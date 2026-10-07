@@ -69,6 +69,10 @@ TYPE_OWNERS = (
     TypeOwner('app/services/access', 'checked', (
         ('pipeline_contracts.py', 'strict'),
         ('pipeline_store.py', 'strict'),
+        ('read_codec.py', 'strict'),
+        ('window_store.py', 'strict'),
+        ('window_candidates.py', 'strict'),
+        ('observation_tokens.py', 'strict'),
         ('__init__.py', 'legacy'),
         ('authorization.py', 'legacy'),
         ('delivery.py', 'legacy'),

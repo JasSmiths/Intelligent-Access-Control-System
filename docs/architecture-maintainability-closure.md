@@ -55,9 +55,15 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   run; every other full-gate check passed. All 727 committed source hashes equal
   the approved candidate, with clean source/cleanup and unchanged operational state.
   Retention dispositions were accepted; E4 integrated conformance remains pending.
-- Current checkpoint: approved P3 frontend range is being integrated sequentially
-  after P5. Its 244 frontend hashes remain unchanged; backend source retains the
-  approved P5 tree. P4 integration editor lifetime remains a separate frontend slice.
+- Current integrated checkpoint: `5e41e2ea8c15c7c2ae517e7a9cd5870b948db04e`
+  includes approved P3, P4 frontend and P5, plus the separately approved P6
+  foundation (`876deec32b2da8559585c5333964af211f3d2308`) and immutable intake
+  (`f9e1dba7d043bed9d378de6205a05cbb8c047856`) owner checkpoints. The integration
+  preserves all 259 approved frontend files and 501 nonfrontend/nondocs intake
+  sources; `p4-intake-integration-mapping.json` and its Astra approval retain the
+  exact source mapping. P6 remains incomplete: the new window/evidence store is
+  awaiting owner review, and the RAM/runtime handoff, completion, HA, historical,
+  chart, lifecycle and final integrated validation remain required.
   The brief initial shared-checkout editing period was separated before the first
   validation checkpoint; integration remains sequential and separately reviewed.
 - Retained evidence: `p0-p1-validation/iacs-validation-smbqtetg`,
@@ -235,8 +241,80 @@ outside merges, and selected-then-related-pending merge order. Do not substitute
 UUID sorting or maximum timestamps. Claims need fencing and unique membership.
 All authority and admission consumers must use indexed/streamed full evidence;
 preview limits cannot truncate OCR or movement authority. Terminalize all window
-members in the event/saga/required-intent transaction. These are design inputs;
-Astra must still approve P6's concrete schema/state transitions before code.
+members in the event/saga/required-intent transaction. Astra approved the concrete
+[schema/state design](architecture-maintainability-p6-design.md) at SHA-256
+`035e98c75f71cdbd6a0cc2214af4af1320828c3f67657ef98806005bd78cf856`;
+`p6-design-astra-approval.json` retains that exact design approval. Its introductory
+pending wording is historical; implementation checkpoint approval and P6 stage
+completion are separate gates.
+
+The approved foundation and immutable-intake receipts are retained in
+`p6-foundation-commit-equivalence.json` and `p6-intake-commit-equivalence.json`.
+Foundation PostgreSQL checks passed 9 cases; the final corrected intake/foundation
+gate passed 25 cases, types 65/48, host source/configuration 22/29 and 54 affected
+units. A mislabeled overwritten foundation type log was corrected with an explicit
+new exact-source run, not represented as original output; the accepted mapping is
+`p6-foundation-type-evidence-correction.json`.
+
+Implementation exposed two additional intake boundaries beyond the preserved
+original audit. Ready publication now uses its own short advisory transaction lock
+and static PostgreSQL sequence, independent of the window coordinator's long domain
+transaction. Rolled-back sequence gaps are permitted; consumption chooses the
+lowest visible committed ordinal and never waits for nonexistent sequence values.
+Webhook provider extras remain immutable for inspection, while operational decode
+excludes the proven server-owned observation/classification/retry/ingest fields and
+rebuilds them through their owners. Synthetic/internal observations require the
+explicit typed `TrustedGateObservation` port. The real adapter-to-enqueue forgery,
+positive server classification, concurrent publication and blocked-coordinator
+fixtures are in `scripts/validation/test_access_intake_persistence.py`.
+
+A further approved parity refinement keeps visitor-resolution markers on their
+terminal window: immutable expiry and active/pruned state with indexed queries.
+Only reads reaching the original visitor-suppression stage prune existing markers
+across all sources, before exact-known/visitor exemptions. Pruning is irreversible;
+a newly created reverse-time marker remains valid until a later applicable prune.
+No global capture-time watermark is used. The source-backed reverse-time,
+cross-source, endpoint, restart and exemption fixtures belong to
+`scripts/validation/test_access_window_persistence.py`. Design amendment receipts
+remain separate from the preserved original design/audit; the new store's approval
+and final integrated runtime evidence are still pending.
+
+Window implementation also exposed an unproven 512-character token limit that
+valid provider extras and OCR candidates do not satisfy. The approved amendment
+retains complete TEXT tokens and uses a 32-byte SHA-256 lookup key with mandatory
+exact-text comparison. The bounded ingest/kind/ordinal identity and nonunique
+digest index retain distinct values even under a digest collision; ordering and
+normalization remain unchanged. The strict `observation_tokens` owner has no
+movement-service import, independent commit or provider I/O. Long event IDs,
+path-derived Unicode IDs, OCR candidates and forced-collision PostgreSQL fixtures
+exercise the actual adapter, window insertion and exact-match predicate. This is
+an implementation-discovered correction, not a claim from the preserved audit.
+
+The window-store probes compare full-payload loading with compact loading and
+Python decoding on equivalent synthetic observations. They measure `tracemalloc`
+allocation and load/decode time, not process RSS, database memory or end-to-end
+throughput. Each webhook is 979,999 bytes; the candidate-heavy cases retain 5,001
+relevant OCR candidates per observation. The retained JSON includes full query
+plans and exact source, image and dependency identities. The final corrected
+store run `p6-window-persistence/iacs-validation-gey1s3wr` passed all 55
+window/intake/foundation cases; earlier snapshots and their setup-only failure
+remain retained as superseded evidence.
+
+| Probe | Observations | Python peak bytes, before → after | Seconds, before → after |
+| --- | ---: | ---: | ---: |
+| Fat irrelevant metadata, small | 4 | 7,268,172 → 6,446,074 | 0.015 → 0.032 |
+| Fat irrelevant metadata, target | 60 | 62,416,947 → 6,355,838 | 0.135 → 0.114 |
+| Large relevant candidate arrays, small | 4 | 13,607,191 → 11,099,401 | 0.053 → 0.099 |
+| Large relevant candidate arrays, target | 12 | 33,885,568 → 14,900,856 | 0.156 → 0.199 |
+
+Lower allocation does not imply faster small cases: three compact queries and
+projection overhead make three of these four cases slower. Complete indexed
+membership/token evidence and logical candidate values retain parity; the display
+preview intentionally contains only the first 50 members, with at most three full
+anchor payloads. Large relevant candidate arrays remain variable-sized, and their
+target probe is explicitly 12 observations. These store-level results do not claim
+P6 runtime throughput or bound worst-case fuzzy-window scan complexity. Final P6
+burst and many-open-window runtime benchmarks remain pending.
 
 The movement reconciliation path's delayed-admission HA presence update must join
 the same durable latest-state/physical-target ordering as normal enrichment. Keep

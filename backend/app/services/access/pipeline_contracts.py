@@ -102,3 +102,10 @@ class TrustedGateObservation:
     def as_payload(self) -> dict[str, Any]:
         return {"state": self.state.value, "observed_at": self.observed_at.isoformat(),
                 "controller": self.controller, "entity_id": self.entity_id, "detail": self.detail}
+
+
+@dataclass(frozen=True)
+class CoordinatorBoundary:
+    phase: Literal["idle", "preparing", "flushing", "immediate_finalizing", "flush_finalizing"]
+    ingest_id: uuid.UUID | None
+    finalizing_window_id: uuid.UUID | None

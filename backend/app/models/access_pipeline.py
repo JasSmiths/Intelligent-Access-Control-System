@@ -15,8 +15,10 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     Sequence,
     String,
+    Text,
     UniqueConstraint,
     Uuid,
     func,
@@ -28,7 +30,9 @@ from app.db.base import Base
 
 # Publication takes its own short transaction advisory lock; the worker's
 # coordinator row may remain locked by a later domain transaction.
-LPR_READY_ORDINAL_SEQUENCE = Sequence("lpr_ready_ordinal_seq", data_type=BigInteger(), metadata=Base.metadata)
+LPR_READY_ORDINAL_SEQUENCE = Sequence(
+    "lpr_ready_ordinal_seq", data_type=BigInteger(), metadata=Base.metadata
+)
 
 
 class LprDebounceWindow(Base):
@@ -66,6 +70,12 @@ class LprDebounceWindow(Base):
     movement_saga_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(), ForeignKey("movement_sagas.id", ondelete="RESTRICT"), nullable=True
     )
+    visitor_resolution_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    visitor_resolution_active: Mapped[bool] = mapped_column(
+        Boolean(), server_default="false", nullable=False
+    )
     reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -77,8 +87,23 @@ class LprDebounceWindow(Base):
             name="ck_lpr_window_state",
         ),
         CheckConstraint("member_count >= 0", name="ck_lpr_window_count"),
+        CheckConstraint(
+            "NOT visitor_resolution_active OR (state = 'completed' AND visitor_resolution_expires_at IS NOT NULL)",
+            name="ck_lpr_window_visitor_resolution",
+        ),
         Index("ix_lpr_window_open_order", "state", "source", "open_ordinal"),
         Index("ix_lpr_window_lease", "state", "lease_until", "open_ordinal"),
+        Index(
+            "ix_lpr_window_visitor_expiry",
+            "visitor_resolution_expires_at",
+            postgresql_where=visitor_resolution_active.is_(True),
+        ),
+        Index(
+            "ix_lpr_window_visitor_source",
+            "source",
+            "visitor_resolution_expires_at",
+            postgresql_where=visitor_resolution_active.is_(True),
+        ),
     )
 
 
@@ -106,12 +131,14 @@ class LprObservationToken(Base):
     __tablename__ = "lpr_observation_tokens"
     ingest_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, nullable=False)
     kind: Mapped[str] = mapped_column(String(24), primary_key=True, nullable=False)
-    value: Mapped[str] = mapped_column(String(512), primary_key=True, nullable=False)
-    ordinal: Mapped[int] = mapped_column(Integer(), nullable=False)
+    value: Mapped[str] = mapped_column(Text(), nullable=False)
+    value_digest: Mapped[bytes] = mapped_column(LargeBinary(), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer(), primary_key=True, nullable=False)
     __table_args__ = (
         ForeignKeyConstraint(["ingest_id"], ["lpr_ingest_events.id"], ondelete="RESTRICT"),
         CheckConstraint("kind IN ('ocr','protect_event')", name="ck_lpr_observation_token_kind"),
-        Index("ix_lpr_observation_token_match", "kind", "value", "ingest_id"),
+        CheckConstraint("octet_length(value_digest) = 32", name="ck_lpr_observation_token_digest"),
+        Index("ix_lpr_observation_token_match", "kind", "value_digest", "ingest_id"),
     )
 
 

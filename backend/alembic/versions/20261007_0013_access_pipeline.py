@@ -70,6 +70,8 @@ def upgrade() -> None:
             sa.ForeignKey("movement_sagas.id", ondelete="RESTRICT"),
             nullable=True,
         ),
+        sa.Column("visitor_resolution_expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("visitor_resolution_active", sa.Boolean(), server_default="false", nullable=False),
         sa.Column("reason", sa.String(120), nullable=True),
         sa.Column("last_error", sa.String(500), nullable=True),
         sa.Column(
@@ -83,6 +85,7 @@ def upgrade() -> None:
             name="ck_lpr_window_state",
         ),
         sa.CheckConstraint("member_count >= 0", name="ck_lpr_window_count"),
+        sa.CheckConstraint("NOT visitor_resolution_active OR (state = 'completed' AND visitor_resolution_expires_at IS NOT NULL)", name="ck_lpr_window_visitor_resolution"),
     )
     op.create_index(
         "ix_lpr_window_open_order", "lpr_debounce_windows", ["state", "source", "open_ordinal"]
@@ -90,6 +93,10 @@ def upgrade() -> None:
     op.create_index(
         "ix_lpr_window_lease", "lpr_debounce_windows", ["state", "lease_until", "open_ordinal"]
     )
+    op.create_index("ix_lpr_window_visitor_expiry", "lpr_debounce_windows", ["visitor_resolution_expires_at"],
+                    postgresql_where=sa.text("visitor_resolution_active IS true"))
+    op.create_index("ix_lpr_window_visitor_source", "lpr_debounce_windows", ["source", "visitor_resolution_expires_at"],
+                    postgresql_where=sa.text("visitor_resolution_active IS true"))
     op.create_table(
         "lpr_window_members",
         sa.Column("ingest_id", sa.Uuid(), primary_key=True, nullable=False),
@@ -114,13 +121,15 @@ def upgrade() -> None:
         "lpr_observation_tokens",
         sa.Column("ingest_id", sa.Uuid(), primary_key=True, nullable=False),
         sa.Column("kind", sa.String(24), primary_key=True, nullable=False),
-        sa.Column("value", sa.String(512), primary_key=True, nullable=False),
-        sa.Column("ordinal", sa.Integer(), nullable=False),
+        sa.Column("value", sa.Text(), nullable=False),
+        sa.Column("value_digest", sa.LargeBinary(), nullable=False),
+        sa.Column("ordinal", sa.Integer(), primary_key=True, nullable=False),
         sa.ForeignKeyConstraint(["ingest_id"], ["lpr_ingest_events.id"], ondelete="RESTRICT"),
         sa.CheckConstraint("kind IN ('ocr','protect_event')", name="ck_lpr_observation_token_kind"),
+        sa.CheckConstraint("octet_length(value_digest) = 32", name="ck_lpr_observation_token_digest"),
     )
     op.create_index(
-        "ix_lpr_observation_token_match", "lpr_observation_tokens", ["kind", "value", "ingest_id"]
+        "ix_lpr_observation_token_match", "lpr_observation_tokens", ["kind", "value_digest", "ingest_id"]
     )
     op.create_table(
         "movement_session_observations",

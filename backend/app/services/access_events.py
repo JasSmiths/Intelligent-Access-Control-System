@@ -31,6 +31,7 @@ from app.services.access.execution import AccessExecution
 from app.services.access.payloads import access_event_realtime_payload, notification_facts
 from app.services.access.pipeline_contracts import TrustedGateObservation
 from app.services.access.plate_matching import add_debounce_read, match_candidates
+from app.services.access.read_codec import read_from_ingest
 from app.services.access.reads import (
     EXTERNAL_ADMISSION_PAYLOAD_KEY,
     EXTERNAL_ADMISSION_SOURCE_LPR_OPEN_GATE,
@@ -39,10 +40,8 @@ from app.services.access.reads import (
     GATE_OBSERVATION_PAYLOAD_KEY,
     INGEST_METADATA_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
-    LPR_INGEST_EVENT_PAYLOAD_KEY,
     MAX_PLATE_READ_PROCESSING_ATTEMPTS,
     PLATE_READ_RETRY_BACKOFF_SECONDS,
-    PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY,
     PROCESSING_ATTEMPT_PAYLOAD_KEY,
     VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY,
     WEBHOOK_TRACE_PAYLOAD_KEY,
@@ -227,7 +226,7 @@ class AccessEventService:
         ingest_row, should_wake_worker = await self._persist_lpr_ingest_read(
             read, received_at=received_at
         )
-        read = self._read_from_lpr_ingest_event(ingest_row)
+        read = read_from_ingest(ingest_row)
         if not should_wake_worker:
             logger.info(
                 "plate_read_ingest_duplicate_ignored",
@@ -251,7 +250,7 @@ class AccessEventService:
         observed_row = await self._lpr_ingest_repo().complete_observation(ingest_row.id, capture_token, gate_observation)
         if observed_row is None:
             return
-        read = self._read_from_lpr_ingest_event(observed_row)
+        read = read_from_ingest(observed_row)
         logger.info(
             "plate_read_received",
             extra={
@@ -329,7 +328,7 @@ class AccessEventService:
     async def _enqueue_pending_lpr_ingest_rows(self) -> int:
         rows = await self._lpr_ingest_repo().pending_rows()
         for row in rows:
-            await self._queue.put(self._read_from_lpr_ingest_event(row))
+            await self._queue.put(read_from_ingest(row))
         if rows:
             logger.info("lpr_ingest_pending_rows_enqueued", extra={"count": len(rows)})
         return len(rows)
@@ -379,41 +378,6 @@ class AccessEventService:
             "raw_payload": read.raw_payload or {},
             "candidate_registration_numbers": list(read.candidate_registration_numbers),
         }
-
-    def _read_with_lpr_ingest_event(self, read: PlateRead, row: LprIngestEvent) -> PlateRead:
-        raw_payload = dict(read.raw_payload or {})
-        raw_payload[LPR_INGEST_EVENT_PAYLOAD_KEY] = {
-            "id": str(row.id),
-            "idempotency_key": row.idempotency_key,
-            "status": row.status,
-        }
-        return _plate_read_with_payload(read, raw_payload)
-
-    def _read_from_lpr_ingest_event(self, row: LprIngestEvent) -> PlateRead:
-        payload = dict(row.normalized_payload or {})
-        captured_at = row.captured_at
-        original = payload.get("raw_payload")
-        # Preserve input in normalized_payload; only owners can establish these
-        # operational fields. Keep unrelated vendor evidence/server correlation.
-        reserved = {GATE_OBSERVATION_PAYLOAD_KEY, PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY,
-            KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY, GATE_MALFUNCTION_PAYLOAD_KEY,
-            VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY, EXTERNAL_ADMISSION_PAYLOAD_KEY,
-            PROCESSING_ATTEMPT_PAYLOAD_KEY, LPR_INGEST_EVENT_PAYLOAD_KEY}
-        raw_payload = {key: value for key, value in original.items() if key not in reserved} if isinstance(original, dict) else {}
-        read = PlateRead(
-            registration_number=str(payload.get("registration_number") or row.registration_number),
-            confidence=float(payload.get("confidence") or 0.0),
-            source=str(payload.get("source") or row.source),
-            captured_at=captured_at,
-            raw_payload={**raw_payload,
-                GATE_OBSERVATION_PAYLOAD_KEY: dict(row.original_observation or {})},
-            candidate_registration_numbers=tuple(
-                str(candidate)
-                for candidate in payload.get("candidate_registration_numbers", [])
-                if str(candidate or "").strip()
-            ),
-        )
-        return self._read_with_lpr_ingest_event(read, row)
 
     async def _read_with_gate_observation(
         self, read: PlateRead, *, observation: TrustedGateObservation | None = None

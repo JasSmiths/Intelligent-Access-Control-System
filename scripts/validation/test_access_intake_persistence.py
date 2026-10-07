@@ -18,6 +18,7 @@ from app.modules.lpr.ubiquiti import UbiquitiLprAdapter
 from app.services import access_events, lpr_ingest
 from app.services.access.pipeline_contracts import TrustedGateObservation
 from app.services.access.pipeline_store import database_now
+from app.services.access.read_codec import read_from_ingest
 from app.services.access.reads import (
     EXTERNAL_ADMISSION_PAYLOAD_KEY,
     GATE_MALFUNCTION_PAYLOAD_KEY,
@@ -84,7 +85,7 @@ async def test_duplicate_during_capture_and_after_terminal_never_rewrites_or_rec
         row=await session.get(LprIngestEvent,identity)
         assert row.status==terminal_status and row.processed_at==NOW
         assert (row.normalized_payload,row.original_observation,row.received_at,row.ready_ordinal)==original
-        decoded=service._read_from_lpr_ingest_event(row)
+        decoded=read_from_ingest(row)
         assert decoded.raw_payload[GATE_OBSERVATION_PAYLOAD_KEY]==original[1]
     gate.current_state.assert_awaited_once()
     assert service._queue.qsize()==1
@@ -254,7 +255,7 @@ async def test_webhook_forged_owner_fields_are_inspectable_but_not_operational(m
         saved=await session.scalar(select(LprIngestEvent))
         original=saved.normalized_payload['raw_payload']
         assert all(original[key]==value for key,value in forged.items())
-        assert queued==service._read_from_lpr_ingest_event(saved)
+        assert queued==read_from_ingest(saved)
         session.add(Vehicle(registration_number='AB12CDE',is_active=True))
         await session.commit()
     classified=await service._read_with_known_vehicle_match(queued)
@@ -271,7 +272,7 @@ async def test_trusted_observation_uses_explicit_typed_port_and_canonical_live_r
     queued=service._queue.get_nowait()
     async with AsyncSessionLocal() as session:
         row=await session.scalar(select(LprIngestEvent))
-        assert queued==service._read_from_lpr_ingest_event(row)
+        assert queued==read_from_ingest(row)
         assert row.original_observation==trusted.as_payload()
     with pytest.raises(ValueError,match='canonical state'):
         TrustedGateObservation('not-an-enum',NOW)
