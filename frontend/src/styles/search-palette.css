@@ -26,18 +26,21 @@
   justify-items: center;
   padding: max(18px, var(--safe-top)) max(18px, var(--safe-right)) max(24px, var(--safe-bottom)) max(18px, var(--safe-left));
   background: rgba(15, 23, 42, 0.28);
+  -webkit-backdrop-filter: blur(9px);
   backdrop-filter: blur(9px);
 }
 
 .search-palette {
   width: min(820px, 100%);
+  min-height: 0;
   max-height: min(720px, 100%);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  background: var(--surface);
+  transform-origin: top center;
   box-shadow: var(--shadow-strong);
 }
 
@@ -98,6 +101,8 @@
   align-content: start;
   gap: 4px;
   overflow: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: 10px;
   padding: 10px;
   border-right: 1px solid var(--line);
 }
@@ -188,6 +193,11 @@
 
 .search-palette-row-type {
   max-width: 112px;
+}
+
+.search-palette-row-arrow {
+  display: none;
+  color: var(--muted);
 }
 
 .search-palette-state {
@@ -288,12 +298,23 @@
   }
 
   .search-palette {
+    height: 100%;
     max-height: 100%;
+    border-radius: 16px;
   }
 
   .search-palette-input-shell {
-    min-height: 58px;
+    min-height: 64px;
     padding-inline: 12px;
+  }
+
+  .search-palette-input-shell .icon-button {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
+    border: 0;
+    border-radius: 12px;
+    background: var(--surface-soft);
   }
 
   .search-palette-input-stack input {
@@ -306,24 +327,27 @@
 
   .search-palette-body {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .search-palette-results {
-    max-height: 48%;
     border-right: 0;
-    border-bottom: 1px solid var(--line);
   }
 
   .search-palette-preview {
-    max-height: 34%;
+    display: none;
   }
 
   .search-palette-row {
-    grid-template-columns: 32px minmax(0, 1fr);
+    min-height: 60px;
+    grid-template-columns: 32px minmax(0, 1fr) 16px;
   }
 
   .search-palette-row-type {
     display: none;
+  }
+
+  .search-palette-row-arrow {
+    display: block;
   }
 }
