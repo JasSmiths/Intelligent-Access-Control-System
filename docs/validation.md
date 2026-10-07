@@ -52,6 +52,29 @@ restoration, and reduced motion.
 It retains light/dark phone and desktop screenshots. Verify keyboard opening and
 closing on a physical iPhone before claiming device-specific keyboard coverage.
 
+## Final runtime PDF capability
+
+The [runtime PDF smoke](../scripts/validation/runtime_pdf_smoke.py) checks the final
+runtime target using its own configured non-root user, installed environment,
+locked Chromium and [actual report template](../backend/app/services/report_templates/person_movements.html).
+It starts no application services, uses a synthetic snapshot, disables networking
+and mounts only a newly owned output directory. It never overlays application
+source, a development virtual environment or downloaded browser files.
+
+```sh
+python3 scripts/validation/runtime_pdf_smoke.py --build \
+  --image iacs-backend:validation-runtime-pdf \
+  --evidence-root /private/tmp/iacs-runtime-pdf-evidence
+```
+
+Building may download locked dependencies, native packages and the matching
+Playwright browser. Omit `--build` to check an already-built immutable image. The
+retained result includes the image ID/size/user, source identity, build duration
+when built, smoke duration and PDF artifact. The installed smoke also records
+template/renderer/lock hashes, the Python environment and Playwright version.
+CI checks its final runtime image before the full isolated harness. This proves
+synthetic PDF capability; supported maximum export sizes are verified separately.
+
 ## Isolated harness
 
 [validate.py](../scripts/validation/validate.py) copies and hashes the current source,
@@ -199,9 +222,15 @@ remove failing assertions to accommodate a new dependency. A justified exception
 at an existing boundary needs a local explanation and behavior coverage; it must
 not mask a provider failure or change uncertain-command recovery semantics.
 
-When introducing or extracting an owner/contract module, update the applicable
-`mypy` and `typed-contracts` targets in
-[the harness](../scripts/validation/validate.py). Full-source lint covers `app`;
+When introducing or extracting an owner/contract module, classify its owner in
+[the single type policy](../scripts/validation/type_targets.py). The harness derives
+checked-body and strict commands from that policy; strict targets also enter the
+checked-body command. Cohesive package targets include new modules automatically.
+Mixed access/workflow packages have finite legacy overrides preserving the
+reviewed coverage; new files inherit the package default. Do not add legacy
+exemptions. The frozen [initial coverage fixture](../scripts/validation/type_coverage_baseline.json)
+is a regression floor, not a second registration list. Host tests reject missing
+protected coverage, invalid/overlapping owners and unclassified suites. Full-source lint covers `app`;
 the `test-names` check covers undefined names in backend and validation fixtures,
 including cases skipped in DB-free mode. Fixtures must patch the actual owner or
 inject its port, not restore retired imports or convenience getters. Classify new
@@ -227,7 +256,10 @@ selected-period output.
 [Directory persistence checks](../scripts/validation/test_directory_operations.py)
 exercise 1,000 people and 2,000 vehicles, cursor ties/filter changes, selected IDs
 outside the current page, totals/search and bounded payloads. They retain
-`DIRECTORY_TARGET_SCALE_EVIDENCE` in pytest output.
+`directory-target-scale.json` in the suite's pytest temporary directory, including
+complete EXPLAIN JSON for every captured query, query counts, returned items,
+payloads, repeated timings and Python allocation peaks. Passing pytest capture
+does not discard these artifacts.
 [Report benchmarks](../scripts/benchmarks/reports.py) compare the old history
 strategy with predecessor reads at small and one-million-movement scales and
 assert equal duration output. [Snapshot benchmarks](../scripts/benchmarks/directory_snapshots.py)
@@ -236,12 +268,22 @@ compare complete-history ranking with indexed per-plate latest-row reads.
 2,000-registration table and roll it back. The required
 [prepared-query regression](../scripts/validation/test_plate_lookup_index.py)
 checks the actual worker query with PostgreSQL forced to use a generic prepared
-plan, so repeated requests retain the normalized active-plate index.
+plan, so repeated requests retain the normalized active-plate index. It writes
+`plate-generic-plan.json` with the actual compiled query and complete plan,
+including execution/buffer details. These artifacts include the exact harness
+source fingerprint, backend image, dependency lock hashes and Python/package
+identities through [the evidence writer](../scripts/benchmarks/evidence.py).
 
 Run these benchmarks only in disposable, network-isolated PostgreSQL namespaces
 with synthetic credentials and locked tools. The Python scripts fail closed on
 non-synthetic environments; inspect their CLI and guards before running. Retain
-JSON measurements and query plans outside the repository. Record the dataset,
+JSON measurements and complete query plans outside the repository. Run the Python
+benchmark entrypoints as modules from the source root with the backend on
+`PYTHONPATH` (`python -m scripts.benchmarks.reports` or
+`python -m scripts.benchmarks.directory_snapshots`); both require `--output`.
+Supply `IACS_IMAGE_IDENTITY` for a standalone container. Standalone source-tree
+fingerprints identify available safe files and are labeled separately from the
+harness snapshot fingerprint. Record the dataset,
 query/returned-row counts, repeated timings and peak Python allocation together.
 Timings vary with host contention; these are relative structural checks, not
 production latency budgets. Report output/PDF costs and PostgreSQL memory are

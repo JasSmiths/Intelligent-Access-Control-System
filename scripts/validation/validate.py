@@ -17,6 +17,7 @@ import tempfile
 import uuid
 
 from source_snapshot import changed_snapshot_sources, copy_sources, discover_sources, source_file, source_fingerprint
+from type_targets import classified_modules, type_commands
 from recovery_checks import (
     HOST_TESTS, PERSISTENCE_TESTS, inventory_errors, persistence_checks, pytest_arguments,
     required_sources, schema_checks, suite_identity,
@@ -27,95 +28,9 @@ PRODUCTION = ['iacs-backend', 'iacs-frontend', 'iacs-postgres', 'iacs-redis', 'i
 LINT_COMMANDS = {
     "ruff": ["-m", "ruff", "check", "--no-cache", "app"],
     "test-names": ["-m", "ruff", "check", "--no-cache", "--select", "F821", "tests", "../scripts/validation"],
-    "mypy": ["-m", "mypy", "--cache-dir=/tmp/mypy", "--check-untyped-defs",
-             'app/services/notification_runs.py',
-             'app/services/notification_dispatch.py',
-             'app/services/notification_rules.py',
-             'app/services/mutation_context.py',
-             'app/services/schedule_assignments.py',
-             'app/services/schedule_operations.py',
-             'app/services/domain_events.py',
-             'app/services/access/decision.py',
-             'app/services/access/reads.py',
-             'app/services/access/evidence.py',
-             'app/services/access/execution.py',
-             'app/services/access/enrichment.py',
-             'app/services/access/payloads.py',
-             'app/services/access/hardware.py',
-             'app/services/access_events.py',
-             'app/ai/providers.py',
-             'app/services/notification_rendering.py',
-             'app/services/vehicle_information.py',
-    'app/services/vehicle_information_contracts.py',
-    'app/services/vehicle_information_store.py',
-    'app/services/vehicle_information_jobs.py',
-    'app/services/vehicle_information_authorization.py',
-    'app/modules/dvsa/client.py',
-    'app/composition.py',
-             'app/services/integration_effects.py',
-             'app/services/gate_controller.py',
-             'app/services/access_device_outcomes.py',
-             'app/services/access/plate_matching.py',
-             'app/services/gate_malfunction_policy.py',
-             'app/services/directory',
-             'app/schemas/directory.py',
-             'app/services/reports.py',
-             'app/services/report_durations.py',
-             'app/services/notifications.py',
-             'app/services/notification_planning.py',
-             'app/services/notification_authorization.py',
-             'app/services/notification_recipients.py',
-             'app/services/automations.py',
-             'app/services/automation_actions.py',
-             'app/services/automation_integration_actions.py',
-             'app/services/automation_rules.py',
-             'app/services/automation_webhooks.py',
-             'app/services/automation_time_intake.py',
-             'app/services/automation_serialization.py',
-             'app/services/workflow_dispatch_ports.py',
-             'app/services/workflows/execution_contracts.py',
-             'app/services/workflow_session.py',
-             'app/services/automation_dispatch.py',
-             'app/services/automation_scheduling.py',
-    ],
 }
 
-LINT_COMMANDS["typed-contracts"] = [
-    "-m", "mypy", "--cache-dir=/tmp/mypy-contracts",
-    "--check-untyped-defs", "--disallow-untyped-defs",
-    'app/services/vehicle_information.py',
-    'app/services/vehicle_information_contracts.py',
-    'app/services/vehicle_information_store.py',
-    'app/services/vehicle_information_jobs.py',
-    'app/services/vehicle_information_authorization.py',
-    'app/modules/dvsa/client.py',
-    'app/composition.py',
-    'app/services/integration_effects.py',
-    'app/services/gate_controller.py',
-    'app/services/access_device_outcomes.py',
-    'app/services/access/plate_matching.py',
-    'app/services/gate_malfunction_policy.py',
-    'app/services/directory',
-    'app/schemas/directory.py',
-    'app/services/report_durations.py',
-    'app/services/notifications.py',
-    'app/services/notification_planning.py',
-    'app/services/notification_authorization.py',
-    'app/services/notification_recipients.py',
-    'app/services/notification_dispatch.py',
-    'app/services/automations.py',
-    'app/services/automation_actions.py',
-    'app/services/automation_integration_actions.py',
-    'app/services/automation_rules.py',
-    'app/services/automation_webhooks.py',
-    'app/services/automation_time_intake.py',
-    'app/services/automation_scheduling.py',
-    'app/services/automation_serialization.py',
-    'app/services/automation_dispatch.py',
-    'app/services/workflow_session.py',
-    'app/services/workflow_dispatch_ports.py',
-    'app/services/workflows/execution_contracts.py',
-]
+LINT_COMMANDS.update(type_commands(ROOT))
 
 
 def arguments(argv=None):
@@ -406,7 +321,8 @@ class Harness:
                'IACS_SEED_DEMO_DATA': 'false', 'IACS_AUTH_SECRET_KEY': 'validation-synthetic-auth-root-never-production',
                'IACS_DATA_DIR': '/isolated/runtime', 'IACS_LOG_DIR': '/isolated/logs', 'IACS_WORKSPACE_DIR': '/workspace',
                'IACS_IMAGE_IDENTITY': images['backend'],
-               'PYTHONPATH': '/workspace/backend', 'PYTHONDONTWRITEBYTECODE': '1', 'HOME': '/tmp'}
+               'IACS_SOURCE_IDENTITY': json.loads((self.run / 'manifest.json').read_text())['source_fingerprint'],
+               'PYTHONPATH': '/workspace/backend:/workspace', 'PYTHONDONTWRITEBYTECODE': '1', 'HOME': '/tmp'}
         mounts = [(self.snapshot, '/workspace', 'ro'), (deps, '/deps', 'ro'),
                   (self.run / 'runtime', '/isolated/runtime', 'rw'), (self.run / 'logs', '/isolated/logs', 'rw'),
                   (self.run / 'artifacts', '/results', 'rw')]
@@ -533,7 +449,7 @@ def run(args):
     before = None
     try:
         if args.mode == 'full':
-            errors = inventory_errors(ROOT)
+            errors = inventory_errors(ROOT) + classified_modules(ROOT)[1]
             if errors:
                 raise ValueError('; '.join(errors))
         paths, inventory = discover_sources(ROOT, required)

@@ -7,11 +7,13 @@ import tracemalloc
 import uuid
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import event as sqlalchemy_event, insert, select
 
 # The harness owns this database and shares only its loopback network namespace.
 assert {p.name for p in Path("/sys/class/net").iterdir()} == {"lo"}
 assert "@127.0.0.1:5432/iacs_validation_" in os.environ.get("IACS_DATABASE_URL", "")
+
+from scripts.benchmarks.evidence import write_evidence
 
 from app.db.session import AsyncSessionLocal, engine
 from app.models import Group, Person, Vehicle
@@ -23,7 +25,7 @@ from app.services.directory.representation import serialize_person
 
 
 @pytest.mark.asyncio
-async def test_target_scale_reads_and_keyset_semantics():
+async def test_target_scale_reads_and_keyset_semantics(tmp_path):
     prefix = uuid.uuid4().hex[:8]
     group_id = uuid.uuid4()
     people_ids = [uuid.UUID(int=index + 1) for index in range(1000)]
@@ -65,22 +67,39 @@ async def test_target_scale_reads_and_keyset_semantics():
                 return [PersonResponse(**serialize_person(person, include_media=False)) for person in rows]
 
             evidence = {}
+            connection = await session.connection()
             for label, operation in [("previous_unbounded_people", old_read), ("bounded_people_page", lambda: list_people(session)), ("bounded_vehicle_page", lambda: list_vehicles(session))]:
                 samples = []
                 peaks = []
                 payload_bytes = 0
-                for _ in range(3):
+                statements = []
+
+                def capture(_connection, _cursor, statement, parameters, _context, _many):
+                    if statement.lstrip().upper().startswith("SELECT"):
+                        statements.append((statement, parameters))
+
+                for repetition in range(3):
                     session.expunge_all()
                     tracemalloc.start()
                     started = perf_counter()
-                    result = await operation()
+                    if repetition == 0:
+                        sqlalchemy_event.listen(engine.sync_engine, "before_cursor_execute", capture)
+                    try:
+                        result = await operation()
+                    finally:
+                        if repetition == 0:
+                            sqlalchemy_event.remove(engine.sync_engine, "before_cursor_execute", capture)
                     samples.append(round((perf_counter() - started) * 1000, 2))
                     peaks.append(tracemalloc.get_traced_memory()[1])
                     tracemalloc.stop()
                     payload = [item.model_dump(mode="json") for item in result] if isinstance(result, list) else result.model_dump(mode="json")
                     payload_bytes = len(json.dumps(payload).encode())
-                evidence[label] = {"timings_ms": samples, "peak_python_bytes": peaks, "payload_bytes": payload_bytes, "returned_items": len(result) if isinstance(result, list) else len(result.items)}
-            print("DIRECTORY_TARGET_SCALE_EVIDENCE=" + json.dumps({"people": 1000, "vehicles": 2000, "measurements": evidence}, sort_keys=True))
+                plans = []
+                for statement, parameters in statements:
+                    plan = await connection.exec_driver_sql("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + statement, parameters)
+                    plans.append(plan.scalar_one())
+                evidence[label] = {"query_count": len(statements), "query_plans": plans, "timings_ms": samples, "peak_python_bytes": peaks, "payload_bytes": payload_bytes, "returned_items": len(result) if isinstance(result, list) else len(result.items)}
+            write_evidence(tmp_path / "directory-target-scale.json", {"dataset": {"people": 1000, "vehicles": 2000}, "measurements": evidence, "limits": "Synthetic read measurements; Python allocation excludes PostgreSQL memory. Returned/scanned query rows are retained in complete EXPLAIN plans."})
             assert evidence["bounded_people_page"]["returned_items"] == 50
             assert evidence["bounded_people_page"]["payload_bytes"] < evidence["previous_unbounded_people"]["payload_bytes"] / 10
             await session.rollback()

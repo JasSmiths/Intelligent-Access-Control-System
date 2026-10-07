@@ -6,16 +6,116 @@ Only temporary files, advisory locks and repository source text are inspected.
 
 from contextlib import ExitStack
 import io
+import json
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import recovery_checks
+from runtime_pdf_smoke import image_identity as pdf_image_identity, smoke_command
+from type_targets import TYPE_OWNERS, TypeOwner, classified_modules, type_commands, type_targets
 from validate import FullRunBusyError, Harness, arguments, full_run_lock, image_references, run
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class RuntimePdfSmokeTests(unittest.TestCase):
+    def test_smoke_uses_installed_runtime_without_network_or_code_overlays(self):
+        command = smoke_command('sha256:synthetic', Path('/owned/results'), 'owned-smoke')
+        self.assertEqual(command[command.index('--network') + 1], 'none')
+        self.assertEqual(command[command.index('--mount') + 1], 'type=bind,src=/owned/results,dst=/results')
+        self.assertEqual(command.count('--mount'), 1)
+        self.assertNotIn('--user', command)
+        self.assertNotIn('PYTHONPATH', ' '.join(command))
+        self.assertNotIn('/deps', ' '.join(command))
+        self.assertIn('tools.report_pdf_smoke', command)
+        self.assertIn('--read-only', command)
+
+    def test_image_must_supply_its_own_non_root_runtime_user(self):
+        for user in ('', '0', 'root', '0:1000', 'root:1000'):
+            row = [{'Id': 'sha256:synthetic', 'Size': 1, 'Config': {'User': user}}]
+            with self.subTest(user=user), patch('runtime_pdf_smoke.subprocess.check_output', return_value=json.dumps(row)), self.assertRaises(ValueError):
+                pdf_image_identity('synthetic')
+        row = [{'Id': 'sha256:synthetic', 'Size': 1, 'Config': {'User': 'iacs'}}]
+        with patch('runtime_pdf_smoke.subprocess.check_output', return_value=json.dumps(row)):
+            self.assertEqual(pdf_image_identity('synthetic')['user'], 'iacs')
+
+
+class TypeCoverageTests(unittest.TestCase):
+    def test_preserves_baseline_coverage_and_flags_with_strict_as_checked_subset(self):
+        baseline = json.loads((ROOT / 'scripts/validation/type_coverage_baseline.json').read_text())
+
+        def expanded(targets, root=ROOT):
+            selected = set()
+            for relative in targets:
+                path = root / 'backend' / relative
+                if path.is_dir():
+                    selected.update(file.relative_to(root / 'backend').as_posix() for file in path.rglob('*.py'))
+                else:
+                    selected.add(relative)
+            return selected
+
+        commands = type_commands(ROOT)
+        self.assertEqual(commands['mypy'][:4], ['-m', 'mypy', '--cache-dir=/tmp/mypy', '--check-untyped-defs'])
+        self.assertEqual(commands['typed-contracts'][:5], ['-m', 'mypy', '--cache-dir=/tmp/mypy-contracts', '--check-untyped-defs', '--disallow-untyped-defs'])
+        checked, strict = expanded(type_targets(ROOT, 'checked')), expanded(type_targets(ROOT, 'strict'))
+        self.assertLessEqual(expanded(baseline['checked']), checked)
+        self.assertLessEqual(expanded(baseline['strict']), strict)
+        self.assertLessEqual(strict, checked)
+        # The finite legacy list may shrink as owners migrate; never grow it to
+        # exclude newly extracted code from a protected package.
+        classified, errors = classified_modules(ROOT)
+        self.assertEqual(errors, [])
+        self.assertLessEqual({path for path, mode in classified.items() if mode == 'legacy'}, set(baseline['legacy']))
+
+    def test_new_package_modules_automatically_enter_both_derived_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in classified_modules(ROOT)[0]:
+                destination = root / 'backend' / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / 'backend' / relative, destination)
+            for package in ('directory', 'workflows'):
+                module = f'app/services/{package}/new_owner.py'
+                (root / 'backend' / module).write_text('def example() -> int: return 1\n')
+                classified, errors = classified_modules(root)
+                self.assertEqual(errors, [])
+                self.assertEqual(classified[module], 'strict')
+                for level in ('checked', 'strict'):
+                    targets = type_targets(root, level)
+                    self.assertTrue(module in targets or f'app/services/{package}' in targets)
+
+    def test_removing_a_protected_package_fails_closed(self):
+        owners = tuple(owner for owner in TYPE_OWNERS if owner.path != 'app/services/directory')
+        self.assertTrue(any('Unclassified protected type module' in error for error in classified_modules(ROOT, owners)[1]))
+        with self.assertRaisesRegex(ValueError, 'Unclassified protected type module'):
+            type_commands(ROOT, owners)
+
+    def test_invalid_duplicate_overlapping_and_orphan_declarations_fail(self):
+        directory = TypeOwner('app/services/directory', 'strict')
+        cases = (
+            (*TYPE_OWNERS, directory),
+            (*TYPE_OWNERS, TypeOwner('app/services/directory/reads.py', 'checked')),
+            (*TYPE_OWNERS, TypeOwner('../escape.py', 'strict')),
+            (*TYPE_OWNERS, TypeOwner('app/missing.py', 'strict')),
+            (*TYPE_OWNERS, TypeOwner('app/composition.py', 'unknown')),
+            tuple(TypeOwner(owner.path, owner.level, (('missing.py', 'legacy'),)) if owner == directory else owner for owner in TYPE_OWNERS),
+            tuple(TypeOwner(owner.path, owner.level, (('reads.py', 'unknown'),)) if owner == directory else owner for owner in TYPE_OWNERS),
+            tuple(TypeOwner(owner.path, owner.level, (('reads.py', 'legacy'), ('reads.py', 'legacy'))) if owner == directory else owner for owner in TYPE_OWNERS),
+        )
+        for owners in cases:
+            with self.subTest(owners=owners), self.assertRaises(ValueError):
+                type_commands(ROOT, owners)
+
+    def test_unclassified_suite_and_missing_helpers_are_rejected(self):
+        omitted = recovery_checks.PERSISTENCE_TESTS[0]
+        with patch.object(recovery_checks, 'PERSISTENCE_TESTS', recovery_checks.PERSISTENCE_TESTS[1:]):
+            self.assertIn('Unclassified validation test: ' + omitted, recovery_checks.inventory_errors(ROOT))
+        with patch.object(recovery_checks, 'REQUIRED_HELPERS', [*recovery_checks.REQUIRED_HELPERS, 'scripts/validation/missing_helper.py']):
+            self.assertIn('Missing required helper: scripts/validation/missing_helper.py', recovery_checks.inventory_errors(ROOT))
 
 
 class RecoveryProfileTests(unittest.TestCase):
@@ -182,6 +282,8 @@ class IsolatedCommandTests(unittest.TestCase):
         self.raise_at = None
 
     def execute(self):
+        (self.run / 'manifest.json').write_text(json.dumps({'source_fingerprint': 'synthetic-source-fingerprint'}))
+
         def check(name, command, *args, **kwargs):
             if '-m' in command and 'pytest' in command:
                 self.assertTrue((self.run / 'artifacts' / name).is_dir(),
@@ -229,6 +331,7 @@ class IsolatedCommandTests(unittest.TestCase):
             self.assertIn(f'IACS_REDIS_URL=redis://127.0.0.1:6379/{index}', command)
             self.assertIn('IACS_RECOVERY_PROBES=synthetic-only', command)
             self.assertIn('IACS_IMAGE_IDENTITY=' + self.images['backend'], command)
+            self.assertIn('IACS_SOURCE_IDENTITY=synthetic-source-fingerprint', command)
             self.assertIn(f'--basetemp=/results/{name}/tmp', command)
             self.assertIn(f'--junitxml=/results/{name}/junit.xml', command)
             self.assertIn(f'{self.source}:/workspace:ro', command)

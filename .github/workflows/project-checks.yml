@@ -6,6 +6,7 @@ on:
       - "backend/**"
       - "frontend/**"
       - "scripts/validation/**"
+      - "scripts/benchmarks/**"
       - "scripts/architecture/**"
       - "docker-compose.yml"
       - ".env.example"
@@ -16,6 +17,7 @@ on:
       - "backend/**"
       - "frontend/**"
       - "scripts/validation/**"
+      - "scripts/benchmarks/**"
       - "scripts/architecture/**"
       - "docker-compose.yml"
       - ".env.example"
@@ -42,6 +44,10 @@ jobs:
           python3 scripts/validation/test_harness_configuration.py
       - name: Build backend runtime image
         run: docker build --target runtime -t iacs-backend:ci-runtime backend
+      - name: Check final runtime PDF capability without source or dependency overlays
+        run: >-
+          python3 scripts/validation/runtime_pdf_smoke.py --image iacs-backend:ci-runtime
+          --evidence-root "${{ runner.temp }}/iacs-runtime-pdf-evidence"
       - name: Run the same isolated locked checks as local development
         run: >-
           python3 scripts/validation/validate.py --mode full --allow-downloads
@@ -57,6 +63,9 @@ jobs:
             ${{ runner.temp }}/iacs-evidence/*/*.json
             ${{ runner.temp }}/iacs-evidence/*/*.log
             ${{ runner.temp }}/iacs-evidence/*/artifacts/**
+            ${{ runner.temp }}/iacs-runtime-pdf-evidence/*/*.json
+            ${{ runner.temp }}/iacs-runtime-pdf-evidence/*/*.log
+            ${{ runner.temp }}/iacs-runtime-pdf-evidence/*/artifacts/**
 
   dependency-audits:
     runs-on: ubuntu-latest

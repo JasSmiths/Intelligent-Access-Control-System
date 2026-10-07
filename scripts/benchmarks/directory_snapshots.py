@@ -3,6 +3,7 @@
 Run in the isolated harness PostgreSQL namespace with a migrated synthetic DB.
 The fixture is rolled back; no image files, providers or application lifespan run.
 """
+import argparse
 import asyncio
 import json
 import os
@@ -18,12 +19,14 @@ assert os.environ.get("IACS_VALIDATION_MODE") == "persistence"
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects import postgresql
 
+from scripts.benchmarks.evidence import write_evidence
+
 from app.db.session import AsyncSessionLocal, engine
 from app.models import AccessEvent
 from app.services.directory.representation import latest_snapshot_query
 
 
-async def main():
+async def main(output):
     prefix = "SYN" + uuid.uuid4().hex[:8].upper()
     registrations = [f"{prefix}{index:02}" for index in range(50)]
     try:
@@ -62,11 +65,15 @@ async def main():
             missing_plan = (await session.execute(text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + missing_sql))).scalar_one()[0]
             evidence["current_unseen_plate"] = {"returned_rows": len((await session.execute(missing)).all()), "plan": missing_plan}
             assert evidence["current_unseen_plate"]["returned_rows"] == 0
-            print(json.dumps(evidence, indent=2, sort_keys=True))
+            write_evidence(output, evidence)
+            print(json.dumps({"output": str(output), "retained_events": evidence["retained_events"]}))
             await session.rollback()
     finally:
         await engine.dispose()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    asyncio.run(main(args.output))

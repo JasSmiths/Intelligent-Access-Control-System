@@ -26,6 +26,8 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from scripts.benchmarks.evidence import write_evidence
+
 from app.models import AccessEvent
 from app.models.enums import AccessDirection
 from app.services.report_durations import (
@@ -176,7 +178,7 @@ def main() -> None:
     if min(args.rows, args.people, args.report_events, args.repetitions) < 1:
         parser.error("All dataset sizes and repetition counts must be positive")
     result = asyncio.run(benchmark(args))
-    args.output.write_text(json.dumps(result, indent=2) + "\n")
+    write_evidence(args.output, result)
     print(json.dumps({"output": str(args.output), "dataset": result["dataset"], "duration_outputs_equal": result["duration_outputs_equal"]}))
 
 

@@ -8,13 +8,15 @@ import pytest
 from sqlalchemy import insert, text
 from sqlalchemy.dialects.postgresql.asyncpg import dialect
 
+from scripts.benchmarks.evidence import write_evidence
+
 from app.db.session import AsyncSessionLocal
 from app.models import Vehicle
 from app.services import access_events
 
 
 @pytest.mark.asyncio
-async def test_actual_plate_query_uses_index_with_generic_prepared_plan(monkeypatch):
+async def test_actual_plate_query_uses_index_with_generic_prepared_plan(monkeypatch, tmp_path):
     captured = []
     async with AsyncSessionLocal() as session:
         await session.execute(insert(Vehicle), [
@@ -48,7 +50,9 @@ async def test_actual_plate_query_uses_index_with_generic_prepared_plan(monkeypa
             result = await session.execute(text(
                 "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE iacs_plate_lookup('AB10CDE')"
             ))
-            plan = result.scalar_one()[0]["Plan"]
+            complete_plan = result.scalar_one()
+            plan = complete_plan[0]["Plan"]
+            write_evidence(tmp_path / "plate-generic-plan.json", {"dataset": {"vehicles": 2000}, "query_count": 1, "query": str(compiled), "plan_cache_mode": "force_generic_plan", "query_plan": complete_plan})
 
             def index_names(node):
                 return [node.get("Index Name"), *(name for child in node.get("Plans", []) for name in index_names(child))]

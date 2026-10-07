@@ -47,7 +47,8 @@ PERSISTENCE_TESTS = [
 DIAGNOSTIC_TESTS = ['scripts/validation/test_recovery_boundaries.py']
 SCHEMA_CHECKS = ['scripts/validation/test_schema_contract.py']
 HOST_TESTS = ['scripts/validation/test_source_snapshot.py', 'scripts/validation/test_harness_configuration.py']
-REQUIRED_HELPERS = ['scripts/validation/recovery_checks.py', 'scripts/validation/database_restore.py']
+REQUIRED_HELPERS = ['scripts/validation/recovery_checks.py', 'scripts/validation/database_restore.py',
+                    'scripts/validation/type_targets.py', 'scripts/validation/type_coverage_baseline.json', 'scripts/benchmarks/evidence.py', 'scripts/validation/runtime_pdf_smoke.py']
 
 
 def persistence_checks(args):

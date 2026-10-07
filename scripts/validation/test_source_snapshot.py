@@ -201,6 +201,7 @@ class HarnessSafetyTests(unittest.TestCase):
     def test_db_free_execution_never_starts_services_or_runs_migrations(self):
         args = arguments(['--mode', 'db-free', '--reuse-dependencies', '/temporary/deps'])
         harness = Harness(args, self.root, self.snapshot)
+        (self.root / 'manifest.json').write_text(json.dumps({'source_fingerprint': 'synthetic-source-fingerprint'}))
         commands = []
         def record(name, command, *args, **kwargs):
             commands.append((name, command))

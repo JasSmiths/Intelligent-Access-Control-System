@@ -10,6 +10,9 @@ Use this guide for a new local instance and routine source work. The
 Install Docker with Compose v2. The images supply Python 3.12, PostgreSQL 16 with
 pgvector, Redis, and the frontend build tools. For host-side frontend work use
 Node.js 22 and npm; use host Python 3.12 for the validation entrypoint.
+The backend shared image ancestry installs locked Playwright Chromium and native
+libraries, so the non-root runtime can render reports. Check final-image packaging
+with the [runtime PDF smoke](validation.md#final-runtime-pdf-capability).
 Image definitions and dependency installation are in the
 [backend Dockerfile](../backend/Dockerfile) and
 [frontend Dockerfile](../frontend/Dockerfile).
