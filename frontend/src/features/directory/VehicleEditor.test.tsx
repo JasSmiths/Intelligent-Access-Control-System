@@ -14,7 +14,7 @@ function deferred<T>() {
 
 function modal(vehicle: Vehicle | null = null) {
   return render(<VehicleModal canRefreshInformation={true} defaultPolicyOptionLabel="Default" groups={[]} mode={vehicle ? "edit" : "create"}
-    onClose={vi.fn()} onSaved={vi.fn().mockResolvedValue(undefined)} people={[]}
+    onClose={vi.fn()} onSaved={vi.fn().mockResolvedValue(undefined)}
     refreshVehicles={vi.fn().mockResolvedValue(undefined)} schedules={[]} setPageError={vi.fn()} vehicle={vehicle} />);
 }
 
@@ -160,7 +160,7 @@ it("keeps server search matches visible when a registration matches instead of t
   const selected = { id: "selected-owner", display_name: "Previously Selected" } as Person;
   const read = vi.spyOn(directory, "readDirectory").mockResolvedValue({ items: [matching], total: 1, next_cursor: null });
   vi.spyOn(directory, "lookupDirectory").mockResolvedValue([selected]);
-  render(<VehiclePeoplePicker groups={[]} people={[]} selectedPersonIds={[selected.id]} onToggle={vi.fn()} />);
+  render(<VehiclePeoplePicker groups={[]} selectedPersonIds={[selected.id]} onToggle={vi.fn()} />);
   await act(async () => { vi.advanceTimersByTime(0); });
   fireEvent.change(screen.getByRole("textbox", { name: "Search people to assign" }), { target: { value: "SYNTH01" } });
   await act(async () => { vi.advanceTimersByTime(150); });

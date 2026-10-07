@@ -10,7 +10,7 @@ import { api, createActionConfirmation } from "../../api/client";
 import { titleCase } from "../../lib/format";
 import { fileToDataUrl, mediaSource } from "../../lib/media";
 import { Badge } from "../../ui/primitives";
-import type { Group, Person, Schedule, Vehicle } from "../../api/types";
+import type { Group, Schedule, Vehicle } from "../../api/types";
 
 import { refreshVehicleInformation, type VehicleInformation, type VehicleInformationSummary } from "../../api/vehicleInformation";
 import { useVehicleInformation } from "./useVehicleInformation";
@@ -21,15 +21,13 @@ import { PersonAvatar, VehiclePhoto } from "./components";
 export function VehiclePeoplePicker({
   groups,
   onToggle,
-  people: initialPeople,
   selectedPersonIds
 }: {
   groups: Group[];
   onToggle: (personId: string) => void;
-  people: Person[];
   selectedPersonIds: string[];
 }) {
-  const personOptions = useDirectoryOptions("people", initialPeople, selectedPersonIds);
+  const personOptions = useDirectoryOptions("people", [], selectedPersonIds);
   const people = personOptions.items;
   const selectedPersonIdSet = React.useMemo(() => new Set(selectedPersonIds), [selectedPersonIds]);
   const selectedPeople = React.useMemo(
@@ -128,7 +126,6 @@ export function VehicleModal({
   mode,
   onClose: finishClose,
   onSaved: finishSaved,
-  people,
   refreshVehicles,
   schedules,
   setPageError,
@@ -140,7 +137,6 @@ export function VehicleModal({
   mode: "create" | "edit";
   onClose: () => void;
   onSaved: () => Promise<void>;
-  people: Person[];
   refreshVehicles: () => Promise<void>;
   schedules: Schedule[];
   setPageError: (message: string) => void;
@@ -361,29 +357,10 @@ export function VehicleModal({
     }
   };
 
-  const previewVehicle: Vehicle = {
-    id: vehicle?.id ?? "preview",
+  const previewVehicle = {
     registration_number: form.registration_number || "NEW",
     vehicle_photo_data_url: vehiclePhotoPreview.startsWith("data:") ? vehiclePhotoPreview : null,
-    vehicle_photo_url: vehiclePhotoPreview && !vehiclePhotoPreview.startsWith("data:") ? vehiclePhotoPreview : null,
-    description: form.description || null,
-    make: form.make || null,
-    model: form.model || null,
-    color: form.color || null,
-
-
-
-
-
-    person_id: form.person_ids.length === 1 ? form.person_ids[0] : null,
-    owner: form.person_ids.length === 1
-      ? people.find((person) => person.id === form.person_ids[0])?.display_name ?? null
-      : null,
-    person_ids: form.person_ids,
-    owners: people.filter((person) => form.person_ids.includes(person.id)).map((person) => person.display_name),
-    schedule_id: form.schedule_id || null,
-    schedule: schedules.find((schedule) => schedule.id === form.schedule_id)?.name ?? null,
-    is_active: form.is_active
+    vehicle_photo_url: vehiclePhotoPreview && !vehiclePhotoPreview.startsWith("data:") ? vehiclePhotoPreview : null
   };
     const motStatus = form.mot_status || null;
     const taxStatus = form.tax_status || null;
@@ -492,7 +469,6 @@ export function VehicleModal({
         <VehiclePeoplePicker
           groups={groups}
           onToggle={toggleAssignedPerson}
-          people={people}
           selectedPersonIds={form.person_ids}
         />
         <label className="field">

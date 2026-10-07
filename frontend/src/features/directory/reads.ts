@@ -13,6 +13,7 @@ export function useDirectoryPage<K extends DirectoryKind>(kind: K, seedItems: Di
   const [cursor, setCursor] = React.useState<string | null>(null);
   const [previous, setPrevious] = React.useState<(string | null)[]>([]);
   const [loading, setLoading] = React.useState(false);
+  const [ready, setReady] = React.useState(false);
   const [error, setError] = React.useState("");
   // Store the page's query alongside its cursor so a changed search never reuses an old cursor.
   const [scope, setScope] = React.useState({ query, active, groupId });
@@ -26,7 +27,7 @@ export function useDirectoryPage<K extends DirectoryKind>(kind: K, seedItems: Di
     setLoading(true); setError("");
     try {
       const next = await readDirectory(kind, { q: query, active, cursor, group_id: groupId }, { signal });
-      if (!signal.aborted) setPage(next);
+      if (!signal.aborted) { setPage(next); setReady(true); }
     } catch (failure) {
       if (!signal.aborted && !isAbortError(failure)) setError(failure instanceof Error ? failure.message : "Unable to load directory");
       throw failure;
@@ -35,7 +36,7 @@ export function useDirectoryPage<K extends DirectoryKind>(kind: K, seedItems: Di
   const refreshRead = useCoordinatedRead(read, eventMatches, enabled && sameScope, query ? 150 : 0);
   const refresh = React.useCallback(() => { void refreshRead().catch(() => undefined); }, [refreshRead]);
   return {
-    ...page, loading, error, refresh, canPrevious: previous.length > 0,
+    ...page, loading, ready, error, refresh, canPrevious: previous.length > 0,
     next: () => { if (page.next_cursor) { setPrevious((current) => [...current, cursor]); setCursor(page.next_cursor); } },
     previous: () => { if (previous.length) { setCursor(previous[previous.length - 1]); setPrevious((current) => current.slice(0, -1)); } }
   };
@@ -71,7 +72,7 @@ export function useDirectoryIdentities<K extends DirectoryKind>(kind: K, seedIte
     return [...merged.values()];
   }, [seedItems, selectedItems, key, resolvedKey]);
   const missingIds = resolvedKey === key ? selectedIds.filter((id) => !selectedItems.some((item) => item.id === id)) : [];
-  return { items, error, missingIds };
+  return { items, error, missingIds, ready: !key || resolvedKey === key };
 }
 
 export function useDirectoryOptions<K extends DirectoryKind>(kind: K, seedItems: DirectoryItem<K>[], selectedIds: string[] = [], enabled = true, providedRefreshToken?: string | number) {

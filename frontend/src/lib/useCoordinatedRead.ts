@@ -1,6 +1,6 @@
 import React from "react";
 import type { RealtimeMessage } from "../api/types";
-import { ReadSignalsContext, REALTIME_REFRESH_MIN_INTERVAL_MS } from "./readSignals";
+import { ReadSignalsContext, REALTIME_REFRESH_MIN_INTERVAL_MS, type ReadSignals } from "./readSignals";
 import { createRefreshCoordinator } from "./refreshCoordinator";
 
 // Own request lifetime and serialization; data, errors and event policy stay with the feature.
@@ -8,9 +8,11 @@ export function useCoordinatedRead(
   read: (signal: AbortSignal) => Promise<void>,
   eventMatches: (message: RealtimeMessage) => boolean,
   enabled = true,
-  debounceMs = 0
+  debounceMs = 0,
+  providedSignals?: ReadSignals
 ) {
-  const signals = React.useContext(ReadSignalsContext);
+  const contextSignals = React.useContext(ReadSignalsContext);
+  const signals = providedSignals ?? contextSignals;
   const matchesRef = React.useRef(eventMatches);
   React.useLayoutEffect(() => { matchesRef.current = eventMatches; }, [eventMatches]);
   const owner = React.useMemo(() => {

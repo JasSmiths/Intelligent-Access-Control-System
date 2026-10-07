@@ -48,3 +48,16 @@ it("keeps a selected-detail failure through independent successful search and cl
   await act(async () => { await signals.publish({ type: "refresh", reason: "manual", resetHistory: false }); });
   expect(result.current.selectedPass).toEqual(remote); expect(result.current.error).toBe("");
 });
+
+it("retires failed selected-detail state when the subject is deselected or changed to a person", async () => {
+  const { wrapper } = setup();
+  vi.spyOn(directory, "lookupDirectory").mockResolvedValue([]);
+  vi.spyOn(api, "get").mockRejectedValue(new Error("Selected detail offline"));
+  const { result, rerender } = renderHook(({ personId, passId }) => useReportSubjects("", false, personId, passId), { wrapper, initialProps: { personId: "", passId: remote.id } });
+  await waitFor(() => expect(result.current.error).toBe("Selected detail offline"));
+  rerender({ personId: "", passId: "" });
+  expect(result.current.error).toBe(""); expect(result.current.selectedPass).toBeNull();
+  rerender({ personId: "person", passId: "" });
+  await waitFor(() => expect(directory.lookupDirectory).toHaveBeenCalledWith("people", ["person"], expect.anything()));
+  expect(result.current.error).toBe("");
+});

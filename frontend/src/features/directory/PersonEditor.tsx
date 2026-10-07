@@ -9,7 +9,7 @@ import { DirectoryPagination } from "./DirectoryPagination";
 import { api, createActionConfirmation } from "../../api/client";
 import { fileToDataUrl, mediaSource } from "../../lib/media";
 import { Badge } from "../../ui/primitives";
-import type { Group, HomeAssistantDiscovery, HomeAssistantManagedCover, Person, Schedule, Vehicle } from "../../api/types";
+import type { Group, HomeAssistantDiscovery, HomeAssistantManagedCover, Person, Schedule } from "../../api/types";
 
 import type { PersonPronouns, PersonPronounFormValue, HomeAssistantInputBooleanAction, HomeAssistantPersonSuggestion } from "./types";
 import { InputBooleanEntityPicker, InputBooleanActionToggle, MobileAppNotifySelectField } from "./PersonIntegrationFields";
@@ -56,8 +56,7 @@ export function PersonModal({
   onSaved: finishSaved,
   person,
   schedules,
-  setPageError,
-  vehicles
+  setPageError
 }: {
   defaultPolicyOptionLabel: string;
   garageDoors: HomeAssistantManagedCover[];
@@ -68,7 +67,6 @@ export function PersonModal({
   person: Person | null;
   schedules: Schedule[];
   setPageError: (message: string) => void;
-  vehicles: Vehicle[];
 }) {
   const modalRef = React.useRef<HTMLFormElement>(null);
   const onClose = useModalClose(modalRef, finishClose);
@@ -109,7 +107,7 @@ export function PersonModal({
   const [submitting, setSubmitting] = React.useState(false);
   const submittingRef = React.useRef(false);
   const [dirty, setDirty] = React.useState(false);
-  const vehicleOptions = useDirectoryOptions("vehicles", vehicles, form.vehicle_ids);
+  const vehicleOptions = useDirectoryOptions("vehicles", [], form.vehicle_ids);
   const vehicleQuery = vehicleOptions.query;
   const setVehicleQuery = vehicleOptions.setQuery;
   const requestClose = useEditorDismiss(onClose, dirty, submitting, "person changes");
