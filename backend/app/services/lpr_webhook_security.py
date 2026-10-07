@@ -7,7 +7,6 @@ from fastapi import HTTPException, Request, status
 from app.core.config import settings
 from app.core.logging import get_logger
 
-
 LPR_WEBHOOK_TOKEN_HEADER = "X-IACS-LPR-Token"
 
 logger = get_logger(__name__)

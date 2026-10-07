@@ -1,8 +1,8 @@
 import shutil
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -14,9 +14,17 @@ from sqlalchemy.orm import selectinload
 from app.api.dependencies import admin_user
 from app.core.config import settings
 from app.db.session import get_db_session
-from app.models import AccessEvent, AuditLog, AutomationRun, GateCommandRecord, MovementSagaRecord, TelemetrySpan, TelemetryTrace, User
+from app.models import (
+    AccessEvent,
+    AuditLog,
+    AutomationRun,
+    GateCommandRecord,
+    MovementSagaRecord,
+    TelemetrySpan,
+    TelemetryTrace,
+    User,
+)
 from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
-from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.investigations import (
     ActivityFilters,
     InvalidCursorError,
@@ -30,6 +38,7 @@ from app.services.investigations.service import (
     investigation_overview,
     list_activity,
 )
+from app.services.lpr_timing import get_lpr_timing_recorder
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORIES,
@@ -68,19 +77,17 @@ class InvestigationScope(BaseModel):
     include_routine: bool | None = None
 
 
-
-
 @router.get("/categories")
-async def telemetry_categories(_: User = Depends(admin_user)) -> dict[str, Any]:
+async def telemetry_categories(_: Annotated[User, Depends(admin_user)]) -> dict[str, Any]:
     return {"categories": TELEMETRY_CATEGORIES}
 
 
 @router.get("/summary")
 async def telemetry_summary(
-    from_at: datetime | None = Query(default=None, alias="from"),
-    to_at: datetime | None = Query(default=None, alias="to"),
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    from_at: Annotated[datetime | None, Query(alias="from")] = None,
+    to_at: Annotated[datetime | None, Query(alias="to")] = None,
 ) -> dict[str, Any]:
     await telemetry.flush()
     trace_filters = _time_filters(TelemetryTrace.started_at, from_at, to_at)
@@ -90,7 +97,9 @@ async def telemetry_summary(
     audit_total = await _filtered_row_count(session, AuditLog, audit_filters)
     database_size_bytes = await _telemetry_database_size(session)
     log_file_size_bytes, log_file_count = _log_directory_size()
-    artifact_size_bytes, artifact_file_count = _directory_size([settings.data_dir / "telemetry-artifacts"])
+    artifact_size_bytes, artifact_file_count = _directory_size(
+        [settings.data_dir / "telemetry-artifacts"]
+    )
     storage = _telemetry_storage_payload(
         database_size_bytes=database_size_bytes,
         log_file_size_bytes=log_file_size_bytes,
@@ -112,14 +121,14 @@ async def telemetry_summary(
             "by_outcome": await _group_counts(session, AuditLog.outcome, audit_filters),
         },
         "storage": storage,
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": datetime.now(tz=UTC).isoformat(),
     }
 
 
 @router.get("/investigation-overview")
 async def get_investigation_overview(
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     runtime = await get_runtime_config()
     return await investigation_overview(session, site_timezone=runtime.site_timezone)
@@ -127,36 +136,34 @@ async def get_investigation_overview(
 
 @router.get("/investigation-filters")
 async def get_investigation_filters(
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     runtime = await get_runtime_config()
     return await investigation_filter_options(session, site_timezone=runtime.site_timezone)
 
 
-
-
 @router.get("/activity")
 async def get_activity(
-    time_range: str = Query(default="last_24_hours", alias="time", max_length=40),
-    from_at: datetime | None = Query(default=None, alias="from"),
-    to_at: datetime | None = Query(default=None, alias="to"),
-    device: str | None = Query(default=None, max_length=160),
-    automation: str | None = Query(default=None, max_length=160),
-    schedule: str | None = Query(default=None, max_length=160),
-    integration: str | None = Query(default=None, max_length=160),
-    category: str | None = Query(default=None, max_length=80),
-    outcome: str | None = Query(default=None, max_length=40),
-    severity: str | None = Query(default=None, max_length=40),
-    actor: str | None = Query(default=None, max_length=160),
-    trigger: str | None = Query(default=None, max_length=160),
-    trace: str | None = Query(default=None, max_length=64),
-    q: str | None = Query(default=None, max_length=200),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    time_range: Annotated[str, Query(alias="time", max_length=40)] = "last_24_hours",
+    from_at: Annotated[datetime | None, Query(alias="from")] = None,
+    to_at: Annotated[datetime | None, Query(alias="to")] = None,
+    device: Annotated[str | None, Query(max_length=160)] = None,
+    automation: Annotated[str | None, Query(max_length=160)] = None,
+    schedule: Annotated[str | None, Query(max_length=160)] = None,
+    integration: Annotated[str | None, Query(max_length=160)] = None,
+    category: Annotated[str | None, Query(max_length=80)] = None,
+    outcome: Annotated[str | None, Query(max_length=40)] = None,
+    severity: Annotated[str | None, Query(max_length=40)] = None,
+    actor: Annotated[str | None, Query(max_length=160)] = None,
+    trigger: Annotated[str | None, Query(max_length=160)] = None,
+    trace: Annotated[str | None, Query(max_length=64)] = None,
+    q: Annotated[str | None, Query(max_length=200)] = None,
     include_routine: bool = False,
-    limit: int = Query(default=25, ge=1, le=100),
-    cursor: str | None = Query(default=None, max_length=1000),
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    cursor: Annotated[str | None, Query(max_length=1000)] = None,
 ) -> dict[str, Any]:
     runtime = await get_runtime_config()
     _validate_investigation_outcome(outcome)
@@ -198,8 +205,8 @@ async def get_activity(
 @router.get("/activity/{episode_id}")
 async def get_activity_episode(
     episode_id: str,
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     runtime = await get_runtime_config()
     payload = await get_activity_detail(session, episode_id, site_timezone=runtime.site_timezone)
@@ -210,17 +217,17 @@ async def get_activity_episode(
 
 @router.get("/traces")
 async def list_traces(
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     category: str | None = None,
     status: str | None = None,
     level: str | None = None,
     registration_number: str | None = None,
     q: str | None = None,
-    from_at: datetime | None = Query(default=None, alias="from"),
-    to_at: datetime | None = Query(default=None, alias="to"),
-    limit: int = Query(default=50, ge=1, le=100),
+    from_at: Annotated[datetime | None, Query(alias="from")] = None,
+    to_at: Annotated[datetime | None, Query(alias="to")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: str | None = None,
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     query = select(TelemetryTrace).order_by(
         TelemetryTrace.started_at.desc(),
@@ -233,7 +240,9 @@ async def list_traces(
     if level:
         query = query.where(TelemetryTrace.level == level)
     if registration_number:
-        query = query.where(TelemetryTrace.registration_number.ilike(f"%{registration_number.strip()}%"))
+        query = query.where(
+            TelemetryTrace.registration_number.ilike(f"%{registration_number.strip()}%")
+        )
     if from_at:
         query = query.where(TelemetryTrace.started_at >= from_at)
     if to_at:
@@ -265,14 +274,17 @@ async def list_traces(
     traces = (await session.scalars(query.limit(limit + 1))).all()
     items = traces[:limit]
     next_cursor = _trace_cursor(items[-1]) if len(traces) > limit and items else None
-    return {"items": [await serialize_trace_with_links(session, trace) for trace in items], "next_cursor": next_cursor}
+    return {
+        "items": [await serialize_trace_with_links(session, trace) for trace in items],
+        "next_cursor": next_cursor,
+    }
 
 
 @router.get("/traces/{trace_id}")
 async def get_trace(
     trace_id: str,
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     trace = await session.get(TelemetryTrace, trace_id)
     if not trace:
@@ -284,14 +296,17 @@ async def get_trace(
             .order_by(TelemetrySpan.step_order, TelemetrySpan.started_at)
         )
     ).all()
-    return {**(await serialize_trace_with_links(session, trace)), "spans": [serialize_span(span) for span in spans]}
+    return {
+        **(await serialize_trace_with_links(session, trace)),
+        "spans": [serialize_span(span) for span in spans],
+    }
 
 
 @router.get("/lpr-waterfall")
 async def get_lpr_waterfall_by_access_event(
-    access_event_id: uuid.UUID = Query(...),
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    access_event_id: Annotated[uuid.UUID, Query()],
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     return await _lpr_waterfall_payload(session, trace_id="", access_event_id=access_event_id)
 
@@ -299,15 +314,17 @@ async def get_lpr_waterfall_by_access_event(
 @router.get("/lpr-waterfall/{trace_id}")
 async def get_lpr_waterfall(
     trace_id: str,
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     access_event_id: uuid.UUID | None = None,
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     return await _lpr_waterfall_payload(session, trace_id=trace_id, access_event_id=access_event_id)
 
 
 @router.get("/audit")
 async def list_audit_logs(
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     category: str | None = None,
     action_prefix: str | None = None,
     actor: str | None = None,
@@ -315,12 +332,10 @@ async def list_audit_logs(
     level: str | None = None,
     outcome: str | None = None,
     q: str | None = None,
-    from_at: datetime | None = Query(default=None, alias="from"),
-    to_at: datetime | None = Query(default=None, alias="to"),
-    limit: int = Query(default=50, ge=1, le=100),
+    from_at: Annotated[datetime | None, Query(alias="from")] = None,
+    to_at: Annotated[datetime | None, Query(alias="to")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: str | None = None,
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     query = select(AuditLog).order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
     if category:
@@ -371,13 +386,15 @@ async def list_audit_logs(
 
 @router.get("/storage")
 async def telemetry_storage(
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     await telemetry.flush()
     database_size_bytes = await _telemetry_database_size(session)
     log_file_size_bytes, log_file_count = _log_directory_size()
-    artifact_size_bytes, artifact_file_count = _directory_size([settings.data_dir / "telemetry-artifacts"])
+    artifact_size_bytes, artifact_file_count = _directory_size(
+        [settings.data_dir / "telemetry-artifacts"]
+    )
     return _telemetry_storage_payload(
         database_size_bytes=database_size_bytes,
         log_file_size_bytes=log_file_size_bytes,
@@ -388,9 +405,9 @@ async def telemetry_storage(
 
 @router.delete("/purge")
 async def purge_telemetry(
-    request: TelemetryPurgeRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    request: Annotated[TelemetryPurgeRequest | None, Body()] = None,
 ) -> dict[str, Any]:
     scope = request.scope if request else "telemetry"
     confirmation_payload = {"scope": scope}
@@ -461,8 +478,7 @@ async def purge_telemetry(
 
 @router.get("/artifacts/{artifact_id}")
 async def telemetry_artifact(
-    artifact_id: str,
-    _: User = Depends(admin_user),
+    artifact_id: str, _: Annotated[User, Depends(admin_user)]
 ) -> FileResponse:
     try:
         path, metadata = telemetry.artifact_path(artifact_id)
@@ -491,7 +507,9 @@ async def _lpr_waterfall_payload(
         raise HTTPException(status_code=404, detail="LPR trace or access event not found.")
 
     spans = await _spans_for_trace(session, trace.trace_id) if trace else []
-    movement_saga = await _movement_saga_for_access_event(session, access_event) if access_event else None
+    movement_saga = (
+        await _movement_saga_for_access_event(session, access_event) if access_event else None
+    )
     gate_commands = await _gate_commands_for_waterfall(session, access_event, movement_saga)
     webhook_trace = _webhook_trace_payload(trace, access_event)
     durable_latency = _durable_latency_payload(
@@ -538,7 +556,9 @@ async def _resolve_lpr_waterfall_subject(
     return await _trace_for_access_event(session, event), event
 
 
-async def _trace_for_access_event(session: AsyncSession, event: AccessEvent | None) -> TelemetryTrace | None:
+async def _trace_for_access_event(
+    session: AsyncSession, event: AccessEvent | None
+) -> TelemetryTrace | None:
     if not event:
         return None
     event_trace_id = _trace_id_from_access_event(event)
@@ -554,7 +574,9 @@ async def _trace_for_access_event(session: AsyncSession, event: AccessEvent | No
     )
 
 
-async def _access_event_for_trace(session: AsyncSession, trace: TelemetryTrace) -> AccessEvent | None:
+async def _access_event_for_trace(
+    session: AsyncSession, trace: TelemetryTrace
+) -> AccessEvent | None:
     if trace.access_event_id:
         event = await session.get(AccessEvent, trace.access_event_id)
         if event:
@@ -672,8 +694,14 @@ def _durable_latency_payload(
     access_event: AccessEvent | None,
     webhook_trace: dict[str, Any],
 ) -> dict[str, Any]:
-    raw_payload = access_event.raw_payload if access_event and isinstance(access_event.raw_payload, dict) else {}
-    debounce_payload = raw_payload.get("debounce") if isinstance(raw_payload.get("debounce"), dict) else {}
+    raw_payload = (
+        access_event.raw_payload
+        if access_event and isinstance(access_event.raw_payload, dict)
+        else {}
+    )
+    debounce_payload = (
+        raw_payload.get("debounce") if isinstance(raw_payload.get("debounce"), dict) else {}
+    )
     trace_context = trace.context if trace and isinstance(trace.context, dict) else {}
 
     captured_at = (
@@ -681,10 +709,9 @@ def _durable_latency_payload(
         or (access_event.occurred_at if access_event else None)
         or (trace.started_at if trace else None)
     )
-    webhook_received_at = (
-        _datetime_from_payload(webhook_trace.get("received_at"))
-        or _datetime_from_payload(trace_context.get("webhook_received_at"))
-    )
+    webhook_received_at = _datetime_from_payload(
+        webhook_trace.get("received_at")
+    ) or _datetime_from_payload(trace_context.get("webhook_received_at"))
     debounce_first_seen = (
         _datetime_from_payload(debounce_payload.get("first_seen"))
         or _datetime_from_payload(trace_context.get("first_seen"))
@@ -715,7 +742,9 @@ def _durable_latency_payload(
         "captured_to_webhook_ms": captured_to_webhook_ms,
         "webhook_to_debounce_finalize_ms": _duration_ms(debounce_finalized_at, webhook_received_at),
         "captured_to_debounce_finalize_ms": _duration_ms(debounce_finalized_at, captured_at),
-        "debounce_finalize_to_access_event_created_ms": _duration_ms(access_event_created_at, debounce_finalized_at),
+        "debounce_finalize_to_access_event_created_ms": _duration_ms(
+            access_event_created_at, debounce_finalized_at
+        ),
         "captured_to_access_event_created_ms": _duration_ms(access_event_created_at, captured_at),
         "trace_duration_ms": trace.duration_ms if trace else None,
     }
@@ -731,9 +760,15 @@ async def _recent_lpr_timing_observations(
         or (access_event.registration_number if access_event else None)
         or ""
     )
-    raw_payload = access_event.raw_payload if access_event and isinstance(access_event.raw_payload, dict) else {}
+    raw_payload = (
+        access_event.raw_payload
+        if access_event and isinstance(access_event.raw_payload, dict)
+        else {}
+    )
     event_ids = set(_payload_values(raw_payload, ("eventId", "event_id")))
-    camera_ids = set(_payload_values(raw_payload, ("cameraId", "camera_id", "sensorId", "sensor_id")))
+    camera_ids = set(
+        _payload_values(raw_payload, ("cameraId", "camera_id", "sensorId", "sensor_id"))
+    )
     matched = [
         observation
         for observation in observations
@@ -754,7 +789,9 @@ def _lpr_observation_matches(
     event_ids: set[str],
     camera_ids: set[str],
 ) -> bool:
-    observed_plate = _normalize_plate(str(observation.get("registration_number") or observation.get("raw_value") or ""))
+    observed_plate = _normalize_plate(
+        str(observation.get("registration_number") or observation.get("raw_value") or "")
+    )
     if registration_number and observed_plate == registration_number:
         return True
     event_id = str(observation.get("event_id") or "").strip()
@@ -862,7 +899,9 @@ def serialize_trace(trace: TelemetryTrace) -> dict[str, Any]:
     }
 
 
-async def serialize_trace_with_links(session: AsyncSession, trace: TelemetryTrace) -> dict[str, Any]:
+async def serialize_trace_with_links(
+    session: AsyncSession, trace: TelemetryTrace
+) -> dict[str, Any]:
     payload = serialize_trace(trace)
     if trace.category == "automation_engine":
         payload["context"] = await _automation_trace_context(session, trace, payload["context"])
@@ -877,7 +916,9 @@ async def _automation_trace_context(
     run_id = _parse_uuid(context.get("run_id"))
     run = await session.get(AutomationRun, run_id) if run_id else None
     if not run and trace.trace_id:
-        run = await session.scalar(select(AutomationRun).where(AutomationRun.trace_id == trace.trace_id))
+        run = await session.scalar(
+            select(AutomationRun).where(AutomationRun.trace_id == trace.trace_id)
+        )
     if not run:
         return context
 
@@ -1003,7 +1044,7 @@ def _datetime_from_payload(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -1087,7 +1128,9 @@ async def _row_count(session: AsyncSession, model: type) -> int:
     return int(await session.scalar(select(func.count()).select_from(model)) or 0)
 
 
-def _time_filters(timestamp_column: Any, from_at: datetime | None, to_at: datetime | None) -> list[Any]:
+def _time_filters(
+    timestamp_column: Any, from_at: datetime | None, to_at: datetime | None
+) -> list[Any]:
     filters: list[Any] = []
     if from_at:
         filters.append(timestamp_column >= from_at)
@@ -1132,7 +1175,7 @@ def _telemetry_storage_payload(
         "log_file_size_bytes": log_file_size_bytes,
         "artifact_size_bytes": artifact_size_bytes,
         "file_count": file_count,
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": datetime.now(tz=UTC).isoformat(),
     }
 
 
@@ -1147,7 +1190,7 @@ async def _telemetry_database_size(session: AsyncSession) -> int:
                 )
                 or 0
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
             await session.rollback()
             return 0
     return total

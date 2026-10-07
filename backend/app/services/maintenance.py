@@ -1,6 +1,6 @@
+import uuid
 from datetime import UTC, datetime
 from typing import Any
-import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,13 +9,15 @@ from app.db.session import AsyncSessionLocal
 from app.models import MaintenanceModeState
 from app.modules.home_assistant.client import get_home_assistant_client
 from app.modules.notifications.base import NotificationContext
-from app.services.event_bus import event_bus
 from app.services.automation_intake import reserve_trigger
-from app.services.notifications import get_notification_service
-from app.services.mutation_context import load_active_admin
+from app.services.event_bus import event_bus
+from app.services.integration_effects import MAINTENANCE_HA_ENTITY_ID, NotificationIntake
 from app.services.maintenance_state import (
-    MAINTENANCE_STATE_ID, get_maintenance_state, is_maintenance_mode_active,
+    MAINTENANCE_STATE_ID,
+    get_maintenance_state,
+    is_maintenance_mode_active,
 )
+from app.services.mutation_context import load_active_admin
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_MAINTENANCE,
     audit_log_event_payload,
@@ -23,9 +25,24 @@ from app.services.telemetry import (
     write_audit_log,
 )
 
+__all__ = ["get_status", "is_maintenance_mode_active", "set_mode"]
+
 logger = get_logger(__name__)
 
-MAINTENANCE_HA_ENTITY_ID = "input_boolean.top_gate_maintenance_mode"
+_notification_intake: NotificationIntake | None = None
+
+
+def bind_notification_intake(intake: NotificationIntake) -> None:
+    global _notification_intake
+    _notification_intake = intake
+
+
+def notification_intake() -> NotificationIntake:
+    if _notification_intake is None:
+        raise RuntimeError("Maintenance notification intake has not been wired by the application")
+    return _notification_intake
+
+
 MAINTENANCE_ENABLED_TRIGGER = "maintenance_mode_enabled"
 MAINTENANCE_DISABLED_TRIGGER = "maintenance_mode_disabled"
 
@@ -94,7 +111,7 @@ async def set_mode(
             duration_seconds=duration_seconds, duration_label=duration_label,
         )
         await session.flush()
-        await get_notification_service().enqueue_in_session(
+        await notification_intake().reserve(
             session, _maintenance_notification(active, event_payload),
             dispatch_id=uuid.uuid5(audit.id, "maintenance.notification"),
         )
@@ -103,7 +120,7 @@ async def set_mode(
             origin_id=str(audit.id), actor=actor, source=source)
         await session.commit()
     try:
-        get_notification_service().dispatcher.wake()
+        notification_intake().wake()
     except Exception:
         logger.exception("maintenance_notification_wakeup_failed")
     try:
@@ -241,7 +258,7 @@ async def _sync_home_assistant(active: bool, *, actor: str, source: str, reason:
     service = "input_boolean.turn_on" if active else "input_boolean.turn_off"
     try:
         await get_home_assistant_client().call_service(service, {"entity_id": MAINTENANCE_HA_ENTITY_ID})
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
         emit_audit_log(
             category=TELEMETRY_CATEGORY_MAINTENANCE,
             action="maintenance_mode.ha_sync_failed",

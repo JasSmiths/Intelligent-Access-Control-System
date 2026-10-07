@@ -9,7 +9,6 @@ from typing import Any
 
 from app.services.event_bus import event_bus
 
-
 MAX_VEHICLE_VISUAL_OBSERVATIONS = 500
 MAX_VEHICLE_PRESENCE_OBSERVATIONS = 1000
 VEHICLE_COLOR_KEYS = ("color", "colour", "vehicleColor", "vehicleColour")
@@ -184,7 +183,7 @@ class VehicleVisualDetectionRecorder:
         if not candidates:
             return None
 
-        return asdict(sorted(candidates, key=score)[0])
+        return asdict(min(candidates, key=score))
 
     async def _append_and_publish(self, observation: VehicleVisualObservation) -> None:
         async with self._lock:
@@ -295,7 +294,9 @@ class VehiclePresenceTracker:
                 continue
             if _has_later_vehicle_presence_end(observation, observations, checked_at):
                 continue
-            age_seconds = abs((checked_at.astimezone(UTC) - observed.astimezone(UTC)).total_seconds())
+            age_seconds = abs(
+                (checked_at.astimezone(UTC) - observed.astimezone(UTC)).total_seconds()
+            )
             if age_seconds > max_age_seconds:
                 continue
 
@@ -357,9 +358,11 @@ def _presence_identity_overlaps(
         return True
     if left.device_id and right.device_id and left.device_id == right.device_id:
         return True
-    if left.registration_number and right.registration_number and left.registration_number == right.registration_number:
-        return True
-    return False
+    return bool(
+        left.registration_number
+        and right.registration_number
+        and left.registration_number == right.registration_number
+    )
 
 
 def _presence_from_lpr_payload(
@@ -371,9 +374,13 @@ def _presence_from_lpr_payload(
     event_id = _string_or_none(_dict_deep_first(payload, ("eventId", "event_id")))
     camera_id = _string_or_none(_dict_deep_first(payload, ("cameraId", "camera_id")))
     device_id = _string_or_none(_dict_deep_first(payload, ("device", "deviceId", "device_id")))
-    captured_at = _datetime_from_any(_dict_deep_first(payload, ("capturedAt", "captured_at", "timestamp", "time")))
+    captured_at = _datetime_from_any(
+        _dict_deep_first(payload, ("capturedAt", "captured_at", "timestamp", "time"))
+    )
     observed_at = captured_at or received_at
-    plate = _normalize_plate(registration_number or str(_dict_deep_first(payload, PLATE_KEYS) or ""))
+    plate = _normalize_plate(
+        registration_number or str(_dict_deep_first(payload, PLATE_KEYS) or "")
+    )
     if not (plate or event_id or camera_id or device_id):
         return None
     return VehiclePresenceObservation(
@@ -438,8 +445,7 @@ def _presence_from_realtime_payload(
     event = payload.get("event")
     if isinstance(event, dict):
         smart_types = {
-            _normalize_detection_label(item)
-            for item in (event.get("smart_detect_types") or [])
+            _normalize_detection_label(item) for item in (event.get("smart_detect_types") or [])
         }
         if smart_types & VEHICLE_PRESENCE_TYPES:
             ended_at = _datetime_from_any(event.get("end"))
@@ -476,13 +482,17 @@ def _presence_from_track(
     if not isinstance(payload, list):
         return []
 
-    common = _protect_common_fields(event, action="track_probe", model="event", received_at=received_at)
+    common = _protect_common_fields(
+        event, action="track_probe", model="event", received_at=received_at
+    )
     resolved_event_id = (
         event_id
         or _string_or_none(raw_track.get("eventId") or raw_track.get("event_id"))
         or common.get("event_id")
     )
-    camera_id = _string_or_none(raw_track.get("cameraId") or raw_track.get("camera_id")) or common.get("camera_id")
+    camera_id = _string_or_none(
+        raw_track.get("cameraId") or raw_track.get("camera_id")
+    ) or common.get("camera_id")
     detail = "smart_detect_track.vehicle"
     if probe_attempt is not None:
         detail = f"{detail}.attempt_{probe_attempt}"
@@ -491,12 +501,16 @@ def _presence_from_track(
     for index, row in enumerate(payload):
         if not isinstance(row, dict):
             continue
-        object_type = _normalize_detection_label(_dict_get_any(row, ("objectType", "object_type", "type")))
+        object_type = _normalize_detection_label(
+            _dict_get_any(row, ("objectType", "object_type", "type"))
+        )
         plate = _normalize_plate(str(_dict_get_any(row, PLATE_KEYS) or ""))
         has_vehicle_attributes = bool(_dict_get_any(row, ("attributes", "attrs")))
         if object_type not in VEHICLE_PRESENCE_TYPES and not plate and not has_vehicle_attributes:
             continue
-        observed_at = _datetime_from_any(_dict_get_any(row, ("timestamp", "capturedAt", "captured_at", "time")))
+        observed_at = _datetime_from_any(
+            _dict_get_any(row, ("timestamp", "capturedAt", "captured_at", "time"))
+        )
         observations.append(
             VehiclePresenceObservation(
                 id=str(uuid.uuid4()),
@@ -515,7 +529,9 @@ def _presence_from_track(
 
 
 def _normalize_detection_label(value: Any) -> str:
-    return str(_enum_value(value) or value or "").strip().replace("-", "_").replace(" ", "_").lower()
+    return (
+        str(_enum_value(value) or value or "").strip().replace("-", "_").replace(" ", "_").lower()
+    )
 
 
 def extract_unifi_protect_vehicle_visual_observations(
@@ -528,15 +544,15 @@ def extract_unifi_protect_vehicle_visual_observations(
     new_obj = getattr(message, "new_obj", None)
     action = _enum_value(getattr(message, "action", None))
     model = str(
-        _dict_get(changed_data, "modelKey")
-        or _enum_value(getattr(new_obj, "model", None))
-        or ""
+        _dict_get(changed_data, "modelKey") or _enum_value(getattr(new_obj, "model", None)) or ""
     )
     common = _protect_common_fields(new_obj, action=action, model=model, received_at=received_at)
 
     observations: list[VehicleVisualObservation] = []
     observations.extend(_observations_from_event_object(new_obj, common))
-    observations.extend(_observations_from_payload(_model_to_debug_dict(new_obj), "new_obj", common))
+    observations.extend(
+        _observations_from_payload(_model_to_debug_dict(new_obj), "new_obj", common)
+    )
     observations.extend(_observations_from_payload(changed_data, "changed_data", common))
     return _dedupe_observations(observations)
 
@@ -581,9 +597,17 @@ def extract_unifi_protect_track_vehicle_visual_observations(
     if not isinstance(payload, list):
         return []
 
-    common = _protect_common_fields(event, action="track_probe", model="event", received_at=received_at)
-    common["event_id"] = event_id or _string_or_none(raw_track.get("eventId") or raw_track.get("event_id")) or common.get("event_id")
-    common["camera_id"] = _string_or_none(raw_track.get("cameraId") or raw_track.get("camera_id")) or common.get("camera_id")
+    common = _protect_common_fields(
+        event, action="track_probe", model="event", received_at=received_at
+    )
+    common["event_id"] = (
+        event_id
+        or _string_or_none(raw_track.get("eventId") or raw_track.get("event_id"))
+        or common.get("event_id")
+    )
+    common["camera_id"] = _string_or_none(
+        raw_track.get("cameraId") or raw_track.get("camera_id")
+    ) or common.get("camera_id")
     detail = "smart_detect_track.attributes"
     if probe_attempt is not None:
         detail = f"{detail}.attempt_{probe_attempt}"
@@ -813,7 +837,9 @@ def _looks_like_vehicle_visual_context(
         for item in smart_types
     ):
         return True
-    return bool(color and any(token in path.lower() for token in ("vehicle", "thumbnail", "smartdetect")))
+    return bool(
+        color and any(token in path.lower() for token in ("vehicle", "thumbnail", "smartdetect"))
+    )
 
 
 def _plate_from_thumbnail(thumbnail: Any) -> str | None:
@@ -840,7 +866,9 @@ def _plate_from_mapping(value: dict[str, Any]) -> str | None:
         if isinstance(group, dict):
             found = _dict_get_any(group, ("matchedName", "matched_name", "name"))
     if isinstance(found, list):
-        found = next((item for item in found if isinstance(item, str) and _normalize_plate(item)), None)
+        found = next(
+            (item for item in found if isinstance(item, str) and _normalize_plate(item)), None
+        )
     return str(found) if found else None
 
 
@@ -855,14 +883,17 @@ def _protect_common_fields(
     return {
         "event_id": str(getattr(event, "id", "") or "") or None,
         "camera_id": str(getattr(event, "camera_id", "") or "") or None,
-        "camera_name": str(getattr(camera, "display_name", "") or getattr(camera, "name", "") or "") or None,
+        "camera_name": str(getattr(camera, "display_name", "") or getattr(camera, "name", "") or "")
+        or None,
         "protect_action": action,
         "protect_model": model,
         "received_at": _isoformat(received_at),
     }
 
 
-def _dedupe_observations(observations: list[VehicleVisualObservation]) -> list[VehicleVisualObservation]:
+def _dedupe_observations(
+    observations: list[VehicleVisualObservation],
+) -> list[VehicleVisualObservation]:
     deduped: list[VehicleVisualObservation] = []
     seen: set[tuple[Any, ...]] = set()
     for observation in observations:
@@ -1035,13 +1066,13 @@ def _model_to_debug_dict(value: Any) -> Any:
     if callable(unifi_dict):
         try:
             return unifi_dict()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - Background integration failure remains observable and recoverable.
             pass
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
         try:
             return model_dump(mode="json")
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - Background integration failure remains observable and recoverable.
             pass
     try:
         return {
@@ -1066,7 +1097,7 @@ def _datetime_from_any(value: Any) -> datetime | None:
             return None
     if isinstance(value, str):
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
         except ValueError:
             return None
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

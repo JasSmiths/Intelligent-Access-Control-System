@@ -1,65 +1,75 @@
 import asyncio
-import uuid
 import copy
+import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import NotificationRule, NotificationRun, Person, Presence, Schedule, User
-from app.models.enums import PresenceState
-from app.modules.announcements.home_assistant_tts import AnnouncementTarget, HomeAssistantTtsAnnouncer
-from app.modules.home_assistant.client import HomeAssistantClient as DefaultHomeAssistantClient, get_home_assistant_client
+from app.models import NotificationRule, NotificationRun, User
+from app.modules.announcements.home_assistant_tts import (
+    AnnouncementTarget,
+    HomeAssistantTtsAnnouncer,
+)
+from app.modules.home_assistant.client import HomeAssistantClient as DefaultHomeAssistantClient
+from app.modules.home_assistant.client import get_home_assistant_client
 from app.modules.notifications.apprise_client import (
     AppriseNotificationSender,
     normalize_apprise_url,
     split_apprise_urls,
     summarize_apprise_url,
 )
-from app.modules.notifications.home_assistant_mobile import (
-    HomeAssistantMobileAppNotifier,
-    HomeAssistantMobileAppTarget,
-)
 from app.modules.notifications.base import (
     ComposedNotification,
     NotificationContext,
     NotificationDeliveryError,
 )
+from app.modules.notifications.home_assistant_mobile import (
+    HomeAssistantMobileAppNotifier,
+    HomeAssistantMobileAppTarget,
+)
+from app.services.action_confirmations import consume_action_confirmation
 from app.services.actionable_notifications import (
     get_actionable_notification_service,
 )
-from app.services.workflows.notification_payloads import notification_context_payload, trigger_severity
-from app.services.workflows.visitor_notifications import visitor_pass_notification_contexts_from_event
 from app.services.dvla import lookup_normalized_vehicle_registration
 from app.services.event_bus import RealtimeEvent, event_bus
-from app.services.automation_authorization import notification_origin_denial
-from app.services.access.authorization import assert_current_recognition_domain_authorization
-from app.services.notification_runs import NotificationActionAuthorization, NotificationRunStore
+from app.services.mutation_context import load_active_admin
+from app.services.notification_authorization import NotificationAuthorization
 from app.services.notification_dispatch import NotificationDispatcher
+from app.services.notification_planning import (
+    NotificationPlanner,
+    rule_id,
+    rule_name,
+    rule_trigger_event,
+)
+from app.services.notification_recipients import NotificationRecipients
 from app.services.notification_rendering import (
     composed_from_context,
     context_variables,
-    context_occurred_at,
-    snapshot_payload,
-    gate_malfunction_notification_content,
 )
 from app.services.notification_requests import (
-    configuration_binding, confirmed_origin, confirmed_attempt_denial,
+    configuration_binding,
+    confirmed_origin,
 )
-from app.services.action_confirmations import consume_action_confirmation
-from app.services.mutation_context import load_active_admin
+from app.services.notification_runs import NotificationRunStore
+from app.services.settings import RuntimeConfig, get_runtime_config, get_runtime_config_for_session
 from app.services.snapshots import get_snapshot_manager
-from app.services.schedules import schedule_allows_at
-from app.services.settings import get_runtime_config, get_runtime_config_for_session
-from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, telemetry, write_audit_log, actor_from_user
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_INTEGRATIONS,
+    actor_from_user,
+    telemetry,
+    write_audit_log,
+)
 from app.services.tts_phonetics import apply_vehicle_tts_phonetics
 from app.services.type_helpers import as_dict
 from app.services.unifi_protect import get_unifi_protect_service
+from app.services.workflow_dispatch_ports import NotificationPolicy
+from app.services.workflows import notification_payloads
 from app.services.workflows.catalog import (
     GATE_MALFUNCTION_EVENT_TYPE,
     INTEGRATION_DEGRADED_EVENT_TYPE,
@@ -67,9 +77,19 @@ from app.services.workflows.catalog import (
     notification_trigger_catalog,
     notification_variable_groups,
 )
-from app.services.workflows.context import normalize_string_list, render_template
-from app.services.workflows.template_recipients import content_for_recipient, recipient_content
-from app.services.workflows import notification_payloads
+from app.services.workflows.execution_contracts import (
+    NotificationActionOutcome,
+    NotificationPlanItem,
+    checked_notification_plan,
+)
+from app.services.workflows.notification_payloads import (
+    notification_context_payload,
+    trigger_severity,
+)
+from app.services.workflows.template_recipients import content_for_recipient
+from app.services.workflows.visitor_notifications import (
+    visitor_pass_notification_contexts_from_event,
+)
 
 logger = get_logger(__name__)
 HomeAssistantClient = DefaultHomeAssistantClient
@@ -78,6 +98,8 @@ HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID = "input_boolean.announcements"
 VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE = (
     "Voice Notification suppressed: `input_boolean.announcements` is disabled."
 )
+
+
 def _home_assistant_client() -> DefaultHomeAssistantClient:
     if HomeAssistantClient is DefaultHomeAssistantClient:
         return get_home_assistant_client()
@@ -107,22 +129,16 @@ class NotificationWorkflowResult:
 
 
 @dataclass(frozen=True)
-class NotificationActionOutcome:
-    delivered: bool
-    skipped: bool = False
-    reason: str = ""
-    message: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class NotificationSnapshotAttachment:
     path: str
     content_type: str
     public_url: str | None
 
+
 TRIGGER_CATALOG = notification_trigger_catalog()
-ACTIONABLE_NOTIFICATION_CATALOG = notification_actionable_catalog(notification_payloads.GATE_OPEN_ACTION)
+ACTIONABLE_NOTIFICATION_CATALOG = notification_actionable_catalog(
+    notification_payloads.GATE_OPEN_ACTION
+)
 VARIABLE_GROUPS = notification_variable_groups()
 
 MOCK_FACTS = {
@@ -190,9 +206,19 @@ class NotificationService:
     events for normal runtime delivery.
     """
 
-    def __init__(self, *, run_store=None) -> None:
+    def __init__(self, *, run_store: NotificationRunStore | None = None) -> None:
         self._started = False
         self.run_store = run_store if run_store is not None else NotificationRunStore()
+        self.planner = NotificationPlanner(
+            sessions=lambda: AsyncSessionLocal(), config=lambda: get_runtime_config()
+        )
+        self.authorization = NotificationAuthorization(
+            config=lambda session: get_runtime_config_for_session(session),
+            actionable=lambda: get_actionable_notification_service(),
+        )
+        self.recipients = NotificationRecipients(
+            sessions=lambda: AsyncSessionLocal(), clients=lambda: _home_assistant_client()
+        )
         self.dispatcher = NotificationDispatcher(self, self.run_store)
 
     async def start(self) -> None:
@@ -222,14 +248,12 @@ class NotificationService:
             "mock_context": context_variables(sample_notification_context()),
         }
 
-    async def available_integrations(self, config) -> list[dict[str, Any]]:
+    async def available_integrations(self, config: RuntimeConfig) -> list[dict[str, Any]]:
         apprise_urls = [
-            normalize_apprise_url(url)
-            for url in split_apprise_urls(config.apprise_urls)
+            normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)
         ]
         apprise_endpoints = [
-            summarize_apprise_url(index, url)
-            for index, url in enumerate(apprise_urls)
+            summarize_apprise_url(index, url) for index, url in enumerate(apprise_urls)
         ]
         mobile_endpoints: list[dict[str, Any]] = []
         if apprise_endpoints:
@@ -250,10 +274,12 @@ class NotificationService:
             }
             for endpoint in apprise_endpoints
         )
-        home_assistant_mobile_endpoints = await self._home_assistant_mobile_endpoint_catalog(config)
+        home_assistant_mobile_endpoints = (
+            await self.recipients.home_assistant_mobile_endpoint_catalog(config)
+        )
         mobile_endpoints.extend(home_assistant_mobile_endpoints)
 
-        voice_endpoints = await self._voice_endpoint_catalog(config)
+        voice_endpoints = await self.recipients.voice_endpoint_catalog(config)
         return [
             {
                 "id": "mobile",
@@ -307,11 +333,17 @@ class NotificationService:
         return await self.enqueue_notification(context)
 
     async def enqueue_in_session(
-        self, session: AsyncSession, context: NotificationContext, *, dispatch_id: uuid.UUID,
+        self,
+        session: AsyncSession,
+        context: NotificationContext,
+        *,
+        dispatch_id: uuid.UUID,
     ) -> uuid.UUID:
         """Reserve required delivery in the caller's mutation transaction."""
         return await self.run_store.enqueue_in_session(
-            session, notification_context_payload(context), run_id=dispatch_id,
+            session,
+            notification_context_payload(context),
+            run_id=dispatch_id,
         )
 
     async def enqueue_notification(self, context: NotificationContext) -> ComposedNotification:
@@ -328,68 +360,135 @@ class NotificationService:
         return composed_from_context(context)
 
     async def reserve_confirmed_request(
-        self, session, *, user, action, payload, confirmation_token, context,
-        direct_action=None, rules_override=None,
-    ):
+        self,
+        session: AsyncSession,
+        *,
+        user: User,
+        action: str,
+        payload: dict[str, Any],
+        confirmation_token: str,
+        context: NotificationContext,
+        direct_action: dict[str, Any] | None = None,
+        rules_override: list[dict[str, Any]] | None = None,
+    ) -> tuple[uuid.UUID, NotificationRun | None]:
         """Confirmation, required request audit and delivery are one transaction.
 
         The API commits once and then calls dispatch_reserved. A disconnected
         caller cannot erase the accepted output; polling recovers ordinary work.
         """
-        prepared = await self.prepare_confirmed_delivery(context, action=action,
-            direct_action=direct_action, rules_override=rules_override)
-        current = await load_active_admin(session, user.id, auth_version=user.auth_session_version, lock=True)
+        prepared = await self.prepare_confirmed_delivery(
+            context, action=action, direct_action=direct_action, rules_override=rules_override
+        )
+        current = await load_active_admin(
+            session, user.id, auth_version=user.auth_session_version, lock=True
+        )
         confirmation = await consume_action_confirmation(
-            session, user=current, action=action, payload=payload,
-            confirmation_token=confirmation_token, commit=False,
+            session,
+            user=current,
+            action=action,
+            payload=payload,
+            confirmation_token=confirmation_token,
+            commit=False,
         )
         return await self.reserve_confirmed_in_session(
-            session, actor_user_id=current.id, auth_version=current.auth_session_version,
-            operation_id=confirmation.id, action=action, context=context,
-            direct_action=direct_action, rules_override=rules_override,
+            session,
+            actor_user_id=current.id,
+            auth_version=current.auth_session_version,
+            operation_id=confirmation.id,
+            action=action,
+            context=context,
+            direct_action=direct_action,
+            rules_override=rules_override,
             prepared=prepared,
         )
 
-    async def prepare_confirmed_delivery(self, context, *, action, direct_action=None, rules_override=None):
+    async def prepare_confirmed_delivery(
+        self,
+        context: NotificationContext,
+        *,
+        action: str,
+        direct_action: dict[str, Any] | None = None,
+        rules_override: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[NotificationPlanItem], str]:
         """Resolve content/audience before acquiring confirmation or actor locks."""
         async with self.run_store.sessions() as read_session:
             config = await get_runtime_config_for_session(read_session)
         if direct_action is not None:
             if direct_action.get("delivery_mode") != "literal":
                 raise ValueError("A concrete literal delivery mode is required")
-            if (direct_action.get("configured_default") and direct_action.get("type") == "voice"
-                    and direct_action.get("target") != config.home_assistant_default_media_player):
-                raise NotificationDeliveryError("The default announcement destination changed. Create a fresh confirmation.",
-                                                delivery="not_sent")
-            plan = [{"rule": {"id": action, "name": action, "trigger_event": context.event_type},
-                     "action": copy.deepcopy(direct_action), "state": "pending"}]
+            if (
+                direct_action.get("configured_default")
+                and direct_action.get("type") == "voice"
+                and direct_action.get("target") != config.home_assistant_default_media_player
+            ):
+                raise NotificationDeliveryError(
+                    "The default announcement destination changed. Create a fresh confirmation.",
+                    delivery="not_sent",
+                )
+            plan = checked_notification_plan(
+                [
+                    {
+                        "rule": {"id": action, "name": action, "trigger_event": context.event_type},
+                        "action": copy.deepcopy(direct_action),
+                        "state": "pending",
+                    }
+                ]
+            )
         else:
-            row = NotificationRun(context=notification_context_payload(context), rules_override=rules_override)
+            row = NotificationRun(
+                context=notification_context_payload(context), rules_override=rules_override
+            )
             plan = await self.prepare_delivery_plan(row)
             for item in plan:
                 if item.get("state") != "pending":
                     continue
                 value = item["action"]
                 if value["type"] == "voice":
-                    value["frozen_voice_targets"] = await self._select_voice_targets(config, value)
+                    value["frozen_voice_targets"] = await self.recipients.select_voice_targets(
+                        config, value
+                    )
                 elif value["type"] == "mobile":
-                    value["frozen_mobile_targets"] = await self._select_home_assistant_mobile_targets(config, value)
+                    value[
+                        "frozen_mobile_targets"
+                    ] = await self.recipients.select_home_assistant_mobile_targets(config, value)
                     # Endpoint indexes are safe to retain; URLs may contain secrets.
-                    configured = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
-                    selected = self._select_apprise_urls(config.apprise_urls, value)
+                    configured = [
+                        normalize_apprise_url(url)
+                        for url in split_apprise_urls(config.apprise_urls)
+                    ]
+                    selected = self.recipients.select_apprise_urls(config.apprise_urls, value)
                     value["frozen_apprise_indexes"] = [configured.index(url) for url in selected]
         return plan, configuration_binding(config, plan)
 
     async def reserve_confirmed_in_session(
-        self, session, *, actor_user_id, auth_version, operation_id, action, context,
-        direct_action=None, rules_override=None, prepared=None,
-    ):
-        plan, prepared_binding = prepared if prepared is not None else await self.prepare_confirmed_delivery(
-            context, action=action, direct_action=direct_action, rules_override=rules_override,
+        self,
+        session: AsyncSession,
+        *,
+        actor_user_id: uuid.UUID,
+        auth_version: int,
+        operation_id: uuid.UUID,
+        action: str,
+        context: NotificationContext,
+        direct_action: dict[str, Any] | None = None,
+        rules_override: list[dict[str, Any]] | None = None,
+        prepared: tuple[list[NotificationPlanItem], str] | None = None,
+    ) -> tuple[uuid.UUID, NotificationRun | None]:
+        plan, prepared_binding = (
+            prepared
+            if prepared is not None
+            else await self.prepare_confirmed_delivery(
+                context,
+                action=action,
+                direct_action=direct_action,
+                rules_override=rules_override,
+            )
         )
         user, origin = await confirmed_origin(
-            session, actor_user_id=actor_user_id, auth_version=auth_version,
-            operation_id=operation_id, action=action,
+            session,
+            actor_user_id=actor_user_id,
+            auth_version=auth_version,
+            operation_id=operation_id,
+            action=action,
         )
         run_id = uuid.uuid5(uuid.UUID(str(operation_id)), "notification-delivery")
         payload = notification_context_payload(context)
@@ -399,17 +498,27 @@ class NotificationService:
         origin["configuration_binding"] = configuration_binding(config, plan)
         payload["confirmed_delivery"] = origin
         identity, claimed = await self.run_store.reserve_prepared_in_session(
-            session, payload, run_id=run_id, plan=plan,
+            session,
+            payload,
+            run_id=run_id,
+            plan=plan,
         )
         if claimed is not None:
             await write_audit_log(
-                session, category=TELEMETRY_CATEGORY_INTEGRATIONS, action=action + ".requested",
-                actor=actor_from_user(user), actor_user_id=user.id, target_entity="NotificationRun",
-                target_id=str(identity), metadata={"operation_id": str(operation_id), "authority": "api"},
+                session,
+                category=TELEMETRY_CATEGORY_INTEGRATIONS,
+                action=action + ".requested",
+                actor=actor_from_user(user),
+                actor_user_id=user.id,
+                target_entity="NotificationRun",
+                target_id=str(identity),
+                metadata={"operation_id": str(operation_id), "authority": "api"},
             )
         return identity, claimed
 
-    async def dispatch_reserved(self, run_id, claimed=None):
+    async def dispatch_reserved(
+        self, run_id: uuid.UUID, claimed: NotificationRun | None = None
+    ) -> NotificationWorkflowResult:
         await self.dispatcher.run_once(run_id, claimed=claimed)
         return self.result_from_run(await self.run_store.get(run_id))
 
@@ -439,26 +548,39 @@ class NotificationService:
     ) -> NotificationWorkflowResult:
         """Immediate attempt through the same durable owner as background delivery."""
         run_id, claimed = await self.run_store.reserve(
-            notification_context_payload(context), rules_override=rules_override, run_id=dispatch_id,
+            notification_context_payload(context),
+            rules_override=rules_override,
+            run_id=dispatch_id,
         )
         await self.dispatcher.run_once(run_id, claimed=claimed)
         row = await self.run_store.get(run_id)
         result = self.result_from_run(row)
         if raise_on_failure and (result.status != "sent" or result.failed_count):
-            raise NotificationDeliveryError(row.review_reason or "; ".join(result.failures or result.skipped_reasons)
-                                            or "Notification was not delivered.")
+            raise NotificationDeliveryError(
+                row.review_reason
+                or "; ".join(result.failures or result.skipped_reasons)
+                or "Notification was not delivered."
+            )
         return result
 
     @staticmethod
     def result_from_run(row: NotificationRun) -> NotificationWorkflowResult:
         context = notification_context_from_payload(row.context)
         first = next((x for x in row.delivery_plan or [] if x.get("action")), None)
-        notification = (ComposedNotification(title=first["action"]["title"], body=first["action"]["message"])
-                        if first else composed_from_context(context))
+        notification = (
+            ComposedNotification(title=first["action"]["title"], body=first["action"]["message"])
+            if first
+            else composed_from_context(context)
+        )
         return NotificationWorkflowResult(
-            notification=notification, run_id=str(row.id), recovery_status=row.status,
-            delivered_count=row.delivered_count, failed_count=row.failed_count,
-            skipped_count=row.skipped_count, failures=list(row.failures), skipped_reasons=list(row.skipped_reasons),
+            notification=notification,
+            run_id=str(row.id),
+            recovery_status=row.status,
+            delivered_count=row.delivered_count,
+            failed_count=row.failed_count,
+            skipped_count=row.skipped_count,
+            failures=list(row.failures),
+            skipped_reasons=list(row.skipped_reasons),
         )
 
     async def _enrich_unknown_vehicle_notification(self, row: NotificationRun) -> None:
@@ -469,16 +591,21 @@ class NotificationService:
         """
         facts = dict(row.context.get("facts") or {})
         registration = facts.get("registration_number")
-        if (row.context.get("event_type") != "unauthorized_plate"
-                or not facts.get("access_event_id") or not registration
-                or (facts.get("vehicle_make") and facts.get("vehicle_colour"))):
+        if (
+            row.context.get("event_type") != "unauthorized_plate"
+            or not facts.get("access_event_id")
+            or not registration
+            or (facts.get("vehicle_make") and facts.get("vehicle_colour"))
+        ):
             return
         try:
             async with asyncio.timeout(3):
                 vehicle = await lookup_normalized_vehicle_registration(registration)
         except Exception as exc:  # noqa: BLE001 - optional enrichment cannot block an alert.
-            logger.warning("notification_vehicle_enrichment_failed",
-                           extra={"exception_class": type(exc).__name__})
+            logger.warning(
+                "notification_vehicle_enrichment_failed",
+                extra={"exception_class": type(exc).__name__},
+            )
             return
         if not facts.get("vehicle_make") and vehicle.make:
             facts["vehicle_make"] = vehicle.make
@@ -488,31 +615,12 @@ class NotificationService:
             facts["vehicle_color"] = colour
         row.context = {**row.context, "facts": facts}
 
-    async def prepare_delivery_plan(self, row: NotificationRun) -> list[dict[str, Any]]:
+    async def prepare_delivery_plan(self, row: NotificationRun) -> list[NotificationPlanItem]:
         await self._enrich_unknown_vehicle_notification(row)
         context = notification_context_from_payload(row.context)
         if row.id is not None:
             context = self._context_with_notification_run_id(context, row.id)
-        rules = await self._rules_for_context(context, row.rules_override)
-        plan = []
-        for rule in rules:
-            rule_origin = self._ordinary_rule_origin(rule) if row.rules_override is None and isinstance(rule, NotificationRule) else None
-            rendered = self.render_rule(rule, context)
-            if not await self.conditions_match(rule, context):
-                plan.append({"rule": rendered, "state": "skipped", "reason": "conditions_not_met"})
-                continue
-            if context.event_type == GATE_MALFUNCTION_EVENT_TYPE:
-                rendered["actions"] = await self._gate_malfunction_actions_for_delivery(rendered["actions"], context)
-            for action in rendered["actions"]:
-                item = {
-                    "rule": {key: value for key, value in rendered.items() if key != "actions"},
-                    "action": action,
-                    "state": "pending",
-                }
-                if rule_origin is not None:
-                    item["rule_origin"] = rule_origin
-                plan.append(item)
-        return plan or [{"state": "skipped", "reason": "no_matching_workflow" if not rules else "no_workflow_actions_delivered"}]
+        return await self.planner.build(context, row.rules_override)
 
     async def authorize_attempt(
         self,
@@ -520,29 +628,12 @@ class NotificationService:
         payload: dict[str, Any],
         run_id: uuid.UUID,
         *,
-        action=None,
-        item=None,
-    ) -> str | NotificationActionAuthorization | None:
-        """Current originating domain authority joins the durable attempt transaction."""
-        if payload.get("resident_recovery_origin") is not None:
-            from app.services.resident_recovery import authorize_mobile_output
-            denial = await authorize_mobile_output(session, payload, run_id, action)
-            return NotificationActionAuthorization(action_skip=denial) if denial else None
-        if payload.get("actionable_output_origin") is not None:
-            denial = await get_actionable_notification_service().authorize_notification_output_in_session(
-                session,
-                payload,
-                run_id,
-                action,
-            )
-            return NotificationActionAuthorization(action_skip=denial) if denial else None
-        denial = await notification_origin_denial(session, payload, run_id,
-            authorize_recognition=assert_current_recognition_domain_authorization)
-        if not denial and item is not None:
-            action_skip = await self._ordinary_rule_action_skip(session, item)
-            if action_skip:
-                return NotificationActionAuthorization(action_skip=action_skip)
-        return denial
+        action: dict[str, Any] | None = None,
+        item: NotificationPlanItem | None = None,
+    ) -> NotificationPolicy:
+        return await self.authorization.authorize_attempt(
+            session, payload, run_id, action=action, item=item
+        )
 
     async def authorize_attempt_with_config(
         self,
@@ -550,147 +641,63 @@ class NotificationService:
         payload: dict[str, Any],
         run_id: uuid.UUID,
         *,
-        action=None,
-        item=None,
+        action: dict[str, Any] | None = None,
+        item: NotificationPlanItem | None = None,
         final: bool = False,
-    ) -> tuple[Any | None, str | NotificationActionAuthorization | None]:
-        """Authorize normal work and retain only its checked runtime snapshot.
-
-        The first pass owns rule/domain policy before the notification-run lock.
-        The final pass refreshes only transport configuration after that lock, so
-        a mutable saved rule is never re-locked in the inverse order.
-        """
-        if final:
-            config = await get_runtime_config_for_session(session)
-            return config, await self._authorize_action_config_in_session(
-                session, action, config, payload=payload, run_id=run_id,
-            )
-        policy = await self.authorize_attempt(session, payload, run_id, action=action, item=item)
-        if policy is not None:
-            return None, policy
-        config = await get_runtime_config_for_session(session)
-        return config, await self._authorize_action_config_in_session(
-            session, action, config, payload=payload, run_id=run_id,
+    ) -> tuple[RuntimeConfig | None, NotificationPolicy]:
+        return await self.authorization.authorize_attempt_with_config(
+            session, payload, run_id, action=action, item=item, final=final
         )
 
-    async def _authorize_action_config_in_session(
+    async def authorize_confirmed_attempt(
         self,
         session: AsyncSession,
-        action,
-        config,
+        payload: dict[str, Any],
+        run_id: uuid.UUID,
         *,
-        payload: dict[str, Any] | None = None,
-        run_id: uuid.UUID | None = None,
-    ):
-        if action is not None and action.get("resident_recovery_output") is not None:
-            from app.services.resident_recovery import authorize_mobile_output
-            denial = await authorize_mobile_output(session, payload or {}, run_id, action)
-            if denial:
-                return NotificationActionAuthorization(action_skip=denial)
-        if action is not None and action.get("actionable_output") is not None:
-            if payload is None or run_id is None:
-                return NotificationActionAuthorization(action_skip="actionable_output_origin_invalid")
-            denial = await get_actionable_notification_service().authorize_notification_output_in_session(
-                session,
-                payload,
-                run_id,
-                action,
-                config=config,
-                final=True,
-            )
-            if denial:
-                return NotificationActionAuthorization(action_skip=denial)
-        return None
-
-    async def authorize_confirmed_attempt(self, session, payload, run_id, *, plan, action=None, item=None):
-        origin = payload.get("confirmed_delivery") or {}
-        try:
-            actors = {uuid.UUID(str(origin.get("user_id")))}
-            await session.scalars(select(User).where(User.id.in_(actors)).order_by(User.id).with_for_update())
-            await load_active_admin(session, origin.get("user_id"), auth_version=origin.get("auth_version"), lock=True)
-        except (ValueError, KeyError, TypeError):
-            return None, "confirmed_actor_no_longer_authorized"
-        config = await get_runtime_config_for_session(session)
-        denial = await confirmed_attempt_denial(
-            session, payload, run_id, plan=plan, runtime_config=config,
+        plan: list[NotificationPlanItem],
+        action: dict[str, Any] | None = None,
+        item: NotificationPlanItem | None = None,
+    ) -> tuple[RuntimeConfig | None, NotificationPolicy]:
+        return await self.authorization.authorize_confirmed_attempt(
+            session, payload, run_id, plan=plan, action=action, item=item
         )
-        if not denial and action is not None:
-            denial = await self.authorize_attempt(session, payload, run_id, action=action, item=item)
-        if not denial and action is not None:
-            denial = await self._authorize_action_config_in_session(
-                session, action, config, payload=payload, run_id=run_id,
-            )
-        return config, denial
 
-    @staticmethod
-    def _ordinary_rule_origin(rule: NotificationRule) -> dict[str, str]:
-        definition = {
-            "id": str(rule.id),
-            "name": rule.name,
-            "trigger_event": rule.trigger_event,
-            "conditions": rule.conditions,
-            "actions": rule.actions,
-            "is_active": rule.is_active,
-        }
-        return {
-            "rule_id": str(rule.id),
-            "definition_fingerprint": notification_payloads.notification_rule_definition_fingerprint(definition),
-        }
-
-    async def _ordinary_rule_action_skip(self, session: AsyncSession, item: dict[str, Any]) -> str | None:
-        """Check a saved workflow at the final pre-effect checkpoint.
-
-        Explicit confirmed/preview rules are represented by ``rules_override``
-        and intentionally have no ordinary-rule origin, so their accepted
-        confirmation remains their authority.
-        """
-        origin = item.get("rule_origin")
-        if origin is None:
-            return None
-        if not isinstance(origin, dict):
-            return "notification_rule_origin_invalid"
-        try:
-            identity = uuid.UUID(str(origin.get("rule_id")))
-        except (TypeError, ValueError, AttributeError):
-            return "notification_rule_origin_invalid"
-        rule = await session.scalar(
-            select(NotificationRule)
-            .where(NotificationRule.id == identity)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        if rule is None:
-            return "notification_rule_deleted"
-        if not rule.is_active:
-            return "notification_rule_inactive"
-        current = self._ordinary_rule_origin(rule)["definition_fingerprint"]
-        if origin.get("definition_fingerprint") != current:
-            return "notification_rule_changed"
-        return None
-
-    async def delivery_config(self):
+    async def delivery_config(self) -> RuntimeConfig:
         return await get_runtime_config()
 
-    async def deliver_planned_action(self, item, row, config) -> NotificationActionOutcome:
-        context = self._context_with_notification_run_id(notification_context_from_payload(row.context), row.id)
+    async def deliver_planned_action(
+        self, item: NotificationPlanItem, row: NotificationRun, config: RuntimeConfig
+    ) -> NotificationActionOutcome:
+        context = self._context_with_notification_run_id(
+            notification_context_from_payload(row.context), row.id
+        )
         action = item["action"]
         if action.get("delivery_mode") == "literal":
             return await self._deliver_literal(action, context, config)
         return await self._deliver_action(item["action"], context, config, item["rule"])
 
-    async def _deliver_literal(self, action, context, config):
+    async def _deliver_literal(
+        self, action: dict[str, Any], context: NotificationContext, config: RuntimeConfig
+    ) -> NotificationActionOutcome:
         """Preserve manual native bodies; workflow formatting does not apply here."""
         target, body = action["target"], action["message"]
-        metadata = {}
+        metadata: dict[str, Any] = {}
         if action["type"] == "voice":
-            await HomeAssistantTtsAnnouncer().announce(AnnouncementTarget(target), body, runtime_config=config)
+            await HomeAssistantTtsAnnouncer().announce(
+                AnnouncementTarget(target), body, runtime_config=config
+            )
         elif action["type"] == "mobile":
             if action.get("resident_recovery_output") is not None:
                 from app.services.resident_recovery import resolve_mobile_actions
+
                 output_actions = await resolve_mobile_actions(action)
             else:
-                output_actions = await get_actionable_notification_service().resolve_notification_output_actions(
-                    action, target=target)
+                output_actions = (
+                    await get_actionable_notification_service().resolve_notification_output_actions(
+                        action, target=target
+                    )
+                )
             await HomeAssistantMobileAppNotifier().send(
                 HomeAssistantMobileAppTarget(target),
                 action["title"],
@@ -703,11 +710,18 @@ class NotificationService:
             raise NotificationDeliveryError("Unsupported literal notification channel")
         return NotificationActionOutcome(delivered=True, metadata=metadata)
 
-
-    async def publish_planned_outcome(self, item, row, outcome) -> None:
-        context = self._context_with_notification_run_id(notification_context_from_payload(row.context), row.id)
-        payload = {**self._event_payload(item["rule"], item["action"], context, outcome.delivered, ""),
-                   **outcome.metadata, "reason": outcome.reason, "message": outcome.message}
+    async def publish_planned_outcome(
+        self, item: NotificationPlanItem, row: NotificationRun, outcome: NotificationActionOutcome
+    ) -> None:
+        context = self._context_with_notification_run_id(
+            notification_context_from_payload(row.context), row.id
+        )
+        payload = {
+            **self._event_payload(item["rule"], item["action"], context, outcome.delivered, ""),
+            **outcome.metadata,
+            "reason": outcome.reason,
+            "message": outcome.message,
+        }
         if outcome.delivered:
             try:
                 identity = uuid.UUID(str(item["rule"].get("id")))
@@ -715,55 +729,54 @@ class NotificationService:
                 identity = None
             if identity:
                 await self._mark_rule_fired(NotificationRule(id=identity))
-        self._record_notification_span("Notification Action Suppressed" if outcome.skipped else "Notification Action Sent",
-                                       context, output_payload=payload)
-        await event_bus.publish("notification.skipped" if outcome.skipped else "notification.sent", payload)
+        self._record_notification_span(
+            "Notification Action Suppressed" if outcome.skipped else "Notification Action Sent",
+            context,
+            output_payload=payload,
+        )
+        await event_bus.publish(
+            "notification.skipped" if outcome.skipped else "notification.sent", payload
+        )
 
     async def publish_planned_failure(
         self,
-        item,
-        row,
+        item: NotificationPlanItem,
+        row: NotificationRun,
         *,
         reason: str = "provider_outcome_unknown",
         requires_review: bool = True,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        context = self._context_with_notification_run_id(notification_context_from_payload(row.context), row.id)
+        context = self._context_with_notification_run_id(
+            notification_context_from_payload(row.context), row.id
+        )
         error = (
             "Provider outcome unknown; review required. Automatic retry is disabled."
             if requires_review
             else "The notification provider definitely did not accept this action."
         )
-        payload = {**self._event_payload(item["rule"], item["action"], context, False, error),
-                   **(metadata or {}), "reason": reason, "requires_review": requires_review}
-        self._record_notification_span("Notification Action Failed", context, status="error", error=error,
-                                       output_payload=payload)
+        payload = {
+            **self._event_payload(item["rule"], item["action"], context, False, error),
+            **(metadata or {}),
+            "reason": reason,
+            "requires_review": requires_review,
+        }
+        self._record_notification_span(
+            "Notification Action Failed",
+            context,
+            status="error",
+            error=error,
+            output_payload=payload,
+        )
         await event_bus.publish("notification.failed", payload)
 
-    async def publish_plan_completion(self, row) -> None:
-        context = self._context_with_notification_run_id(notification_context_from_payload(row.context), row.id)
+    async def publish_plan_completion(self, row: NotificationRun) -> None:
+        context = self._context_with_notification_run_id(
+            notification_context_from_payload(row.context), row.id
+        )
         for item in row.delivery_plan or []:
             if item["state"] == "skipped" and "action" not in item:
                 await self._publish_workflow_skip(context, item["reason"], rule=item.get("rule"))
-
-    async def _rules_for_context(
-        self,
-        context: NotificationContext,
-        rules_override: list[dict[str, Any]] | None,
-    ) -> list[NotificationRule | dict[str, Any]]:
-        if rules_override is not None:
-            return [notification_payloads.normalize_rule_payload(rule) for rule in rules_override]
-        async with AsyncSessionLocal() as session:
-            return (
-                await session.scalars(
-                    select(NotificationRule)
-                    .where(
-                        NotificationRule.trigger_event == context.event_type,
-                        NotificationRule.is_active.is_(True),
-                    )
-                    .order_by(NotificationRule.created_at)
-                )
-            ).all()
 
     async def _publish_workflow_skip(
         self,
@@ -783,7 +796,9 @@ class NotificationService:
         }
         if rule is not None:
             payload.update({"rule_id": rule_id(rule), "rule_name": rule_name(rule)})
-        self._record_notification_span("Notification Workflow Skipped", context, output_payload=payload)
+        self._record_notification_span(
+            "Notification Workflow Skipped", context, output_payload=payload
+        )
         await event_bus.publish(
             "notification.skipped",
             {
@@ -808,7 +823,7 @@ class NotificationService:
                 stored.last_fired_at = fired_at
                 await session.commit()
             rule.last_fired_at = fired_at
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - optional accounting cannot reverse committed delivery.
             logger.warning(
                 "notification_last_fired_update_failed",
                 extra={"rule_id": str(rule_id_value), "error": str(exc)},
@@ -822,87 +837,25 @@ class NotificationService:
         return replace(context, facts={**context.facts, "notification_run_id": str(run_id)})
 
     async def conditions_match(
-        self,
-        rule: NotificationRule | dict[str, Any],
-        context: NotificationContext,
+        self, rule: NotificationRule | dict[str, Any], context: NotificationContext
     ) -> bool:
-        conditions = rule_conditions(rule)
-        if not conditions:
-            return True
-        occurred_at = context_occurred_at(context)
-        config = await get_runtime_config()
-        async with AsyncSessionLocal() as session:
-            for condition in conditions:
-                if not await self._condition_matches(session, condition, context, occurred_at, config):
-                    return False
-        return True
+        return await self.planner.conditions_match(rule, context)
 
     def render_rule(
-        self,
-        rule: NotificationRule | dict[str, Any],
-        context: NotificationContext | None = None,
+        self, rule: NotificationRule | dict[str, Any], context: NotificationContext | None = None
     ) -> dict[str, Any]:
-        active_context = context or sample_notification_context(rule_trigger_event(rule))
-        variables = context_variables(active_context)
-        rendered_actions: list[dict[str, Any]] = []
-        for action in rule_actions(rule):
-            action_type = str(action.get("type") or "")
-            media = notification_payloads.normalize_media(action.get("media"))
-            title_template = str(action.get("title_template") or "")
-            message_template = str(action.get("message_template") or "")
-            gate_malfunction_stages = notification_payloads.normalize_gate_malfunction_stages(
-                action.get("gate_malfunction_stages")
-            )
-            if active_context.event_type == GATE_MALFUNCTION_EVENT_TYPE:
-                content = gate_malfunction_notification_content(
-                    action_type,
-                    active_context,
-                    previous_notification=_context_bool(
-                        active_context.facts.get("malfunction_has_previous_notification")
-                    ),
-                )
-                rendered_title = content["title"]
-                rendered_message = content["body"]
-            else:
-                rendered_title = render_template(title_template, variables)
-                rendered_message = render_template(message_template, variables)
-            scoped_content = None
-            if action.get("variable_recipients"):
-                default_content, scoped_content = recipient_content(action, variables)
-                rendered_title, rendered_message = default_content["title"], default_content["message"]
-            rendered_actions.append(
-                {
-                    "id": str(action.get("id") or f"action-{len(rendered_actions) + 1}"),
-                    "type": action_type,
-                    "target_mode": str(action.get("target_mode") or "all"),
-                    "target_ids": normalize_string_list(action.get("target_ids"), allow_scalar=False),
-                    "title": rendered_title,
-                    "message": rendered_message,
-                    "title_template": title_template,
-                    "message_template": message_template,
-                    "gate_malfunction_stages": gate_malfunction_stages,
-                    "media": media,
-                    "actionable": notification_payloads.normalize_actionable(action.get("actionable")),
-                    "snapshot": snapshot_payload(media),
-                    **({"variable_recipients": action["variable_recipients"], "recipient_content": scoped_content}
-                       if scoped_content is not None else {}),
-                }
-            )
-        return {
-            "id": rule_id(rule),
-            "name": rule_name(rule),
-            "trigger_event": rule_trigger_event(rule),
-            "is_active": rule_is_active(rule),
-            "conditions": rule_conditions(rule),
-            "actions": rendered_actions,
-        }
+        return self.planner.render_rule(
+            rule, context or sample_notification_context(rule_trigger_event(rule))
+        )
 
     async def preview_rule(
         self,
         rule: NotificationRule | dict[str, Any],
         context: NotificationContext | None = None,
     ) -> dict[str, Any]:
-        return self.render_rule(rule, context or sample_notification_context(rule_trigger_event(rule)))
+        return self.render_rule(
+            rule, context or sample_notification_context(rule_trigger_event(rule))
+        )
 
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
         if event.type == "notification.trigger":
@@ -911,80 +864,22 @@ class NotificationService:
             return
         # These visitor transitions reserve notification intents in the pass
         # mutation transaction; realtime cannot produce another delivery run.
-        if event.type in {"visitor_pass.created", "visitor_pass.cancelled", "visitor_pass.status_changed",
-                          "visitor_pass.used", "visitor_pass.departure_recorded"}:
+        if event.type in {
+            "visitor_pass.created",
+            "visitor_pass.cancelled",
+            "visitor_pass.status_changed",
+            "visitor_pass.used",
+            "visitor_pass.departure_recorded",
+        }:
             return
         for context in visitor_pass_notification_contexts_from_event(event):
             await self.enqueue_notification(context)
-
-    async def _condition_matches(
-        self,
-        session: AsyncSession,
-        condition: dict[str, Any],
-        context: NotificationContext,
-        occurred_at: datetime,
-        config,
-    ) -> bool:
-        condition_type = str(condition.get("type") or "")
-        if condition_type == "schedule":
-            schedule_id = str(condition.get("schedule_id") or "")
-            try:
-                parsed_schedule_id = uuid.UUID(schedule_id)
-            except ValueError:
-                return False
-            schedule = await session.get(Schedule, parsed_schedule_id)
-            if not schedule:
-                return False
-            return schedule_allows_at(schedule, occurred_at, config.site_timezone)
-
-        if condition_type == "presence":
-            rows = (
-                await session.scalars(select(Presence))
-            ).all()
-            present_ids = {
-                str(row.person_id)
-                for row in rows
-                if row.state == PresenceState.PRESENT
-            }
-            return presence_condition_matches(condition, present_ids)
-
-        logger.warning(
-            "notification_condition_unknown",
-            extra={"condition_type": condition_type, "event_type": context.event_type},
-        )
-        return False
-
-    async def _gate_malfunction_actions_for_delivery(
-        self,
-        actions: list[dict[str, Any]],
-        context: NotificationContext,
-    ) -> list[dict[str, Any]]:
-        stage = notification_payloads.normalize_gate_malfunction_stage(context.facts.get("malfunction_stage"))
-        selected: list[dict[str, Any]] = []
-        for action in actions:
-            if not gate_malfunction_action_supports_stage(action, stage):
-                continue
-            content = gate_malfunction_notification_content(
-                str(action.get("type") or ""),
-                context,
-                previous_notification=_context_bool(
-                    context.facts.get("malfunction_has_previous_notification")
-                ),
-            )
-            selected.append(
-                {
-                    **action,
-                    "title": content["title"],
-                    "message": content["body"],
-                }
-            )
-        return selected
 
     async def _deliver_action(
         self,
         action: dict[str, Any],
         context: NotificationContext,
-        config,
+        config: RuntimeConfig,
         rendered_rule: dict[str, Any],
     ) -> NotificationActionOutcome:
         action_type = str(action.get("type") or "")
@@ -1011,17 +906,23 @@ class NotificationService:
         self,
         action: dict[str, Any],
         context: NotificationContext,
-        config,
+        config: RuntimeConfig,
     ) -> NotificationActionOutcome:
         if "frozen_apprise_indexes" in action:
-            configured = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
+            configured = [
+                normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)
+            ]
             urls = [configured[index] for index in action["frozen_apprise_indexes"]]
             home_assistant_targets = action["frozen_mobile_targets"]
         else:
-            urls = self._select_apprise_urls(config.apprise_urls, action)
-            home_assistant_targets = await self._select_home_assistant_mobile_targets(config, action)
+            urls = self.recipients.select_apprise_urls(config.apprise_urls, action)
+            home_assistant_targets = await self.recipients.select_home_assistant_mobile_targets(
+                config, action
+            )
         if not urls and not home_assistant_targets:
-            raise NotificationDeliveryError("No mobile notification endpoints are configured or selected.")
+            raise NotificationDeliveryError(
+                "No mobile notification endpoints are configured or selected."
+            )
         snapshot = await self._snapshot_attachment(action.get("media") or {})
         attachments = [snapshot.path] if snapshot else []
         failures: list[str] = []
@@ -1029,14 +930,31 @@ class NotificationService:
         delivered_any = False
         try:
             if "recipient_content" in action:
-                configured = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
+                configured = [
+                    normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)
+                ]
                 for url in urls:
                     endpoint = f"apprise:{configured.index(url)}"
-                    scoped_action = {**action, **content_for_recipient(action, endpoint, context.subject)}
-                    delivered_any = await self._send_mobile_apprise(scoped_action, context, [url], attachments,
-                        failures, receipts=receipts, receipt_target=endpoint) or delivered_any
+                    scoped_action = {
+                        **action,
+                        **content_for_recipient(action, endpoint, context.subject),
+                    }
+                    delivered_any = (
+                        await self._send_mobile_apprise(
+                            scoped_action,
+                            context,
+                            [url],
+                            attachments,
+                            failures,
+                            receipts=receipts,
+                            receipt_target=endpoint,
+                        )
+                        or delivered_any
+                    )
             else:
-                delivered_any = await self._send_mobile_apprise(action, context, urls, attachments, failures, receipts=receipts)
+                delivered_any = await self._send_mobile_apprise(
+                    action, context, urls, attachments, failures, receipts=receipts
+                )
             delivered_any = (
                 await self._send_mobile_home_assistant(
                     action,
@@ -1100,7 +1018,9 @@ class NotificationService:
         urls: list[str],
         attachments: list[str],
         failures: list[str],
-        *, receipts: list[dict[str, str]] | None = None, receipt_target: str = "apprise",
+        *,
+        receipts: list[dict[str, str]] | None = None,
+        receipt_target: str = "apprise",
     ) -> bool:
         if not urls:
             return False
@@ -1135,7 +1055,9 @@ class NotificationService:
         targets: list[str],
         snapshot: NotificationSnapshotAttachment | None,
         failures: list[str],
-        *, runtime_config=None, receipts: list[dict[str, str]] | None = None,
+        *,
+        runtime_config: RuntimeConfig | None = None,
+        receipts: list[dict[str, str]] | None = None,
     ) -> bool:
         if not targets:
             return False
@@ -1163,7 +1085,9 @@ class NotificationService:
         delivered_any = False
         for target in targets:
             try:
-                copy = content_for_recipient(action, f"home_assistant_mobile:{target}", context.subject)
+                copy = content_for_recipient(
+                    action, f"home_assistant_mobile:{target}", context.subject
+                )
                 mobile_actions = await self._home_assistant_mobile_actions_for_target(
                     action,
                     context,
@@ -1203,11 +1127,14 @@ class NotificationService:
         context: NotificationContext,
         target: str,
         *,
-        runtime_config=None,
+        runtime_config: RuntimeConfig | None = None,
     ) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
         actionable = notification_payloads.normalize_actionable(action.get("actionable"))
-        if actionable.get("enabled") and actionable.get("action") == notification_payloads.GATE_OPEN_ACTION:
+        if (
+            actionable.get("enabled")
+            and actionable.get("action") == notification_payloads.GATE_OPEN_ACTION
+        ):
             gate_action = await get_actionable_notification_service().create_gate_open_action(
                 context=context,
                 notify_service=target,
@@ -1225,13 +1152,24 @@ class NotificationService:
         if snapshot and not (home_assistant_targets and snapshot.public_url):
             get_snapshot_manager().delete_snapshot_path(snapshot.path)
 
-
-    async def _send_voice(self, action: dict[str, Any], config) -> NotificationActionOutcome:
+    async def _send_voice(
+        self, action: dict[str, Any], config: RuntimeConfig
+    ) -> NotificationActionOutcome:
         frozen = "frozen_voice_targets" in action
-        targets = action["frozen_voice_targets"] if frozen else await self._select_voice_targets(config, action)
+        targets = (
+            action["frozen_voice_targets"]
+            if frozen
+            else await self.recipients.select_voice_targets(config, action)
+        )
         if not targets:
-            raise NotificationDeliveryError("No Home Assistant media player is configured or selected.")
-        suppression = await self._voice_announcements_preflight(runtime_config=config) if frozen else await self._voice_announcements_preflight()
+            raise NotificationDeliveryError(
+                "No Home Assistant media player is configured or selected."
+            )
+        suppression = (
+            await self._voice_announcements_preflight(runtime_config=config)
+            if frozen
+            else await self._voice_announcements_preflight()
+        )
         if suppression:
             return suppression
 
@@ -1241,23 +1179,30 @@ class NotificationService:
         for target in targets:
             try:
                 spoken_message = apply_vehicle_tts_phonetics(
-                    content_for_recipient(action, f"home_assistant_tts:{target}")["message"])
+                    content_for_recipient(action, f"home_assistant_tts:{target}")["message"]
+                )
                 options = {"runtime_config": config} if frozen else {}
                 await announcer.announce(AnnouncementTarget(target), spoken_message, **options)
                 delivered_any = True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - retain each provider failure before proceeding.
                 failures.append(f"{target}: {exc}")
         if failures:
             raise NotificationDeliveryError("; ".join(failures))
         if not delivered_any:
-            raise NotificationDeliveryError("No Home Assistant media player endpoints were delivered.")
+            raise NotificationDeliveryError(
+                "No Home Assistant media player endpoints were delivered."
+            )
         return NotificationActionOutcome(delivered=True)
 
-    async def _voice_announcements_preflight(self, *, runtime_config=None) -> NotificationActionOutcome | None:
+    async def _voice_announcements_preflight(
+        self, *, runtime_config: RuntimeConfig | None = None
+    ) -> NotificationActionOutcome | None:
         try:
             options = {"runtime_config": runtime_config} if runtime_config is not None else {}
-            state = await _home_assistant_client().get_state(HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID, **options)
-        except Exception as exc:
+            state = await _home_assistant_client().get_state(
+                HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID, **options
+            )
+        except Exception as exc:  # noqa: BLE001 - missing current speaker authority suppresses delivery.
             logger.warning(
                 "voice_notification_announcements_state_unavailable",
                 extra={"entity_id": HOME_ASSISTANT_ANNOUNCEMENTS_ENTITY_ID, "error": str(exc)},
@@ -1321,187 +1266,18 @@ class NotificationService:
             },
         )
 
-    def _select_apprise_urls(self, configured: str, action: dict[str, Any]) -> list[str]:
-        urls = [normalize_apprise_url(url) for url in split_apprise_urls(configured)]
-        if not urls:
-            return []
-        target_mode = str(action.get("target_mode") or "all")
-        endpoint_ids = normalize_string_list(action.get("target_ids"), allow_scalar=False)
-        if target_mode == "all" or "apprise:*" in endpoint_ids or not endpoint_ids:
-            return urls
-        chosen: list[str] = []
-        for endpoint_id in endpoint_ids:
-            if not endpoint_id.startswith("apprise:"):
-                continue
-            try:
-                index = int(endpoint_id.split(":", 1)[1])
-            except ValueError:
-                continue
-            if 0 <= index < len(urls):
-                chosen.append(urls[index])
-        return chosen
-
-    async def _select_home_assistant_mobile_targets(self, config, action: dict[str, Any]) -> list[str]:
-        target_mode = str(action.get("target_mode") or "all")
-        endpoint_ids = normalize_string_list(action.get("target_ids"), allow_scalar=False)
-        if target_mode == "all" or "home_assistant_mobile:*" in endpoint_ids:
-            return await self._all_home_assistant_mobile_targets(config)
-
-        targets: list[str] = []
-        for endpoint_id in endpoint_ids:
-            if not endpoint_id.startswith("home_assistant_mobile:"):
-                continue
-            target = endpoint_id.split(":", 1)[1]
-            if target and target != "*":
-                if not target.startswith("notify.mobile_app_"):
-                    raise NotificationDeliveryError(
-                        "Home Assistant mobile targets must be notify.mobile_app_* services."
-                    )
-                targets.append(target)
-        return list(dict.fromkeys(targets))
-
-    async def _select_voice_targets(self, config, action: dict[str, Any]) -> list[str]:
-        target_mode = str(action.get("target_mode") or "all")
-        endpoint_ids = normalize_string_list(action.get("target_ids"), allow_scalar=False)
-        if target_mode == "all" or "home_assistant_tts:*" in endpoint_ids:
-            targets = await self._all_media_player_targets(config)
-            if targets:
-                return targets
-            return [config.home_assistant_default_media_player] if config.home_assistant_default_media_player else []
-
-        selected_targets: list[str] = []
-        for endpoint_id in endpoint_ids:
-            if not endpoint_id.startswith("home_assistant_tts:"):
-                continue
-            target = endpoint_id.split(":", 1)[1]
-            if target == "default":
-                target = config.home_assistant_default_media_player
-            if target and target != "*":
-                selected_targets.append(target)
-        if not selected_targets and config.home_assistant_default_media_player:
-            selected_targets.append(config.home_assistant_default_media_player)
-        return selected_targets
-
-    async def _voice_endpoint_catalog(self, config) -> list[dict[str, Any]]:
-        endpoints: list[dict[str, Any]] = []
-        targets = await self._all_media_player_targets(config)
-        if targets:
-            endpoints.append(
-                {
-                    "id": "home_assistant_tts:*",
-                    "provider": "Home Assistant",
-                    "label": "All media players",
-                    "detail": f"{len(targets)} media_player entities",
-                }
-            )
-            endpoints.extend(
-                {
-                    "id": f"home_assistant_tts:{target}",
-                    "provider": "Home Assistant",
-                    "label": target.split(".", 1)[-1].replace("_", " ").title(),
-                    "detail": target,
-                }
-                for target in targets
-            )
-        elif config.home_assistant_default_media_player:
-            endpoints.append(
-                {
-                    "id": f"home_assistant_tts:{config.home_assistant_default_media_player}",
-                    "provider": "Home Assistant",
-                    "label": "Default media player",
-                    "detail": config.home_assistant_default_media_player,
-                }
-            )
-        return endpoints
-
-
-    async def _home_assistant_mobile_endpoint_catalog(self, config) -> list[dict[str, Any]]:
-        targets = await self._all_home_assistant_mobile_targets(config)
-        if not targets:
-            return []
-
-        endpoints: list[dict[str, Any]] = [
-            {
-                "id": "home_assistant_mobile:*",
-                "provider": "Home Assistant",
-                "label": "All Home Assistant mobile apps",
-                "detail": f"{len(targets)} notify.mobile_app services",
-            }
-        ]
-        person_labels = await self._home_assistant_mobile_person_labels()
-        for target in targets:
-            endpoints.append(
-                {
-                    "id": f"home_assistant_mobile:{target}",
-                    "provider": "Home Assistant",
-                    "label": person_labels.get(target) or target.split(".", 1)[-1].replace("_", " ").title(),
-                    "detail": target,
-                }
-            )
-        return endpoints
-
-    async def _home_assistant_mobile_person_labels(self) -> dict[str, str]:
-        async with AsyncSessionLocal() as session:
-            people = (
-                await session.scalars(
-                    select(Person).where(Person.home_assistant_mobile_app_notify_service.is_not(None))
-                )
-            ).all()
-        return {
-            str(person.home_assistant_mobile_app_notify_service): person.display_name
-            for person in people
-            if person.home_assistant_mobile_app_notify_service
-        }
-
-    async def _all_home_assistant_mobile_targets(self, config) -> list[str]:
-        configured_targets = await self._configured_home_assistant_mobile_targets()
-        if not (config.home_assistant_url and config.home_assistant_token):
-            return configured_targets
-        try:
-            services = await _home_assistant_client().list_services()
-        except Exception as exc:
-            logger.debug("notification_mobile_app_discovery_failed", extra={"error": str(exc)})
-            return configured_targets
-        discovered_targets = sorted(
-            service.service_id
-            for service in services
-            if service.service_id.startswith("notify.mobile_app_")
-        )
-        return list(dict.fromkeys([*configured_targets, *discovered_targets]))
-
-    async def _configured_home_assistant_mobile_targets(self) -> list[str]:
-        async with AsyncSessionLocal() as session:
-            people = (
-                await session.scalars(
-                    select(Person).where(Person.home_assistant_mobile_app_notify_service.is_not(None))
-                )
-            ).all()
-        return list(
-            dict.fromkeys(
-                str(person.home_assistant_mobile_app_notify_service)
-                for person in people
-                if person.home_assistant_mobile_app_notify_service
-            )
-        )
-
-    async def _all_media_player_targets(self, config) -> list[str]:
-        if not (config.home_assistant_url and config.home_assistant_token):
-            return []
-        try:
-            states = await _home_assistant_client().list_states()
-        except Exception as exc:
-            logger.debug("notification_media_player_discovery_failed", extra={"error": str(exc)})
-            return []
-        return sorted(state.entity_id for state in states if state.entity_id.startswith("media_player."))
-
-    async def _snapshot_attachment(self, media: dict[str, Any]) -> NotificationSnapshotAttachment | None:
+    async def _snapshot_attachment(
+        self, media: dict[str, Any]
+    ) -> NotificationSnapshotAttachment | None:
         if not media.get("attach_camera_snapshot") or not media.get("camera_id"):
             return None
         camera_id = str(media["camera_id"])
         try:
             snapshot = await get_unifi_protect_service().snapshot(camera_id, width=960, height=540)
         except Exception as exc:
-            raise NotificationDeliveryError(f"Unable to capture notification snapshot: {exc}") from exc
+            raise NotificationDeliveryError(
+                f"Unable to capture notification snapshot: {exc}"
+            ) from exc
 
         manager = get_snapshot_manager()
         stored = manager.store_notification_snapshot(snapshot.content, snapshot.content_type)
@@ -1574,7 +1350,9 @@ def notification_context_from_payload(payload: dict[str, Any]) -> NotificationCo
     if notification_run_id:
         facts["notification_run_id"] = notification_run_id
     return NotificationContext(
-        event_type=str(payload.get("event_type") or payload.get("trigger_event") or "integration_test"),
+        event_type=str(
+            payload.get("event_type") or payload.get("trigger_event") or "integration_test"
+        ),
         subject=str(payload.get("subject") or facts.get("subject") or "Notification event"),
         severity=str(payload.get("severity") or facts.get("severity") or "info"),
         facts={str(key): "" if value is None else str(value) for key, value in facts.items()},
@@ -1648,26 +1426,6 @@ def sample_notification_context(trigger_event: str | None = None) -> Notificatio
     )
 
 
-def gate_malfunction_action_supports_stage(action: dict[str, Any], stage: str) -> bool:
-    stages = notification_payloads.normalize_gate_malfunction_stages(action.get("gate_malfunction_stages"))
-    return not stages or notification_payloads.normalize_gate_malfunction_stage(stage) in stages
-
-
-def _context_bool(value: Any) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def presence_condition_matches(condition: dict[str, Any], present_person_ids: set[str]) -> bool:
-    mode = str(condition.get("mode") or "")
-    if mode == "no_one_home":
-        return not present_person_ids
-    if mode == "someone_home":
-        return bool(present_person_ids)
-    if mode == "person_home":
-        return str(condition.get("person_id") or "") in present_person_ids
-    return False
-
-
 def _receipt_failure_count(receipts: list[dict[str, str]]) -> int:
     return sum(
         receipt.get("delivery") in {"not_sent", "rejected", "unknown"}
@@ -1678,9 +1436,7 @@ def _receipt_failure_count(receipts: list[dict[str, str]]) -> int:
 
 def _receipt_delivery_uncertain(receipts: list[dict[str, str]]) -> bool:
     return any(
-        receipt.get("delivery") == "unknown"
-        for receipt in receipts
-        if isinstance(receipt, dict)
+        receipt.get("delivery") == "unknown" for receipt in receipts if isinstance(receipt, dict)
     )
 
 
@@ -1691,30 +1447,6 @@ def _receipt_failure_delivery(receipts: list[dict[str, str]]) -> str:
     if "rejected" in deliveries:
         return "rejected"
     return "not_sent"
-
-
-def rule_id(rule: NotificationRule | dict[str, Any]) -> str:
-    return str(rule.id if isinstance(rule, NotificationRule) else rule.get("id") or "")
-
-
-def rule_name(rule: NotificationRule | dict[str, Any]) -> str:
-    return str(rule.name if isinstance(rule, NotificationRule) else rule.get("name") or "Notification Workflow")
-
-
-def rule_trigger_event(rule: NotificationRule | dict[str, Any]) -> str:
-    return str(rule.trigger_event if isinstance(rule, NotificationRule) else rule.get("trigger_event") or "")
-
-
-def rule_conditions(rule: NotificationRule | dict[str, Any]) -> list[dict[str, Any]]:
-    return notification_payloads.normalize_conditions(rule.conditions if isinstance(rule, NotificationRule) else rule.get("conditions"))
-
-
-def rule_actions(rule: NotificationRule | dict[str, Any]) -> list[dict[str, Any]]:
-    return notification_payloads.normalize_actions(rule.actions if isinstance(rule, NotificationRule) else rule.get("actions"))
-
-
-def rule_is_active(rule: NotificationRule | dict[str, Any]) -> bool:
-    return bool(rule.is_active if isinstance(rule, NotificationRule) else rule.get("is_active", True))
 
 
 @lru_cache

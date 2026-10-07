@@ -6,7 +6,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-
 HARDWARE_ACTION_TYPES = frozenset({"gate.open", "garage_door.open", "garage_door.close"})
 RECOGNITION_TRIGGER_KEYS = frozenset(
     {"vehicle.known_plate", "vehicle.unknown_plate", "vehicle.outside_schedule"}

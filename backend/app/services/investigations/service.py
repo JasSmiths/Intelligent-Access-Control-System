@@ -8,8 +8,8 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.investigations.contracts import (
-    ActivityFilters,
     OUTCOMES,
+    ActivityFilters,
     cursor_for_item,
     decode_cursor,
     encode_cursor,
@@ -28,7 +28,6 @@ from app.services.investigations.repository import (
     load_audit_or_linked_trace,
     load_trace_detail,
 )
-
 
 MAX_ACTIVITY_SCAN_ROWS = 5000
 PROBLEM_OUTCOMES = {"failed", "blocked", "pending", "unknown"}
@@ -155,8 +154,7 @@ async def investigation_filter_options(
     return {
         **catalog,
         "outcomes": [
-            {"value": outcome, "label": outcome.replace("_", " ").title()}
-            for outcome in OUTCOMES
+            {"value": outcome, "label": outcome.replace("_", " ").title()} for outcome in OUTCOMES
         ],
         "time_ranges": [
             {"value": value, "label": value.replace("_", " ").title()}
@@ -206,7 +204,9 @@ async def investigation_overview(
     important = [item for item in important_payload["items"] if not item.get("routine")]
     return {
         "recent_problems": problems[:12],
-        "incomplete_runs": [item for item in problems if item["outcome"] in INCOMPLETE_OUTCOMES][:8],
+        "incomplete_runs": [item for item in problems if item["outcome"] in INCOMPLETE_OUTCOMES][
+            :8
+        ],
         "repeated_problems": _repeated_problems(problems),
         "important_activity": important[:12],
         "site_timezone": site_timezone,
@@ -216,8 +216,6 @@ async def investigation_overview(
             "to": to_at.isoformat() if to_at else None,
         },
     }
-
-
 
 
 def _trace_detail_payload(bundle: Any, site_timezone: str) -> dict[str, Any]:
@@ -241,16 +239,6 @@ def _candidate_sort_key(candidate: tuple[str, Any]) -> tuple[datetime, int, str]
         timestamp = timestamp.replace(tzinfo=UTC)
     row_id = row.trace_id if kind == "trace" else str(row.id)
     return timestamp, 1 if kind == "trace" else 0, row_id
-
-
-
-
-
-
-
-
-
-
 
 
 def _resolved_range(filters: ActivityFilters) -> dict[str, Any]:

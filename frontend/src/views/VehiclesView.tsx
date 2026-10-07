@@ -1,8 +1,10 @@
 import { Car, Plus, Trash2 } from "lucide-react";
 import React from "react";
+import { useDirectoryIdentities, useDirectoryPage } from "../features/directory/reads";
+import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
 import { api, createActionConfirmation } from "../api/client";
-import { matches, useScheduleDefaultPolicyOptionLabel } from "../lib/format";
+import { useScheduleDefaultPolicyOptionLabel } from "../lib/format";
 import { Badge, EmptyState } from "../ui/primitives";
 import type { Group, Person, Schedule, Vehicle } from "../api/types";
 
@@ -16,6 +18,7 @@ export function VehiclesView({
   people,
   query,
   refresh,
+  refreshToken = 0,
   schedules,
   vehicles
 }: {
@@ -23,31 +26,20 @@ export function VehiclesView({
   people: Person[];
   query: string;
   refresh: () => Promise<void>;
+  refreshToken?: number;
   schedules: Schedule[];
   vehicles: Vehicle[];
 }) {
+  const directoryPage = useDirectoryPage("vehicles", vehicles, { query, refreshToken });
+  const ownerOptions = useDirectoryIdentities("people", people, directoryPage.items.flatMap((vehicle) => vehicle.person_ids ?? (vehicle.person_id ? [vehicle.person_id] : [])), refreshToken);
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedVehicle, setSelectedVehicle] = React.useState<Vehicle | null>(null);
   const [error, setError] = React.useState("");
   const [saved, setSaved] = React.useState("");
   const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
-  const peopleById = React.useMemo(() => new Map(people.map((person) => [person.id, person])), [people]);
-  const peopleByVehicleId = React.useMemo(() => indexPeopleByVehicleId(people), [people]);
-  const filtered = React.useMemo(() => vehicles.filter((item) => {
-    const owners = ownerPeopleForVehicle(item, peopleByVehicleId, peopleById);
-    return (
-      matches(item.registration_number, query) ||
-      matches(item.owner ?? "", query) ||
-      owners.some((person) =>
-        matches(person.display_name, query) ||
-        matches(person.group ?? "", query) ||
-        matches(person.category ?? "", query)
-      ) ||
-      matches(item.make ?? "", query) ||
-      matches(item.model ?? "", query) ||
-      matches(item.color ?? "", query)
-    );
-  }), [peopleById, peopleByVehicleId, query, vehicles]);
+  const peopleById = React.useMemo(() => new Map(ownerOptions.items.map((person) => [person.id, person])), [ownerOptions.items]);
+  const peopleByVehicleId = React.useMemo(() => indexPeopleByVehicleId(ownerOptions.items), [ownerOptions.items]);
+  const filtered = directoryPage.items;
   const groupedVehicles = React.useMemo(
     () => groupVehiclesByDirectoryGroup(filtered, peopleByVehicleId, peopleById, groups),
     [filtered, groups, peopleById, peopleByVehicleId]
@@ -83,7 +75,7 @@ export function VehiclesView({
       await api.delete(`/api/v1/vehicles/${vehicle.id}`, {
         confirmation_token: confirmation.confirmation_token
       });
-      await refresh();
+      await refresh(); directoryPage.refresh();
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete vehicle");
     }
@@ -102,9 +94,10 @@ export function VehiclesView({
         </button>
       </div>
 
-      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {error || ownerOptions.error ? <div className="auth-error inline-error">{error || ownerOptions.error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
+      <DirectoryPagination page={directoryPage} />
       <div className="card users-card vehicles-card">
         {filtered.length ? (
           <div className="directory-group-list">
@@ -163,9 +156,9 @@ export function VehiclesView({
             onSaved={async () => {
               closeModal();
               setSaved("Vehicle saved.");
-              try { await refresh(); } catch { setError("Vehicle saved, but the list could not be refreshed. Refresh to see the latest data."); }
+              try { await refresh(); directoryPage.refresh(); } catch { setError("Vehicle saved, but the list could not be refreshed. Refresh to see the latest data."); }
             }}
-            people={people}
+            people={ownerOptions.items}
             refreshVehicles={refresh}
             schedules={schedules}
             setPageError={setError}

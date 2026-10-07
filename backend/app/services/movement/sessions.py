@@ -55,13 +55,20 @@ class ExternalVehicleSessionMatch:
 
 def detected_registration_number(read: PlateRead) -> str:
     match = known_vehicle_plate_match_from_read(read)
-    return str(match.get("detected_registration_number") or read.registration_number) if match else read.registration_number
+    return (
+        str(match.get("detected_registration_number") or read.registration_number)
+        if match
+        else read.registration_number
+    )
 
 
 def candidate_registration_numbers(read: PlateRead) -> tuple[str, ...]:
     seen: set[str] = set()
     normalized: list[str] = []
-    for candidate in (read.registration_number, *getattr(read, "candidate_registration_numbers", ())):
+    for candidate in (
+        read.registration_number,
+        *getattr(read, "candidate_registration_numbers", ()),
+    ):
         plate = normalize_registration_number(str(candidate or ""))
         if plate and plate not in seen:
             seen.add(plate)
@@ -150,7 +157,7 @@ def datetime_from_payload(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
@@ -187,9 +194,17 @@ def coerce_access_direction(value: Any) -> AccessDirection | None:
     if isinstance(value, AccessDirection):
         return value
     text = str(value or "").strip().lower()
-    aliases = {"in": AccessDirection.ENTRY, "entry": AccessDirection.ENTRY, "enter": AccessDirection.ENTRY,
-               "arrival": AccessDirection.ENTRY, "arrive": AccessDirection.ENTRY, "out": AccessDirection.EXIT,
-               "exit": AccessDirection.EXIT, "leave": AccessDirection.EXIT, "departure": AccessDirection.EXIT}
+    aliases = {
+        "in": AccessDirection.ENTRY,
+        "entry": AccessDirection.ENTRY,
+        "enter": AccessDirection.ENTRY,
+        "arrival": AccessDirection.ENTRY,
+        "arrive": AccessDirection.ENTRY,
+        "out": AccessDirection.EXIT,
+        "exit": AccessDirection.EXIT,
+        "leave": AccessDirection.EXIT,
+        "departure": AccessDirection.EXIT,
+    }
     return aliases.get(text)
 
 
@@ -210,7 +225,14 @@ class MovementSessionService:
             else settings.lpr_vehicle_session_idle_seconds
         )
         try:
-            return max(10.0, float(configured if configured is not None else settings.lpr_vehicle_session_idle_seconds))
+            return max(
+                10.0,
+                float(
+                    configured
+                    if configured is not None
+                    else settings.lpr_vehicle_session_idle_seconds
+                ),
+            )
         except (TypeError, ValueError):
             return max(10.0, float(settings.lpr_vehicle_session_idle_seconds))
 
@@ -219,16 +241,23 @@ class MovementSessionService:
         return VehicleSessionContext(
             registration_number=read.registration_number,
             normalized_registration_number=normalize_registration_number(read.registration_number),
-            camera_id=first_payload_value(payload, ("cameraId", "camera_id", "sensorId", "sensor_id")),
+            camera_id=first_payload_value(
+                payload, ("cameraId", "camera_id", "sensorId", "sensor_id")
+            ),
             device_id=first_payload_value(payload, ("device", "deviceId", "device_id")),
-            protect_event_ids=set(payload_values(payload, ("eventId", "event_id"))) | event_ids_from_paths(payload),
+            protect_event_ids=set(payload_values(payload, ("eventId", "event_id")))
+            | event_ids_from_paths(payload),
         )
 
-    async def suppression_for_read(self, read: PlateRead, *, runtime: Any | None = None) -> VehicleSessionSuppression | None:
+    async def suppression_for_read(
+        self, read: PlateRead, *, runtime: Any | None = None
+    ) -> VehicleSessionSuppression | None:
         context = self.context_from_read(read)
         if not context.normalized_registration_number:
             return None
-        return await self.suppression_from_ledger(read, context, self.idle_seconds(runtime), runtime=runtime)
+        return await self.suppression_from_ledger(
+            read, context, self.idle_seconds(runtime), runtime=runtime
+        )
 
     async def suppression_from_ledger(
         self,
@@ -246,14 +275,16 @@ class MovementSessionService:
                 captured_at=read.captured_at,
                 lookup_horizon=lookup_horizon,
                 limit=100,
-        )
+            )
         for row in rows:
             if not str(row.normalized_registration_number or "").strip():
                 continue
             matched_by = self._session_match(row, context, read, runtime)
             if not matched_by:
                 continue
-            if matched_by != "arrival_ocr_noise" and self._read_is_departure_after_entry_session(read, row):
+            if matched_by != "arrival_ocr_noise" and self._read_is_departure_after_entry_session(
+                read, row
+            ):
                 continue
             if self._read_is_entry_after_exit_idle_expired(read, row, idle_seconds):
                 continue
@@ -277,8 +308,14 @@ class MovementSessionService:
         context = self.context_from_read(read)
         session_state = suppression.session
         suppressed_payload = self.suppressed_read_payload(read, suppression)
-        movement_session_id = _uuid_or_none(getattr(session_state, "id", None) or getattr(session_state, "movement_session_id", None))
-        event_id = _uuid_or_none(getattr(session_state, "access_event_id", None) or getattr(session_state, "event_id", None))
+        movement_session_id = _uuid_or_none(
+            getattr(session_state, "id", None)
+            or getattr(session_state, "movement_session_id", None)
+        )
+        event_id = _uuid_or_none(
+            getattr(session_state, "access_event_id", None)
+            or getattr(session_state, "event_id", None)
+        )
         if not movement_session_id and not event_id:
             return
 
@@ -290,13 +327,16 @@ class MovementSessionService:
                         db,
                         row,
                         read_captured_at=read.captured_at,
-                        idle_expires_at=read.captured_at + timedelta(seconds=self.idle_seconds(runtime)),
+                        idle_expires_at=read.captured_at
+                        + timedelta(seconds=self.idle_seconds(runtime)),
                         protect_event_ids=context.protect_event_ids,
                         ocr_variants=ocr_variants_for_reads((read,)),
                         last_gate_state=gate_observation_from_read(read).get("state"),
                         reason=suppression.reason,
                         matched_by=suppression.matched_by,
-                        presence_evidence=presence_evidence_payload(suppression.evidence) if suppression.evidence else None,
+                        presence_evidence=presence_evidence_payload(suppression.evidence)
+                        if suppression.evidence
+                        else None,
                         suppressed_read_payload=suppressed_payload,
                     )
             if event_id:
@@ -321,7 +361,9 @@ class MovementSessionService:
         opened_at: datetime,
         runtime: Any | None = None,
     ) -> ExternalVehicleSessionMatch | None:
-        rows = await self._active_unknown_denied_sessions(session, opened_at=opened_at, runtime=runtime)
+        rows = await self._active_unknown_denied_sessions(
+            session, opened_at=opened_at, runtime=runtime
+        )
         return await self._external_presence_match(rows, opened_at=opened_at, runtime=runtime)
 
     async def external_admission_candidate_for_read(
@@ -340,7 +382,9 @@ class MovementSessionService:
             )
             if self._session_matches_read(row, read)
         ]
-        return await self._external_presence_match(rows, opened_at=read.captured_at, runtime=runtime)
+        return await self._external_presence_match(
+            rows, opened_at=read.captured_at, runtime=runtime
+        )
 
     async def external_departure_candidate_for_read(
         self,
@@ -351,7 +395,9 @@ class MovementSessionService:
     ) -> ExternalVehicleSessionMatch | None:
         if read_direction_hint(read) != AccessDirection.EXIT:
             return None
-        rows = await self._active_external_admission_sessions(session, read.captured_at, runtime=runtime)
+        rows = await self._active_external_admission_sessions(
+            session, read.captured_at, runtime=runtime
+        )
         candidates: list[tuple[Any, AccessEvent]] = []
         for row, event in rows:
             if not self._session_matches_plate_or_event(row, read):
@@ -360,7 +406,9 @@ class MovementSessionService:
                 candidates.append((row, event))
         if not candidates:
             return None
-        row, event = max(candidates, key=lambda item: getattr(item[0], "last_seen_at", read.captured_at))
+        row, event = max(
+            candidates, key=lambda item: getattr(item[0], "last_seen_at", read.captured_at)
+        )
         return ExternalVehicleSessionMatch(
             session=row,
             access_event=event,
@@ -399,7 +447,9 @@ class MovementSessionService:
             "observed_at": observed_at.isoformat() if observed_at else None,
             "presence_evidence": presence_evidence_payload(evidence) if evidence else None,
         }
-        row.suppressed_reads = [*(row.suppressed_reads or []), payload][-MAX_SUPPRESSED_SESSION_READS:]
+        row.suppressed_reads = [*(row.suppressed_reads or []), payload][
+            -MAX_SUPPRESSED_SESSION_READS:
+        ]
         await session.flush()
 
     def initial_payload(
@@ -517,17 +567,27 @@ class MovementSessionService:
         vehicle_session.setdefault("id", event_id)
         vehicle_session.setdefault("started_at", occurred_at.isoformat())
         vehicle_session.setdefault("registration_number", registration_number)
-        vehicle_session.setdefault("normalized_registration_number", normalize_registration_number(registration_number))
+        vehicle_session.setdefault(
+            "normalized_registration_number", normalize_registration_number(registration_number)
+        )
         vehicle_session["last_seen_at"] = read.captured_at.isoformat()
         vehicle_session["last_gate_state"] = gate_observation_from_read(read).get("state")
-        vehicle_session["suppressed_read_count"] = int(vehicle_session.get("suppressed_read_count") or 0) + 1
+        vehicle_session["suppressed_read_count"] = (
+            int(vehicle_session.get("suppressed_read_count") or 0) + 1
+        )
         vehicle_session["last_suppressed_reason"] = suppression.reason
         vehicle_session["last_matched_by"] = suppression.matched_by
         if suppression.evidence:
-            vehicle_session["last_presence_evidence"] = presence_evidence_payload(suppression.evidence)
-        protect_event_ids = set(string_list(vehicle_session.get("protect_event_ids"))) | context.protect_event_ids
+            vehicle_session["last_presence_evidence"] = presence_evidence_payload(
+                suppression.evidence
+            )
+        protect_event_ids = (
+            set(string_list(vehicle_session.get("protect_event_ids"))) | context.protect_event_ids
+        )
         vehicle_session["protect_event_ids"] = sorted(protect_event_ids)
-        variants = set(string_list(vehicle_session.get("ocr_variants"))) | set(ocr_variants_for_reads((read,)))
+        variants = set(string_list(vehicle_session.get("ocr_variants"))) | set(
+            ocr_variants_for_reads((read,))
+        )
         vehicle_session["ocr_variants"] = sorted(value for value in variants if value)
         suppressed_reads = list(vehicle_session.get("suppressed_reads") or [])
         suppressed_reads.append(suppressed_read_payload)
@@ -535,7 +595,9 @@ class MovementSessionService:
         payload[VEHICLE_SESSION_PAYLOAD_KEY] = vehicle_session
         return payload
 
-    def suppressed_read_payload(self, read: PlateRead, suppression: VehicleSessionSuppression) -> dict[str, Any]:
+    def suppressed_read_payload(
+        self, read: PlateRead, suppression: VehicleSessionSuppression
+    ) -> dict[str, Any]:
         context = self.context_from_read(read)
         return {
             "registration_number": read.registration_number,
@@ -547,7 +609,9 @@ class MovementSessionService:
             "reason": suppression.reason,
             "matched_by": suppression.matched_by,
             "protect_event_ids": sorted(context.protect_event_ids),
-            "presence_evidence": presence_evidence_payload(suppression.evidence) if suppression.evidence else None,
+            "presence_evidence": presence_evidence_payload(suppression.evidence)
+            if suppression.evidence
+            else None,
         }
 
     def _session_match(
@@ -560,11 +624,15 @@ class MovementSessionService:
         if self._read_matches_different_known_vehicle(session, read):
             return None
         same_source = read.source == getattr(session, "source", None)
-        session_registration = str(getattr(session, "normalized_registration_number", "") or "").strip()
+        session_registration = str(
+            getattr(session, "normalized_registration_number", "") or ""
+        ).strip()
         session_event_ids = set(string_list(getattr(session, "protect_event_ids", None)))
         same_plate = (
             context.normalized_registration_number == session_registration
-            or self._is_similar_plate(context.normalized_registration_number, session_registration, runtime)
+            or self._is_similar_plate(
+                context.normalized_registration_number, session_registration, runtime
+            )
         )
         if same_plate:
             return "registration_number" if same_source else "cross_source_registration_number"
@@ -578,8 +646,16 @@ class MovementSessionService:
         match = known_vehicle_plate_match_from_read(read)
         if not match:
             return False
-        matched = normalize_registration_number(str(match.get("registration_number") or match.get("normalized_registration_number") or ""))
-        return bool(matched and matched != str(getattr(session, "normalized_registration_number", "") or ""))
+        matched = normalize_registration_number(
+            str(
+                match.get("registration_number")
+                or match.get("normalized_registration_number")
+                or ""
+            )
+        )
+        return bool(
+            matched and matched != str(getattr(session, "normalized_registration_number", "") or "")
+        )
 
     def _read_looks_like_arrival_ocr_noise(
         self,
@@ -617,13 +693,18 @@ class MovementSessionService:
     ) -> dict[str, Any] | None:
         evidence = await get_vehicle_presence_tracker().recent_evidence(
             registration_number=context.registration_number,
-            event_ids=context.protect_event_ids | set(string_list(getattr(session, "protect_event_ids", None))),
+            event_ids=context.protect_event_ids
+            | set(string_list(getattr(session, "protect_event_ids", None))),
             camera_id=context.camera_id or getattr(session, "camera_id", None),
             device_id=context.device_id or getattr(session, "device_id", None),
             observed_at=read.captured_at,
             max_age_seconds=idle_seconds,
         )
-        return None if evidence and self._presence_evidence_is_current_lpr_read(evidence, context, read) else evidence
+        return (
+            None
+            if evidence and self._presence_evidence_is_current_lpr_read(evidence, context, read)
+            else evidence
+        )
 
     def _presence_evidence_is_current_lpr_read(
         self,
@@ -631,27 +712,41 @@ class MovementSessionService:
         context: VehicleSessionContext,
         read: PlateRead,
     ) -> bool:
-        if evidence.get("source") != "webhook" or evidence.get("source_detail") != "ubiquiti_lpr_webhook":
+        if (
+            evidence.get("source") != "webhook"
+            or evidence.get("source_detail") != "ubiquiti_lpr_webhook"
+        ):
             return False
         observed_at = datetime_from_payload(evidence.get("observed_at"))
         if not observed_at:
             return False
-        if abs((read.captured_at.astimezone(UTC) - observed_at.astimezone(UTC)).total_seconds()) > 1.0:
+        if (
+            abs((read.captured_at.astimezone(UTC) - observed_at.astimezone(UTC)).total_seconds())
+            > 1.0
+        ):
             return False
         evidence_event_id = str(evidence.get("event_id") or "").strip()
-        evidence_registration = normalize_registration_number(str(evidence.get("registration_number") or ""))
+        evidence_registration = normalize_registration_number(
+            str(evidence.get("registration_number") or "")
+        )
         return bool(
             (evidence_event_id and evidence_event_id in context.protect_event_ids)
-            or (evidence_registration and evidence_registration == context.normalized_registration_number)
+            or (
+                evidence_registration
+                and evidence_registration == context.normalized_registration_number
+            )
         )
 
     def _read_is_departure_after_entry_session(self, read: PlateRead, session: Any) -> bool:
         last_seen_at = getattr(session, "last_seen_at", read.captured_at)
-        gate_cycle_expires_at = last_seen_at + timedelta(seconds=EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS)
+        gate_cycle_expires_at = last_seen_at + timedelta(
+            seconds=EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS
+        )
         return (
             getattr(session, "direction", None) == AccessDirection.ENTRY
             and read_direction_hint(read) == AccessDirection.EXIT
-            and read.captured_at > (getattr(session, "gate_cycle_expires_at", None) or gate_cycle_expires_at)
+            and read.captured_at
+            > (getattr(session, "gate_cycle_expires_at", None) or gate_cycle_expires_at)
         )
 
     def _read_is_entry_after_exit_idle_expired(
@@ -664,7 +759,11 @@ class MovementSessionService:
         return (
             getattr(session, "direction", None) == AccessDirection.EXIT
             and read_direction_hint(read) == AccessDirection.ENTRY
-            and read.captured_at > (getattr(session, "idle_expires_at", None) or last_seen_at + timedelta(seconds=idle_seconds))
+            and read.captured_at
+            > (
+                getattr(session, "idle_expires_at", None)
+                or last_seen_at + timedelta(seconds=idle_seconds)
+            )
         )
 
     def _is_similar_plate(self, left: str, right: str, runtime: Any | None = None) -> bool:
@@ -712,7 +811,9 @@ class MovementSessionService:
                 continue
             event = await self._event_for_session(session, row)
             raw_payload = getattr(event, "raw_payload", None) if event else None
-            external = raw_payload.get("external_admission") if isinstance(raw_payload, dict) else None
+            external = (
+                raw_payload.get("external_admission") if isinstance(raw_payload, dict) else None
+            )
             if isinstance(external, dict) and external.get("mode") == "arrival":
                 candidates.append((row, event))
         return candidates
@@ -737,7 +838,9 @@ class MovementSessionService:
         event = getattr(row, "access_event", None) or getattr(row, "event", None)
         if event is not None:
             return event
-        event_id = _uuid_or_none(getattr(row, "access_event_id", None) or getattr(row, "event_id", None))
+        event_id = _uuid_or_none(
+            getattr(row, "access_event_id", None) or getattr(row, "event_id", None)
+        )
         if not event_id:
             return None
         return await session.get(AccessEvent, event_id)
@@ -801,25 +904,38 @@ class MovementSessionService:
         if age_seconds is not None and age_seconds > max_age_seconds:
             return False
         evidence_observed_at = datetime_from_payload(evidence.get("observed_at"))
-        if evidence_observed_at:
-            if (observed_at.astimezone(UTC) - evidence_observed_at.astimezone(UTC)).total_seconds() > max_age_seconds:
-                return False
+        if (
+            evidence_observed_at
+            and (observed_at.astimezone(UTC) - evidence_observed_at.astimezone(UTC)).total_seconds()
+            > max_age_seconds
+        ):
+            return False
         return not (
             evidence.get("source") == "webhook"
             and evidence.get("source_detail") == "ubiquiti_lpr_webhook"
         )
 
-    def _external_presence_match_strength(self, row: Any, evidence: dict[str, Any]) -> tuple[int, str]:
-        row_plate = normalize_registration_number(str(getattr(row, "registration_number", "") or ""))
-        evidence_plate = normalize_registration_number(str(evidence.get("registration_number") or ""))
+    def _external_presence_match_strength(
+        self, row: Any, evidence: dict[str, Any]
+    ) -> tuple[int, str]:
+        row_plate = normalize_registration_number(
+            str(getattr(row, "registration_number", "") or "")
+        )
+        evidence_plate = normalize_registration_number(
+            str(evidence.get("registration_number") or "")
+        )
         if row_plate and evidence_plate and row_plate == evidence_plate:
             return 3, "external_presence_registration_number"
         event_id = str(evidence.get("event_id") or "").strip()
         if event_id and event_id in set(string_list(getattr(row, "protect_event_ids", None))):
             return 2, "external_presence_protect_event_id"
-        if getattr(row, "camera_id", None) and evidence.get("camera_id") == getattr(row, "camera_id", None):
+        if getattr(row, "camera_id", None) and evidence.get("camera_id") == getattr(
+            row, "camera_id", None
+        ):
             return 1, "external_presence_camera"
-        if getattr(row, "device_id", None) and evidence.get("device_id") == getattr(row, "device_id", None):
+        if getattr(row, "device_id", None) and evidence.get("device_id") == getattr(
+            row, "device_id", None
+        ):
             return 1, "external_presence_device"
         return 0, ""
 
@@ -832,16 +948,17 @@ class MovementSessionService:
     def _session_matches_plate_or_event(self, row: Any, read: PlateRead) -> bool:
         context = self.context_from_read(read)
         if context.normalized_registration_number and (
-            context.normalized_registration_number == str(getattr(row, "normalized_registration_number", "") or "")
+            context.normalized_registration_number
+            == str(getattr(row, "normalized_registration_number", "") or "")
             or self._is_similar_plate(
                 context.normalized_registration_number,
                 str(getattr(row, "normalized_registration_number", "") or ""),
             )
         ):
             return True
-        if context.protect_event_ids & set(string_list(getattr(row, "protect_event_ids", None))):
-            return True
-        return False
+        return bool(
+            context.protect_event_ids & set(string_list(getattr(row, "protect_event_ids", None)))
+        )
 
 
 def read_direction_hint(read: PlateRead) -> AccessDirection | None:
@@ -874,7 +991,17 @@ def ocr_variants_for_reads(reads: Sequence[PlateRead]) -> list[str]:
 def presence_evidence_payload(evidence: dict[str, Any] | None) -> dict[str, Any]:
     if not evidence:
         return {}
-    keys = ("source", "source_detail", "active", "observed_at", "registration_number", "event_id", "camera_id", "device_id", "age_seconds")
+    keys = (
+        "source",
+        "source_detail",
+        "active",
+        "observed_at",
+        "registration_number",
+        "event_id",
+        "camera_id",
+        "device_id",
+        "age_seconds",
+    )
     return {key: evidence.get(key) for key in keys if evidence.get(key) is not None}
 
 

@@ -1480,3 +1480,6 @@
   justify-content: flex-end;
   flex-wrap: wrap;
 }
+
+.directory-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
+.directory-pagination > span:first-child { margin-right: auto; }

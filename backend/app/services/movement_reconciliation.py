@@ -12,11 +12,15 @@ from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, GateCommandRecord, MovementSagaRecord, Person
 from app.models.enums import GateCommandState, MovementSagaState
 from app.modules.gate.base import GateState
-from app.services.event_bus import event_bus
-from app.services.movement.admission import AdmissionResult, finalize_in_session, recover_unattempted_visitor_reservations
 from app.services.access.delivery import recover_garage_outcome_outputs
 from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.actionable_notifications import get_actionable_notification_service
+from app.services.event_bus import event_bus
+from app.services.movement.admission import (
+    AdmissionResult,
+    finalize_in_session,
+    recover_unattempted_visitor_reservations,
+)
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.person_presence_input_booleans import apply_person_presence_input_boolean_actions
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, write_audit_log
@@ -65,18 +69,21 @@ class MovementReconciliationService:
             except Exception as exc:
                 logger.exception("movement_reconciliation_failed", extra={"error": str(exc)})
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=RECONCILIATION_INTERVAL_SECONDS)
-            except asyncio.TimeoutError:
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=RECONCILIATION_INTERVAL_SECONDS
+                )
+            except TimeoutError:
                 continue
 
     async def reconcile_once(self) -> int:
         self._pending_events = []
         actionable_outputs = 0
         try:
-            actionable_outputs, self._actionable_cursor = await (
-                get_actionable_notification_service().reconcile_actionable_outputs(
-                    after_id=self._actionable_cursor
-                )
+            (
+                actionable_outputs,
+                self._actionable_cursor,
+            ) = await get_actionable_notification_service().reconcile_actionable_outputs(
+                after_id=self._actionable_cursor
             )
         except Exception as exc:  # noqa: BLE001 - independent recovery owners must still run.
             logger.error(
@@ -84,8 +91,10 @@ class MovementReconciliationService:
                 extra={"error_class": type(exc).__name__},
             )
         garage_outputs = await recover_garage_outcome_outputs()
-        recovered_reservations, self._reservation_cursor = await recover_unattempted_visitor_reservations(
-            after_id=self._reservation_cursor)
+        (
+            recovered_reservations,
+            self._reservation_cursor,
+        ) = await recover_unattempted_visitor_reservations(after_id=self._reservation_cursor)
         now = datetime.now(tz=UTC)
         stale_cutoff = now - timedelta(seconds=RECONCILIATION_GRACE_SECONDS)
         command_saga_ids = (
@@ -159,12 +168,18 @@ class MovementReconciliationService:
                             ),
                         )
                     )
-                    .where(GateCommandRecord.id > self._standalone_cursor if self._standalone_cursor else True)
+                    .where(
+                        GateCommandRecord.id > self._standalone_cursor
+                        if self._standalone_cursor
+                        else True
+                    )
                     .order_by(GateCommandRecord.id.asc())
                     .limit(25)
                 )
             ).all()
-            next_standalone_cursor = standalone_commands[-1].id if len(standalone_commands) == 25 else None
+            next_standalone_cursor = (
+                standalone_commands[-1].id if len(standalone_commands) == 25 else None
+            )
             for command in standalone_commands:
                 count += await self._reconcile_standalone_gate_command(session, command)
             await session.commit()
@@ -181,7 +196,7 @@ class MovementReconciliationService:
                         event,
                         source="movement_reconciliation_presence_commit",
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
                     logger.warning(
                         "movement_reconciliation_input_boolean_unhandled_failure",
                         extra={
@@ -195,51 +210,93 @@ class MovementReconciliationService:
     async def _reconcile_standalone_gate_command(self, session, command: GateCommandRecord) -> int:
         if isinstance(session, AsyncSession):
             await session.refresh(command, with_for_update=True)
-        now = (await session.scalar(select(func.clock_timestamp()))
-               if isinstance(session, AsyncSession) else datetime.now(tz=UTC))
-        if command.state == GateCommandState.LEASED and command.lease_expires_at and command.lease_expires_at > now:
+        now = (
+            await session.scalar(select(func.clock_timestamp()))
+            if isinstance(session, AsyncSession)
+            else datetime.now(tz=UTC)
+        )
+        if (
+            command.state == GateCommandState.LEASED
+            and command.lease_expires_at
+            and command.lease_expires_at > now
+        ):
             return 0
         if (command.command_metadata or {}).get("target_plan"):
-            before = (command.command_metadata, command.state, command.completed_at,
-                      command.requires_reconciliation, command.lease_token, command.lease_expires_at)
+            before = (
+                command.command_metadata,
+                command.state,
+                command.completed_at,
+                command.requires_reconciliation,
+                command.lease_token,
+                command.lease_expires_at,
+            )
             await AccessDeviceCommandJournal().reconcile_parent_in_session(session, command)
-            changed = before != (command.command_metadata, command.state, command.completed_at,
-                                 command.requires_reconciliation, command.lease_token, command.lease_expires_at)
+            changed = before != (
+                command.command_metadata,
+                command.state,
+                command.completed_at,
+                command.requires_reconciliation,
+                command.lease_token,
+                command.lease_expires_at,
+            )
             if changed:
-                await self._audit_standalone_gate_command_reconciliation(session, command,
-                    "Per-target command receipts reconciled.", success=command.mechanically_confirmed)
+                await self._audit_standalone_gate_command_reconciliation(
+                    session,
+                    command,
+                    "Per-target command receipts reconciled.",
+                    success=command.mechanically_confirmed,
+                )
                 if command.mechanically_confirmed:
-                    await self._publish_standalone_command_reconciled(command, GateState(command.gate_state or "unknown"))
+                    await self._publish_standalone_command_reconciled(
+                        command, GateState(command.gate_state or "unknown")
+                    )
                 elif not command.requires_reconciliation:
-                    await self._publish_standalone_command_failed(command, "Physical targets were not verified.")
+                    await self._publish_standalone_command_failed(
+                        command, "Physical targets were not verified."
+                    )
             return int(changed)
         if command.state == GateCommandState.LEASED:
             detail = "Standalone gate command lease expired without a target journal; delivery remains unknown."
             self._ledger.mark_gate_command_uncertain(command, at=now, detail=detail)
-            await self._audit_standalone_gate_command_reconciliation(session, command, detail, success=False)
+            await self._audit_standalone_gate_command_reconciliation(
+                session, command, detail, success=False
+            )
             return 1
         # Historical commands have no immutable physical target receipt. Neither
         # today's configured gate nor elapsed time can establish their outcome.
         return 0
 
     async def _reconcile_saga(
-        self, session, saga: MovementSagaRecord, *,
+        self,
+        session,
+        saga: MovementSagaRecord,
+        *,
         presence_input_boolean_jobs: list[tuple[Person, AccessEvent]] | None = None,
     ) -> int:
-        now = (await session.scalar(select(func.clock_timestamp()))
-               if isinstance(session, AsyncSession) else datetime.now(tz=UTC))
+        now = (
+            await session.scalar(select(func.clock_timestamp()))
+            if isinstance(session, AsyncSession)
+            else datetime.now(tz=UTC)
+        )
         command = _latest_reconciliation_command(saga.gate_commands)
         if not command:
             pending_since = saga.updated_at or saga.created_at or saga.occurred_at
-            if (saga.state == MovementSagaState.PHYSICAL_COMMAND_PENDING and pending_since
-                    and now - pending_since < timedelta(seconds=RECONCILIATION_GRACE_SECONDS)):
+            if (
+                saga.state == MovementSagaState.PHYSICAL_COMMAND_PENDING
+                and pending_since
+                and now - pending_since < timedelta(seconds=RECONCILIATION_GRACE_SECONDS)
+            ):
                 return 0
             if saga.access_event_id is not None:
                 result = await finalize_in_session(session, saga_id=saga.id)
                 await self._queue_presence_effects(session, result, presence_input_boolean_jobs)
                 return int(result.changed)
             return 0
-        if command.state == GateCommandState.LEASED and command.lease_expires_at and command.lease_expires_at > now:
+        if (
+            command.state == GateCommandState.LEASED
+            and command.lease_expires_at
+            and command.lease_expires_at > now
+        ):
             return 0
         if (command.command_metadata or {}).get("target_plan"):
             # The finalizer takes saga/event locks before any parent/target locks.
@@ -249,7 +306,9 @@ class MovementReconciliationService:
             if not result.changed:
                 return 0
             if result.admission_status == "verified":
-                await self._publish_reconciled(result.saga, command, GateState(command.gate_state or "unknown"))
+                await self._publish_reconciled(
+                    result.saga, command, GateState(command.gate_state or "unknown")
+                )
             elif result.admission_status == "denied":
                 detail = "The designated entry target was not verified."
                 await self._publish_saga_failed(result.saga, detail)
@@ -257,20 +316,37 @@ class MovementReconciliationService:
         if isinstance(session, AsyncSession):
             await session.refresh(saga, with_for_update=True)
             await session.refresh(command, with_for_update=True)
-        if command.state == GateCommandState.LEASED and command.lease_expires_at and command.lease_expires_at > now:
+        if (
+            command.state == GateCommandState.LEASED
+            and command.lease_expires_at
+            and command.lease_expires_at > now
+        ):
             return 0
         if command.state == GateCommandState.LEASED:
-            self._ledger.mark_gate_command_uncertain(command, at=now,
-                detail="Gate command lease expired without a target journal; delivery remains unknown.")
-            await self._ledger.transition_movement_saga(session, saga, MovementSagaState.RECONCILIATION_REQUIRED,
-                detail="Gate command lease expired before completion.", reconciliation_required=True)
+            self._ledger.mark_gate_command_uncertain(
+                command,
+                at=now,
+                detail="Gate command lease expired without a target journal; delivery remains unknown.",
+            )
+            await self._ledger.transition_movement_saga(
+                session,
+                saga,
+                MovementSagaState.RECONCILIATION_REQUIRED,
+                detail="Gate command lease expired before completion.",
+                reconciliation_required=True,
+            )
             return 1
         return 0
 
-    async def _queue_presence_effects(self, session, result: AdmissionResult,
-                                      jobs: list[tuple[Person, AccessEvent]] | None) -> None:
-        if (jobs is None or not result.presence_changed or not result.event.person_id
-                or result.admission_status == "historical"):
+    async def _queue_presence_effects(
+        self, session, result: AdmissionResult, jobs: list[tuple[Person, AccessEvent]] | None
+    ) -> None:
+        if (
+            jobs is None
+            or not result.presence_changed
+            or not result.event.person_id
+            or result.admission_status == "historical"
+        ):
             return
         person = await session.get(Person, result.event.person_id)
         if person:
@@ -287,38 +363,48 @@ class MovementReconciliationService:
             "gate_command_id": str(command.id),
             "gate_state": state.value,
         }
-        self._pending_events.extend([("movement_saga.reconciled", payload), ("gate.command.reconciled", payload)])
+        self._pending_events.extend(
+            [("movement_saga.reconciled", payload), ("gate.command.reconciled", payload)]
+        )
 
     async def _publish_standalone_command_reconciled(
         self,
         command: GateCommandRecord,
         state: GateState,
     ) -> None:
-        self._pending_events.append((
-            "gate.command.reconciled",
-            {
-                "movement_saga": None,
-                "gate_command_id": str(command.id),
-                "gate_state": state.value,
-                "detail": command.detail,
-            },
-        ))
+        self._pending_events.append(
+            (
+                "gate.command.reconciled",
+                {
+                    "movement_saga": None,
+                    "gate_command_id": str(command.id),
+                    "gate_state": state.value,
+                    "detail": command.detail,
+                },
+            )
+        )
 
     async def _publish_saga_failed(self, saga: MovementSagaRecord, detail: str) -> None:
-        self._pending_events.append((
-            "movement_saga.failed",
-            {"movement_saga": movement_saga_summary(saga), "detail": detail},
-        ))
+        self._pending_events.append(
+            (
+                "movement_saga.failed",
+                {"movement_saga": movement_saga_summary(saga), "detail": detail},
+            )
+        )
 
-    async def _publish_standalone_command_failed(self, command: GateCommandRecord, detail: str) -> None:
-        self._pending_events.append((
-            "gate.command.reconciliation_failed",
-            {
-                "gate_command_id": str(command.id),
-                "gate_key": command.gate_key,
-                "detail": detail,
-            },
-        ))
+    async def _publish_standalone_command_failed(
+        self, command: GateCommandRecord, detail: str
+    ) -> None:
+        self._pending_events.append(
+            (
+                "gate.command.reconciliation_failed",
+                {
+                    "gate_command_id": str(command.id),
+                    "gate_key": command.gate_key,
+                    "detail": detail,
+                },
+            )
+        )
 
     async def _audit_standalone_gate_command_reconciliation(
         self,
@@ -336,7 +422,11 @@ class MovementReconciliationService:
             target_entity="GateCommand",
             target_id=command.id,
             target_label=command.gate_key,
-            outcome="success" if success else "requires_review" if command.requires_reconciliation else "failed",
+            outcome="success"
+            if success
+            else "requires_review"
+            if command.requires_reconciliation
+            else "failed",
             level="info" if success else "warning",
             metadata={
                 "source": command.source,
@@ -347,21 +437,18 @@ class MovementReconciliationService:
             },
         )
 
+
 def _latest_reconciliation_command(commands: list[GateCommandRecord]) -> GateCommandRecord | None:
     candidates = [
         command
         for command in commands
         if command.requires_reconciliation
         or command.state in {GateCommandState.RECONCILIATION_REQUIRED, GateCommandState.LEASED}
-        or (
-            command.state == GateCommandState.ACCEPTED
-            and not command.mechanically_confirmed
-        )
+        or (command.state == GateCommandState.ACCEPTED and not command.mechanically_confirmed)
     ]
     if not candidates:
         candidates = list(commands)
     return max(candidates, key=lambda command: command.updated_at, default=None)
-
 
 
 @lru_cache

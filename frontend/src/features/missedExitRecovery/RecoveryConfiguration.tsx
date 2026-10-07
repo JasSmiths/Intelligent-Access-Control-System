@@ -1,4 +1,6 @@
 import React from "react";
+import { useDirectoryOptions } from "../directory/reads";
+import { DirectoryPagination } from "../directory/DirectoryPagination";
 import { createActionConfirmation, isAbortError } from "../../api/client";
 import { integrationsApi, type RecoveryTrackerDiscovery } from "../../api/integrations";
 import { missedExitRecoveryApi } from "../../api/missedExitRecovery";
@@ -18,7 +20,8 @@ export function RecoveryConfiguration({ people, refreshToken, refresh }: { peopl
   const [globalDirty, setGlobalDirty] = React.useState(false);
   const [settingsKnown, setSettingsKnown] = React.useState(false);
   const [ownerId, setOwnerId] = React.useState("");
-  const owner = people.find((person) => person.id === ownerId);
+  const personOptions = useDirectoryOptions("people", people, ownerId ? [ownerId] : [], true, refreshToken);
+  const owner = personOptions.items.find((person) => person.id === ownerId);
   const [ownerDraft, setOwnerDraft] = React.useState<OwnerDraft>(() => newOwnerDraft());
   const ownerConfig = ownerDraft.config;
   const ownerDrafts = React.useRef(new Map<string, OwnerDraft>());
@@ -74,7 +77,7 @@ export function RecoveryConfiguration({ people, refreshToken, refresh }: { peopl
   }, [owner, ownerDraft, ownerConfig, mapping, discovery, saving]);
   function selectOwner(id: string) {
     if (ownerId) ownerDrafts.current.set(ownerId, ownerDraft);
-    setOwnerDraft(ownerDrafts.current.get(id) ?? newOwnerDraft(people.find((person) => person.id === id)));
+    setOwnerDraft(ownerDrafts.current.get(id) ?? newOwnerDraft(personOptions.items.find((person) => person.id === id)));
     setOwnerId(id); setError(""); setSaved("");
   }
   function editOwner(updates: Partial<OwnerConfig>, trackerTouched = false) {
@@ -120,7 +123,7 @@ export function RecoveryConfiguration({ people, refreshToken, refresh }: { peopl
     </section>
     <section className="card"><h2>Owner configuration</h2><form onSubmit={saveOwner}>
       <fieldset disabled={saving} className="recovery-fields">
-        <label className="field"><span>Configure owner</span><select value={ownerId} onChange={(event) => selectOwner(event.target.value)}><option value="">Select owner</option>{people.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}</select></label>
+        <label className="field"><span>Configure owner</span><input aria-label="Search recovery owner" placeholder="Search people" value={personOptions.query} onChange={(event) => personOptions.setQuery(event.target.value)} /><DirectoryPagination page={personOptions} /><select aria-label="Configure owner" value={ownerId} onChange={(event) => selectOwner(event.target.value)}><option value="">Select owner</option>{personOptions.items.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}</select></label>
         <label className="field"><span>Owner recovery opt-in</span><select disabled={!owner} value={String(ownerConfig.enabled)} onChange={(event) => editOwner({ enabled: event.target.value === "true" })}><option value="false">Disabled</option><option value="true">Enabled</option></select></label>
         <label className="field"><span>Discovered phone tracker</span><select disabled={!owner} value={ownerConfig.tracker} onChange={(event) => editOwner({ tracker: event.target.value }, true)}><option value="">Select tracker or enter manually</option>{ownerConfig.tracker && !phoneOptions.some((item) => item.entity_id === ownerConfig.tracker) ? <option value={ownerConfig.tracker}>{ownerConfig.tracker} (configured/manual)</option> : null}{phoneOptions.map((item) => <option key={item.entity_id} value={item.entity_id}>{item.name || item.entity_id} · {item.entity_id}{!item.available ? " (Unavailable)" : ""}</option>)}</select></label>
         <label className="field"><span>Home Assistant phone tracker entity</span><input disabled={!owner} value={ownerConfig.tracker} placeholder="device_tracker.phone" pattern="device_tracker\.[a-z0-9_]+" onChange={(event) => editOwner({ tracker: event.target.value }, true)} /></label>

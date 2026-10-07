@@ -17,13 +17,23 @@ from app.modules.home_assistant.covers import (
     normalize_cover_entities,
     normalize_cover_state,
 )
+from app.modules.notifications.base import NotificationContext
 from app.services.event_bus import event_bus
-from app.services.maintenance import MAINTENANCE_HA_ENTITY_ID, set_mode
+from app.services.integration_effects import MAINTENANCE_HA_ENTITY_ID, HomeAssistantEffects
 from app.services.settings import get_runtime_config
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, emit_audit_log
 from app.services.type_helpers import as_dict
+from app.services.workflows.catalog import INTEGRATION_DEGRADED_EVENT_TYPE
 
 logger = get_logger(__name__)
+
+_bound_effects: HomeAssistantEffects | None = None
+
+
+def bind_home_assistant_effects(effects: HomeAssistantEffects) -> None:
+    global _bound_effects
+    _bound_effects = effects
+
 
 FRONT_DOOR_ENTITY_ID = "binary_sensor.front_door"
 BACK_DOOR_ENTITY_ID = "binary_sensor.back_door"
@@ -41,7 +51,9 @@ LISTENER_RECONNECT_SECONDS = 5.0
 class HomeAssistantIntegrationService:
     """Keeps Home Assistant state synchronized with IACS realtime state."""
 
-    def __init__(self, client: HomeAssistantClient | None = None) -> None:
+    def __init__(self, client: HomeAssistantClient | None = None, *,
+                 effects: HomeAssistantEffects | None = None) -> None:
+        self._effects = effects
         self._client = client or get_home_assistant_client()
         self._listener: asyncio.Task | None = None
         self._state_refresh_task: asyncio.Task | None = None
@@ -268,32 +280,30 @@ class HomeAssistantIntegrationService:
                 await asyncio.sleep(LISTENER_RECONNECT_SECONDS)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
                 previous_status = (self._connected, self._last_error)
                 self._mark_unhealthy(str(exc))
                 await self._publish_connection_status_if_changed(previous_status)
                 logger.warning("home_assistant_listener_failed", extra={"error": str(exc)})
                 await asyncio.sleep(LISTENER_RECONNECT_SECONDS)
 
+    def _effect_owner(self) -> HomeAssistantEffects:
+        effects = self._effects or _bound_effects
+        if effects is None:
+            raise RuntimeError("Home Assistant effects have not been wired by the application")
+        return effects
+
     async def _handle_mobile_notification_action(self, event: dict) -> None:
         data = as_dict(event.get("data"))
         action_id = str(data.get("action") or "").strip()
         if not action_id:
             return
-        from app.services.actionable_notifications import (
-            GATE_FORCE_OPEN_PREFIX,
-            GATE_OPEN_PREFIX,
-            get_actionable_notification_service,
-        )
-
-        action_kind = (
-            "gate_force_open" if action_id.startswith(GATE_FORCE_OPEN_PREFIX)
-            else "gate_open" if action_id.startswith(GATE_OPEN_PREFIX)
-            else "unrecognized"
+        action_kind = "gate_force_open" if action_id.startswith("iacs:gate_force_open:") else (
+            "gate_open" if action_id.startswith("iacs:gate_open:") else "unrecognized"
         )
 
         try:
-            handled = await get_actionable_notification_service().handle_home_assistant_action(
+            handled = await self._effect_owner().mobile_action(
                 action_id,
                 data,
             )
@@ -302,7 +312,7 @@ class HomeAssistantIntegrationService:
                     "home_assistant_actionable_notification_processed",
                     extra={"action_kind": action_kind},
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
             logger.warning(
                 "home_assistant_actionable_notification_failed",
                 extra={"action_kind": action_kind, "error_class": type(exc).__name__},
@@ -387,13 +397,7 @@ class HomeAssistantIntegrationService:
         normalized = state_value.strip().lower()
         if normalized not in {"on", "off"}:
             return
-        await set_mode(
-            normalized == "on",
-            actor="Home Assistant Sync",
-            source="Home Assistant Sync",
-            reason="Synced from Home Assistant",
-            sync_ha=False,
-        )
+        await self._effect_owner().maintenance_state(normalized == "on")
 
     async def _refresh_configured_states(
         self,
@@ -456,7 +460,7 @@ class HomeAssistantIntegrationService:
     async def _refresh_entity_state(self, entity_id: str) -> tuple[str, bool, str | None]:
         try:
             state = await self._client.get_state(entity_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
             error = str(exc)
             logger.warning("home_assistant_state_refresh_failed", extra={"entity_id": entity_id, "error": error})
             return entity_id, False, error
@@ -552,11 +556,6 @@ class HomeAssistantIntegrationService:
         _previous_connected, previous_error = previous_status
         if not self._last_error or previous_error:
             return
-        from app.modules.notifications.base import NotificationContext
-        from app.services.notifications import (
-            INTEGRATION_DEGRADED_EVENT_TYPE,
-            get_notification_service,
-        )
 
         reason = self._last_error
         occurred_at = self._last_failure_at or datetime.now(tz=UTC)
@@ -575,7 +574,7 @@ class HomeAssistantIntegrationService:
                 "source": "home_assistant",
             },
         )
-        await get_notification_service().enqueue_notification(context)
+        await self._effect_owner().degraded_notification(context)
 
     async def _record_gate_state_observation(
         self,
@@ -627,7 +626,7 @@ class HomeAssistantIntegrationService:
         if not value:
             return None
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
         except ValueError:
             return None
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

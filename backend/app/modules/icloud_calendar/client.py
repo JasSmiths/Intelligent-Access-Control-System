@@ -10,7 +10,9 @@ from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 
-ICLOUD_RECONNECT_REQUIRED_MESSAGE = "Stored iCloud session is no longer accepted by Apple. Reconnect this account."
+ICLOUD_RECONNECT_REQUIRED_MESSAGE = (
+    "Stored iCloud session is no longer accepted by Apple. Reconnect this account."
+)
 
 
 class ICloudCalendarClientError(RuntimeError):
@@ -51,7 +53,7 @@ class ICloudCalendarClient:
     def requires_security_key(self, auth_session: ICloudAuthSession) -> bool:
         try:
             return bool(getattr(auth_session.api, "security_key_names", None))
-        except Exception:
+        except Exception:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
             return False
 
     def requires_2fa(self, auth_session: ICloudAuthSession) -> bool:
@@ -71,14 +73,16 @@ class ICloudCalendarClient:
     def validate_2fa_code(self, auth_session: ICloudAuthSession, code: str) -> bool:
         validator = getattr(auth_session.api, "validate_2fa_code", None)
         if not callable(validator):
-            raise ICloudCalendarClientError("This iCloud session cannot validate a verification code.")
+            raise ICloudCalendarClientError(
+                "This iCloud session cannot validate a verification code."
+            )
         return bool(validator(code))
 
     def trust_session(self, auth_session: ICloudAuthSession) -> bool:
         try:
             if bool(getattr(auth_session.api, "is_trusted_session", False)):
                 return True
-        except Exception:
+        except Exception:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
             return False
         trust = getattr(auth_session.api, "trust_session", None)
         if not callable(trust):
@@ -108,8 +112,12 @@ class ICloudCalendarClient:
                 if _stored_session_needs_reauth(exc):
                     raise ICloudCalendarReauthRequired(ICLOUD_RECONNECT_REQUIRED_MESSAGE) from exc
                 raise
-            if bool(getattr(api, "requires_2fa", False)) or bool(getattr(api, "requires_2sa", False)):
-                raise ICloudCalendarReauthRequired("iCloud requested verification again. Reconnect this account.")
+            if bool(getattr(api, "requires_2fa", False)) or bool(
+                getattr(api, "requires_2sa", False)
+            ):
+                raise ICloudCalendarReauthRequired(
+                    "iCloud requested verification again. Reconnect this account."
+                )
             raw_events = _fetch_raw_calendar_events(api, starts_at, ends_at)
             return [event for event in (_normalize_event(item) for item in raw_events) if event]
         finally:
@@ -144,7 +152,9 @@ class ICloudCalendarClient:
 def _fetch_raw_calendar_events(api: Any, starts_at: datetime, ends_at: datetime) -> list[Any]:
     calendar = getattr(api, "calendar", None)
     if calendar is None:
-        raise ICloudCalendarClientError("iCloud Calendar service was not available for this account.")
+        raise ICloudCalendarClientError(
+            "iCloud Calendar service was not available for this account."
+        )
 
     refresh_client = getattr(calendar, "refresh_client", None)
     if callable(refresh_client):
@@ -200,15 +210,27 @@ def _stored_session_needs_reauth(exc: Exception) -> bool:
 
 def _normalize_event(value: Any) -> ICloudCalendarEvent | None:
     title = _text(_event_value(value, "title", "summary", "name"))
-    calendar_id = _text(_event_value(value, "pguid", "pGuid", "calendar_id", "calendarId", "calendarGuid"))
+    calendar_id = _text(
+        _event_value(value, "pguid", "pGuid", "calendar_id", "calendarId", "calendarGuid")
+    )
     event_id = _text(_event_value(value, "guid", "id", "event_id", "eventId"))
     timezone = _event_timezone(value)
     starts_at = _datetime_value(
-        _event_value(value, "startDate", "start_date", "localStartDate", "local_start_date", "start", "starts_at"),
+        _event_value(
+            value,
+            "startDate",
+            "start_date",
+            "localStartDate",
+            "local_start_date",
+            "start",
+            "starts_at",
+        ),
         timezone=timezone,
     )
     ends_at = _datetime_value(
-        _event_value(value, "endDate", "end_date", "localEndDate", "local_end_date", "end", "ends_at"),
+        _event_value(
+            value, "endDate", "end_date", "localEndDate", "local_end_date", "end", "ends_at"
+        ),
         timezone=timezone,
     )
     if not title or not event_id or not starts_at or not ends_at or ends_at <= starts_at:
@@ -222,7 +244,9 @@ def _normalize_event(value: Any) -> ICloudCalendarEvent | None:
         starts_at=starts_at,
         ends_at=ends_at,
         description=_text(_event_value(value, "description", "desc")),
-        notes=_text(_event_value(value, "notes", "note", "privateComments", "private_comments", "comments")),
+        notes=_text(
+            _event_value(value, "notes", "note", "privateComments", "private_comments", "comments")
+        ),
         raw=_safe_event_raw(value),
     )
 
@@ -290,7 +314,7 @@ def _event_timezone(value: Any) -> ZoneInfo | None:
             continue
         try:
             return ZoneInfo(candidate)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - Vendor boundary preserves failure truth for arbitrary SDK errors.
             continue
     return None
 

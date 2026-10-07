@@ -87,10 +87,19 @@ def inspect(root: Path) -> dict:
                     base = ".".join([*parent, *([base] if base else [])])
                 targets.extend([base, *(base + "." + alias.name for alias in node.names)])
             for target in targets:
+                if (relative.startswith("backend/app/modules/") and target.startswith("app.services.")
+                        and not (target == "app.services.settings" or target.startswith("app.services.settings."))):
+                    violations[relative + "::business_service_import::" + target] += 1
+                if name.startswith("app.services.") and target.startswith("app.api."):
+                    violations[relative + "::api_import::" + target] += 1
                 if target in modules and target != name:
                     graph[name].add(target)
             if not isinstance(node, ast.Call):
                 continue
+            if (relative == "backend/app/api/v1/directory.py" and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "session"
+                    and node.func.attr in {"add", "delete", "commit", "flush", "begin"}):
+                violations[relative + "::domain_transaction_in_route"] += 1
             if isinstance(node.func, ast.Attribute):
                 if node.func.attr == "open_gate" and relative != "backend/app/services/gate_commands.py":
                     violations[relative + "::gate_provider_call"] += 1

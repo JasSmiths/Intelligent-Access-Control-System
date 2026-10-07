@@ -98,7 +98,7 @@ function pendingUserExit(dialog: HTMLElement) {
 it("propagates a saved current user before exit completes even when navigation unmounts the editor", async () => {
   const savedUser = { ...account, first_name: "Alexandra", full_name: "Alexandra Morgan" };
   const onCurrentUserUpdated = vi.fn();
-  vi.mocked(client.api.get).mockImplementation(async (path) => path === "/api/v1/users" ? [account] : []);
+  vi.mocked(client.api.get).mockImplementation(async (path) => path === "/api/v1/users" ? [account] : { items: [], total: 0, next_cursor: null });
   vi.spyOn(client.api, "patch").mockResolvedValue(savedUser);
   const view = render(<UsersView currentUser={account} onCurrentUserUpdated={onCurrentUserUpdated} refreshToken={0} />);
   await act(async () => {});
@@ -119,7 +119,7 @@ it("propagates a saved current user before exit completes even when navigation u
 it("publishes the generated password before exit and retains its saved-user label after closing", async () => {
   const savedUser = { ...account, id: "synthetic-created", username: "sam", first_name: "Sam", last_name: "River", full_name: "Sam River" };
   const onCurrentUserUpdated = vi.fn();
-  vi.mocked(client.api.get).mockImplementation(async (path) => path === "/api/v1/users" ? [account] : []);
+  vi.mocked(client.api.get).mockImplementation(async (path) => path === "/api/v1/users" ? [account] : { items: [], total: 0, next_cursor: null });
   vi.spyOn(client.api, "post").mockResolvedValue({ user: savedUser, temporary_password: "synthetic-password" });
   render(<UsersView currentUser={account} onCurrentUserUpdated={onCurrentUserUpdated} refreshToken={0} />);
   await act(async () => {});

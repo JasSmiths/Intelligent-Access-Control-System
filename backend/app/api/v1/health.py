@@ -1,6 +1,5 @@
-from typing import Any
-
 import asyncio
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -22,10 +21,12 @@ async def readiness(request: Request) -> JSONResponse:
         database = await asyncio.wait_for(_database_check(), timeout=2)
     except TimeoutError:
         database = {"status": "down"}
-    ready = (bool(getattr(request.app.state, "startup_complete", False))
-             and database.get("status") == "ok"
-             and bool(_realtime_check().get("started"))
-             and bool(_access_events_check().get("worker_running")))
+    ready = (
+        bool(getattr(request.app.state, "startup_complete", False))
+        and database.get("status") == "ok"
+        and bool(_realtime_check().get("started"))
+        and bool(_access_events_check().get("worker_running"))
+    )
     return JSONResponse({"ready": ready}, status_code=200 if ready else 503)
 
 
@@ -54,7 +55,7 @@ async def _database_check() -> dict[str, Any]:
         async with AsyncSessionLocal() as session:
             await session.execute(text("SELECT 1"))
         return {"status": "ok"}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Readiness reports any subsystem failure without interrupting other probes.
         return {"status": "down", "detail": _safe_error(exc)}
 
 
@@ -69,7 +70,7 @@ def _realtime_check() -> dict[str, Any]:
 def _access_events_check() -> dict[str, Any]:
     try:
         status = get_access_event_service().status()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Readiness reports any subsystem failure without interrupting other probes.
         return {"status": "degraded", "detail": _safe_error(exc)}
     return status
 
@@ -86,15 +87,20 @@ async def _maintenance_check() -> dict[str, Any]:
             "duration_seconds": status.get("duration_seconds"),
             "duration_label": status.get("duration_label"),
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Readiness reports any subsystem failure without interrupting other probes.
         return {"status": "degraded", "detail": _safe_error(exc)}
 
 
 async def _home_assistant_check() -> dict[str, Any]:
     try:
         status = await get_home_assistant_service().status(refresh=False)
-    except Exception as exc:
-        return {"status": "degraded", "configured": None, "connected": False, "detail": _safe_error(exc)}
+    except Exception as exc:  # noqa: BLE001 - Readiness reports any subsystem failure without interrupting other probes.
+        return {
+            "status": "degraded",
+            "configured": None,
+            "connected": False,
+            "detail": _safe_error(exc),
+        }
     configured = bool(status.get("configured"))
     connected = bool(status.get("connected"))
     last_error = status.get("last_error")

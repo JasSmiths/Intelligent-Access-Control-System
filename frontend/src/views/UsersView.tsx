@@ -3,6 +3,9 @@ import { useModalClose } from "../ui/useModalClose";
 import { useEditorDismiss } from "../ui/useEditorDismiss";
 import { Camera, Key, MessageCircle, Smartphone, Trash2, UserPlus, UserRound, X } from "lucide-react";
 import React from "react";
+import { listPeople, lookupPeople } from "../api/directory";
+import { useDirectoryOptions } from "../features/directory/reads";
+import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
 import { api, createActionConfirmation } from "../api/client";
 import { displayUserName, formatDate } from "../lib/format";
@@ -34,10 +37,11 @@ export function UsersView({
     try {
       const [nextUsers, nextPeople] = await Promise.all([
         api.get<UserAccount[]>("/api/v1/users"),
-        api.get<Person[]>("/api/v1/people")
+        listPeople()
       ]);
       setUsers(nextUsers);
-      setPeople(nextPeople);
+      const linked = await lookupPeople(nextUsers.flatMap((item) => item.person_id ? [item.person_id] : []));
+      setPeople([...new Map([...nextPeople.items, ...linked].map((item) => [item.id, item])).values()]);
     } catch (userError) {
       setError(userError instanceof Error ? userError.message : "Unable to load users");
     } finally {
@@ -262,6 +266,7 @@ function UserModal({
     generate_password: mode === "create"
   });
   const existingProfilePhotoSource = mediaSource(user?.profile_photo_url, user?.profile_photo_data_url);
+  const personOptions = useDirectoryOptions("people", people, form.person_id ? [form.person_id] : []);
   const [profilePhotoChanged, setProfilePhotoChanged] = React.useState(false);
   const profilePhotoPreview = form.profile_photo_data_url || (!profilePhotoChanged ? existingProfilePhotoSource : "");
   const [error, setError] = React.useState("");
@@ -445,9 +450,11 @@ function UserModal({
         </label>
         <label className="field">
           <span>Directory person</span>
-          <select value={form.person_id} onChange={(event) => update("person_id", event.target.value)}>
+          <input aria-label="Search linked person" placeholder="Search directory people" value={personOptions.query} onChange={(event) => personOptions.setQuery(event.target.value)} />
+          <DirectoryPagination page={personOptions} />
+          <select aria-label="Linked person" value={form.person_id} onChange={(event) => update("person_id", event.target.value)}>
             <option value="">No linked person</option>
-            {people.map((person) => (
+            {personOptions.items.map((person) => (
               <option key={person.id} value={person.id}>{person.display_name}</option>
             ))}
           </select>

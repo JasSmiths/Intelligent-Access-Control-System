@@ -28,7 +28,7 @@ from app.models import (AccessDeviceCommandRecord, ActionConfirmation, AuditLog,
 from app.models.enums import GateCommandState, UserRole
 from app.modules.gate.base import CommandDelivery, GateState
 from app.services import action_confirmations as confirmations
-from app.services import maintenance, settings
+from app.services import maintenance, notifications, settings
 from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.access_devices import AccessDeviceService
 from app.services.auth import AuthError
@@ -84,7 +84,7 @@ async def owned_resources(isolated_resources, monkeypatch):
         await session.commit()
     settings.invalidate_runtime_config_cache()
     service = NotificationService(run_store=NotificationRunStore())
-    monkeypatch.setattr(maintenance, "get_notification_service", lambda: service)
+    monkeypatch.setattr(notifications, "get_notification_service", lambda: service)
     monkeypatch.setattr(confirmations, "emit_audit_log", lambda **_kwargs: None)
     # set_mode(sync_ha=False) must never need this sink; unexpected calls fail.
     monkeypatch.setattr(maintenance, "_sync_home_assistant", AsyncMock(side_effect=AssertionError("Hardware sync is forbidden")))

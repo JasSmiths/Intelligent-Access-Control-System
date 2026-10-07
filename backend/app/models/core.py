@@ -2,10 +2,26 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, or_, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Date,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    or_,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
+
 from app.db.base import Base
 from app.models.enums import (
     AccessDecision,
@@ -54,13 +70,17 @@ class Person(Base, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     pronouns: Mapped[str | None] = mapped_column(String(24))
     profile_photo_data_url: Mapped[str | None] = mapped_column(Text)
-    group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"), index=True)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("groups.id", ondelete="SET NULL"), index=True
+    )
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("schedules.id", ondelete="SET NULL"), index=True
     )
     garage_door_entity_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     home_assistant_mobile_app_notify_service: Mapped[str | None] = mapped_column(String(255))
-    missed_exit_recovery_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    missed_exit_recovery_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     missed_exit_recovery_tracker_entity_id: Mapped[str | None] = mapped_column(String(255))
     home_assistant_presence_input_boolean_entity_ids: Mapped[list[str]] = mapped_column(
         JSONB, default=list, nullable=False
@@ -84,15 +104,17 @@ class Person(Base, TimestampMixin):
     presence: Mapped["Presence | None"] = relationship(back_populates="person")
 
 
-Index("uq_people_recovery_tracker", Person.missed_exit_recovery_tracker_entity_id, unique=True,
-      postgresql_where=text("missed_exit_recovery_tracker_entity_id IS NOT NULL"))
+Index(
+    "uq_people_recovery_tracker",
+    Person.missed_exit_recovery_tracker_entity_id,
+    unique=True,
+    postgresql_where=text("missed_exit_recovery_tracker_entity_id IS NOT NULL"),
+)
 
 
 class AccessDevice(Base, TimestampMixin):
     __tablename__ = "access_devices"
-    __table_args__ = (
-        UniqueConstraint("key", name="uq_access_devices_key"),
-    )
+    __table_args__ = (UniqueConstraint("key", name="uq_access_devices_key"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     key: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
@@ -138,11 +160,15 @@ class Vehicle(Base, TimestampMixin):
     __tablename__ = "vehicles"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL"), index=True
+    )
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("schedules.id", ondelete="SET NULL"), index=True
     )
-    registration_number: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
+    registration_number: Mapped[str] = mapped_column(
+        String(32), unique=True, index=True, nullable=False
+    )
     vehicle_photo_data_url: Mapped[str | None] = mapped_column(Text)
     make: Mapped[str | None] = mapped_column(String(80))
     model: Mapped[str | None] = mapped_column(String(120))
@@ -163,6 +189,13 @@ class Vehicle(Base, TimestampMixin):
         back_populates="vehicle",
         cascade="all, delete-orphan",
     )
+
+
+Index(
+    "ix_vehicles_normalized_active_plate",
+    func.upper(func.regexp_replace(Vehicle.registration_number, "[^A-Za-z0-9]", "", "g")),
+    postgresql_where=Vehicle.is_active.is_(True),
+)
 
 
 class VehiclePersonAssignment(Base, TimestampMixin):
@@ -194,17 +227,21 @@ class User(Base, TimestampMixin):
     email: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
     mobile_phone_number: Mapped[str | None] = mapped_column(String(40))
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.STANDARD, nullable=False)
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole), default=UserRole.STANDARD, nullable=False
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    auth_session_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    auth_session_version: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL"), index=True
+    )
     preferences: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     person: Mapped[Person | None] = relationship()
-
-
 
 
 class SystemSetting(Base, TimestampMixin):
@@ -221,18 +258,20 @@ class MaintenanceModeState(Base, TimestampMixin):
     __tablename__ = "maintenance_mode_state"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    is_active: Mapped[bool] = mapped_column("is_maintenance_mode_active", Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        "is_maintenance_mode_active", Boolean, default=False, nullable=False
+    )
     enabled_by: Mapped[str | None] = mapped_column("maintenance_enabled_by", String(160))
-    enabled_at: Mapped[datetime | None] = mapped_column("maintenance_enabled_at", DateTime(timezone=True))
+    enabled_at: Mapped[datetime | None] = mapped_column(
+        "maintenance_enabled_at", DateTime(timezone=True)
+    )
     source: Mapped[str | None] = mapped_column(String(80))
     reason: Mapped[str | None] = mapped_column(Text)
 
 
 class ActionConfirmation(Base, TimestampMixin):
     __tablename__ = "action_confirmations"
-    __table_args__ = (
-        UniqueConstraint("token_hash", name="ux_action_confirmations_token_hash"),
-    )
+    __table_args__ = (UniqueConstraint("token_hash", name="ux_action_confirmations_token_hash"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -244,7 +283,9 @@ class ActionConfirmation(Base, TimestampMixin):
     target_entity: Mapped[str | None] = mapped_column(String(120), index=True)
     target_id: Mapped[str | None] = mapped_column(String(160), index=True)
     target_label: Mapped[str | None] = mapped_column(String(240))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     outcome: Mapped[str | None] = mapped_column(String(80), index=True)
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
@@ -277,7 +318,12 @@ class AuditLog(Base):
 
 
 Index("ix_audit_logs_timestamp_id", AuditLog.timestamp.desc(), AuditLog.id.desc())
-Index("ix_audit_logs_category_timestamp", AuditLog.category, AuditLog.timestamp.desc(), AuditLog.id.desc())
+Index(
+    "ix_audit_logs_category_timestamp",
+    AuditLog.category,
+    AuditLog.timestamp.desc(),
+    AuditLog.id.desc(),
+)
 Index(
     "ix_audit_logs_target_entity_timestamp",
     AuditLog.target_entity,
@@ -291,8 +337,15 @@ Index(
     AuditLog.timestamp,
     AuditLog.id,
 )
-Index("ix_audit_logs_level_timestamp", AuditLog.level, AuditLog.timestamp.desc(), AuditLog.id.desc())
-Index("ix_audit_logs_outcome_timestamp", AuditLog.outcome, AuditLog.timestamp.desc(), AuditLog.id.desc())
+Index(
+    "ix_audit_logs_level_timestamp", AuditLog.level, AuditLog.timestamp.desc(), AuditLog.id.desc()
+)
+Index(
+    "ix_audit_logs_outcome_timestamp",
+    AuditLog.outcome,
+    AuditLog.timestamp.desc(),
+    AuditLog.id.desc(),
+)
 
 
 class TelemetryTrace(Base):
@@ -337,7 +390,11 @@ class TelemetrySpan(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
-Index("ix_telemetry_traces_started_trace", TelemetryTrace.started_at.desc(), TelemetryTrace.trace_id.desc())
+Index(
+    "ix_telemetry_traces_started_trace",
+    TelemetryTrace.started_at.desc(),
+    TelemetryTrace.trace_id.desc(),
+)
 Index(
     "ix_telemetry_traces_category_started",
     TelemetryTrace.category,
@@ -377,14 +434,21 @@ class GateMalfunctionState(Base, TimestampMixin):
     gate_entity_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     gate_name: Mapped[str | None] = mapped_column(String(160))
     status: Mapped[GateMalfunctionStatus] = mapped_column(
-        Enum(GateMalfunctionStatus), default=GateMalfunctionStatus.ACTIVE, nullable=False, index=True
+        Enum(GateMalfunctionStatus),
+        default=GateMalfunctionStatus.ACTIVE,
+        nullable=False,
+        index=True,
     )
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    declared_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    declared_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     fubar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     fix_attempts_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    next_attempt_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    next_attempt_scheduled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     attempt_claim_token: Mapped[str | None] = mapped_column(String(64), index=True)
     attempt_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_known_vehicle_event_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -425,7 +489,9 @@ class GateMalfunctionTimelineEvent(Base, TimestampMixin):
         ForeignKey("gate_malfunction_states.id", ondelete="CASCADE"), nullable=False, index=True
     )
     kind: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     title: Mapped[str] = mapped_column(String(240), nullable=False)
     details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     attempt_number: Mapped[int | None] = mapped_column(Integer)
@@ -452,7 +518,9 @@ class GateMalfunctionNotificationOutbox(Base, TimestampMixin):
     stage: Mapped[str] = mapped_column(String(40), nullable=False, default="initial", index=True)
     subject: Mapped[str] = mapped_column(String(240), nullable=False)
     severity: Mapped[str] = mapped_column(String(40), nullable=False)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False, index=True)
     attempts_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -473,9 +541,13 @@ class GateStateObservation(Base, TimestampMixin):
     state: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     raw_state: Mapped[str | None] = mapped_column(String(80))
     previous_state: Mapped[str | None] = mapped_column(String(40), index=True)
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     state_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    source: Mapped[str] = mapped_column(String(80), default="home_assistant", nullable=False, index=True)
+    source: Mapped[str] = mapped_column(
+        String(80), default="home_assistant", nullable=False, index=True
+    )
 
 
 class NotificationRule(Base, TimestampMixin):
@@ -527,7 +599,9 @@ class NotificationRun(Base, TimestampMixin):
 
 
 Index("ix_notification_runs_status_queued", NotificationRun.status, NotificationRun.queued_at)
-Index("ix_notification_runs_trigger_queued", NotificationRun.trigger_event, NotificationRun.queued_at)
+Index(
+    "ix_notification_runs_trigger_queued", NotificationRun.trigger_event, NotificationRun.queued_at
+)
 
 
 class NotificationActionContext(Base, TimestampMixin):
@@ -554,7 +628,9 @@ class NotificationActionContext(Base, TimestampMixin):
     parent_context_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("notification_action_contexts.id", ondelete="SET NULL"), index=True
     )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     outcome: Mapped[str | None] = mapped_column(String(80), index=True)
     outcome_detail: Mapped[str | None] = mapped_column(Text)
@@ -603,8 +679,12 @@ class AutomationRun(Base, TimestampMixin):
     __tablename__ = "automation_runs"
     __table_args__ = (
         UniqueConstraint("occurrence_key", name="uq_automation_run_occurrence"),
-        Index("ix_automation_run_recovery_queue", "queued_at", "id",
-              postgresql_where=text("recovery_version = 1 AND status IN ('queued', 'processing')")),
+        Index(
+            "ix_automation_run_recovery_queue",
+            "queued_at",
+            "id",
+            postgresql_where=text("recovery_version = 1 AND status IN ('queued', 'processing')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -614,16 +694,24 @@ class AutomationRun(Base, TimestampMixin):
     )
     trigger_key: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(40), default="running", nullable=False, index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     trigger_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     context: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    condition_results: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
-    action_results: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    condition_results: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    action_results: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
     trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
     error: Mapped[str | None] = mapped_column(Text)
     actor: Mapped[str] = mapped_column(String(160), default="System", nullable=False, index=True)
-    source: Mapped[str] = mapped_column(String(120), default="automation", nullable=False, index=True)
+    source: Mapped[str] = mapped_column(
+        String(120), default="automation", nullable=False, index=True
+    )
     recovery_version: Mapped[int | None] = mapped_column(Integer)
     occurrence_key: Mapped[str | None] = mapped_column(String(255))
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -645,16 +733,24 @@ class AutomationWebhookSender(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     webhook_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     source_ip: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     event_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_payload_shape: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    key_strength: Mapped[str] = mapped_column(String(40), default="legacy", nullable=False, index=True)
+    key_strength: Mapped[str] = mapped_column(
+        String(40), default="legacy", nullable=False, index=True
+    )
     hmac_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     allowed_source_ips: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     last_nonce: Mapped[str | None] = mapped_column(String(160), index=True)
     last_signature_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    rate_window_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    rate_window_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     rate_window_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     rejected_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
@@ -675,7 +771,9 @@ class AutomationWebhookNonce(Base, TimestampMixin):
 
 Index("ix_automation_rules_trigger_keys_gin", AutomationRule.trigger_keys, postgresql_using="gin")
 Index("ix_automation_rules_active_next_run", AutomationRule.is_active, AutomationRule.next_run_at)
-Index("ix_automation_rules_active_created", AutomationRule.is_active, AutomationRule.created_at.desc())
+Index(
+    "ix_automation_rules_active_created", AutomationRule.is_active, AutomationRule.created_at.desc()
+)
 Index("ix_automation_runs_rule_started", AutomationRun.rule_id, AutomationRun.started_at.desc())
 Index("ix_automation_webhook_nonces_expires", AutomationWebhookNonce.expires_at)
 
@@ -742,7 +840,9 @@ class Presence(Base, TimestampMixin):
     state: Mapped[PresenceState] = mapped_column(
         Enum(PresenceState), default=PresenceState.UNKNOWN, nullable=False
     )
-    last_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("access_events.id"), index=True)
+    last_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id"), index=True
+    )
     last_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     person: Mapped[Person] = relationship(back_populates="presence")
@@ -752,14 +852,20 @@ class AccessEvent(Base, TimestampMixin):
     __tablename__ = "access_events"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vehicles.id", ondelete="SET NULL"), index=True)
-    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
+    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="SET NULL"), index=True
+    )
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL"), index=True
+    )
     registration_number: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     direction: Mapped[AccessDirection] = mapped_column(Enum(AccessDirection), nullable=False)
     decision: Mapped[AccessDecision] = mapped_column(Enum(AccessDecision), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     source: Mapped[str] = mapped_column(String(120), nullable=False)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     timing_classification: Mapped[TimingClassification] = mapped_column(
         Enum(TimingClassification), default=TimingClassification.UNKNOWN, nullable=False
     )
@@ -794,7 +900,8 @@ Index(
     "ix_access_events_snapshot_registration_occurred",
     AccessEvent.registration_number,
     AccessEvent.occurred_at.desc(),
-    postgresql_where=AccessEvent.snapshot_path.is_not(None) & AccessEvent.snapshot_bytes.is_not(None),
+    postgresql_where=AccessEvent.snapshot_path.is_not(None)
+    & AccessEvent.snapshot_bytes.is_not(None),
 )
 Index(
     "ix_access_events_granted_person_direction_time",
@@ -835,8 +942,12 @@ class LprZoneShadowObservation(Base, TimestampMixin):
     camera_id: Mapped[str | None] = mapped_column(String(120), index=True)
     camera_name: Mapped[str | None] = mapped_column(String(160))
     camera_identifier: Mapped[str | None] = mapped_column(String(160))
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    time_of_day: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    time_of_day: Mapped[str] = mapped_column(
+        String(20), default="unknown", nullable=False, index=True
+    )
     time_of_day_source: Mapped[str] = mapped_column(String(80), default="unknown", nullable=False)
     zone_id: Mapped[str | None] = mapped_column(String(120), index=True)
     zone_name: Mapped[str | None] = mapped_column(String(160), index=True)
@@ -875,15 +986,23 @@ class LprIngestEvent(Base, TimestampMixin):
     __tablename__ = "lpr_ingest_events"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    idempotency_key: Mapped[str] = mapped_column(String(180), unique=True, nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(180), unique=True, nullable=False, index=True
+    )
     source: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     registration_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False, index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_error: Mapped[str | None] = mapped_column(Text)
     movement_saga_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -905,12 +1024,17 @@ Index("ix_lpr_ingest_events_source_captured", LprIngestEvent.source, LprIngestEv
 
 class MovementSagaRecord(Base, TimestampMixin):
     __tablename__ = "movement_sagas"
-    __table_args__ = (CheckConstraint(
-        "admission_status IS NULL OR admission_status IN ('pending','verified','not_required','denied','historical')",
-        name="ck_movement_sagas_admission_status"),)
+    __table_args__ = (
+        CheckConstraint(
+            "admission_status IS NULL OR admission_status IN ('pending','verified','not_required','denied','historical')",
+            name="ck_movement_sagas_admission_status",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(160), unique=True, nullable=False, index=True
+    )
     source: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     state: Mapped[MovementSagaState] = mapped_column(
         Enum(MovementSagaState),
@@ -922,18 +1046,28 @@ class MovementSagaRecord(Base, TimestampMixin):
         ForeignKey("access_events.id", ondelete="SET NULL"),
         index=True,
     )
-    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
-    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vehicles.id", ondelete="SET NULL"), index=True)
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL"), index=True
+    )
+    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="SET NULL"), index=True
+    )
     registration_number: Mapped[str | None] = mapped_column(String(32), index=True)
     direction: Mapped[AccessDirection | None] = mapped_column(Enum(AccessDirection), index=True)
     decision: Mapped[AccessDecision | None] = mapped_column(Enum(AccessDecision), index=True)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    gate_command_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    gate_command_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True
+    )
     presence_committed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # NULL is unclassified legacy history, never proof of entry admission.
     admission_status: Mapped[str | None] = mapped_column(String(24))
     admission_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    reconciliation_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    reconciliation_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True
+    )
     failure_detail: Mapped[str | None] = mapped_column(Text)
     intent_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     decision_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
@@ -947,7 +1081,9 @@ class GateCommandRecord(Base, TimestampMixin):
     __tablename__ = "gate_command_records"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    idempotency_key: Mapped[str] = mapped_column(String(180), unique=True, nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(180), unique=True, nullable=False, index=True
+    )
     movement_saga_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("movement_sagas.id", ondelete="SET NULL"),
         index=True,
@@ -964,7 +1100,9 @@ class GateCommandRecord(Base, TimestampMixin):
     )
     action: Mapped[str] = mapped_column(String(40), default="open", nullable=False)
     source: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
-    gate_key: Mapped[str] = mapped_column(String(120), default="default", nullable=False, index=True)
+    gate_key: Mapped[str] = mapped_column(
+        String(120), default="default", nullable=False, index=True
+    )
     controller: Mapped[str] = mapped_column(String(80), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     actor: Mapped[str | None] = mapped_column(String(160))
@@ -979,7 +1117,9 @@ class GateCommandRecord(Base, TimestampMixin):
     gate_state: Mapped[str | None] = mapped_column(String(40))
     detail: Mapped[str | None] = mapped_column(Text)
     mechanically_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    requires_reconciliation: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    requires_reconciliation: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True
+    )
     exception_class: Mapped[str | None] = mapped_column(String(120))
     command_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
 
@@ -992,28 +1132,48 @@ class AccessDeviceCommandRecord(Base, TimestampMixin):
     __tablename__ = "access_device_command_records"
     __table_args__ = (
         CheckConstraint("action IN ('open', 'close')", name="ck_device_command_action"),
-        CheckConstraint("state IN ('prepared', 'attempting', 'accepted', 'rejected', 'unknown', 'verified', 'not_sent')",
-                        name="ck_device_command_state"),
+        CheckConstraint(
+            "state IN ('prepared', 'attempting', 'accepted', 'rejected', 'unknown', 'verified', 'not_sent')",
+            name="ck_device_command_state",
+        ),
         UniqueConstraint("idempotency_key", name="uq_device_command_idempotency"),
-        Index("uq_device_command_unresolved_target", "target_device_id", unique=True,
-              postgresql_where=text("state IN ('prepared', 'attempting', 'accepted', 'unknown')")),
+        Index(
+            "uq_device_command_unresolved_target",
+            "target_device_id",
+            unique=True,
+            postgresql_where=text("state IN ('prepared', 'attempting', 'accepted', 'unknown')"),
+        ),
         Index("ix_device_command_parent_state", "gate_command_id", "state"),
         Index("ix_device_command_state_lease", "state", "lease_expires_at"),
-        CheckConstraint("origin_context IS NULL OR (jsonb_typeof(origin_context) = 'object' AND COALESCE(origin_context->>'kind' = 'automatic_access_garage', FALSE))", name="ck_device_command_origin"),
-        CheckConstraint("outcome_recorded_at IS NULL OR origin_context IS NOT NULL", name="ck_device_command_output_origin"),
-        Index("ix_device_command_pending_output", "created_at", "id",
-              postgresql_where=text("origin_context IS NOT NULL AND outcome_recorded_at IS NULL")),
+        CheckConstraint(
+            "origin_context IS NULL OR (jsonb_typeof(origin_context) = 'object' AND COALESCE(origin_context->>'kind' = 'automatic_access_garage', FALSE))",
+            name="ck_device_command_origin",
+        ),
+        CheckConstraint(
+            "outcome_recorded_at IS NULL OR origin_context IS NOT NULL",
+            name="ck_device_command_output_origin",
+        ),
+        Index(
+            "ix_device_command_pending_output",
+            "created_at",
+            "id",
+            postgresql_where=text("origin_context IS NOT NULL AND outcome_recorded_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    gate_command_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("gate_command_records.id", ondelete="SET NULL"))
+    gate_command_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("gate_command_records.id", ondelete="SET NULL")
+    )
     # Immutable historical identity: deleting a terminal device must not erase receipts.
     target_device_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     device_key: Mapped[str] = mapped_column(String(120), nullable=False)
     action: Mapped[str] = mapped_column(String(40), nullable=False)
     intent_id: Mapped[str] = mapped_column(String(80), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(180), nullable=False)
-    recovery_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    recovery_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
     state: Mapped[str] = mapped_column(String(32), nullable=False)
     binding_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     binding_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -1024,10 +1184,12 @@ class AccessDeviceCommandRecord(Base, TimestampMixin):
     accepted: Mapped[bool | None] = mapped_column(Boolean)
     gate_state: Mapped[str | None] = mapped_column(String(40))
     verification_observation_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("gate_state_observations.id", ondelete="SET NULL"))
+        ForeignKey("gate_state_observations.id", ondelete="SET NULL")
+    )
     verification_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    provider_receipts: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list,
-                                                                  server_default=text("'[]'::jsonb"), nullable=False)
+    provider_receipts: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False
+    )
     detail: Mapped[str | None] = mapped_column(Text)
     origin_context: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     outcome_recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1048,13 +1210,27 @@ class MovementSessionRecord(Base, TimestampMixin):
         index=True,
     )
     registration_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    normalized_registration_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    direction: Mapped[AccessDirection] = mapped_column(Enum(AccessDirection), nullable=False, index=True)
-    decision: Mapped[AccessDecision] = mapped_column(Enum(AccessDecision), nullable=False, index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    debounce_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    gate_cycle_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    normalized_registration_number: Mapped[str] = mapped_column(
+        String(32), nullable=False, index=True
+    )
+    direction: Mapped[AccessDirection] = mapped_column(
+        Enum(AccessDirection), nullable=False, index=True
+    )
+    decision: Mapped[AccessDecision] = mapped_column(
+        Enum(AccessDecision), nullable=False, index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    debounce_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    gate_cycle_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     idle_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     camera_id: Mapped[str | None] = mapped_column(String(120), index=True)
     device_id: Mapped[str | None] = mapped_column(String(120), index=True)
@@ -1065,7 +1241,9 @@ class MovementSessionRecord(Base, TimestampMixin):
     last_suppressed_reason: Mapped[str | None] = mapped_column(String(160), index=True)
     last_matched_by: Mapped[str | None] = mapped_column(String(80))
     last_presence_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    suppressed_reads: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    suppressed_reads: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
 
 
@@ -1075,9 +1253,22 @@ Index(
     MovementSagaRecord.reconciliation_required,
     MovementSagaRecord.updated_at,
 )
-Index("ix_gate_command_records_gate_state_lease", GateCommandRecord.gate_key, GateCommandRecord.state, GateCommandRecord.lease_expires_at)
-Index("ix_gate_command_records_reconciliation_updated", GateCommandRecord.requires_reconciliation, GateCommandRecord.updated_at)
-Index("ix_movement_sessions_source_last_seen", MovementSessionRecord.source, MovementSessionRecord.last_seen_at)
+Index(
+    "ix_gate_command_records_gate_state_lease",
+    GateCommandRecord.gate_key,
+    GateCommandRecord.state,
+    GateCommandRecord.lease_expires_at,
+)
+Index(
+    "ix_gate_command_records_reconciliation_updated",
+    GateCommandRecord.requires_reconciliation,
+    GateCommandRecord.updated_at,
+)
+Index(
+    "ix_movement_sessions_source_last_seen",
+    MovementSessionRecord.source,
+    MovementSessionRecord.last_seen_at,
+)
 Index(
     "ix_movement_sessions_source_gate_cycle",
     MovementSessionRecord.source,
@@ -1099,13 +1290,19 @@ class ReportExport(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     report_number: Mapped[str] = mapped_column(String(12), nullable=False)
-    report_type: Mapped[str] = mapped_column(String(80), default="person_movements", nullable=False, index=True)
+    report_type: Mapped[str] = mapped_column(
+        String(80), default="person_movements", nullable=False, index=True
+    )
     person_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("people.id", ondelete="SET NULL"),
         index=True,
     )
-    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    period_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    period_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     options: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     pdf_path: Mapped[str] = mapped_column(String(512), nullable=False)
@@ -1117,8 +1314,6 @@ class ReportExport(Base, TimestampMixin):
 
     person: Mapped[Person | None] = relationship()
     created_by: Mapped[User | None] = relationship()
-
-
 
 
 class VisitorPass(Base, TimestampMixin):
@@ -1133,7 +1328,9 @@ class VisitorPass(Base, TimestampMixin):
         index=True,
     )
     visitor_phone: Mapped[str | None] = mapped_column(String(40), index=True)
-    expected_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    expected_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     window_minutes: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -1143,7 +1340,9 @@ class VisitorPass(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    creation_source: Mapped[str] = mapped_column(String(80), default="ui", nullable=False, index=True)
+    creation_source: Mapped[str] = mapped_column(
+        String(80), default="ui", nullable=False, index=True
+    )
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         index=True,
@@ -1177,12 +1376,18 @@ class VisitorPassReservationRecord(Base, TimestampMixin):
     Historical IDs intentionally survive event/pass retention. The visitor owner
     refuses destructive mutation while a reservation is unresolved.
     """
+
     __tablename__ = "visitor_pass_reservations"
     __table_args__ = (
         UniqueConstraint("access_event_id", name="uq_visitor_reservation_event"),
         UniqueConstraint("intent_id", name="uq_visitor_reservation_intent"),
-        CheckConstraint("state IN ('reserved','held','consumed','released')", name="ck_visitor_reservation_state"),
-        CheckConstraint("pass_type IN ('one-time','duration')", name="ck_visitor_reservation_pass_type"),
+        CheckConstraint(
+            "state IN ('reserved','held','consumed','released')",
+            name="ck_visitor_reservation_state",
+        ),
+        CheckConstraint(
+            "pass_type IN ('one-time','duration')", name="ck_visitor_reservation_pass_type"
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     visitor_pass_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
@@ -1198,9 +1403,19 @@ class VisitorPassReservationRecord(Base, TimestampMixin):
     verification_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
 
 
-Index("uq_visitor_reservation_unavailable", VisitorPassReservationRecord.visitor_pass_id, unique=True,
-      postgresql_where=text("state IN ('reserved','held') OR (state = 'consumed' AND pass_type = 'one-time')"))
-Index("ix_visitor_reservation_state_deadline", VisitorPassReservationRecord.state, VisitorPassReservationRecord.dispatch_deadline)
+Index(
+    "uq_visitor_reservation_unavailable",
+    VisitorPassReservationRecord.visitor_pass_id,
+    unique=True,
+    postgresql_where=text(
+        "state IN ('reserved','held') OR (state = 'consumed' AND pass_type = 'one-time')"
+    ),
+)
+Index(
+    "ix_visitor_reservation_state_deadline",
+    VisitorPassReservationRecord.state,
+    VisitorPassReservationRecord.dispatch_deadline,
+)
 
 
 Index(
@@ -1220,8 +1435,7 @@ Index(
     VisitorPass.valid_from,
     VisitorPass.valid_until,
     postgresql_where=(
-        (VisitorPass.pass_type == VisitorPassType.DURATION)
-        & VisitorPass.visitor_phone.is_not(None)
+        (VisitorPass.pass_type == VisitorPassType.DURATION) & VisitorPass.visitor_phone.is_not(None)
     ),
 )
 Index(
@@ -1281,10 +1495,14 @@ class ICloudCalendarSyncRun(Base, TimestampMixin):
     __tablename__ = "icloud_calendar_sync_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     status: Mapped[str] = mapped_column(String(40), default="running", nullable=False, index=True)
-    trigger_source: Mapped[str] = mapped_column(String(80), default="ui", nullable=False, index=True)
+    trigger_source: Mapped[str] = mapped_column(
+        String(80), default="ui", nullable=False, index=True
+    )
     triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         index=True,
@@ -1296,7 +1514,9 @@ class ICloudCalendarSyncRun(Base, TimestampMixin):
     passes_updated: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     passes_cancelled: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     passes_skipped: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    account_results: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    account_results: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
     error: Mapped[str | None] = mapped_column(Text)
 
     triggered_by: Mapped[User | None] = relationship()
@@ -1306,12 +1526,18 @@ class Anomaly(Base, TimestampMixin):
     __tablename__ = "anomalies"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("access_events.id", ondelete="CASCADE"), index=True)
+    event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="CASCADE"), index=True
+    )
     anomaly_type: Mapped[AnomalyType] = mapped_column(Enum(AnomalyType), nullable=False, index=True)
-    severity: Mapped[AnomalySeverity] = mapped_column(Enum(AnomalySeverity), nullable=False, index=True)
+    severity: Mapped[AnomalySeverity] = mapped_column(
+        Enum(AnomalySeverity), nullable=False, index=True
+    )
     message: Mapped[str] = mapped_column(Text, nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     resolution_note: Mapped[str | None] = mapped_column(Text)
     context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
@@ -1327,70 +1553,68 @@ Index(
 )
 
 
-
-
-
-
 class RevokedAuthToken(Base, TimestampMixin):
     __tablename__ = "revoked_auth_tokens"
-    __table_args__ = (
-        UniqueConstraint("jti_hash", name="ux_revoked_auth_tokens_jti_hash"),
-    )
+    __table_args__ = (UniqueConstraint("jti_hash", name="ux_revoked_auth_tokens_jti_hash"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     jti_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
 
 
 class ResidentRecoveryJourney(Base, TimestampMixin):
     """Bounded distance evidence, not a resident's raw location history."""
+
     __tablename__ = "resident_recovery_journeys"
-    person_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), primary_key=True)
+    person_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), primary_key=True
+    )
     epoch: Mapped[str] = mapped_column(String(36), nullable=False)
     binding: Mapped[str] = mapped_column(String(64), nullable=False)
     coordinate_hash: Mapped[str | None] = mapped_column(String(64))
     latest_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     samples: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
     invalid_reason: Mapped[str | None] = mapped_column(String(80))
-    claimed_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("access_events.id", ondelete="SET NULL"))
+    claimed_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL")
+    )
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MissedExitRecoveryAttempt(Base, TimestampMixin):
     __tablename__ = "missed_exit_recovery_attempts"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL"), index=True
+    )
     owner_name: Mapped[str] = mapped_column(String(160), nullable=False)
-    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vehicles.id", ondelete="SET NULL"))
+    vehicle_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="SET NULL")
+    )
     registration_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("access_events.id", ondelete="CASCADE"), unique=True, nullable=False)
-    saga_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("movement_sagas.id", ondelete="SET NULL"))
-    recovery_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("access_events.id", ondelete="SET NULL"))
-    command_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("gate_command_records.id", ondelete="SET NULL"))
-    action_context_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("notification_action_contexts.id", ondelete="SET NULL"))
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("access_events.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    saga_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("movement_sagas.id", ondelete="SET NULL")
+    )
+    recovery_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("access_events.id", ondelete="SET NULL")
+    )
+    command_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("gate_command_records.id", ondelete="SET NULL")
+    )
+    action_context_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("notification_action_contexts.id", ondelete="SET NULL")
+    )
     method: Mapped[str] = mapped_column(String(40), default="none", nullable=False, index=True)
     outcome: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     reason: Mapped[str] = mapped_column(String(120), nullable=False)

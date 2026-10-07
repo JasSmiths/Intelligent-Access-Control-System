@@ -11,7 +11,6 @@ from typing import Any
 from app.modules.lpr.base import PlateRead
 from app.services.event_bus import event_bus
 
-
 MAX_LPR_TIMING_OBSERVATIONS = 2000
 PLATE_VALUE_KEYS = {
     "detectedlicenseplate",
@@ -37,7 +36,17 @@ PLATE_VALUE_KEYS = {
     "top_k_candidate",
     "vrn",
 }
-PLATE_KEY_MARKERS = ("license", "licence", "plate", "lpr", "registration", "vrn", "matched", "candidate", "ocr")
+PLATE_KEY_MARKERS = (
+    "license",
+    "licence",
+    "plate",
+    "lpr",
+    "registration",
+    "vrn",
+    "matched",
+    "candidate",
+    "ocr",
+)
 CONTEXT_VALUE_KEYS = {"name", "value", "val", "text", "matchedname", "matched_name"}
 OBJECT_PLATE_ATTRS = (
     "license_plate",
@@ -106,7 +115,9 @@ class LprTimingRecorder:
             self._observations.clear()
         await event_bus.publish("lpr_timing.cleared", {})
 
-    async def record_webhook_plate(self, read: PlateRead, *, received_at: datetime | None = None) -> None:
+    async def record_webhook_plate(
+        self, read: PlateRead, *, received_at: datetime | None = None
+    ) -> None:
         observation = LprTimingObservation(
             id=str(uuid.uuid4()),
             source="webhook",
@@ -120,7 +131,9 @@ class LprTimingRecorder:
         )
         await self._append_and_publish(observation)
 
-    async def record_unifi_protect_message(self, message: Any, *, received_at: datetime | None = None) -> None:
+    async def record_unifi_protect_message(
+        self, message: Any, *, received_at: datetime | None = None
+    ) -> None:
         observations = extract_unifi_protect_lpr_observations(message, received_at=received_at)
         for observation in observations:
             await self._append_and_publish(observation)
@@ -161,9 +174,7 @@ def extract_unifi_protect_lpr_observations(
     new_obj = getattr(message, "new_obj", None)
     action = _enum_value(getattr(message, "action", None))
     model = str(
-        _dict_get(changed_data, "modelKey")
-        or _enum_value(getattr(new_obj, "model", None))
-        or ""
+        _dict_get(changed_data, "modelKey") or _enum_value(getattr(new_obj, "model", None)) or ""
     )
     common = _protect_common_fields(new_obj, action=action, model=model, received_at=received_at)
 
@@ -191,8 +202,12 @@ def extract_unifi_protect_track_observations(
     if not isinstance(payload, list):
         return []
 
-    resolved_event_id = event_id or _track_event_id(raw_track) or str(getattr(event, "id", "") or "") or None
-    common = _protect_common_fields(event, action="track_probe", model="event", received_at=received_at)
+    resolved_event_id = (
+        event_id or _track_event_id(raw_track) or str(getattr(event, "id", "") or "") or None
+    )
+    common = _protect_common_fields(
+        event, action="track_probe", model="event", received_at=received_at
+    )
     common["event_id"] = resolved_event_id or common["event_id"]
 
     observations: list[LprTimingObservation] = []
@@ -284,7 +299,9 @@ def _observations_from_event_object(
     thumbnails = list(getattr(metadata, "detected_thumbnails", None) or [])
     observations: list[LprTimingObservation] = []
     for index, thumbnail in enumerate(thumbnails):
-        captured_at = _isoformat(getattr(thumbnail, "clock_best_wall", None) or getattr(event, "start", None))
+        captured_at = _isoformat(
+            getattr(thumbnail, "clock_best_wall", None) or getattr(event, "start", None)
+        )
         observations.extend(
             _thumbnail_candidate_observations(
                 thumbnail,
@@ -359,7 +376,14 @@ def _thumbnail_candidate_observations(
             observations.append(observation)
 
     attributes = getattr(thumbnail, "attributes", None)
-    for key in ("matchedName", "matched_name", "topKCandidate", "top_k_candidate", "namesTopK", "names_top_k"):
+    for key in (
+        "matchedName",
+        "matched_name",
+        "topKCandidate",
+        "top_k_candidate",
+        "namesTopK",
+        "names_top_k",
+    ):
         value = _object_or_dict_value(attributes, key)
         if value is None:
             continue
@@ -369,7 +393,9 @@ def _thumbnail_candidate_observations(
             payload_path=f"{base_path}.attributes.{key}",
             common=common,
             captured_at=captured_at,
-            confidence=_float_or_none(getattr(value, "confidence", None) or getattr(thumbnail, "confidence", None)),
+            confidence=_float_or_none(
+                getattr(value, "confidence", None) or getattr(thumbnail, "confidence", None)
+            ),
             confidence_scale="0_100",
         )
         if observation is not None:
@@ -422,7 +448,15 @@ def _observation_from_candidate(
 
 
 def _track_plate_value(row: dict[str, Any]) -> tuple[str, Any] | tuple[None, None]:
-    for key in ("licensePlate", "license_plate", "licencePlate", "licence_plate", "plate", "plateNumber", "plate_number"):
+    for key in (
+        "licensePlate",
+        "license_plate",
+        "licencePlate",
+        "licence_plate",
+        "plate",
+        "plateNumber",
+        "plate_number",
+    ):
         value = row.get(key)
         if value:
             return key, value
@@ -463,7 +497,7 @@ def _model_to_debug_dict(value: Any) -> Any:
     if callable(unifi_dict):
         try:
             return unifi_dict()
-        except Exception:
+        except Exception:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
             return None
     return None
 
@@ -520,7 +554,11 @@ def _walk_lpr_candidate_values(
 def _is_lpr_candidate_key(key: str) -> bool:
     normalized = _normalize_key(key)
     compact = normalized.replace("_", "")
-    return normalized in PLATE_VALUE_KEYS or compact in PLATE_VALUE_KEYS or any(marker in compact for marker in PLATE_KEY_MARKERS)
+    return (
+        normalized in PLATE_VALUE_KEYS
+        or compact in PLATE_VALUE_KEYS
+        or any(marker in compact for marker in PLATE_KEY_MARKERS)
+    )
 
 
 def _path_has_lpr_context(path: str) -> bool:
@@ -535,19 +573,22 @@ def _protect_common_fields(
     model: str | None,
     received_at: datetime,
 ) -> dict[str, Any]:
-    is_camera = bool(obj is not None and (str(model or "").lower() == "camera" or hasattr(obj, "channels")))
+    is_camera = bool(
+        obj is not None and (str(model or "").lower() == "camera" or hasattr(obj, "channels"))
+    )
     camera = obj if is_camera else getattr(obj, "camera", None)
-    camera_id = str(
-        (getattr(obj, "id", None) if is_camera else None)
-        or getattr(obj, "camera_id", "")
-        or getattr(camera, "id", "")
-        or ""
-    ) or None
-    camera_name = str(
-        getattr(camera, "display_name", "")
-        or getattr(camera, "name", "")
-        or ""
-    ) or None
+    camera_id = (
+        str(
+            (getattr(obj, "id", None) if is_camera else None)
+            or getattr(obj, "camera_id", "")
+            or getattr(camera, "id", "")
+            or ""
+        )
+        or None
+    )
+    camera_name = (
+        str(getattr(camera, "display_name", "") or getattr(camera, "name", "") or "") or None
+    )
     return {
         "received_at": _isoformat(received_at),
         "event_id": None if is_camera else str(getattr(obj, "id", "") or "") or None,
@@ -555,7 +596,9 @@ def _protect_common_fields(
         "camera_name": camera_name,
         "protect_action": action,
         "protect_model": model,
-        "smart_detect_types": [_enum_value(item) for item in getattr(obj, "smart_detect_types", [])],
+        "smart_detect_types": [
+            _enum_value(item) for item in getattr(obj, "smart_detect_types", [])
+        ],
     }
 
 

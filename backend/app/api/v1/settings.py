@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,15 +9,15 @@ from app.api.confirmations import require_confirmed_action
 from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
 from app.models import User
-from app.modules.notifications.apprise_client import validate_apprise_urls
 from app.modules.access_devices.registry import get_access_device_provider
+from app.modules.notifications.apprise_client import validate_apprise_urls
+from app.services.access_devices import get_access_device_service
 from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services.auth_secret_management import (
     AuthSecretRotationError,
     auth_secret_security_status,
     rotate_auth_secret,
 )
-from app.services.access_devices import get_access_device_service
 from app.services.dvla import test_vehicle_enquiry_connection
 from app.services.home_assistant import get_home_assistant_service
 from app.services.settings import (
@@ -55,14 +55,13 @@ class AuthSecretRotateRequest(BaseModel):
 
 @router.get("")
 async def get_settings(
-    category: str | None = None,
-    _: User = Depends(current_user),
+    _: Annotated[User, Depends(current_user)], category: str | None = None
 ) -> list[dict[str, Any]]:
     return await list_settings(category)
 
 
 @router.get("/runtime")
-async def runtime_settings(_: User = Depends(current_user)) -> dict[str, Any]:
+async def runtime_settings(_: Annotated[User, Depends(current_user)]) -> dict[str, Any]:
     config = await get_runtime_config()
     return {
         "app_name": config.app_name,
@@ -73,15 +72,15 @@ async def runtime_settings(_: User = Depends(current_user)) -> dict[str, Any]:
 
 
 @router.get("/security/auth-secret")
-async def get_auth_secret_status(_: User = Depends(admin_user)) -> dict[str, object]:
+async def get_auth_secret_status(_: Annotated[User, Depends(admin_user)]) -> dict[str, object]:
     return await auth_secret_security_status()
 
 
 @router.post("/security/auth-secret/rotate")
 async def rotate_auth_secret_endpoint(
     request: AuthSecretRotateRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, object]:
     await require_confirmed_action(
         session,
@@ -103,8 +102,8 @@ async def rotate_auth_secret_endpoint(
 @router.patch("")
 async def patch_settings(
     request: SettingsUpdateRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> list[dict[str, Any]]:
     try:
         validate_dynamic_setting_keys(request.values)
@@ -141,7 +140,7 @@ async def patch_settings(
         service = get_home_assistant_service()
         await service.stop()
         await service.start()
-    if any(key.startswith("esphome_") or key.startswith("gate_") for key in request.values):
+    if any(key.startswith(("esphome_", "gate_")) for key in request.values):
         await get_access_device_service().restart()
     if any(key.startswith("unifi_protect_") for key in request.values):
         await get_unifi_protect_service().restart()
@@ -151,8 +150,8 @@ async def patch_settings(
 @router.post("/test")
 async def test_connection(
     request: ConnectionTestRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, str | bool]:
     integration = request.integration.lower()
     values = request.values
@@ -187,7 +186,9 @@ async def test_connection(
         elif integration == "ollama":
             await _test_ollama(values)
         else:
-            raise HTTPException(status_code=400, detail=f"Unknown integration: {request.integration}")
+            raise HTTPException(
+                status_code=400, detail=f"Unknown integration: {request.integration}"
+            )
     except Exception as exc:
         emit_audit_log(
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -223,7 +224,9 @@ async def _test_home_assistant(values: dict[str, Any]) -> None:
     if not base_url or not token:
         raise ValueError("Home Assistant URL and token are required.")
     async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-        response = await client.get(f"{base_url}/api/", headers={"Authorization": f"Bearer {token}"})
+        response = await client.get(
+            f"{base_url}/api/", headers={"Authorization": f"Bearer {token}"}
+        )
     _raise_for_test(response, "Home Assistant")
 
 
@@ -244,7 +247,11 @@ async def _test_esphome(values: dict[str, Any]) -> None:
     if not enabled_devices:
         raise ValueError("No enabled ESPHome devices are configured.")
     requested_device = str(values.get("device_id") or "").strip()
-    target_devices = [device for device in enabled_devices if str(device.get("id") or "") == requested_device] if requested_device else enabled_devices
+    target_devices = (
+        [device for device in enabled_devices if str(device.get("id") or "") == requested_device]
+        if requested_device
+        else enabled_devices
+    )
     if not target_devices:
         raise ValueError("Requested ESPHome device is not configured or enabled.")
     for device in target_devices:
@@ -272,12 +279,16 @@ async def _test_openai(values: dict[str, Any]) -> None:
     if not api_key:
         raise ValueError("OpenAI API key is required.")
     async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-        response = await client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"})
+        response = await client.get(
+            f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
+        )
     _raise_for_test(response, "OpenAI")
 
 
 async def _test_gemini(values: dict[str, Any]) -> None:
-    base_url = str(values.get("gemini_base_url") or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+    base_url = str(
+        values.get("gemini_base_url") or "https://generativelanguage.googleapis.com/v1beta"
+    ).rstrip("/")
     api_key = str(values.get("gemini_api_key") or "")
     if not api_key:
         raise ValueError("Gemini API key is required.")

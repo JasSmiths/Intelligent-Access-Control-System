@@ -77,7 +77,6 @@ def boundary(monkeypatch):
     )
     monkeypatch.setattr(notifications, "get_notification_service", lambda: state.service)
     monkeypatch.setattr(notification_api, "get_notification_service", lambda: state.service)
-    monkeypatch.setattr(integrations, "get_notification_service", lambda: state.service)
     monkeypatch.setattr(integrations, "is_maintenance_mode_active", AsyncMock(return_value=False))
     state.config = SimpleNamespace(home_assistant_default_media_player="media_player.default_synthetic",
                                    apprise_urls="json://synthetic.invalid")

@@ -4,7 +4,11 @@ from urllib.parse import urlparse
 import apprise
 
 from app.core.logging import get_logger
-from app.modules.notifications.base import NotificationContext, NotificationDeliveryError, NotificationSender
+from app.modules.notifications.base import (
+    NotificationContext,
+    NotificationDeliveryError,
+    NotificationSender,
+)
 from app.services.settings import get_runtime_config
 
 logger = get_logger(__name__)
@@ -51,7 +55,9 @@ class AppriseNotificationSender(NotificationSender):
             extra={"title": title, "event_type": context.event_type, "severity": context.severity},
         )
         if not sent:
-            raise NotificationDeliveryError("Apprise accepted the URL but did not deliver the notification.")
+            raise NotificationDeliveryError(
+                "Apprise accepted the URL but did not deliver the notification."
+            )
 
     async def _parse_urls(self) -> list[str]:
         configured = self._urls

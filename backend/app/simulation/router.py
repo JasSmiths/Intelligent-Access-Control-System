@@ -1,3 +1,5 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,10 +31,10 @@ async def _raise_if_maintenance_active() -> None:
 @router.post("/arrival/{registration_number}")
 async def simulate_arrival(
     registration_number: str,
-    request: SimulationInjectionRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-    service: AccessEventService = Depends(get_access_event_service),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    service: Annotated[AccessEventService, Depends(get_access_event_service)],
+    request: Annotated[SimulationInjectionRequest | None, Body()] = None,
 ) -> dict[str, str]:
     """Inject a synthetic plate read for local demos and automated tests."""
 
@@ -60,10 +62,10 @@ async def simulate_arrival(
 @router.post("/misread-sequence/{registration_number}")
 async def simulate_misread_sequence(
     registration_number: str,
-    request: SimulationInjectionRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-    service: AccessEventService = Depends(get_access_event_service),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    service: Annotated[AccessEventService, Depends(get_access_event_service)],
+    request: Annotated[SimulationInjectionRequest | None, Body()] = None,
 ) -> dict[str, str]:
     """Inject a rapid sequence of near-matches to exercise debounce logic."""
 
@@ -93,7 +95,11 @@ async def simulate_misread_sequence(
             )
         )
 
-    return {"status": "simulated", "registration_number": plate, "candidate_count": str(len(candidates))}
+    return {
+        "status": "simulated",
+        "registration_number": plate,
+        "candidate_count": str(len(candidates)),
+    }
 
 
 @router.post("/e2e/full-access-flow", response_model=FullAccessFlowReport)

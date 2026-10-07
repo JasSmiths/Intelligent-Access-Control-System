@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -27,11 +27,13 @@ class ActionConfirmationCreateRequest(BaseModel):
 @router.post("")
 async def create_confirmation(
     request: ActionConfirmationCreateRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     if request.action.strip() == "alert.group.resolve":
-        raise HTTPException(status_code=403, detail="Alert groups require a server-issued member target.")
+        raise HTTPException(
+            status_code=403, detail="Alert groups require a server-issued member target."
+        )
     try:
         metadata = {key: value for key, value in request.metadata.items() if key != "hardware_plan"}
         if request.action == "gate.open":
@@ -39,11 +41,14 @@ async def create_confirmation(
                 target_device_key=request.payload.get("target_device_key"),
             )
         elif request.action in {"cover.open", "cover.close"}:
-            key = resolve_legacy_cover_key(entity_id=request.payload.get("entity_id"), target=request.payload.get("target"))
+            key = resolve_legacy_cover_key(
+                entity_id=request.payload.get("entity_id"), target=request.payload.get("target")
+            )
             if not key:
                 raise ValueError("A configured garage door target is required.")
             metadata["hardware_plan"] = await get_access_device_service().preview_device_command(
-                key, request.action.split(".")[1],
+                key,
+                request.action.split(".")[1],
             )
         return await create_action_confirmation(
             session,

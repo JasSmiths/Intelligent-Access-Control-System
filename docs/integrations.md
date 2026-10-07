@@ -1,6 +1,8 @@
 # Integrations and safety
 
-IACS owns authorization, durable receipts and audit. Provider modules translate
+IACS owns authorization, durable receipts and audit. Application composition
+binds integration observation callbacks to business owners without vendor
+back-imports. Binding is inert; the application lifespan starts and stops services. Provider modules translate
 approved operations into vendor I/O. Use the application owners even when a
 provider offers a simpler direct command. See [architecture](architecture.md)
 for the access and movement flow and [validation](validation.md) for isolated

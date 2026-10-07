@@ -24,14 +24,87 @@ from recovery_checks import (
 
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION = ['iacs-backend', 'iacs-frontend', 'iacs-postgres', 'iacs-redis', 'iacs-updater']
-LINT_COMMANDS = {'ruff': ['-m', 'ruff', 'check', '--no-cache', 'app/services/notification_runs.py', 'app/services/notification_dispatch.py', 'app/services/notification_rules.py', 'app/services/mutation_context.py', 'app/services/schedule_assignments.py', 'app/services/schedule_operations.py', 'app/services/domain_events.py', 'app/services/access/decision.py', 'app/services/access/reads.py', 'app/services/access/evidence.py', 'app/services/access/execution.py', 'app/services/access/enrichment.py', 'app/services/access/payloads.py', 'app/services/access/hardware.py', 'app/services/access_events.py'], 'mypy': ['-m', 'mypy', '--cache-dir=/tmp/mypy', 'app/services/notification_runs.py', 'app/services/notification_dispatch.py', 'app/services/notification_rules.py', 'app/services/mutation_context.py', 'app/services/schedule_assignments.py', 'app/services/schedule_operations.py', 'app/services/domain_events.py', 'app/services/access/decision.py', 'app/services/access/reads.py', 'app/services/access/evidence.py', 'app/services/access/execution.py', 'app/services/access/enrichment.py', 'app/services/access/payloads.py', 'app/services/access/hardware.py', 'app/services/access_events.py']}
+LINT_COMMANDS = {
+    "ruff": ["-m", "ruff", "check", "--no-cache", "app"],
+    "test-names": ["-m", "ruff", "check", "--no-cache", "--select", "F821", "tests", "../scripts/validation"],
+    "mypy": ["-m", "mypy", "--cache-dir=/tmp/mypy", "--check-untyped-defs",
+             'app/services/notification_runs.py',
+             'app/services/notification_dispatch.py',
+             'app/services/notification_rules.py',
+             'app/services/mutation_context.py',
+             'app/services/schedule_assignments.py',
+             'app/services/schedule_operations.py',
+             'app/services/domain_events.py',
+             'app/services/access/decision.py',
+             'app/services/access/reads.py',
+             'app/services/access/evidence.py',
+             'app/services/access/execution.py',
+             'app/services/access/enrichment.py',
+             'app/services/access/payloads.py',
+             'app/services/access/hardware.py',
+             'app/services/access_events.py',
+             'app/ai/providers.py',
+             'app/services/notification_rendering.py',
+             'app/composition.py',
+             'app/services/integration_effects.py',
+             'app/services/gate_controller.py',
+             'app/services/access_device_outcomes.py',
+             'app/services/access/plate_matching.py',
+             'app/services/gate_malfunction_policy.py',
+             'app/services/directory',
+             'app/schemas/directory.py',
+             'app/services/reports.py',
+             'app/services/report_durations.py',
+             'app/services/notifications.py',
+             'app/services/notification_planning.py',
+             'app/services/notification_authorization.py',
+             'app/services/notification_recipients.py',
+             'app/services/automations.py',
+             'app/services/automation_actions.py',
+             'app/services/automation_integration_actions.py',
+             'app/services/automation_rules.py',
+             'app/services/automation_webhooks.py',
+             'app/services/automation_time_intake.py',
+             'app/services/automation_serialization.py',
+             'app/services/workflow_dispatch_ports.py',
+             'app/services/workflows/execution_contracts.py',
+             'app/services/workflow_session.py',
+             'app/services/automation_dispatch.py',
+             'app/services/automation_scheduling.py',
+    ],
+}
 
+LINT_COMMANDS["typed-contracts"] = [
+    "-m", "mypy", "--cache-dir=/tmp/mypy-contracts",
+    "--check-untyped-defs", "--disallow-untyped-defs",
+    'app/composition.py',
+    'app/services/integration_effects.py',
+    'app/services/gate_controller.py',
+    'app/services/access_device_outcomes.py',
+    'app/services/access/plate_matching.py',
+    'app/services/gate_malfunction_policy.py',
+    'app/services/directory',
+    'app/schemas/directory.py',
+    'app/services/report_durations.py',
+    'app/services/notifications.py',
+    'app/services/notification_planning.py',
+    'app/services/notification_authorization.py',
+    'app/services/notification_recipients.py',
+    'app/services/notification_dispatch.py',
+    'app/services/automations.py',
+    'app/services/automation_actions.py',
+    'app/services/automation_integration_actions.py',
+    'app/services/automation_rules.py',
+    'app/services/automation_webhooks.py',
+    'app/services/automation_time_intake.py',
+    'app/services/automation_scheduling.py',
+    'app/services/automation_serialization.py',
+    'app/services/automation_dispatch.py',
+    'app/services/workflow_session.py',
+    'app/services/workflow_dispatch_ports.py',
+    'app/services/workflows/execution_contracts.py',
+]
 
-# The scoped style/type baseline must not hide undefined runtime names elsewhere.
-LINT_COMMANDS["ruff"] += ["app/ai/providers.py", "app/services/notification_rendering.py"]
-LINT_COMMANDS["mypy"] += ["app/ai/providers.py", "app/services/notification_rendering.py"]
-LINT_COMMANDS["undefined-names"] = ["-m", "ruff", "check", "--no-cache", "--select", "F821", "app"]
-LINT_COMMANDS["ruff"] += ["app/services/resident_recovery.py", "app/services/resident_recovery_evidence.py", "app/api/v1/missed_exit_recovery.py", "app/services/actionable_notifications.py", "app/simulation/scenarios.py"]
 
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)

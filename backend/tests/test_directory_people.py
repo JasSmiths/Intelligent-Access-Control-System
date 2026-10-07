@@ -1,12 +1,12 @@
+import uuid
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, cast
-import uuid
 
 import pytest
-from fastapi import HTTPException
 
-from app.api.v1.directory import (
-    derived_vehicle_person_id,
+from app.services.directory.assignments import derived_vehicle_person_id
+from app.services.directory.errors import DirectoryOperationError
+from app.services.directory.representation import (
     normalize_person_presence_input_boolean_action,
     normalize_person_presence_input_boolean_entity_ids,
     normalize_person_pronouns,
@@ -27,12 +27,14 @@ SimpleNamespace = cast(Any, _SimpleNamespace)
         (None, None),
     ],
 )
-def test_normalize_person_pronouns_accepts_supported_values(value: str | None, expected: str | None) -> None:
+def test_normalize_person_pronouns_accepts_supported_values(
+    value: str | None, expected: str | None
+) -> None:
     assert normalize_person_pronouns(value) == expected
 
 
 def test_normalize_person_pronouns_rejects_unsupported_values() -> None:
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(DirectoryOperationError) as exc_info:
         normalize_person_pronouns("they/them")
 
     assert exc_info.value.status_code == 400
@@ -46,22 +48,27 @@ def test_normalize_presence_input_boolean_entity_ids_trims_and_dedupes() -> None
 
 
 def test_normalize_presence_input_boolean_entity_ids_rejects_non_input_boolean() -> None:
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(DirectoryOperationError) as exc_info:
         normalize_person_presence_input_boolean_entity_ids(["switch.person"])
 
     assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "Home Assistant presence entity IDs must start with input_boolean."
+    assert (
+        exc_info.value.detail == "Home Assistant presence entity IDs must start with input_boolean."
+    )
 
 
 def test_normalize_presence_input_boolean_action_defaults_and_validates() -> None:
     assert normalize_person_presence_input_boolean_action(None) == "turn_off"
     assert normalize_person_presence_input_boolean_action("turn_on") == "turn_on"
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(DirectoryOperationError) as exc_info:
         normalize_person_presence_input_boolean_action("toggle")
 
     assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "Home Assistant presence input_boolean action must be turn_on or turn_off."
+    assert (
+        exc_info.value.detail
+        == "Home Assistant presence input_boolean action must be turn_on or turn_off."
+    )
 
 
 def test_derived_vehicle_person_id_is_only_set_for_single_assignment() -> None:
@@ -197,9 +204,15 @@ def test_serialize_person_uses_vehicle_assignment_rows() -> None:
     assert payload["profile_photo_data_url"] == "data:image/png;base64,person"
     assert payload["profile_photo_url"] == f"/api/v1/people/{person.id}/photo"
     assert payload["vehicles"][0]["vehicle_photo_data_url"] == "data:image/png;base64,vehicle"
-    assert payload["vehicles"][0]["vehicle_photo_url"] == f"/api/v1/vehicles/{assigned_vehicle.id}/photo"
+    assert (
+        payload["vehicles"][0]["vehicle_photo_url"]
+        == f"/api/v1/vehicles/{assigned_vehicle.id}/photo"
+    )
     compact_payload = serialize_person(person, include_media=False)
     assert compact_payload["profile_photo_data_url"] is None
     assert compact_payload["profile_photo_url"] == f"/api/v1/people/{person.id}/photo"
     assert compact_payload["vehicles"][0]["vehicle_photo_data_url"] is None
-    assert compact_payload["vehicles"][0]["vehicle_photo_url"] == f"/api/v1/vehicles/{assigned_vehicle.id}/photo"
+    assert (
+        compact_payload["vehicles"][0]["vehicle_photo_url"]
+        == f"/api/v1/vehicles/{assigned_vehicle.id}/photo"
+    )

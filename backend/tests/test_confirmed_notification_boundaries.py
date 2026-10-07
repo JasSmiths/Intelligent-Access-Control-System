@@ -9,7 +9,7 @@ import pytest
 from app.modules.announcements import home_assistant_tts
 from app.modules.notifications import home_assistant_mobile
 from app.modules.notifications.base import NotificationContext
-from app.services import notification_requests, notifications
+from app.services import notification_requests, notifications, notification_planning, notification_authorization
 from app.services.notifications import NotificationService
 
 
@@ -35,7 +35,7 @@ async def test_literal_ha_body_reaches_actual_adapter_without_template_or_prefix
     for adapter in (home_assistant_tts, home_assistant_mobile):
         monkeypatch.setattr(adapter, "get_home_assistant_client", lambda: client)
     monkeypatch.setattr(home_assistant_tts, "get_runtime_config", AsyncMock(side_effect=AssertionError("Config reread")))
-    monkeypatch.setattr(notifications, "render_template", Mock(side_effect=AssertionError("Literal body rendered")))
+    monkeypatch.setattr(notification_planning, "render_template", Mock(side_effect=AssertionError("Literal body rendered")))
     target = "media_player.synthetic" if kind == "voice" else "notify.mobile_app_synthetic"
     action = {"type": kind, "delivery_mode": "literal", "target": target, "message": BODY, "title": TITLE}
     original = deepcopy(action)
@@ -79,8 +79,8 @@ async def test_authorized_snapshot_is_returned_unchanged_for_transport(monkeypat
     current = AsyncMock(return_value=config)
     denial = AsyncMock(return_value=None)
     monkeypatch.setattr(notifications, "get_runtime_config_for_session", current)
-    monkeypatch.setattr(notifications, "confirmed_attempt_denial", denial)
-    monkeypatch.setattr(notifications, "load_active_admin", AsyncMock())
+    monkeypatch.setattr(notification_authorization, "confirmed_attempt_denial", denial)
+    monkeypatch.setattr(notification_authorization, "load_active_admin", AsyncMock())
     service = NotificationService()
     session = SimpleNamespace(scalars=AsyncMock())
     payload = {"confirmed_delivery": {"user_id": str(uuid.uuid4()), "auth_version": 1}}

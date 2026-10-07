@@ -1,7 +1,8 @@
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from statistics import median
-from typing import Any, Mapping, Sequence
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import or_, select
@@ -10,7 +11,6 @@ from sqlalchemy.orm import selectinload
 
 from app.models import AccessEvent, Person, Vehicle, VehiclePersonAssignment
 from app.models.enums import AccessDecision, AccessDirection
-
 
 LOOKBACK_WEEKS = 12
 MIN_WEEKDAY_VISITS = 3
@@ -106,9 +106,7 @@ def build_expected_presence_payload(
         if window_start_date <= event.occurred_at.astimezone(timezone).date() < target_date
     ]
     today_events = [
-        event
-        for event in events
-        if event.occurred_at.astimezone(timezone).date() == target_date
+        event for event in events if event.occurred_at.astimezone(timezone).date() == target_date
     ]
     visits_by_person = _visit_days_by_person(
         historical_events,
@@ -163,14 +161,10 @@ def build_expected_presence_payload(
             evidence_days=len(today["visit_dates"]),
             observed_weekdays=today["observed_weekdays"],
             typical_arrival=_typical_time(
-                minute
-                for visit in weekday_visits
-                for minute in visit.entry_minutes[:1]
+                minute for visit in weekday_visits for minute in visit.entry_minutes[:1]
             ),
             typical_departure=_typical_time(
-                minute
-                for visit in weekday_visits
-                for minute in visit.exit_minutes[-1:]
+                minute for visit in weekday_visits for minute in visit.exit_minutes[-1:]
             ),
         )
 
@@ -180,11 +174,7 @@ def build_expected_presence_payload(
         len(training_candidate_people),
         len(observed_today),
     )
-    coverage_ratio = (
-        learned_candidates / learning_population
-        if learning_population
-        else 1.0
-    )
+    coverage_ratio = learned_candidates / learning_population if learning_population else 1.0
     learning = bool(learning_population and coverage_ratio < LEARNING_MIN_COVERAGE)
     if learning:
         for observed in observed_today:
@@ -367,8 +357,7 @@ def _evaluate_person_weekday(
     recent_weekdays = observed_weekdays[-RECENT_WEEKDAY_OCCURRENCES:]
     has_recent_evidence = any(local_date in visit_dates for local_date in recent_weekdays)
     candidate = (
-        len(visit_dates) >= MIN_WEEKDAY_VISITS
-        and attendance_ratio >= MIN_CANDIDATE_ATTENDANCE
+        len(visit_dates) >= MIN_WEEKDAY_VISITS and attendance_ratio >= MIN_CANDIDATE_ATTENDANCE
     )
     learned = (
         len(visit_dates) >= MIN_WEEKDAY_VISITS
@@ -434,7 +423,7 @@ def _typical_time(minutes: Any) -> str | None:
     values = [int(value) for value in minutes]
     if not values:
         return None
-    typical = int(round(median(values)))
+    typical = round(median(values))
     return f"{typical // 60:02d}:{typical % 60:02d}"
 
 

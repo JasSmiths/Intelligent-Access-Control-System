@@ -1,13 +1,13 @@
 import asyncio
 from pathlib import Path
 
-from alembic import command
 from alembic.config import Config
 
+from alembic import command
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.services.auth_secret_management import migrate_encrypted_payloads_for_active_auth_secret
 from app.services.access_devices import seed_access_devices_from_settings
+from app.services.auth_secret_management import migrate_encrypted_payloads_for_active_auth_secret
 from app.services.settings import seed_dynamic_settings
 
 logger = get_logger(__name__)

@@ -1,6 +1,6 @@
 import json
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
@@ -9,19 +9,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import admin_user
 from app.db.session import get_db_session
 from app.models import AutomationRule, User
-from app.services.mutation_context import MutationError, load_active_admin
+from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
+from app.services.automation_errors import AutomationError
+from app.services.automation_execution import AutomationRunStore
+from app.services.automation_serialization import serialize_rule, serialize_run
 from app.services.automations import (
     WEBHOOK_NONCE_HEADER,
     WEBHOOK_SIGNATURE_HEADER,
     WEBHOOK_TIMESTAMP_HEADER,
-    AutomationError,
     get_automation_service,
-    serialize_rule,
-    serialize_run,
 )
-from app.services.automation_execution import AutomationRunStore
-from app.services.workflows.automation_definition import normalize_actions, normalize_conditions, normalize_triggers
-from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
+from app.services.mutation_context import MutationError, load_active_admin
+from app.services.workflows.automation_definition import (
+    normalize_actions,
+    normalize_conditions,
+    normalize_triggers,
+)
 
 router = APIRouter()
 
@@ -58,7 +61,7 @@ class AutomationRuleDeleteRequest(BaseModel):
 
 
 @router.get("/catalog")
-async def automation_catalog(_: User = Depends(admin_user)) -> dict[str, Any]:
+async def automation_catalog(_: Annotated[User, Depends(admin_user)]) -> dict[str, Any]:
     return await get_automation_service().catalog()
 
 
@@ -70,12 +73,7 @@ async def _current_history_admin(session: AsyncSession, user: User) -> None:
 
 
 @router.get("/runs")
-async def list_automation_runs(
-    limit: int = Query(default=25, ge=1, le=100),
-    before_id: uuid.UUID | None = None,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
+async def list_automation_runs(user: Annotated[User, Depends(admin_user)], session: Annotated[AsyncSession, Depends(get_db_session)], limit: Annotated[int, Query(ge=1, le=100)]=25, before_id: uuid.UUID | None=None) -> dict[str, Any]:
     await _current_history_admin(session, user)
     try:
         rows, cursor = await AutomationRunStore().read_page(session, limit=limit, before_id=before_id)
@@ -85,11 +83,7 @@ async def list_automation_runs(
 
 
 @router.get("/runs/{run_id}")
-async def get_automation_run(
-    run_id: uuid.UUID,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
+async def get_automation_run(run_id: uuid.UUID, user: Annotated[User, Depends(admin_user)], session: Annotated[AsyncSession, Depends(get_db_session)]) -> dict[str, Any]:
     await _current_history_admin(session, user)
     try:
         row = await AutomationRunStore().read_detail(session, run_id)
@@ -99,20 +93,13 @@ async def get_automation_run(
 
 
 @router.get("/rules")
-async def list_automation_rules(
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> list[dict[str, Any]]:
+async def list_automation_rules(_: Annotated[User, Depends(admin_user)], session: Annotated[AsyncSession, Depends(get_db_session)]) -> list[dict[str, Any]]:
     rules = await get_automation_service().list_rules(session)
     return [serialize_rule(rule) for rule in rules]
 
 
 @router.post("/rules", status_code=status.HTTP_201_CREATED)
-async def create_automation_rule(
-    request: AutomationRuleRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
+async def create_automation_rule(request: AutomationRuleRequest, user: Annotated[User, Depends(admin_user)], session: Annotated[AsyncSession, Depends(get_db_session)]) -> dict[str, Any]:
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
     await require_confirmation(
         session,
@@ -141,21 +128,12 @@ async def create_automation_rule(
 
 
 @router.get("/rules/{rule_id}")
-async def get_automation_rule(
-    rule_id: uuid.UUID,
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
+async def get_automation_rule(rule_id: uuid.UUID, _: Annotated[User, Depends(admin_user)], session: Annotated[AsyncSession, Depends(get_db_session)]) -> dict[str, Any]:
     return serialize_rule(await get_rule_or_404(session, rule_id))
 
 
 @router.patch("/rules/{rule_id}")
-async def update_automation_rule(
-    rule_id: uuid.UUID,
-    request: AutomationRuleUpdateRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
+async def update_automation_rule(rule_id: uuid.UUID, request: AutomationRuleUpdateRequest, user: Annotated[User, Depends(admin_user)], session: Annotated[AsyncSession, Depends(get_db_session)]) -> dict[str, Any]:
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
     await require_confirmation(
         session,
@@ -186,12 +164,7 @@ async def update_automation_rule(
 
 
 @router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_automation_rule(
-    rule_id: uuid.UUID,
-    request: AutomationRuleDeleteRequest | None = None,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> None:
+async def delete_automation_rule(rule_id: uuid.UUID, user: Annotated[User, Depends(admin_user)], session: Annotated[AsyncSession, Depends(get_db_session)], request: AutomationRuleDeleteRequest | None=None) -> None:
     await require_confirmation(
         session,
         user=user,
@@ -205,12 +178,7 @@ async def delete_automation_rule(
 
 
 @router.post("/rules/{rule_id}/dry-run")
-async def dry_run_automation_rule(
-    rule_id: uuid.UUID,
-    request: AutomationDryRunRequest | None = None,
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
+async def dry_run_automation_rule(rule_id: uuid.UUID, _: Annotated[User, Depends(admin_user)], session: Annotated[AsyncSession, Depends(get_db_session)], request: AutomationDryRunRequest | None=None) -> dict[str, Any]:
     rule = await get_rule_or_404(session, rule_id)
     body = request or AutomationDryRunRequest()
     return await get_automation_service().dry_run_rule(
@@ -221,10 +189,7 @@ async def dry_run_automation_rule(
 
 
 @router.post("/dry-run")
-async def dry_run_unsaved_automation_rule(
-    request: dict[str, Any],
-    _: User = Depends(admin_user),
-) -> dict[str, Any]:
+async def dry_run_unsaved_automation_rule(request: dict[str, Any], _: Annotated[User, Depends(admin_user)]) -> dict[str, Any]:
     rule = {
         "name": request.get("name") or "Unsaved Automation",
         "triggers": normalize_triggers(request.get("triggers")),

@@ -1,3 +1,4 @@
+from app.services.access.plate_matching import match_candidates
 import asyncio
 import uuid
 from datetime import UTC, date, datetime, timedelta
@@ -1399,18 +1400,18 @@ def test_known_vehicle_plate_match_canonicalizes_likely_misreads() -> None:
     service = AccessEventService()
     stored = ["MD25VNO"]
 
-    first_match = service._known_vehicle_plate_match("MD25VMO", stored, 0.78)
-    second_match = service._known_vehicle_plate_match("MO25VNO", stored, 0.78)
-    third_match = service._known_vehicle_plate_match("MD2SVNO", stored, 0.78)
+    first_match = match_candidates(("MD25VMO",), stored, 0.78)
+    second_match = match_candidates(("MO25VNO",), stored, 0.78)
+    third_match = match_candidates(("MD2SVNO",), stored, 0.78)
     assert first_match is not None
     assert second_match is not None
     assert third_match is not None
     assert first_match["registration_number"] == "MD25VNO"
     assert second_match["registration_number"] == "MD25VNO"
     assert third_match["registration_number"] == "MD25VNO"
-    assert service._known_vehicle_plate_match("ND25VN0", stored, 0.78) is None
+    assert match_candidates(("ND25VN0",), stored, 0.78) is None
 
-    exact = service._known_vehicle_plate_match("MD25VNO", stored, 0.78)
+    exact = match_candidates(("MD25VNO",), stored, 0.78)
     assert exact is not None
     assert exact["registration_number"] == "MD25VNO"
     assert exact["exact"] is True
@@ -1427,7 +1428,7 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
     )
     finalized: list[Any] = []
 
-    async def fake_active_vehicle_registrations():
+    async def fake_matching_vehicle_registrations(_candidates):
         return ["MD25VNO"]
 
     async def fake_finalize_window(window):
@@ -1456,7 +1457,7 @@ async def test_exact_known_plate_finalizes_burst_and_suppresses_trailing_noise(m
     async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_matching_vehicle_registrations", fake_matching_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
@@ -1500,7 +1501,7 @@ async def test_exact_known_plate_candidate_inside_single_unifi_alarm_finalizes(m
     )
     finalized: list[Any] = []
 
-    async def fake_active_vehicle_registrations():
+    async def fake_matching_vehicle_registrations(_candidates):
         return ["MD25VNO"]
 
     async def fake_finalize_window(window):
@@ -1520,7 +1521,7 @@ async def test_exact_known_plate_candidate_inside_single_unifi_alarm_finalizes(m
     async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_matching_vehicle_registrations", fake_matching_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
@@ -1561,7 +1562,7 @@ async def test_exact_known_plate_suppresses_same_exit_gate_cycle_echo_after_debo
     finalized: list[Any] = []
     published: list[Any] = []
 
-    async def fake_active_vehicle_registrations():
+    async def fake_matching_vehicle_registrations(_candidates):
         return ["PE70DHX"]
 
     async def fake_finalize_window(window):
@@ -1590,7 +1591,7 @@ async def test_exact_known_plate_suppresses_same_exit_gate_cycle_echo_after_debo
     async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_matching_vehicle_registrations", fake_matching_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
@@ -1629,7 +1630,7 @@ async def test_exact_known_plate_suppresses_immediate_open_gate_echo_after_entry
     finalized: list[Any] = []
     published: list[Any] = []
 
-    async def fake_active_vehicle_registrations():
+    async def fake_matching_vehicle_registrations(_candidates):
         return ["PE70DHX"]
 
     async def fake_finalize_window(window):
@@ -1658,7 +1659,7 @@ async def test_exact_known_plate_suppresses_immediate_open_gate_echo_after_entry
     async def fake_no_gate_malfunction_context(read):
         return read
 
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_matching_vehicle_registrations", fake_matching_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
     monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
@@ -1703,7 +1704,7 @@ async def test_exact_known_plate_allows_departure_state_after_entry_gate_cycle(m
     finalized: list[Any] = []
     published: list[Any] = []
 
-    async def fake_active_vehicle_registrations():
+    async def fake_matching_vehicle_registrations(_candidates):
         return ["PE70DHX"]
 
     async def fake_finalize_window(window):
@@ -1732,7 +1733,7 @@ async def test_exact_known_plate_allows_departure_state_after_entry_gate_cycle(m
     async def fake_no_gate_malfunction_context(read):
         return read
 
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_matching_vehicle_registrations", fake_matching_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_no_gate_malfunction_context)
     monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
@@ -1775,7 +1776,7 @@ async def test_gate_malfunction_known_read_bypasses_recent_suppression(monkeypat
     finalized = []
     published = []
 
-    async def fake_active_vehicle_registrations():
+    async def fake_matching_vehicle_registrations(_candidates):
         return ["SVA673"]
 
     async def fake_gate_malfunction_context(read):
@@ -1804,7 +1805,7 @@ async def test_gate_malfunction_known_read_bypasses_recent_suppression(monkeypat
     async def fake_publish(event_type, payload):
         published.append((event_type, payload))
 
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_matching_vehicle_registrations", fake_matching_vehicle_registrations)
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_gate_malfunction_context)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(access_events_module.event_bus, "publish", fake_publish)
@@ -1834,7 +1835,7 @@ async def test_gate_malfunction_unknown_read_is_ignored_before_finalize(monkeypa
     captured_at = datetime(2026, 5, 2, 18, 17, 5, tzinfo=UTC)
     ignored = []
 
-    async def fake_active_vehicle_registrations():
+    async def fake_matching_vehicle_registrations(_candidates):
         return []
 
     async def fake_gate_malfunction_context(_read):
@@ -1846,7 +1847,7 @@ async def test_gate_malfunction_unknown_read_is_ignored_before_finalize(monkeypa
     async def fail_finalize(_window):
         raise AssertionError("Unknown malfunction reads must not finalize access events.")
 
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_matching_vehicle_registrations", fake_matching_vehicle_registrations)
     monkeypatch.setattr(service, "_read_with_gate_malfunction_context", fake_gate_malfunction_context)
     monkeypatch.setattr(service, "_ignore_unknown_gate_malfunction_read", fake_ignore)
     monkeypatch.setattr(service, "_finalize_window", fail_finalize)
@@ -2149,7 +2150,7 @@ async def test_exact_known_plate_absorbs_prior_unmatched_reads_from_same_window(
     )
     finalized = []
 
-    async def fake_active_vehicle_registrations():
+    async def fake_matching_vehicle_registrations(_candidates):
         return ["MD25VNO"]
 
     async def fake_finalize_window(window):
@@ -2166,7 +2167,7 @@ async def test_exact_known_plate_absorbs_prior_unmatched_reads_from_same_window(
     async def fake_vehicle_session_suppression_from_ledger(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_matching_vehicle_registrations", fake_matching_vehicle_registrations)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_no_visitor_pass_departure_match)
     monkeypatch.setattr(service._movement_sessions, "suppression_from_ledger", fake_vehicle_session_suppression_from_ledger)
@@ -2192,7 +2193,7 @@ async def test_on_site_visitor_departure_absorbs_prior_unmatched_reads_from_same
     finalized = []
     published = []
 
-    async def fake_active_vehicle_registrations():
+    async def fake_matching_vehicle_registrations(_candidates):
         return []
 
     async def fake_read_with_visitor_pass_departure_match(read):
@@ -2229,7 +2230,7 @@ async def test_on_site_visitor_departure_absorbs_prior_unmatched_reads_from_same
     async def fake_exact_resolution_suppression_reason(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(service, "_active_vehicle_registrations", fake_active_vehicle_registrations)
+    monkeypatch.setattr(service, "_matching_vehicle_registrations", fake_matching_vehicle_registrations)
     monkeypatch.setattr(service, "_read_with_visitor_pass_departure_match", fake_read_with_visitor_pass_departure_match)
     monkeypatch.setattr(service, "_finalize_window", fake_finalize_window)
     monkeypatch.setattr(service, "_publish_suppressed_read", fake_publish_suppressed_read)

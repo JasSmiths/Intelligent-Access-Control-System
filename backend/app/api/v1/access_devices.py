@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -56,8 +56,8 @@ class AccessDeviceDeleteRequest(BaseModel):
 
 @router.get("")
 async def list_access_devices(
-    kind: Literal["gate", "garage_door"] | None = Query(default=None),
-    _: User = Depends(current_user),
+    _: Annotated[User, Depends(current_user)],
+    kind: Annotated[Literal["gate", "garage_door"] | None, Query()] = None,
 ) -> list[dict[str, Any]]:
     service = get_access_device_service()
     devices = await service.list_devices(kind=kind)
@@ -68,10 +68,12 @@ async def list_access_devices(
 @router.post("")
 async def create_access_device(
     request: AccessDeviceRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
-    payload = request.model_dump(mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True)
+    payload = request.model_dump(
+        mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True
+    )
     await require_confirmed_action(
         session,
         user=user,
@@ -102,8 +104,8 @@ async def create_access_device(
 async def update_access_device(
     device_id: str,
     request: AccessDevicePatchRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     payload = request.model_dump(
         mode="json",
@@ -143,9 +145,9 @@ async def update_access_device(
 @router.delete("/{device_id}")
 async def delete_access_device(
     device_id: str,
-    request: AccessDeviceDeleteRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    request: Annotated[AccessDeviceDeleteRequest | None, Body()] = None,
 ) -> dict[str, bool]:
     await require_confirmed_action(
         session,
@@ -176,10 +178,12 @@ async def upsert_access_device_binding(
     device_id: str,
     provider: str,
     request: ProviderBindingRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
-    payload = request.model_dump(mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True)
+    payload = request.model_dump(
+        mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True
+    )
     await require_confirmed_action(
         session,
         user=user,
@@ -210,7 +214,9 @@ async def upsert_access_device_binding(
 
 
 @router.get("/status")
-async def access_device_status(refresh: bool = False, _: User = Depends(current_user)) -> dict[str, Any]:
+async def access_device_status(
+    _: Annotated[User, Depends(current_user)], refresh: bool = False
+) -> dict[str, Any]:
     return await get_access_device_service().status(refresh=refresh)
 
 

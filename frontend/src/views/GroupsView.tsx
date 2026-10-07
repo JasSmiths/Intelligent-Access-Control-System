@@ -3,6 +3,8 @@ import { useModalClose } from "../ui/useModalClose";
 import { useEditorDismiss } from "../ui/useEditorDismiss";
 import { Check, CircleDot, Plus, Users, X } from "lucide-react";
 import React from "react";
+import { useDirectoryPage } from "../features/directory/reads";
+import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
 import { api, createActionConfirmation } from "../api/client";
 import { matches, titleCase } from "../lib/format";
@@ -23,12 +25,14 @@ export function GroupsView({
   groups,
   people,
   query,
-  refresh
+  refresh,
+  refreshToken = 0
 }: {
   groups: Group[];
   people: Person[];
   query: string;
   refresh: () => Promise<void>;
+  refreshToken?: number;
 }) {
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedGroup, setSelectedGroup] = React.useState<Group | null>(null);
@@ -113,6 +117,7 @@ export function GroupsView({
       {modalOpen ? (
         <GroupModal
           group={selectedGroup}
+          refreshToken={refreshToken}
           members={selectedGroup ? people.filter((person) => person.group_id === selectedGroup.id) : []}
           mode={selectedGroup ? "edit" : "create"}
           onClose={closeModal}
@@ -130,7 +135,8 @@ export function GroupsView({
 
 export function GroupModal({
   group,
-  members,
+  members: initialMembers,
+  refreshToken = 0,
   mode,
   onClose: finishClose,
   onSaved: finishSaved,
@@ -138,11 +144,14 @@ export function GroupModal({
 }: {
   group: Group | null;
   members: Person[];
+  refreshToken?: number;
   mode: "create" | "edit";
   onClose: () => void;
   onSaved: () => Promise<void>;
   setPageError: (message: string) => void;
 }) {
+  const memberPage = useDirectoryPage("people", initialMembers, { groupId: group?.id, enabled: Boolean(group), refreshToken });
+  const members = memberPage.items;
   const modalRef = React.useRef<HTMLFormElement>(null);
   const onClose = useModalClose(modalRef, finishClose);
   const onSaved = useModalClose(modalRef, finishSaved);
@@ -253,8 +262,9 @@ export function GroupModal({
           <div className="group-members-panel">
             <div className="panel-header">
               <h2>Members</h2>
-              <span className="member-count">{members.length} {members.length === 1 ? "person" : "people"}</span>
+              <span className="member-count">{memberPage.total} {memberPage.total === 1 ? "person" : "people"}</span>
             </div>
+            <DirectoryPagination page={memberPage} />
             {members.length ? (
               <div className="group-member-list">
                 {members.map((member) => (

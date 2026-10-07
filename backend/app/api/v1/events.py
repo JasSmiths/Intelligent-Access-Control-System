@@ -1,7 +1,7 @@
-import uuid
 import hashlib
+import uuid
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -12,44 +12,66 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.dependencies import current_user
-from app.api.v1.history import HistoryPage, older_than, range_boundary, read_cursor, site_zone, write_cursor
-from app.db.session import AsyncSessionLocal
-from app.db.session import get_db_session
+from app.api.v1.history import (
+    HistoryPage,
+    older_than,
+    range_boundary,
+    read_cursor,
+    site_zone,
+    write_cursor,
+)
+from app.db.session import AsyncSessionLocal, get_db_session
 from app.models import AccessEvent, Anomaly, MovementSagaRecord, Presence, User
 from app.models.enums import AccessDecision, AccessDirection, AnomalySeverity, AnomalyType
-from app.services.snapshots import alert_snapshot_metadata, alert_snapshot_path
+from app.services.action_confirmations import (
+    ActionConfirmationError,
+    consume_action_confirmation,
+    create_action_confirmation,
+)
 from app.services.event_bus import event_bus
 from app.services.expected_presence import expected_presence_today
 from app.services.profile_photos import compact_image_bytes
 from app.services.settings import get_runtime_config
-from app.services.snapshots import access_event_snapshot_payload, get_snapshot_manager
-from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
-from app.services.action_confirmations import (
-    ActionConfirmationError, create_action_confirmation, consume_action_confirmation,
+from app.services.snapshots import (
+    access_event_snapshot_payload,
+    alert_snapshot_metadata,
+    alert_snapshot_path,
+    get_snapshot_manager,
 )
+from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
 
 router = APIRouter()
 
 
 @router.get("/events/history", response_model=HistoryPage[dict[str, Any]])
 async def events_history(
-    limit: int = Query(default=50, ge=1, le=250),
-    cursor: str | None = Query(default=None, max_length=1024),
-    q: str | None = Query(default=None, max_length=120),
-    from_: str | None = Query(default=None, alias="from"),
-    to: str | None = Query(default=None),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=250)] = 50,
+    cursor: Annotated[str | None, Query(max_length=1024)] = None,
+    q: Annotated[str | None, Query(max_length=120)] = None,
+    from_: Annotated[str | None, Query(alias="from")] = None,
+    to: Annotated[str | None, Query()] = None,
     direction: AccessDirection | None = None,
     decision: AccessDecision | None = None,
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
 ) -> HistoryPage[dict[str, Any]]:
     zone = site_zone((await get_runtime_config()).site_timezone)
     start, end = range_boundary(from_, zone), range_boundary(to, zone)
     if start and end and start >= end:
         raise HTTPException(status_code=422, detail="History start must be before end.")
-    filters = {"q": (q or "").strip(), "from": start, "to": end, "direction": direction, "decision": decision}
+    filters = {
+        "q": (q or "").strip(),
+        "from": start,
+        "to": end,
+        "direction": direction,
+        "decision": decision,
+    }
     as_of, after_stamp, after_id = read_cursor(cursor, filters)
-    query = select(AccessEvent).options(selectinload(AccessEvent.anomalies)).where(AccessEvent.created_at <= as_of)
+    query = (
+        select(AccessEvent)
+        .options(selectinload(AccessEvent.anomalies))
+        .where(AccessEvent.created_at <= as_of)
+    )
     if start:
         query = query.where(AccessEvent.occurred_at >= start)
     if end:
@@ -60,18 +82,44 @@ async def events_history(
         query = query.where(AccessEvent.decision == decision)
     if filters["q"]:
         pattern = f"%{filters['q']}%"
-        query = query.where(or_(AccessEvent.registration_number.ilike(pattern), AccessEvent.source.ilike(pattern)))
+        query = query.where(
+            or_(AccessEvent.registration_number.ilike(pattern), AccessEvent.source.ilike(pattern))
+        )
     if after_stamp and after_id:
-        query = query.where(older_than(AccessEvent.occurred_at, AccessEvent.id, after_stamp, after_id))
-    rows = (await session.scalars(query.order_by(AccessEvent.occurred_at.desc(), AccessEvent.id.desc()).limit(limit + 1))).all()
+        query = query.where(
+            older_than(AccessEvent.occurred_at, AccessEvent.id, after_stamp, after_id)
+        )
+    rows = (
+        await session.scalars(
+            query.order_by(AccessEvent.occurred_at.desc(), AccessEvent.id.desc()).limit(limit + 1)
+        )
+    ).all()
     page_rows = rows[:limit]
-    movement_rows = (await session.scalars(select(MovementSagaRecord).where(
-        MovementSagaRecord.access_event_id.in_([row.id for row in page_rows])
-    ))).all() if page_rows else []
+    movement_rows = (
+        (
+            await session.scalars(
+                select(MovementSagaRecord).where(
+                    MovementSagaRecord.access_event_id.in_([row.id for row in page_rows])
+                )
+            )
+        ).all()
+        if page_rows
+        else []
+    )
     movement_by_event = {row.access_event_id: row for row in movement_rows}
-    next_cursor = write_cursor(as_of, page_rows[-1].occurred_at, page_rows[-1].id, filters) if len(rows) > limit else None
-    return HistoryPage(items=[_serialize_event(row, movement_by_event.get(row.id), verify_snapshot_available=False)
-                              for row in page_rows], next_cursor=next_cursor, as_of=as_of)
+    next_cursor = (
+        write_cursor(as_of, page_rows[-1].occurred_at, page_rows[-1].id, filters)
+        if len(rows) > limit
+        else None
+    )
+    return HistoryPage(
+        items=[
+            _serialize_event(row, movement_by_event.get(row.id), verify_snapshot_available=False)
+            for row in page_rows
+        ],
+        next_cursor=next_cursor,
+        as_of=as_of,
+    )
 
 
 class AlertActionRequest(BaseModel):
@@ -101,30 +149,44 @@ def _group_identity(group_id: str) -> tuple[str, str]:
     return parts[3], parts[2]
 
 
-async def _group_rows(session: AsyncSession, group_id: str, as_of: datetime, timezone: ZoneInfo,
-                      *, lock: bool = False) -> list[Anomaly]:
+async def _group_rows(
+    session: AsyncSession, group_id: str, as_of: datetime, timezone: ZoneInfo, *, lock: bool = False
+) -> list[Anomaly]:
     registration, local_date = _group_identity(group_id)
     try:
         day = datetime.fromisoformat(local_date).date()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Invalid alert group date.") from exc
     start = datetime.combine(day, datetime.min.time(), tzinfo=timezone).astimezone(UTC)
-    end = datetime.combine(day.fromordinal(day.toordinal() + 1), datetime.min.time(), tzinfo=timezone).astimezone(UTC)
-    query = (select(Anomaly).options(selectinload(Anomaly.event))
-             .where(Anomaly.anomaly_type == AnomalyType.UNAUTHORIZED_PLATE,
-                    Anomaly.resolved_at.is_(None), Anomaly.created_at >= start,
-                    Anomaly.created_at < end, Anomaly.created_at <= as_of)
-             .order_by(Anomaly.id))
+    end = datetime.combine(
+        day.fromordinal(day.toordinal() + 1), datetime.min.time(), tzinfo=timezone
+    ).astimezone(UTC)
+    query = (
+        select(Anomaly)
+        .options(selectinload(Anomaly.event))
+        .where(
+            Anomaly.anomaly_type == AnomalyType.UNAUTHORIZED_PLATE,
+            Anomaly.resolved_at.is_(None),
+            Anomaly.created_at >= start,
+            Anomaly.created_at < end,
+            Anomaly.created_at <= as_of,
+        )
+        .order_by(Anomaly.id)
+    )
     if lock:
         query = query.with_for_update(of=Anomaly)
-    return [row for row in (await session.scalars(query)).all() if _alert_registration_number(row) == registration]
+    return [
+        row
+        for row in (await session.scalars(query)).all()
+        if _alert_registration_number(row) == registration
+    ]
 
 
 @router.post("/alerts/groups/confirmation")
 async def confirm_alert_group(
     request: AlertGroupConfirmationRequest,
-    actor: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    actor: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
     if request.as_of.tzinfo is None or request.as_of > datetime.now(UTC):
         raise HTTPException(status_code=422, detail="Invalid alert history cutoff.")
@@ -132,20 +194,32 @@ async def confirm_alert_group(
     rows = await _group_rows(session, request.group_id, request.as_of, timezone)
     ids = [row.id for row in rows]
     if len(ids) != request.count or _alert_member_hash(ids) != request.member_hash:
-        raise HTTPException(status_code=409, detail="Alert group changed. Refresh and review it again.")
+        raise HTTPException(
+            status_code=409, detail="Alert group changed. Refresh and review it again."
+        )
     note = request.note.strip() if request.note else None
     payload = {"group_id": request.group_id, "action": "resolve", "note": note}
     confirmation = await create_action_confirmation(
-        session, user=actor, action="alert.group.resolve", payload=payload,
-        target_entity="AlertGroup", target_id=request.group_id, target_label=f"{len(ids)} alerts",
-        reason="Resolve reviewed alert group", metadata={"alert_ids": [str(item) for item in ids],
-                                                       "member_hash": request.member_hash},
+        session,
+        user=actor,
+        action="alert.group.resolve",
+        payload=payload,
+        target_entity="AlertGroup",
+        target_id=request.group_id,
+        target_label=f"{len(ids)} alerts",
+        reason="Resolve reviewed alert group",
+        metadata={"alert_ids": [str(item) for item in ids], "member_hash": request.member_hash},
     )
-    return {**confirmation, "count": len(ids), "member_hash": request.member_hash, "as_of": request.as_of.isoformat()}
+    return {
+        **confirmation,
+        "count": len(ids),
+        "member_hash": request.member_hash,
+        "as_of": request.as_of.isoformat(),
+    }
 
 
 @router.get("/events")
-async def list_events(limit: int = Query(default=50, ge=1, le=250)) -> list[dict]:
+async def list_events(limit: Annotated[int, Query(ge=1, le=250)] = 50) -> list[dict]:
     async with AsyncSessionLocal() as session:
         events = (
             await session.scalars(
@@ -157,12 +231,16 @@ async def list_events(limit: int = Query(default=50, ge=1, le=250)) -> list[dict
         ).all()
 
         movement_rows = (
-            await session.scalars(
-                select(MovementSagaRecord).where(
-                    MovementSagaRecord.access_event_id.in_([event.id for event in events])
+            (
+                await session.scalars(
+                    select(MovementSagaRecord).where(
+                        MovementSagaRecord.access_event_id.in_([event.id for event in events])
+                    )
                 )
-            )
-        ).all() if events else []
+            ).all()
+            if events
+            else []
+        )
     movement_by_event_id = {row.access_event_id: row for row in movement_rows}
 
     return [
@@ -203,26 +281,34 @@ def _serialize_event(
 @router.get("/events/{event_id}")
 async def event_detail(
     event_id: uuid.UUID,
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
-    event = await session.scalar(select(AccessEvent).options(selectinload(AccessEvent.anomalies)).where(AccessEvent.id == event_id))
+    event = await session.scalar(
+        select(AccessEvent)
+        .options(selectinload(AccessEvent.anomalies))
+        .where(AccessEvent.id == event_id)
+    )
     if not event:
         raise HTTPException(status_code=404, detail="Event was not found.")
-    movement = await session.scalar(select(MovementSagaRecord).where(MovementSagaRecord.access_event_id == event_id))
+    movement = await session.scalar(
+        select(MovementSagaRecord).where(MovementSagaRecord.access_event_id == event_id)
+    )
     return _serialize_event(event, movement, verify_snapshot_available=False)
 
 
 @router.get("/events/{event_id}/snapshot", response_model=None)
 async def event_snapshot(
     event_id: uuid.UUID,
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
-    variant: Literal["thumb", "full"] = Query(default="full"),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    variant: Annotated[Literal["thumb", "full"], Query()] = "full",
 ):
     row = await session.get(AccessEvent, event_id)
     if not row or not row.snapshot_path:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event snapshot was not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Event snapshot was not found."
+        )
     try:
         path = get_snapshot_manager().resolve_path(row.snapshot_path)
     except FileNotFoundError as exc:
@@ -275,7 +361,9 @@ def _event_movement_saga_payload(
             "gate_command_required": movement_saga.gate_command_required,
             "presence_committed": movement_saga.presence_committed,
             "failure_detail": movement_saga.failure_detail,
-            "updated_at": movement_saga.updated_at.isoformat() if movement_saga.updated_at else None,
+            "updated_at": movement_saga.updated_at.isoformat()
+            if movement_saga.updated_at
+            else None,
         }
     return None
 
@@ -292,7 +380,9 @@ async def list_presence() -> list[dict]:
     async with AsyncSessionLocal() as session:
         rows = (
             await session.scalars(
-                select(Presence).options(selectinload(Presence.person)).order_by(Presence.updated_at.desc())
+                select(Presence)
+                .options(selectinload(Presence.person))
+                .order_by(Presence.updated_at.desc())
             )
         ).all()
 
@@ -309,8 +399,8 @@ async def list_presence() -> list[dict]:
 
 @router.get("/presence/expected-today")
 async def expected_presence_for_today(
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
     config = await get_runtime_config()
     return await expected_presence_today(session, timezone_name=config.site_timezone)
@@ -318,13 +408,13 @@ async def expected_presence_for_today(
 
 @router.get("/alerts")
 async def list_alerts(
-    status_filter: Literal["open", "resolved", "all"] = Query(default="open", alias="status"),
-    severity: AnomalySeverity | None = Query(default=None),
-    type_filter: AnomalyType | None = Query(default=None, alias="type"),
-    q: str | None = Query(default=None, max_length=120),
-    limit: int = Query(default=100, ge=1, le=250),
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    status_filter: Annotated[Literal["open", "resolved", "all"], Query(alias="status")] = "open",
+    severity: Annotated[AnomalySeverity | None, Query()] = None,
+    type_filter: Annotated[AnomalyType | None, Query(alias="type")] = None,
+    q: Annotated[str | None, Query(max_length=120)] = None,
+    limit: Annotated[int, Query(ge=1, le=250)] = 100,
 ) -> list[dict]:
     config = await get_runtime_config()
     timezone = _alert_timezone(config.site_timezone)
@@ -345,7 +435,9 @@ async def list_alerts(
         query = query.where(Anomaly.anomaly_type == type_filter)
     if q:
         pattern = f"%{q.strip()}%"
-        query = query.where(or_(Anomaly.message.ilike(pattern), cast(Anomaly.context, String).ilike(pattern)))
+        query = query.where(
+            or_(Anomaly.message.ilike(pattern), cast(Anomaly.context, String).ilike(pattern))
+        )
 
     rows = (await session.scalars(query)).all()
     items = _serialize_alerts(rows, timezone)
@@ -354,56 +446,86 @@ async def list_alerts(
 
 @router.get("/alerts/history", response_model=HistoryPage[dict[str, Any]])
 async def alerts_history(
-    status_filter: Literal["open", "resolved", "all"] = Query(default="open", alias="status"),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    status_filter: Annotated[Literal["open", "resolved", "all"], Query(alias="status")] = "open",
     severity: AnomalySeverity | None = None,
-    type_filter: AnomalyType | None = Query(default=None, alias="type"),
-    q: str | None = Query(default=None, max_length=120),
-    from_: str | None = Query(default=None, alias="from"),
+    type_filter: Annotated[AnomalyType | None, Query(alias="type")] = None,
+    q: Annotated[str | None, Query(max_length=120)] = None,
+    from_: Annotated[str | None, Query(alias="from")] = None,
     to: str | None = None,
-    limit: int = Query(default=50, ge=1, le=250),
-    cursor: str | None = Query(default=None, max_length=1024),
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    limit: Annotated[int, Query(ge=1, le=250)] = 50,
+    cursor: Annotated[str | None, Query(max_length=1024)] = None,
 ) -> HistoryPage[dict[str, Any]]:
     timezone = _alert_timezone((await get_runtime_config()).site_timezone)
     start, end = range_boundary(from_, timezone), range_boundary(to, timezone)
     if start and end and start >= end:
         raise HTTPException(status_code=422, detail="History start must be before end.")
-    filters = {"status": status_filter, "severity": severity, "type": type_filter,
-               "q": (q or "").strip().lower(), "from": start, "to": end}
+    filters = {
+        "status": status_filter,
+        "severity": severity,
+        "type": type_filter,
+        "q": (q or "").strip().lower(),
+        "from": start,
+        "to": end,
+    }
     as_of, after_stamp, after_id = read_cursor(cursor, filters)
     context_plate = case(
-        (func.jsonb_typeof(Anomaly.context["registration_number"]) == "string",
-         func.nullif(Anomaly.context["registration_number"].astext, "")),
+        (
+            func.jsonb_typeof(Anomaly.context["registration_number"]) == "string",
+            func.nullif(Anomaly.context["registration_number"].astext, ""),
+        ),
         else_=None,
     )
     plate = func.coalesce(context_plate, AccessEvent.registration_number, "")
     local_day = cast(func.timezone(timezone.key, Anomaly.created_at), Date)
-    grouped = (Anomaly.anomaly_type == AnomalyType.UNAUTHORIZED_PLATE) & Anomaly.resolved_at.is_(None)
+    grouped = (Anomaly.anomaly_type == AnomalyType.UNAUTHORIZED_PLATE) & Anomaly.resolved_at.is_(
+        None
+    )
     group_key = case(
         (grouped, func.concat("group:unauthorized_plate:", cast(local_day, String), ":", plate)),
         else_=cast(Anomaly.id, String),
     )
-    display_severity = case((Anomaly.anomaly_type == AnomalyType.UNAUTHORIZED_PLATE,
-                             literal(AnomalySeverity.WARNING.name)), else_=cast(Anomaly.severity, String))
+    display_severity = case(
+        (
+            Anomaly.anomaly_type == AnomalyType.UNAUTHORIZED_PLATE,
+            literal(AnomalySeverity.WARNING.name),
+        ),
+        else_=cast(Anomaly.severity, String),
+    )
     member_match = None
     if filters["q"]:
         pattern = f"%{filters['q']}%"
-        display_message = case((Anomaly.anomaly_type == AnomalyType.UNAUTHORIZED_PLATE,
-                                literal("Unauthorised Plate, Access Denied")), else_=Anomaly.message)
-        member_match = or_(plate.ilike(pattern), display_message.ilike(pattern),
-                           Anomaly.message.ilike(pattern),
-                           cast(Anomaly.context, String).ilike(pattern),
-                           cast(Anomaly.anomaly_type, String).ilike(pattern))
+        display_message = case(
+            (
+                Anomaly.anomaly_type == AnomalyType.UNAUTHORIZED_PLATE,
+                literal("Unauthorised Plate, Access Denied"),
+            ),
+            else_=Anomaly.message,
+        )
+        member_match = or_(
+            plate.ilike(pattern),
+            display_message.ilike(pattern),
+            Anomaly.message.ilike(pattern),
+            cast(Anomaly.context, String).ilike(pattern),
+            cast(Anomaly.anomaly_type, String).ilike(pattern),
+        )
     columns = [
-        Anomaly.id.label("id"), group_key.label("group_key"), Anomaly.created_at.label("stamp"),
+        Anomaly.id.label("id"),
+        group_key.label("group_key"),
+        Anomaly.created_at.label("stamp"),
         display_severity.label("display_severity"),
-        func.row_number().over(partition_by=group_key,
-                               order_by=(Anomaly.created_at.desc(), Anomaly.id.desc())).label("rank"),
+        func.row_number()
+        .over(partition_by=group_key, order_by=(Anomaly.created_at.desc(), Anomaly.id.desc()))
+        .label("rank"),
     ]
     if member_match is not None:
         columns.append(func.bool_or(member_match).over(partition_by=group_key).label("matches"))
-    query = select(*columns).outerjoin(AccessEvent, Anomaly.event_id == AccessEvent.id).where(Anomaly.created_at <= as_of)
+    query = (
+        select(*columns)
+        .outerjoin(AccessEvent, Anomaly.event_id == AccessEvent.id)
+        .where(Anomaly.created_at <= as_of)
+    )
     if status_filter == "open":
         query = query.where(Anomaly.resolved_at.is_(None))
     elif status_filter == "resolved":
@@ -422,26 +544,37 @@ async def alerts_history(
         summary = summary.where(ranked.c.stamp < end)
     if after_stamp and after_id:
         summary = summary.where(older_than(ranked.c.stamp, ranked.c.id, after_stamp, after_id))
-    page_keys = (await session.execute(summary.order_by(ranked.c.stamp.desc(), ranked.c.id.desc()).limit(limit + 1))).all()
+    page_keys = (
+        await session.execute(
+            summary.order_by(ranked.c.stamp.desc(), ranked.c.id.desc()).limit(limit + 1)
+        )
+    ).all()
     selected = page_keys[:limit]
     if not selected:
         return HistoryPage(items=[], next_cursor=None, as_of=as_of)
     selected_keys = [item.group_key for item in selected]
-    member_query = (select(Anomaly).outerjoin(AccessEvent, Anomaly.event_id == AccessEvent.id)
-                    .options(selectinload(Anomaly.event), selectinload(Anomaly.resolved_by))
-                    .where(Anomaly.created_at <= as_of, group_key.in_(selected_keys)))
+    member_query = (
+        select(Anomaly)
+        .outerjoin(AccessEvent, Anomaly.event_id == AccessEvent.id)
+        .options(selectinload(Anomaly.event), selectinload(Anomaly.resolved_by))
+        .where(Anomaly.created_at <= as_of, group_key.in_(selected_keys))
+    )
     if status_filter == "open":
         member_query = member_query.where(Anomaly.resolved_at.is_(None))
     elif status_filter == "resolved":
         member_query = member_query.where(Anomaly.resolved_at.is_not(None))
     if type_filter:
         member_query = member_query.where(Anomaly.anomaly_type == type_filter)
-    rows = (await session.scalars(member_query.order_by(Anomaly.created_at.desc(), Anomaly.id.desc()))).all()
+    rows = (
+        await session.scalars(member_query.order_by(Anomaly.created_at.desc(), Anomaly.id.desc()))
+    ).all()
     payload_by_key = {item["id"]: item for item in _serialize_alerts(rows, timezone)}
     try:
         page_items = [payload_by_key[item.group_key] for item in selected]
     except KeyError as exc:
-        raise HTTPException(status_code=409, detail="Alert history changed during this read. Refresh the page.") from exc
+        raise HTTPException(
+            status_code=409, detail="Alert history changed during this read. Refresh the page."
+        ) from exc
     next_cursor = None
     if len(page_keys) > limit:
         last = selected[-1]
@@ -452,8 +585,8 @@ async def alerts_history(
 @router.patch("/alerts/action")
 async def action_alerts(
     request: AlertActionRequest,
-    actor: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    actor: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
     if request.group_id:
         if request.alert_ids or request.action != "resolve":
@@ -461,15 +594,22 @@ async def action_alerts(
         note = request.note.strip() if request.note else None
         try:
             confirmation = await consume_action_confirmation(
-                session, user=actor, action="alert.group.resolve",
+                session,
+                user=actor,
+                action="alert.group.resolve",
                 payload={"group_id": request.group_id, "action": "resolve", "note": note},
-                confirmation_token=request.confirmation_token, commit=False,
+                confirmation_token=request.confirmation_token,
+                commit=False,
             )
         except ActionConfirmationError as exc:
             await session.rollback()
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         frozen_ids = (confirmation.metadata_ or {}).get("alert_ids")
-        if not isinstance(frozen_ids, list) or not frozen_ids or any(not isinstance(item, str) for item in frozen_ids):
+        if (
+            not isinstance(frozen_ids, list)
+            or not frozen_ids
+            or any(not isinstance(item, str) for item in frozen_ids)
+        ):
             await session.rollback()
             raise HTTPException(status_code=409, detail="Alert group confirmation is invalid.")
         alert_ids = [uuid.UUID(item) for item in frozen_ids]
@@ -477,21 +617,34 @@ async def action_alerts(
         alert_ids = list(dict.fromkeys(request.alert_ids))
         if not alert_ids or request.confirmation_token:
             raise HTTPException(status_code=422, detail="Alert IDs are required.")
-    rows = (await session.scalars(
-        select(Anomaly).options(selectinload(Anomaly.event), selectinload(Anomaly.resolved_by))
-        .where(Anomaly.id.in_(alert_ids)).order_by(Anomaly.id).with_for_update(of=Anomaly)
-    )).all()
+    rows = (
+        await session.scalars(
+            select(Anomaly)
+            .options(selectinload(Anomaly.event), selectinload(Anomaly.resolved_by))
+            .where(Anomaly.id.in_(alert_ids))
+            .order_by(Anomaly.id)
+            .with_for_update(of=Anomaly)
+        )
+    ).all()
     if len(rows) != len(alert_ids):
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="One or more alerts were not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="One or more alerts were not found."
+        )
     if request.group_id:
         registration, local_date = _group_identity(request.group_id)
         timezone = _alert_timezone((await get_runtime_config()).site_timezone)
-        if any(row.resolved_at is not None or row.anomaly_type != AnomalyType.UNAUTHORIZED_PLATE or
-               _alert_registration_number(row) != registration or
-               row.created_at.astimezone(timezone).date().isoformat() != local_date for row in rows):
+        if any(
+            row.resolved_at is not None
+            or row.anomaly_type != AnomalyType.UNAUTHORIZED_PLATE
+            or _alert_registration_number(row) != registration
+            or row.created_at.astimezone(timezone).date().isoformat() != local_date
+            for row in rows
+        ):
             await session.rollback()
-            raise HTTPException(status_code=409, detail="Alert group changed. Refresh and review it again.")
+            raise HTTPException(
+                status_code=409, detail="Alert group changed. Refresh and review it again."
+            )
 
     before = [_alert_audit_snapshot(row) for row in rows]
     note = request.note.strip() if request.note else None
@@ -515,9 +668,13 @@ async def action_alerts(
     try:
         await event_bus.publish(
             "alerts.updated",
-            {"action": request.action, "alert_ids": [str(row.id) for row in rows], "count": len(rows)},
+            {
+                "action": request.action,
+                "alert_ids": [str(row.id) for row in rows],
+                "count": len(rows),
+            },
         )
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - Optional publication cannot undo the committed domain transaction.
         # The audited transaction has committed; a refresh will see its result.
         pass
     return {"updated": len(rows), "alert_ids": [str(row.id) for row in rows]}
@@ -526,16 +683,20 @@ async def action_alerts(
 @router.get("/alerts/{alert_id}/snapshot")
 async def alert_snapshot(
     alert_id: uuid.UUID,
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> FileResponse:
     row = await session.get(Anomaly, alert_id)
     if not row or row.anomaly_type != AnomalyType.UNAUTHORIZED_PLATE:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert snapshot was not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Alert snapshot was not found."
+        )
     metadata = alert_snapshot_metadata(row)
     path = alert_snapshot_path(alert_id)
     if not metadata or not path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert snapshot was not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Alert snapshot was not found."
+        )
     return FileResponse(
         path,
         media_type=str(metadata.get("content_type") or "image/jpeg"),
@@ -546,11 +707,14 @@ async def alert_snapshot(
 @router.get("/alerts/{alert_id}")
 async def alert_detail(
     alert_id: uuid.UUID,
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
-    row = await session.scalar(select(Anomaly).options(selectinload(Anomaly.event), selectinload(Anomaly.resolved_by))
-                               .where(Anomaly.id == alert_id))
+    row = await session.scalar(
+        select(Anomaly)
+        .options(selectinload(Anomaly.event), selectinload(Anomaly.resolved_by))
+        .where(Anomaly.id == alert_id)
+    )
     if not row:
         raise HTTPException(status_code=404, detail="Alert was not found.")
     if _should_group_unknown_plate(row):
@@ -559,7 +723,9 @@ async def alert_detail(
         as_of = datetime.now(UTC)
         rows = await _group_rows(session, group_id, as_of, timezone)
         if not rows:
-            raise HTTPException(status_code=409, detail="Alert changed during this read. Refresh the page.")
+            raise HTTPException(
+                status_code=409, detail="Alert changed during this read. Refresh the page."
+            )
         return {**_serialize_alerts(rows, timezone)[0], "as_of": as_of.isoformat()}
     return _serialize_alert(row)
 
@@ -646,10 +812,7 @@ def _serialize_alert(row: Anomaly) -> dict:
 
 
 def _should_group_unknown_plate(row: Anomaly) -> bool:
-    return (
-        row.resolved_at is None
-        and row.anomaly_type == AnomalyType.UNAUTHORIZED_PLATE
-    )
+    return row.resolved_at is None and row.anomaly_type == AnomalyType.UNAUTHORIZED_PLATE
 
 
 def _alert_display_severity(row: Anomaly) -> AnomalySeverity:

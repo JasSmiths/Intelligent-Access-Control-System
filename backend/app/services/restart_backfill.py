@@ -14,7 +14,15 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import AccessEvent, Anomaly, GateStateObservation, Person, Presence, Vehicle, VisitorPass
+from app.models import (
+    AccessEvent,
+    Anomaly,
+    GateStateObservation,
+    Person,
+    Presence,
+    Vehicle,
+    VisitorPass,
+)
 from app.models.enums import (
     AccessDecision,
     AccessDirection,
@@ -25,9 +33,11 @@ from app.models.enums import (
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.gate.base import GateState
 from app.modules.unifi_protect.client import UnifiProtectError
-from app.services.snapshots import alert_snapshot_metadata_from_event
+from app.services.access.historical import (
+    HistoricalSessionInput,
+    persist_historical_event_in_session,
+)
 from app.services.event_bus import event_bus
-from app.services.access.historical import HistoricalSessionInput, persist_historical_event_in_session
 from app.services.movement.sessions import payload_values
 from app.services.movement_fsm import MovementDirectionFSM, MovementIntent
 from app.services.movement_ledger import movement_saga_summary
@@ -39,6 +49,7 @@ from app.services.snapshots import (
     SnapshotError,
     access_event_snapshot_relative_path,
     access_event_snapshot_url,
+    alert_snapshot_metadata_from_event,
     apply_snapshot_to_access_event,
     get_snapshot_manager,
 )
@@ -60,9 +71,7 @@ MISSED_EVENT_BACKFILL_SOURCE = "unifi_protect_restart_backfill"
 MISSED_EVENT_RECONCILIATION_SOURCE = "unifi_protect_lpr_reconciliation"
 MISSED_EVENT_RECONCILIATION_INTERVAL_SECONDS = 120.0
 MISSED_EVENT_RECONCILIATION_INITIAL_LOOKBACK = timedelta(minutes=15)
-MISSED_EVENT_RECONCILIATION_REASON = (
-    "UniFi Protect retained an LPR event that did not arrive through the webhook while the backend was running."
-)
+MISSED_EVENT_RECONCILIATION_REASON = "UniFi Protect retained an LPR event that did not arrive through the webhook while the backend was running."
 
 
 @dataclass(frozen=True)
@@ -298,7 +307,9 @@ class MissedAccessEventBackfillService:
             return None
 
         registration_number = normalize_registration_number(
-            str(track_candidate.get("registration_number") or track_candidate.get("raw_value") or "")
+            str(
+                track_candidate.get("registration_number") or track_candidate.get("raw_value") or ""
+            )
         )
         captured_at = (
             _parse_datetime(track_candidate.get("captured_at"))
@@ -308,14 +319,20 @@ class MissedAccessEventBackfillService:
         if not registration_number or not captured_at:
             return None
 
-        event_payload = track.get("event") if isinstance(track.get("event"), dict) else protect_event
+        event_payload = (
+            track.get("event") if isinstance(track.get("event"), dict) else protect_event
+        )
         return ProtectBackfillCandidate(
             protect_event_id=protect_event_id,
             registration_number=registration_number,
             captured_at=_aware_utc(captured_at),
             confidence=_confidence_ratio(track_candidate.get("confidence")),
-            camera_id=str(event_payload.get("camera_id") or protect_event.get("camera_id") or "") or None,
-            camera_name=str(event_payload.get("camera_name") or protect_event.get("camera_name") or "") or None,
+            camera_id=str(event_payload.get("camera_id") or protect_event.get("camera_id") or "")
+            or None,
+            camera_name=str(
+                event_payload.get("camera_name") or protect_event.get("camera_name") or ""
+            )
+            or None,
             protect_event=event_payload if isinstance(event_payload, dict) else protect_event,
             track_candidate=track_candidate,
         )
@@ -366,7 +383,10 @@ class MissedAccessEventBackfillService:
                     source=f"visitor_pass_{visitor_pass_mode or 'match'}",
                     reason=f"Visitor pass matched for {visitor_pass.visitor_name}.",
                 )
-            allowed = bool((schedule_evaluation and schedule_evaluation.allowed and identity_active) or visitor_pass)
+            allowed = bool(
+                (schedule_evaluation and schedule_evaluation.allowed and identity_active)
+                or visitor_pass
+            )
             decision = AccessDecision.GRANTED if allowed else AccessDecision.DENIED
             direction, direction_resolution = await self._direction_for_backfill(
                 session,
@@ -440,11 +460,14 @@ class MissedAccessEventBackfillService:
             await session.flush()
 
             await self._attach_protect_thumbnail(event, candidate)
-            anomalies = _build_backfill_anomalies(event, person, vehicle, allowed, visitor_pass=visitor_pass)
+            anomalies = _build_backfill_anomalies(
+                event, person, vehicle, allowed, visitor_pass=visitor_pass
+            )
             session.add_all(anomalies)
 
             finalized = await self._persist_backfill_movement(
-                session, event, candidate, direction_resolution=direction_resolution)
+                session, event, candidate, direction_resolution=direction_resolution
+            )
             movement_saga, presence_updated = finalized.saga, finalized.presence_changed
             event.raw_payload = {
                 **(event.raw_payload or {}),
@@ -535,18 +558,33 @@ class MissedAccessEventBackfillService:
         )
         return True
 
-    async def _persist_backfill_movement(self, session: AsyncSession, event: AccessEvent,
-        candidate: ProtectBackfillCandidate, *, direction_resolution: dict[str, Any],
+    async def _persist_backfill_movement(
+        self,
+        session: AsyncSession,
+        event: AccessEvent,
+        candidate: ProtectBackfillCandidate,
+        *,
+        direction_resolution: dict[str, Any],
     ):
-        return await persist_historical_event_in_session(session, event,
+        return await persist_historical_event_in_session(
+            session,
+            event,
             idempotency_key=f"movement-backfill:{self.source}:{candidate.protect_event_id}",
-            evidence={**direction_resolution, "source": self.source,
-                      "protect_event_id": candidate.protect_event_id, "backfill": True},
+            evidence={
+                **direction_resolution,
+                "source": self.source,
+                "protect_event_id": candidate.protect_event_id,
+                "backfill": True,
+            },
             session_input=HistoricalSessionInput(
                 debounce_seconds=settings.lpr_debounce_max_seconds,
-                idle_seconds=settings.lpr_vehicle_session_idle_seconds, camera_id=candidate.camera_id,
-                protect_event_ids={candidate.protect_event_id}, ocr_variants=_candidate_ocr_variants(candidate),
-                last_gate_state=_direction_resolution_gate_state(direction_resolution)))
+                idle_seconds=settings.lpr_vehicle_session_idle_seconds,
+                camera_id=candidate.camera_id,
+                protect_event_ids={candidate.protect_event_id},
+                ocr_variants=_candidate_ocr_variants(candidate),
+                last_gate_state=_direction_resolution_gate_state(direction_resolution),
+            ),
+        )
 
     async def _matching_existing_event(
         self,
@@ -557,8 +595,10 @@ class MissedAccessEventBackfillService:
             await session.scalars(
                 select(AccessEvent)
                 .where(
-                    AccessEvent.occurred_at >= candidate.captured_at - MISSED_EVENT_BACKFILL_DUPLICATE_WINDOW,
-                    AccessEvent.occurred_at <= candidate.captured_at + MISSED_EVENT_BACKFILL_DUPLICATE_WINDOW,
+                    AccessEvent.occurred_at
+                    >= candidate.captured_at - MISSED_EVENT_BACKFILL_DUPLICATE_WINDOW,
+                    AccessEvent.occurred_at
+                    <= candidate.captured_at + MISSED_EVENT_BACKFILL_DUPLICATE_WINDOW,
                 )
                 .order_by(AccessEvent.occurred_at.desc())
                 .limit(50)
@@ -571,7 +611,9 @@ class MissedAccessEventBackfillService:
                 return row
         return None
 
-    async def _lookup_vehicle(self, session: AsyncSession, registration_number: str) -> Vehicle | None:
+    async def _lookup_vehicle(
+        self, session: AsyncSession, registration_number: str
+    ) -> Vehicle | None:
         return await session.scalar(
             select(Vehicle)
             .options(
@@ -600,7 +642,8 @@ class MissedAccessEventBackfillService:
                     AccessEvent.direction == AccessDirection.ENTRY,
                     AccessEvent.vehicle_id.is_not(None),
                     AccessEvent.occurred_at <= candidate.captured_at,
-                    AccessEvent.occurred_at >= candidate.captured_at - MISSED_EVENT_TRAILING_OCR_SUPPRESSION_WINDOW,
+                    AccessEvent.occurred_at
+                    >= candidate.captured_at - MISSED_EVENT_TRAILING_OCR_SUPPRESSION_WINDOW,
                 )
                 .order_by(AccessEvent.occurred_at.desc())
                 .limit(25)
@@ -616,8 +659,11 @@ class MissedAccessEventBackfillService:
         session: AsyncSession,
         candidate: ProtectBackfillCandidate,
     ) -> tuple[VisitorPass | None, str | None]:
-        return await get_visitor_pass_service().find_historical_match(session,
-            occurred_at=candidate.captured_at, registration_number=candidate.registration_number)
+        return await get_visitor_pass_service().find_historical_match(
+            session,
+            occurred_at=candidate.captured_at,
+            registration_number=candidate.registration_number,
+        )
 
     async def _direction_for_backfill(
         self,
@@ -748,15 +794,16 @@ def backfill_window_start(
         anchor = startup - MISSED_EVENT_BACKFILL_DEFAULT_LOOKBACK
 
     lower_bound = startup - MISSED_EVENT_BACKFILL_MAX_LOOKBACK
-    if anchor < lower_bound:
-        anchor = lower_bound
+    anchor = max(anchor, lower_bound)
     return anchor - MISSED_EVENT_BACKFILL_OVERLAP
 
 
 def protect_event_ids_from_payload(payload: Any) -> set[str]:
     if not isinstance(payload, dict):
         return set()
-    return set(payload_values(payload, ("eventId", "event_id", "protect_event_id", "protect_event_ids")))
+    return set(
+        payload_values(payload, ("eventId", "event_id", "protect_event_id", "protect_event_ids"))
+    )
 
 
 def _camera_ids_from_access_event(event: AccessEvent) -> set[str]:
@@ -797,7 +844,9 @@ def _best_track_candidate(observations: list[dict[str, Any]]) -> dict[str, Any] 
         candidate = dict(observation)
         candidate["registration_number"] = registration_number
         confidence = _confidence_ratio(candidate.get("confidence"))
-        captured_at = _parse_datetime(candidate.get("captured_at")) or datetime.min.replace(tzinfo=UTC)
+        captured_at = _parse_datetime(candidate.get("captured_at")) or datetime.min.replace(
+            tzinfo=UTC
+        )
         score = (confidence, captured_at)
         if best is None or score > (best[0], best[1]):
             best = (confidence, captured_at, candidate)
@@ -869,9 +918,7 @@ async def _gate_observation_for_backfill(
         return None, None
 
     open_states = {"open", "opening", "closing"}
-    open_observations = [
-        row for row in observations if str(row.state or "").lower() in open_states
-    ]
+    open_observations = [row for row in observations if str(row.state or "").lower() in open_states]
     nearest = min(
         open_observations or observations,
         key=lambda row: abs((_aware_utc(row.observed_at) - captured).total_seconds()),
@@ -887,7 +934,9 @@ async def _gate_observation_for_backfill(
     return nearest, closed_at
 
 
-def _direction_from_gate_observation(observation: GateStateObservation | None) -> AccessDirection | None:
+def _direction_from_gate_observation(
+    observation: GateStateObservation | None,
+) -> AccessDirection | None:
     if not observation:
         return None
     state = str(observation.state or "").lower()
@@ -930,7 +979,9 @@ def _gate_observation_payload(
     return {key: value for key, value in payload.items() if value is not None}
 
 
-def _visitor_pass_payload(visitor_pass: VisitorPass | None, mode: str | None) -> dict[str, Any] | None:
+def _visitor_pass_payload(
+    visitor_pass: VisitorPass | None, mode: str | None
+) -> dict[str, Any] | None:
     if not visitor_pass:
         return None
     return {
@@ -956,7 +1007,9 @@ def _schedule_evaluation_payload(schedule_evaluation: ScheduleEvaluation | None)
         "override_ends_at": schedule_evaluation.override_ends_at.isoformat()
         if schedule_evaluation and schedule_evaluation.override_ends_at
         else None,
-        "reason": schedule_evaluation.reason if schedule_evaluation else "No active vehicle identity matched.",
+        "reason": schedule_evaluation.reason
+        if schedule_evaluation
+        else "No active vehicle identity matched.",
     }
 
 
@@ -991,7 +1044,7 @@ def _parse_datetime(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return _aware_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        return _aware_utc(datetime.fromisoformat(value))
     except ValueError:
         return None
 
@@ -1055,5 +1108,5 @@ async def _audit_backfill_result(
                 level="info" if result.errors == 0 else "warning",
             )
             await session.commit()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
         logger.warning("missed_access_event_backfill_audit_failed", extra={"error": str(exc)})

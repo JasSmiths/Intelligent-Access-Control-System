@@ -1,11 +1,17 @@
 """Notification lifecycle and recovery; provider operations stay in NotificationService."""
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.logging import get_logger
+from app.models import NotificationRun
 from app.modules.notifications.base import NotificationDeliveryError
 from app.services.notification_runs import (
     ClaimLost,
@@ -13,18 +19,28 @@ from app.services.notification_runs import (
     destination_outcome_truth,
     safe_destination_outcomes,
 )
+from app.services.settings import RuntimeConfig
+from app.services.workflow_dispatch_ports import NotificationDispatchOwner, NotificationPolicy
+from app.services.workflows.execution_contracts import (
+    NotificationActionOutcome,
+    NotificationPlanItem,
+    checked_notification_plan,
+)
 
 logger = get_logger(__name__)
 POLL_SECONDS = 2
 ACTION_TIMEOUT_SECONDS = 120
+type AuthorizationCallback = Callable[
+    [AsyncSession, dict[str, Any], uuid.UUID], Awaitable[NotificationPolicy]
+]
 
 
 class NotificationDispatcher:
-    def __init__(self, service, store: NotificationRunStore):
+    def __init__(self, service: NotificationDispatchOwner, store: NotificationRunStore):
         self.service = service
         self.store = store
         self._wake = asyncio.Event()
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         if self._task is None:
@@ -52,7 +68,9 @@ class NotificationDispatcher:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), timeout=POLL_SECONDS)
 
-    async def run_once(self, run_id=None, *, claimed=None) -> bool:
+    async def run_once(
+        self, run_id: uuid.UUID | None = None, *, claimed: NotificationRun | None = None
+    ) -> bool:
         row = claimed if claimed is not None else await self.store.claim(run_id)
         if row is None:
             return False
@@ -61,26 +79,32 @@ class NotificationDispatcher:
             plan = row.delivery_plan
             if plan is None:
                 plan = await self.service.prepare_delivery_plan(row)
-                await self.store.save_plan(row.id, token, plan, facts=row.context.get("facts"))
+                await self.store.save_plan(
+                    row.id, token, [dict(item) for item in plan], facts=row.context.get("facts")
+                )
+            plan = checked_notification_plan(plan)
             for index, item in enumerate(plan):
                 if item["state"] != "pending":
                     continue
                 # Bind each closure to this action and its mutable in-memory
                 # authorization snapshot. No transport configuration is stored.
-                attempt = {"config": await self.service.delivery_config()}
+                attempt: dict[str, RuntimeConfig | None] = {
+                    "config": await self.service.delivery_config()
+                }
                 action = item["action"]
-                refresh_authorization = None
-                authorize: Callable[..., Awaitable[Any]]
+                refresh: AuthorizationCallback | None = None
+                authorize: AuthorizationCallback
                 if row.context.get("confirmed_delivery") is not None:
+
                     async def authorize_confirmed(
-                        session,
-                        payload,
-                        identity,
+                        session: AsyncSession,
+                        payload: dict[str, Any],
+                        identity: uuid.UUID,
                         *,
-                        _attempt=attempt,
-                        _action=action,
-                        _item=item,
-                    ):
+                        _attempt: dict[str, RuntimeConfig | None] = attempt,
+                        _action: dict[str, Any] = action,
+                        _item: NotificationPlanItem = item,
+                    ) -> NotificationPolicy:
                         _attempt["config"], denial = await self.service.authorize_confirmed_attempt(
                             session,
                             payload,
@@ -93,80 +117,70 @@ class NotificationDispatcher:
 
                     authorize = authorize_confirmed
                 else:
-                    config_authorizer = getattr(self.service, "authorize_attempt_with_config", None)
-                    owner = getattr(self.service, "authorize_attempt", None)
-                    if config_authorizer is not None:
-                        async def authorize_configured(
+
+                    async def authorize_configured(
+                        session: AsyncSession,
+                        payload: dict[str, Any],
+                        identity: uuid.UUID,
+                        *,
+                        _attempt: dict[str, RuntimeConfig | None] = attempt,
+                        _action: dict[str, Any] = action,
+                        _item: NotificationPlanItem = item,
+                    ) -> NotificationPolicy:
+                        (
+                            _attempt["config"],
+                            policy,
+                        ) = await self.service.authorize_attempt_with_config(
                             session,
                             payload,
                             identity,
-                            *,
-                            _attempt=attempt,
-                            _authorizer=config_authorizer,
-                            _action=action,
-                            _item=item,
-                        ):
-                            _attempt["config"], policy = await _authorizer(
-                                session,
-                                payload,
-                                identity,
-                                action=_action,
-                                item=_item,
-                            )
-                            return policy
+                            action=_action,
+                            item=_item,
+                        )
+                        return policy
 
-                        authorize = authorize_configured
+                    authorize = authorize_configured
 
-                        async def refresh_authorization(
+                    async def refresh_configured(
+                        session: AsyncSession,
+                        payload: dict[str, Any],
+                        identity: uuid.UUID,
+                        *,
+                        _attempt: dict[str, RuntimeConfig | None] = attempt,
+                        _action: dict[str, Any] = action,
+                        _item: NotificationPlanItem = item,
+                    ) -> NotificationPolicy:
+                        (
+                            _attempt["config"],
+                            policy,
+                        ) = await self.service.authorize_attempt_with_config(
                             session,
                             payload,
                             identity,
-                            *,
-                            _attempt=attempt,
-                            _authorizer=config_authorizer,
-                            _action=action,
-                            _item=item,
-                        ):
-                            _attempt["config"], policy = await _authorizer(
-                                session,
-                                payload,
-                                identity,
-                                action=_action,
-                                item=_item,
-                                final=True,
-                            )
-                            return policy
-                    elif owner is not None:
-                        async def authorize_owned(
-                            session,
-                            payload,
-                            identity,
-                            *,
-                            _owner=owner,
-                            _action=action,
-                            _item=item,
-                        ):
-                            return await _owner(session, payload, identity, action=_action, item=_item)
+                            action=_action,
+                            item=_item,
+                            final=True,
+                        )
+                        return policy
 
-                        authorize = authorize_owned
-                    else:
-                        async def authorize_missing(_session, _payload, _identity):
-                            return "notification_origin_validator_missing"
-
-                        authorize = authorize_missing
+                    refresh = refresh_configured
                 started = await self.store.begin_action(
                     row.id,
                     token,
                     index,
                     authorize_origin=authorize,
-                    refresh_authorization=refresh_authorization,
+                    refresh_authorization=refresh,
                 )
-                if started is not None and not getattr(started, "attempted", True):
+                if started is not None and not started.attempted:
                     # A saved workflow can change after plan preparation. Its
                     # action is durably skipped, while other rule actions stay
                     # eligible for this same claimed run.
                     continue
                 config = attempt["config"]
+                if config is None:
+                    raise ValueError(
+                        "A notification attempt needs its authorized runtime configuration."
+                    )
                 try:
                     async with asyncio.timeout(ACTION_TIMEOUT_SECONDS):
                         outcome = await self.service.deliver_planned_action(item, row, config)
@@ -192,7 +206,11 @@ class NotificationDispatcher:
                         return True
                     continue
                 except Exception:  # noqa: BLE001 - an unclassified provider error is always ambiguous.
-                    checkpoint = {"state": "unknown", "reason": "provider_outcome_unknown", "review_required": True}
+                    checkpoint = {
+                        "state": "unknown",
+                        "reason": "provider_outcome_unknown",
+                        "review_required": True,
+                    }
                     await self.store.finish_action(
                         row.id,
                         token,
@@ -206,7 +224,9 @@ class NotificationDispatcher:
                     return True
                 checkpoint = _checkpoint_from_outcome(outcome)
                 if outcome.metadata.get("provider_message_id"):
-                    checkpoint["provider_message_id"] = str(outcome.metadata["provider_message_id"])[:255]
+                    checkpoint["provider_message_id"] = str(
+                        outcome.metadata["provider_message_id"]
+                    )[:255]
                 await self.store.finish_action(
                     row.id,
                     token,
@@ -248,8 +268,8 @@ class NotificationDispatcher:
         return True
 
 
-def _checkpoint_from_outcome(outcome) -> dict[str, Any]:
-    metadata = outcome.metadata if isinstance(getattr(outcome, "metadata", None), dict) else {}
+def _checkpoint_from_outcome(outcome: NotificationActionOutcome) -> dict[str, Any]:
+    metadata = outcome.metadata
     raw_outcomes = metadata.get("destination_outcomes")
     receipt_accepted, receipt_failures, receipt_uncertain = destination_outcome_truth(raw_outcomes)
     # Projection is solely for the durable, user-visible receipt. Recovery
@@ -273,8 +293,13 @@ def _checkpoint_from_outcome(outcome) -> dict[str, Any]:
         review_required = True
     checkpoint: dict[str, Any] = {
         "state": state,
-        "reason": outcome.reason or (
-            "provider_outcome_unknown" if review_required else "provider_rejected" if failure_count else ""
+        "reason": outcome.reason
+        or (
+            "provider_outcome_unknown"
+            if review_required
+            else "provider_rejected"
+            if failure_count
+            else ""
         ),
         "partial_failure": bool(metadata.get("partial_failure")) or failure_count > 0,
         "failure_count": failure_count,

@@ -21,3 +21,34 @@ def test_ratchet_detects_new_edges_and_writer_increases_but_allows_removal():
 
 def test_cycle_inventory_keeps_only_edges_within_actual_components():
     assert guard.cycle_edges({"a": {"b"}, "b": {"a", "c"}, "c": set()}) == [["a", "b"], ["b", "a"]]
+
+
+def test_owner_guard_distinguishes_runtime_business_imports_and_route_writes(tmp_path):
+    fixtures = {
+        "backend/app/modules/vendor.py": """
+from typing import TYPE_CHECKING
+from app.services.settings import get_runtime_config
+if TYPE_CHECKING:
+    from app.services.contract import ReadContract
+from app.services.domain import mutate
+""",
+        "backend/app/services/domain.py": "from app.api.v1.directory import router\n",
+        "backend/app/api/v1/directory.py": """
+async def create(session, person):
+    session.add(person)
+    await session.flush()
+    await session.commit()
+""",
+    }
+    for relative, source in fixtures.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    inventory = guard.inspect(tmp_path)
+    assert inventory["violations"] == {
+        "backend/app/api/v1/directory.py::domain_transaction_in_route": 3,
+        "backend/app/modules/vendor.py::business_service_import::app.services.domain": 1,
+        "backend/app/modules/vendor.py::business_service_import::app.services.domain.mutate": 1,
+        "backend/app/services/domain.py::api_import::app.api.v1.directory": 1,
+        "backend/app/services/domain.py::api_import::app.api.v1.directory.router": 1,
+    }

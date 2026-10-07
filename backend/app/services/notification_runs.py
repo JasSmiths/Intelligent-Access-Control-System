@@ -118,7 +118,12 @@ class NotificationRunStore:
         return await self._create(context, rules_override, run_id, immediate=True)
 
     async def enqueue_in_session(
-        self, session, context: dict[str, Any], *, run_id: uuid.UUID, rules_override=None,
+        self,
+        session,
+        context: dict[str, Any],
+        *,
+        run_id: uuid.UUID,
+        rules_override=None,
     ) -> uuid.UUID:
         """Join the origin transaction; the caller owns commit and any wakeup.
 
@@ -145,23 +150,36 @@ class NotificationRunStore:
         if any(item.get("state") not in {"pending", "skipped"} for item in plan):
             raise ValueError("New notification plans cannot contain attempted actions")
         payload = copy.deepcopy(context)
-        fingerprint = hashlib.sha256(json.dumps(
-            {"context": payload, "plan": plan}, sort_keys=True, separators=(",", ":"),
-        ).encode()).hexdigest()
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {"context": payload, "plan": plan},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         payload["prepared_plan_hash"] = fingerprint
         row = await self._insert(session, payload, None, identity, immediate=immediate, plan=plan)
         if row is None:
-            existing = await session.scalar(select(NotificationRun).where(
-                NotificationRun.id == identity,
-            ).with_for_update().execution_options(populate_existing=True))
+            existing = await session.scalar(
+                select(NotificationRun)
+                .where(
+                    NotificationRun.id == identity,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
             if existing is None or existing.context.get("prepared_plan_hash") != fingerprint:
-                raise ValueError("Notification operation identity was reused with different content or authority")
+                raise ValueError(
+                    "Notification operation identity was reused with different content or authority"
+                )
         return identity, row if immediate else None
 
     async def _create(self, context, rules_override, run_id, *, immediate):
         identity = run_id or uuid.uuid4()
         async with self.sessions() as session:
-            row = await self._insert(session, context, rules_override, identity, immediate=immediate)
+            row = await self._insert(
+                session, context, rules_override, identity, immediate=immediate
+            )
             await session.commit()
         return identity, row if immediate else None
 
@@ -239,7 +257,10 @@ class NotificationRunStore:
 
     async def _owned(self, session, run_id, token):
         row = await session.scalar(
-            select(NotificationRun).where(NotificationRun.id == run_id).with_for_update().execution_options(populate_existing=True)
+            select(NotificationRun)
+            .where(NotificationRun.id == run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         now = await session.scalar(select(func.clock_timestamp()))
         if (
@@ -278,12 +299,22 @@ class NotificationRunStore:
             snapshot = await session.get(NotificationRun, run_id)
             authorization = None
             origins = ("confirmed_delivery",)
-            if snapshot is not None and (authorize_origin is not None or any(snapshot.context.get(key) is not None for key in origins)):
-                authorization = (await authorize_origin(session, snapshot.context, run_id)
-                                 if authorize_origin is not None else "notification_origin_validator_missing")
+            if snapshot is not None and (
+                authorize_origin is not None
+                or any(snapshot.context.get(key) is not None for key in origins)
+            ):
+                authorization = (
+                    await authorize_origin(session, snapshot.context, run_id)
+                    if authorize_origin is not None
+                    else "notification_origin_validator_missing"
+                )
             denial, action_skip = _authorization_parts(authorization)
             row, now = await self._owned(session, run_id, token)
-            if not denial and row.context.get("confirmed_delivery") is not None and authorize_origin is not None:
+            if (
+                not denial
+                and row.context.get("confirmed_delivery") is not None
+                and authorize_origin is not None
+            ):
                 # Actor was locked before the run. Refresh mutable configuration
                 # after the final blocking lock, not from a snapshot taken while
                 # waiting behind another transaction.
@@ -324,7 +355,9 @@ class NotificationRunStore:
                 row.delivery_plan = plan
                 self._counts(row)
                 row.lease_expires_at = now + timedelta(seconds=LEASE_SECONDS)
-                await self._audit_checkpoint(session, row, "skipped", index=index, reason=action_skip)
+                await self._audit_checkpoint(
+                    session, row, "skipped", index=index, reason=action_skip
+                )
                 await session.commit()
                 return NotificationActionStart(attempted=False, skip_reason=action_skip)
             plan[index]["state"] = "attempting"
@@ -402,7 +435,9 @@ class NotificationRunStore:
             await session.commit()
 
     @staticmethod
-    async def _audit_checkpoint(session, row, delivery, *, index=None, reason=None, checkpoint=None):
+    async def _audit_checkpoint(
+        session, row, delivery, *, index=None, reason=None, checkpoint=None
+    ):
         origin = row.context.get("confirmed_delivery")
         if not isinstance(origin, dict):
             return
@@ -428,9 +463,13 @@ class NotificationRunStore:
         if outcomes:
             metadata["destination_outcomes"] = outcomes
         await write_audit_log(
-            session, category=TELEMETRY_CATEGORY_INTEGRATIONS, action="notification.delivery.checkpoint",
-            actor="notification_dispatch", actor_user_id=origin.get("user_id"),
-            target_entity="NotificationRun", target_id=str(row.id),
+            session,
+            category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            action="notification.delivery.checkpoint",
+            actor="notification_dispatch",
+            actor_user_id=origin.get("user_id"),
+            target_entity="NotificationRun",
+            target_id=str(row.id),
             outcome=audit_outcome,
             level="warning" if audit_outcome in {"uncertain", "failed"} else "info",
             metadata=metadata,

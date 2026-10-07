@@ -1,5 +1,7 @@
 import { ArrowLeft, CheckCircle2, MessageCircle, Play, PlugZap, Plus, Sparkles, Trash2 } from "lucide-react";
 import React from "react";
+import { useDirectoryOptions } from "../directory/reads";
+import { DirectoryPagination } from "../directory/DirectoryPagination";
 import type { Person, Vehicle } from "../../api/types";
 import type { AutomationAction, AutomationCatalogGroup, AutomationCatalogItem, AutomationNode, AutomationVariable } from "../../api/workflows";
 import { fromDateTimeLocal, titleCase, toDateTimeLocal } from "../../lib/format";
@@ -86,6 +88,9 @@ function AutomationNodeCard({
   onChange: (node: AutomationNode | AutomationAction) => void;
   onRemove: () => void;
 }) {
+  const directoryNode = node.type.includes("person.") || node.type.includes("vehicle.");
+  const personOptions = useDirectoryOptions("people", people, node.config.person_id ? [String(node.config.person_id)] : [], directoryNode);
+  const vehicleOptions = useDirectoryOptions("vehicles", vehicles, node.config.vehicle_id ? [String(node.config.vehicle_id)] : [], directoryNode);
   const Icon = automationNodeIcon(node.type);
   const updateConfig = (config: Record<string, unknown>) => onChange({ ...node, config: { ...node.config, ...config } });
   return (
@@ -103,16 +108,20 @@ function AutomationNodeCard({
         <div className="field-grid compact-field-grid">
           <label className="field compact-field">
             <span>Person</span>
-            <select value={String(node.config.person_id ?? "")} onChange={(event) => updateConfig({ person_id: event.target.value })}>
+            <input aria-label="Search automation person" placeholder="Search people" value={personOptions.query} onChange={(event) => personOptions.setQuery(event.target.value)} />
+            <DirectoryPagination page={personOptions} />
+            <select aria-label="Person" value={String(node.config.person_id ?? "")} onChange={(event) => updateConfig({ person_id: event.target.value })}>
               <option value="">From trigger context</option>
-              {people.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}
+              {personOptions.items.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}
             </select>
           </label>
           <label className="field compact-field">
             <span>Vehicle</span>
-            <select value={String(node.config.vehicle_id ?? "")} onChange={(event) => updateConfig({ vehicle_id: event.target.value })}>
+            <input aria-label="Search automation vehicle" placeholder="Search vehicles" value={vehicleOptions.query} onChange={(event) => vehicleOptions.setQuery(event.target.value)} />
+            <DirectoryPagination page={vehicleOptions} />
+            <select aria-label="Vehicle" value={String(node.config.vehicle_id ?? "")} onChange={(event) => updateConfig({ vehicle_id: event.target.value })}>
               <option value="">From trigger context</option>
-              {vehicles.map((vehicle) => <option key={vehicle.id} value={vehicle.id}>{vehicle.registration_number}</option>)}
+              {vehicleOptions.items.map((vehicle) => <option key={vehicle.id} value={vehicle.id}>{vehicle.registration_number}</option>)}
             </select>
           </label>
         </div>

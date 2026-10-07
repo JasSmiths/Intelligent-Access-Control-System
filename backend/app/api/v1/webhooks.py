@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
@@ -43,8 +43,7 @@ MAX_LPR_WEBHOOK_BODY_BYTES = 256 * 1024
 
 @router.post("/ubiquiti/lpr", status_code=status.HTTP_202_ACCEPTED)
 async def receive_ubiquiti_lpr(
-    request: Request,
-    service: AccessEventService = Depends(get_access_event_service),
+    request: Request, service: Annotated[AccessEventService, Depends(get_access_event_service)]
 ) -> dict[str, str]:
     """Accept Ubiquiti LPR webhooks.
 
@@ -215,7 +214,8 @@ def _smart_zone_evidence_detail(
         "configured_smart_zones": configured_smart_zones,
         "zone_statuses": _smart_zone_status_payloads(zone_evidence, zone_resolution),
         "time_of_day": zone_resolution.get("time_of_day") or "unknown",
-        "time_of_day_source": zone_resolution.get("time_of_day_source") or "unifi_protect.isDark_unavailable",
+        "time_of_day_source": zone_resolution.get("time_of_day_source")
+        or "unifi_protect.isDark_unavailable",
         "smart_zone_evidence": {
             "present": zone_evidence.present,
             "explicit_empty": zone_evidence.explicit_empty,
@@ -228,7 +228,9 @@ def _smart_zone_evidence_detail(
     }
 
 
-def _smart_zone_status_payloads(zone_evidence: Any, zone_resolution: dict[str, Any]) -> list[dict[str, Any]]:
+def _smart_zone_status_payloads(
+    zone_evidence: Any, zone_resolution: dict[str, Any]
+) -> list[dict[str, Any]]:
     statuses = getattr(zone_evidence, "zone_statuses", []) or []
     matches = zone_resolution.get("smart_zone_matches")
     match_by_input: dict[str, dict[str, Any]] = {}
@@ -269,7 +271,8 @@ def _read_with_smart_zone_evidence_metadata(
         "configured_smart_zones": detail.get("configured_smart_zones") or [],
         "zone_statuses": detail.get("zone_statuses") or [],
         "time_of_day": detail.get("time_of_day") or "unknown",
-        "time_of_day_source": detail.get("time_of_day_source") or "unifi_protect.isDark_unavailable",
+        "time_of_day_source": detail.get("time_of_day_source")
+        or "unifi_protect.isDark_unavailable",
         "smart_zone_evidence": detail.get("smart_zone_evidence") or {},
     }
     return PlateRead(
@@ -323,7 +326,7 @@ async def _record_lpr_diagnostic_payloads(raw_payload: Any, read: PlateRead) -> 
                 raw_payload,
                 registration_number=read.registration_number,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Optional publication cannot undo the committed domain transaction.
             detail = _safe_error_detail(exc)
             failures.append({"diagnostic": name, "error": detail})
             logger.warning(
@@ -409,7 +412,9 @@ def _looks_like_numeric_zone_id(value: Any) -> bool:
 
 
 def _is_alarm_manager_test_payload(payload: Any) -> bool:
-    return _alarm_manager_event_id(payload) == "testEventId" or _has_trigger_device(payload, "FAKE_MAC")
+    return _alarm_manager_event_id(payload) == "testEventId" or _has_trigger_device(
+        payload, "FAKE_MAC"
+    )
 
 
 def _alarm_manager_event_id(payload: Any) -> str | None:
@@ -439,4 +444,6 @@ def _has_trigger_device(payload: Any, device: str) -> bool:
     triggers = alarm.get("triggers")
     if not isinstance(triggers, list):
         return False
-    return any(isinstance(trigger, dict) and trigger.get("device") == device for trigger in triggers)
+    return any(
+        isinstance(trigger, dict) and trigger.get("device") == device for trigger in triggers
+    )

@@ -3,9 +3,11 @@ import { useModalClose } from "../../ui/useModalClose";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import { Camera, Car, Check, CircleDot, Plus, RefreshCw, ShieldCheck, Type, X } from "lucide-react";
 import React from "react";
+import { useDirectoryOptions } from "./reads";
+import { DirectoryPagination } from "./DirectoryPagination";
 
 import { api, createActionConfirmation } from "../../api/client";
-import { matches, titleCase } from "../../lib/format";
+import { titleCase } from "../../lib/format";
 import { fileToDataUrl, mediaSource } from "../../lib/media";
 import { Badge } from "../../ui/primitives";
 import type { Group, Person, Schedule, Vehicle } from "../../api/types";
@@ -17,7 +19,7 @@ import { PersonAvatar, VehiclePhoto } from "./components";
 export function VehiclePeoplePicker({
   groups,
   onToggle,
-  people,
+  people: initialPeople,
   selectedPersonIds
 }: {
   groups: Group[];
@@ -25,6 +27,8 @@ export function VehiclePeoplePicker({
   people: Person[];
   selectedPersonIds: string[];
 }) {
+  const personOptions = useDirectoryOptions("people", initialPeople, selectedPersonIds);
+  const people = personOptions.items;
   const selectedPersonIdSet = React.useMemo(() => new Set(selectedPersonIds), [selectedPersonIds]);
   const selectedPeople = React.useMemo(
     () => people
@@ -33,7 +37,7 @@ export function VehiclePeoplePicker({
     [people, selectedPersonIdSet]
   );
   const groupSections = React.useMemo(() => {
-    const allPeople = [...people].sort((left, right) => left.display_name.localeCompare(right.display_name));
+    const allPeople = [...personOptions.pageItems].sort((left, right) => left.display_name.localeCompare(right.display_name));
     return [
       {
         id: "all",
@@ -41,18 +45,19 @@ export function VehiclePeoplePicker({
         description: "Every directory person",
         items: allPeople
       },
-      ...groupPeopleByDirectoryGroup(people, groups).map((section) => ({
+      ...groupPeopleByDirectoryGroup(personOptions.pageItems, groups).map((section) => ({
         id: section.id,
         title: section.name,
         description: section.category ? titleCase(section.category) : "No group",
         items: section.items
       }))
     ];
-  }, [groups, people]);
+  }, [groups, personOptions.pageItems]);
   const [activeGroupId, setActiveGroupId] = React.useState("all");
-  const [personQuery, setPersonQuery] = React.useState("");
+  const personQuery = personOptions.query;
+  const setPersonQuery = personOptions.setQuery;
   const activeGroup = groupSections.find((section) => section.id === activeGroupId) ?? groupSections[0];
-  const visiblePeople = activeGroup.items.filter((person) => matches(`${person.display_name} ${person.group ?? ""}`, personQuery));
+  const visiblePeople = activeGroup.items;
 
   React.useEffect(() => {
     if (!groupSections.some((section) => section.id === activeGroupId)) {
@@ -75,6 +80,7 @@ export function VehiclePeoplePicker({
         </div>
         <div className="vehicle-person-browser">
           <input aria-label="Search people to assign" className="assignment-search" placeholder="Search people" value={personQuery} onChange={(event) => setPersonQuery(event.target.value)} />
+          <DirectoryPagination page={personOptions} />
           <div className="vehicle-person-groups" role="tablist" aria-label="Person groups">
             {groupSections.map((section) => (
               <button

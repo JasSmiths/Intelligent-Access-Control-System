@@ -1,7 +1,9 @@
 import { Plus, UserPlus, Users } from "lucide-react";
 import React from "react";
+import { useDirectoryPage } from "../features/directory/reads";
+import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
-import { activeManagedCovers, matches, titleCase, useScheduleDefaultPolicyOptionLabel } from "../lib/format";
+import { activeManagedCovers, titleCase, useScheduleDefaultPolicyOptionLabel } from "../lib/format";
 import { Badge, EmptyState } from "../ui/primitives";
 import type { Group, HomeAssistantManagedCover, Person, Schedule, Vehicle } from "../api/types";
 
@@ -16,6 +18,7 @@ export function PeopleView({
   people,
   query,
   refresh,
+  refreshToken = 0,
   schedules,
   vehicles
 }: {
@@ -24,9 +27,11 @@ export function PeopleView({
   people: Person[];
   query: string;
   refresh: () => Promise<void>;
+  refreshToken?: number;
   schedules: Schedule[];
   vehicles: Vehicle[];
 }) {
+  const directoryPage = useDirectoryPage("people", people, { query, refreshToken });
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedPerson, setSelectedPerson] = React.useState<Person | null>(null);
   const [error, setError] = React.useState("");
@@ -34,17 +39,9 @@ export function PeopleView({
   const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
   const availableGarageDoors = React.useMemo(() => activeManagedCovers(garageDoors), [garageDoors]);
   const garageDoorNameMap = React.useMemo(() => new Map(garageDoors.map((door) => [door.entity_id, door.name || door.entity_id])), [garageDoors]);
-  const filtered = React.useMemo(() => people.filter((item) =>
-    matches(item.display_name, query) ||
-    matches(item.group ?? "", query) ||
-    item.vehicles.some((vehicle) => matches(vehicle.registration_number, query)) ||
-    (item.garage_door_entity_ids ?? []).some((entityId) => matches(garageDoorNameMap.get(entityId) ?? entityId, query)) ||
-    matches(item.home_assistant_mobile_app_notify_service ?? "", query) ||
-    (item.home_assistant_presence_input_boolean_entity_ids ?? []).some((entityId) => matches(entityId, query))
-  ), [garageDoorNameMap, people, query]);
+  const filtered = directoryPage.items;
   const groupedPeople = React.useMemo(() => groupPeopleByDirectoryGroup(filtered, groups), [filtered, groups]);
   const { openGroups: openPeopleGroups, toggleGroup: togglePeopleGroup } = useDirectoryGroupOpenState(groupedPeople);
-  const assignedVehicleIds = React.useMemo(() => new Set(people.flatMap((person) => person.vehicles.map((vehicle) => vehicle.id))), [people]);
 
   const openCreate = () => {
     setSelectedPerson(null);
@@ -77,6 +74,7 @@ export function PeopleView({
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
+      <DirectoryPagination page={directoryPage} />
       <div className="card users-card people-card">
         {filtered.length ? (
           <div className="directory-group-list">
@@ -132,7 +130,6 @@ export function PeopleView({
 
       {modalOpen ? (
         <PersonModal
-          assignedVehicleIds={assignedVehicleIds}
           defaultPolicyOptionLabel={defaultPolicyOptionLabel}
           garageDoors={availableGarageDoors}
           groups={groups}
@@ -141,10 +138,9 @@ export function PeopleView({
           onSaved={async () => {
             closeModal();
             setSaved("Person saved.");
-            try { await refresh(); } catch { setError("Person saved, but the list could not be refreshed. Refresh to see the latest data."); }
+            try { await refresh(); directoryPage.refresh(); } catch { setError("Person saved, but the list could not be refreshed. Refresh to see the latest data."); }
           }}
           person={selectedPerson}
-          people={people}
           schedules={schedules}
           setPageError={setError}
           vehicles={vehicles}

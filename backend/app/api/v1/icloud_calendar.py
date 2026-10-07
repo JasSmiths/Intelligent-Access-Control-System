@@ -1,5 +1,5 @@
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -71,7 +71,9 @@ class ICloudAccountsPayload(BaseModel):
 
 
 def icloud_server_error(operation: str, exc: Exception) -> HTTPException:
-    logger.exception("icloud_calendar_api_operation_failed", extra={"operation": operation, "error": str(exc)})
+    logger.exception(
+        "icloud_calendar_api_operation_failed", extra={"operation": operation, "error": str(exc)}
+    )
     return HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail=(
@@ -83,14 +85,16 @@ def icloud_server_error(operation: str, exc: Exception) -> HTTPException:
 
 @router.get("/accounts", response_model=ICloudAccountsPayload)
 async def list_icloud_calendar_accounts(
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ICloudAccountsPayload:
     service = get_icloud_calendar_service()
     accounts = await service.list_accounts(session)
     runs = await service.recent_sync_runs(session)
     return ICloudAccountsPayload(
-        accounts=[ICloudAccountResponse(**serialize_icloud_account(account)) for account in accounts],
+        accounts=[
+            ICloudAccountResponse(**serialize_icloud_account(account)) for account in accounts
+        ],
         recent_sync_runs=[ICloudSyncRunResponse(**serialize_icloud_sync_run(run)) for run in runs],
     )
 
@@ -98,8 +102,8 @@ async def list_icloud_calendar_accounts(
 @router.post("/accounts/auth/start")
 async def start_icloud_calendar_auth(
     request: ICloudAuthStartRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     service = get_icloud_calendar_service()
     try:
@@ -113,7 +117,9 @@ async def start_icloud_calendar_auth(
         return result
     except ICloudCalendarError as exc:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except Exception as exc:
         await session.rollback()
         raise icloud_server_error("start iCloud Calendar setup", exc) from exc
@@ -122,8 +128,8 @@ async def start_icloud_calendar_auth(
 @router.post("/accounts/auth/verify")
 async def verify_icloud_calendar_auth(
     request: ICloudAuthVerifyRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     service = get_icloud_calendar_service()
     try:
@@ -137,7 +143,9 @@ async def verify_icloud_calendar_auth(
         return result
     except ICloudCalendarError as exc:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except Exception as exc:
         await session.rollback()
         raise icloud_server_error("verify iCloud Calendar setup", exc) from exc
@@ -146,14 +154,16 @@ async def verify_icloud_calendar_auth(
 @router.delete("/accounts/{account_id}", response_model=ICloudAccountResponse)
 async def remove_icloud_calendar_account(
     account_id: uuid.UUID,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ICloudAccountResponse:
     service = get_icloud_calendar_service()
     try:
         account = await service.get_account(session, account_id)
         if not account:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="iCloud Calendar account not found.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="iCloud Calendar account not found."
+            )
         removed = await service.remove_account(session, account, user=user)
         await session.commit()
         await session.refresh(removed)
@@ -162,14 +172,18 @@ async def remove_icloud_calendar_account(
         raise
     except ICloudCalendarError as exc:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except Exception as exc:
         await session.rollback()
         raise icloud_server_error("remove iCloud Calendar account", exc) from exc
 
 
 @router.post("/sync", response_model=ICloudSyncRunResponse)
-async def sync_icloud_calendars_now(user: User = Depends(admin_user)) -> ICloudSyncRunResponse:
+async def sync_icloud_calendars_now(
+    user: Annotated[User, Depends(admin_user)],
+) -> ICloudSyncRunResponse:
     service = get_icloud_calendar_service()
     try:
         result = await service.sync_all(
@@ -179,6 +193,8 @@ async def sync_icloud_calendars_now(user: User = Depends(admin_user)) -> ICloudS
         )
         return ICloudSyncRunResponse(**result)
     except ICloudCalendarError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except Exception as exc:
         raise icloud_server_error("sync iCloud Calendars", exc) from exc

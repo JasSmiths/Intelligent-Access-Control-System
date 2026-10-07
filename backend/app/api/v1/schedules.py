@@ -1,5 +1,5 @@
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -56,8 +56,8 @@ def serialize_schedule(schedule: Schedule) -> dict[str, Any]:
 
 @router.get("", response_model=list[ScheduleResponse])
 async def list_schedules(
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> list[ScheduleResponse]:
     schedules = (await session.scalars(select(Schedule).order_by(Schedule.name))).all()
     return [ScheduleResponse(**serialize_schedule(schedule)) for schedule in schedules]
@@ -66,8 +66,8 @@ async def list_schedules(
 @router.post("", response_model=ScheduleResponse, status_code=status.HTTP_201_CREATED)
 async def create_schedule(
     request: ScheduleRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ScheduleResponse:
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
     await require_confirmed_action(
@@ -79,7 +79,9 @@ async def create_schedule(
     )
     try:
         values = schedule_operations.validate_schedule_values(confirmation_payload)
-        schedule = await schedule_operations.create_schedule(session, values, user=user, source="api")
+        schedule = await schedule_operations.create_schedule(
+            session, values, user=user, source="api"
+        )
     except ScheduleOperationError as exc:
         raise _operation_http_error(exc) from exc
 
@@ -89,8 +91,8 @@ async def create_schedule(
 @router.get("/{schedule_id}", response_model=ScheduleResponse)
 async def get_schedule(
     schedule_id: uuid.UUID,
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ScheduleResponse:
     schedule = await session.get(Schedule, schedule_id)
     if not schedule:
@@ -102,8 +104,8 @@ async def get_schedule(
 async def update_schedule(
     schedule_id: uuid.UUID,
     request: ScheduleRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ScheduleResponse:
     schedule = await session.get(Schedule, schedule_id)
     if not schedule:
@@ -119,7 +121,11 @@ async def update_schedule(
     )
     try:
         schedule = await schedule_operations.update_schedule(
-            session, schedule_id, request.model_dump(exclude={"confirmation_token"}), user=user, source="api",
+            session,
+            schedule_id,
+            request.model_dump(exclude={"confirmation_token"}),
+            user=user,
+            source="api",
         )
     except ScheduleOperationError as exc:
         raise _operation_http_error(exc) from exc
@@ -129,8 +135,8 @@ async def update_schedule(
 @router.get("/{schedule_id}/dependencies", response_model=ScheduleDependenciesResponse)
 async def get_schedule_dependencies(
     schedule_id: uuid.UUID,
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ScheduleDependenciesResponse:
     schedule = await session.get(Schedule, schedule_id)
     if not schedule:
@@ -142,9 +148,9 @@ async def get_schedule_dependencies(
 @router.delete("/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_schedule(
     schedule_id: uuid.UUID,
-    request: ScheduleDeleteRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    request: Annotated[ScheduleDeleteRequest | None, Body()] = None,
 ) -> None:
     schedule = await session.get(Schedule, schedule_id)
     if not schedule:
@@ -164,7 +170,12 @@ async def delete_schedule(
 
 
 def _operation_http_error(exc: ScheduleOperationError) -> HTTPException:
-    codes = {"schedule_not_found": 404, "schedule_exists": 409, "schedule_in_use": 409, "forbidden": 403}
+    codes = {
+        "schedule_not_found": 404,
+        "schedule_exists": 409,
+        "schedule_in_use": 409,
+        "forbidden": 403,
+    }
     detail = str(exc)
     if exc.dependencies:
         detail = f"Schedule is currently in use by {_dependency_summary(exc.dependencies)}."
@@ -176,7 +187,9 @@ def _dependency_summary(dependencies: dict[str, list[dict[str, str | None]]]) ->
     labels = {"people": "people", "vehicles": "vehicles", "doors": "doors"}
     for key, rows in dependencies.items():
         if rows:
-            names = ", ".join(str(row.get("name") or row.get("entity_id") or row.get("id")) for row in rows[:4])
+            names = ", ".join(
+                str(row.get("name") or row.get("entity_id") or row.get("id")) for row in rows[:4]
+            )
             suffix = f" and {len(rows) - 4} more" if len(rows) > 4 else ""
             parts.append(f"{labels.get(key, key)}: {names}{suffix}")
     return "; ".join(parts) or "assigned entities"

@@ -165,3 +165,22 @@ readiness as 503. Before reactivation, reconcile external effects accepted after
 the restored backup: those receipts may be missing from the restored database.
 The harness's synthetic restore rehearsal validates its fixtures, not an
 installation's real backup or permission to resume delivery.
+
+## Directory read contracts
+
+People and vehicle list endpoints under `/api/v1` return
+`{items, total, next_cursor}`. The default page has 50 items; `limit` must be
+between 1 and 200. Search uses `q`, active-state filtering uses `active`, and
+people may be filtered by `group_id`. Cursors belong to the same filters and
+ordering; discard them when a filter changes. Ordering includes the record ID
+to handle equal display names or registrations.
+
+Use `GET /people/{id}` and `GET /vehicles/{id}` for detail. Explicit `ids`
+lookups and vehicle `registrations` lookups are bounded to 200 values per request.
+Use the typed directory client for URL encoding, pagination and selected-record
+hydration. Repository callers have migrated together; the old array response is
+retired. External consumers must adopt the page contract before deployment.
+
+The normalized active-plate index is migration `20261006_0011`. It adds no
+columns or data transformations, and its downgrade removes only that index.
+Production migration and deployment remain separately authorized operations.

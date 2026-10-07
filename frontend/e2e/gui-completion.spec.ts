@@ -1,3 +1,4 @@
+import reportPreviewContract from "../src/api/fixtures/reportPreview.generated.json" with { type: "json" };
 import { expect, test, type Page } from "playwright/test";
 
 const now = "2026-09-23T10:30:00Z";
@@ -31,8 +32,8 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
       case "/api/v1/access/movements/movement-1": body = movement; break;
       case "/api/v1/alerts": body = []; break;
       case "/api/v1/alerts/history": body = history([]); break;
-      case "/api/v1/people": body = [person]; break;
-      case "/api/v1/vehicles": body = [vehicle]; break;
+      case "/api/v1/people": body = { items: [person], total: 1, next_cursor: null }; break;
+      case "/api/v1/vehicles": body = { items: [vehicle], total: 1, next_cursor: null }; break;
       case "/api/v1/groups": body = [group]; break;
       case "/api/v1/schedules": body = [schedule]; break;
       case "/api/v1/schedules/schedule-1/dependencies": body = { people: [person], vehicles: [vehicle], doors: [] }; break;
@@ -224,8 +225,8 @@ test("scrolls a lower active Settings destination into the sidebar viewport", as
   expect(unexpected).toEqual([]);
 });
 
-test("shows a complete touch navigation drawer at iPhone landscape size", async ({ browser }, testInfo) => {
-  const context = await browser.newContext({ baseURL: "http://127.0.0.1:5174", viewport: { width: 956, height: 440 }, hasTouch: true, isMobile: true });
+test("shows a complete touch navigation drawer at iPhone landscape size", async ({ browser, baseURL }, testInfo) => {
+  const context = await browser.newContext({ baseURL, viewport: { width: 956, height: 440 }, hasTouch: true, isMobile: true });
   const page = await context.newPage();
   try {
     const unexpected = await installFixtures(page);
@@ -614,5 +615,88 @@ test("creates manual duration passes with a normalized plate and optional phone 
   await page.locator(".visitor-pass-card").first().click();
   const tabs = page.getByRole("tablist", { name: "Visitor Pass details", exact: true });
   await expect(tabs.getByRole("tab")).toHaveText(["Details", "Log"]);
+  expect(unexpected).toEqual([]);
+});
+
+test("keeps a complete report preview and export reachable across themes and screens", async ({ page }, testInfo) => {
+  const unexpected = await installFixtures(page, "standard");
+  await page.route("**/api/v1/reports/person-movements/preview", async (route) => {
+    expect(route.request().method()).toBe("POST");
+    const request = route.request().postDataJSON();
+    expect(request.person_id).toBe(person.id);
+    const report = reportPreviewContract.ready.report;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      ...reportPreviewContract.ready,
+      report: { ...report, generated_at: now, generated_label: "23 Sep 2026 at 11:30",
+        subject: { type: "person", id: person.id, label: person.display_name },
+        person: { ...report.person, id: person.id, display_name: person.display_name, vehicles: [vehicle] },
+        period: { ...report.period, start: request.period_start, end: request.period_end,
+          label: "16 Sep at 11:30 to 23 Sep at 11:30", start_label: "16 Sep 2026", end_label: "23 Sep 2026", duration_label: "7 days" },
+        summary: { arrivals: 1, departures: 0, total: 1, first_event: "23 Sep at 11:30" },
+        events: [{ ...event, id: "preview-event", occurred_label: "23 Sep at 11:30", type_label: "Arrival", tone: "green", detail: "Access granted", source_label: "Gate LPR", confidence_percent: 98, duration: { label: "New Arrival", tone: "new" } }] }
+    }) });
+  });
+  await page.goto("/reports");
+  await page.getByRole("combobox", { name: "Subject" }).focus();
+  await page.getByRole("option", { name: /Ada Resident/ }).click();
+  await expect(page.getByLabel("Report preview")).toBeVisible();
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    for (const [width, height] of [[1440, 900], [768, 1024], [390, 844], [844, 390]]) {
+      await page.setViewportSize({ width, height });
+      await expect(page.getByRole("combobox", { name: "Subject" })).toHaveValue(person.display_name);
+      const exportButton = page.getByRole("button", { name: "Export PDF" });
+      await expect(exportButton).toBeEnabled();
+      await exportButton.scrollIntoViewIfNeeded();
+      await expect(exportButton).toBeVisible();
+      await exportButton.focus();
+      await expect(exportButton).toBeFocused();
+      const overflow = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
+      expect(overflow.scroll).toBeLessThanOrEqual(overflow.width + 1);
+      await page.getByLabel("Report preview").scrollIntoViewIfNeeded();
+      await page.screenshot({ path: testInfo.outputPath(`reports-ready-${theme}-${width}x${height}.png`), fullPage: true, animations: "disabled" });
+    }
+  }
+  expect(unexpected).toEqual([]);
+});
+
+test("browses a thousand-person directory in bounded pages on desktop and mobile", async ({ page }, testInfo) => {
+  const unexpected = await installFixtures(page, "standard");
+  const people = Array.from({ length: 1000 }, (_, index) => ({ ...person,
+    id: `paged-person-${index + 1}`, first_name: "Resident", last_name: String(index + 1).padStart(4, "0"),
+    display_name: `Resident ${String(index + 1).padStart(4, "0")}`, vehicles: []
+  }));
+  const reads: number[] = [];
+  await page.route("**/api/v1/people?*", async (route) => {
+    expect(route.request().method()).toBe("GET");
+    const params = new URL(route.request().url()).searchParams;
+    const limit = Number(params.get("limit") ?? 50);
+    expect(limit).toBeLessThanOrEqual(50);
+    const offset = Number(params.get("cursor") ?? 0);
+    reads.push(offset);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      items: people.slice(offset, offset + limit), total: people.length,
+      next_cursor: offset + limit < people.length ? String(offset + limit) : null
+    }) });
+  });
+  await page.goto("/people");
+  const firstPerson = page.getByRole("button", { name: /Resident 0001/ });
+  const nextPerson = page.getByRole("button", { name: /Resident 0051/ });
+  for (const [width, height] of [[1440, 900], [390, 844]]) {
+    await page.setViewportSize({ width, height });
+    await expect(firstPerson).toBeVisible();
+    await expect(page.getByLabel("Previous directory page")).toBeDisabled();
+    await page.getByLabel("Next directory page").click();
+    await expect(nextPerson).toBeVisible();
+    await expect(firstPerson).toHaveCount(0);
+    await expect(page.getByLabel("Previous directory page")).toBeEnabled();
+    await expect(page.getByText("1000 results", { exact: true })).toBeVisible();
+    const overflow = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
+    expect(overflow.scroll).toBeLessThanOrEqual(overflow.width + 1);
+    await page.screenshot({ path: testInfo.outputPath(`directory-page-two-${width}x${height}.png`), animations: "disabled" });
+    await page.getByLabel("Previous directory page").click();
+    await expect(firstPerson).toBeVisible();
+  }
+  expect(reads).toContain(50);
   expect(unexpected).toEqual([]);
 });

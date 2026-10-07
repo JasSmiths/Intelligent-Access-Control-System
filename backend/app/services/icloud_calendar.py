@@ -89,7 +89,9 @@ class ICloudCalendarService:
             ).all()
         )
 
-    async def recent_sync_runs(self, session: AsyncSession, limit: int = 5) -> list[ICloudCalendarSyncRun]:
+    async def recent_sync_runs(
+        self, session: AsyncSession, limit: int = 5
+    ) -> list[ICloudCalendarSyncRun]:
         return list(
             (
                 await session.scalars(
@@ -110,10 +112,14 @@ class ICloudCalendarService:
     ) -> dict[str, Any]:
         normalized_apple_id = _clean_apple_id(apple_id)
         if not password:
-            raise ICloudCalendarError("Apple ID password is required to start iCloud Calendar setup.")
+            raise ICloudCalendarError(
+                "Apple ID password is required to start iCloud Calendar setup."
+            )
 
         try:
-            auth_session = await asyncio.to_thread(self._client.start_auth, normalized_apple_id, password)
+            auth_session = await asyncio.to_thread(
+                self._client.start_auth, normalized_apple_id, password
+            )
         except ICloudCalendarClientError as exc:
             raise ICloudCalendarError(str(exc)) from exc
         try:
@@ -175,16 +181,22 @@ class ICloudCalendarService:
     ) -> dict[str, Any]:
         pending = await self._get_pending(handshake_id)
         if not pending:
-            raise ICloudCalendarError("The iCloud verification session has expired. Start account setup again.")
+            raise ICloudCalendarError(
+                "The iCloud verification session has expired. Start account setup again."
+            )
         auth_session = pending.auth_session
         if not re.fullmatch(r"\d{6}", str(code or "").strip()):
             raise ICloudCalendarError("Enter the six-digit Apple verification code.")
         try:
-            verified = await asyncio.to_thread(self._client.validate_2fa_code, auth_session, str(code).strip())
+            verified = await asyncio.to_thread(
+                self._client.validate_2fa_code, auth_session, str(code).strip()
+            )
         except ICloudCalendarClientError as exc:
             raise ICloudCalendarError(str(exc)) from exc
         if not verified:
-            raise ICloudCalendarError("Apple rejected that verification code. Check the code and try again.")
+            raise ICloudCalendarError(
+                "Apple rejected that verification code. Check the code and try again."
+            )
         try:
             trusted = await asyncio.to_thread(self._client.trust_session, auth_session)
         except ICloudCalendarClientError as exc:
@@ -192,7 +204,9 @@ class ICloudCalendarService:
             raise ICloudCalendarError(str(exc)) from exc
         if not trusted:
             await self._drop_pending(handshake_id, cleanup=True)
-            raise ICloudCalendarError("Apple verified the code but did not trust the session. Try setup again.")
+            raise ICloudCalendarError(
+                "Apple verified the code but did not trust the session. Try setup again."
+            )
         account = await self._store_authenticated_account(session, auth_session, user=user)
         await self._drop_pending(handshake_id, cleanup=True)
         await self._publish_accounts_changed(session)
@@ -231,10 +245,15 @@ class ICloudCalendarService:
         await session.flush()
         await self._publish_accounts_changed(session)
         for payload in cancelled_payloads:
-            await event_bus.publish("visitor_pass.cancelled", {"visitor_pass": payload, "source": ICLOUD_CALENDAR_SOURCE})
+            await event_bus.publish(
+                "visitor_pass.cancelled",
+                {"visitor_pass": payload, "source": ICLOUD_CALENDAR_SOURCE},
+            )
         return account
 
-    async def get_account(self, session: AsyncSession, account_id: uuid.UUID) -> ICloudCalendarAccount | None:
+    async def get_account(
+        self, session: AsyncSession, account_id: uuid.UUID
+    ) -> ICloudCalendarAccount | None:
         return await session.scalar(
             select(ICloudCalendarAccount).where(
                 ICloudCalendarAccount.id == account_id,
@@ -256,7 +275,9 @@ class ICloudCalendarService:
                 triggered_by_user_id=triggered_by_user_id,
             )
             try:
-                result, visitor_events = await self._sync_all_in_session(session, run=run, actor=actor, actor_user_id=triggered_by_user_id)
+                result, visitor_events = await self._sync_all_in_session(
+                    session, run=run, actor=actor, actor_user_id=triggered_by_user_id
+                )
                 await session.commit()
             except Exception as exc:
                 await session.rollback()
@@ -329,7 +350,9 @@ class ICloudCalendarService:
                         )
                     except VisitorPassError as exc:
                         account_result["passes_skipped"] += 1
-                        account_result.setdefault("skips", []).append({"event": event.title, "reason": str(exc)})
+                        account_result.setdefault("skips", []).append(
+                            {"event": event.title, "reason": str(exc)}
+                        )
                         continue
                     if changed == "created":
                         account_result["passes_created"] += 1
@@ -350,7 +373,10 @@ class ICloudCalendarService:
                 account_result["passes_cancelled"] += len(cancelled)
                 for payload in cancelled:
                     visitor_events.append(
-                        ("visitor_pass.cancelled", {"visitor_pass": payload, "source": ICLOUD_CALENDAR_SOURCE})
+                        (
+                            "visitor_pass.cancelled",
+                            {"visitor_pass": payload, "source": ICLOUD_CALENDAR_SOURCE},
+                        )
                     )
                 account.status = "connected"
                 account.last_error = None
@@ -361,7 +387,7 @@ class ICloudCalendarService:
                 account.last_sync_status = "error"
                 account_result["status"] = "requires_reauth"
                 account_result["error"] = str(exc)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
                 account.status = "error"
                 account.last_error = str(exc) or "Unable to sync iCloud Calendar."
                 account.last_sync_status = "error"
@@ -380,7 +406,9 @@ class ICloudCalendarService:
         run.passes_cancelled = totals["passes_cancelled"]
         run.passes_skipped = totals["passes_skipped"]
         run.account_results = account_results
-        run.status = "ok" if all(row.get("status") == "ok" for row in account_results) else "partial"
+        run.status = (
+            "ok" if all(row.get("status") == "ok" for row in account_results) else "partial"
+        )
         run.finished_at = datetime.now(tz=UTC)
 
         await write_audit_log(
@@ -436,10 +464,14 @@ class ICloudCalendarService:
                 actor=actor,
             )
             await session.flush()
-            return "created", "visitor_pass.created", {
-                "visitor_pass": serialize_visitor_pass(visitor_pass),
-                "source": ICLOUD_CALENDAR_SOURCE,
-            }
+            return (
+                "created",
+                "visitor_pass.created",
+                {
+                    "visitor_pass": serialize_visitor_pass(visitor_pass),
+                    "source": ICLOUD_CALENDAR_SOURCE,
+                },
+            )
 
         if not calendar_pass_can_be_reconciled(existing):
             return "skipped", None, None
@@ -460,10 +492,14 @@ class ICloudCalendarService:
         await session.flush()
         if before == visitor_pass_audit_snapshot(existing):
             return "skipped", None, None
-        return "updated", "visitor_pass.updated", {
-            "visitor_pass": serialize_visitor_pass(existing),
-            "source": ICLOUD_CALENDAR_SOURCE,
-        }
+        return (
+            "updated",
+            "visitor_pass.updated",
+            {
+                "visitor_pass": serialize_visitor_pass(existing),
+                "source": ICLOUD_CALENDAR_SOURCE,
+            },
+        )
 
     async def _cancel_missing_calendar_passes(
         self,
@@ -545,7 +581,9 @@ class ICloudCalendarService:
     ) -> ICloudCalendarAccount:
         encrypted_bundle = _encrypt_session_bundle(self._client.session_bundle(auth_session))
         existing = await session.scalar(
-            select(ICloudCalendarAccount).where(ICloudCalendarAccount.apple_id == auth_session.apple_id)
+            select(ICloudCalendarAccount).where(
+                ICloudCalendarAccount.apple_id == auth_session.apple_id
+            )
         )
         now = datetime.now(tz=UTC)
         if existing:
@@ -643,7 +681,9 @@ def source_reference_for_event(account_id: uuid.UUID | str, event: ICloudCalenda
 
 
 async def calendar_visitor_name_for_event(event: ICloudCalendarEvent) -> CalendarVisitorName:
-    return CalendarVisitorName(visitor_name=fallback_visitor_name_from_calendar_title(event.title), source="fallback")
+    return CalendarVisitorName(
+        visitor_name=fallback_visitor_name_from_calendar_title(event.title), source="fallback"
+    )
 
 
 def fallback_visitor_name_from_calendar_title(title: str) -> str:
@@ -659,7 +699,11 @@ def fallback_visitor_name_from_calendar_title(title: str) -> str:
         r"\s+/\s+",
     )
     for pattern in separator_patterns:
-        parts = [_clean_calendar_visitor_name(part) for part in re.split(pattern, clean_title) if part.strip()]
+        parts = [
+            _clean_calendar_visitor_name(part)
+            for part in re.split(pattern, clean_title)
+            if part.strip()
+        ]
         if len(parts) < 2:
             continue
         candidate = parts[-1]
@@ -704,10 +748,10 @@ def source_metadata_for_event(
 
 
 def calendar_pass_can_be_reconciled(visitor_pass: VisitorPass) -> bool:
-    return (
-        visitor_pass.creation_source == ICLOUD_CALENDAR_SOURCE
-        and visitor_pass.status in {VisitorPassStatus.ACTIVE, VisitorPassStatus.SCHEDULED}
-    )
+    return visitor_pass.creation_source == ICLOUD_CALENDAR_SOURCE and visitor_pass.status in {
+        VisitorPassStatus.ACTIVE,
+        VisitorPassStatus.SCHEDULED,
+    }
 
 
 def serialize_icloud_account(account: ICloudCalendarAccount) -> dict[str, Any]:
@@ -723,7 +767,9 @@ def serialize_icloud_account(account: ICloudCalendarAccount) -> dict[str, Any]:
         "last_sync_status": account.last_sync_status,
         "last_sync_summary": account.last_sync_summary or None,
         "last_error": last_error,
-        "created_by_user_id": str(account.created_by_user_id) if account.created_by_user_id else None,
+        "created_by_user_id": str(account.created_by_user_id)
+        if account.created_by_user_id
+        else None,
         "created_at": _iso(account.created_at),
         "updated_at": _iso(account.updated_at),
     }
@@ -761,12 +807,16 @@ def icloud_account_audit_snapshot(account: ICloudCalendarAccount) -> dict[str, A
         "last_sync_status": account.last_sync_status,
         "last_sync_summary": account.last_sync_summary,
         "last_error": account.last_error,
-        "created_by_user_id": str(account.created_by_user_id) if account.created_by_user_id else None,
+        "created_by_user_id": str(account.created_by_user_id)
+        if account.created_by_user_id
+        else None,
     }
 
 
 def _serialized_icloud_account_status(account: ICloudCalendarAccount) -> tuple[str, str | None]:
-    if account.status == "error" and _looks_like_stored_session_password_fallback(account.last_error):
+    if account.status == "error" and _looks_like_stored_session_password_fallback(
+        account.last_error
+    ):
         return "requires_reauth", ICLOUD_RECONNECT_REQUIRED_MESSAGE
     return account.status, account.last_error
 
@@ -783,19 +833,25 @@ def _decrypt_session_bundle(encrypted_bundle: str) -> dict[str, Any]:
     try:
         decoded = json.loads(decrypt_secret(encrypted_bundle))
     except Exception as exc:
-        raise ICloudCalendarReauthRequired("Stored iCloud session could not be decoded. Reconnect this account.") from exc
+        raise ICloudCalendarReauthRequired(
+            "Stored iCloud session could not be decoded. Reconnect this account."
+        ) from exc
     if not isinstance(decoded, dict):
-        raise ICloudCalendarReauthRequired("Stored iCloud session is invalid. Reconnect this account.")
+        raise ICloudCalendarReauthRequired(
+            "Stored iCloud session is invalid. Reconnect this account."
+        )
     return decoded
 
 
 def _sync_range(timezone_name: str) -> tuple[datetime, datetime]:
     try:
         timezone = ZoneInfo(timezone_name)
-    except Exception:
+    except Exception:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
         timezone = ZoneInfo("UTC")
     today = datetime.combine(datetime.now(tz=timezone).date(), time.min, tzinfo=timezone)
-    return today.astimezone(UTC), (today + timedelta(days=ICLOUD_SYNC_LOOKAHEAD_DAYS + 1)).astimezone(UTC)
+    return today.astimezone(UTC), (
+        today + timedelta(days=ICLOUD_SYNC_LOOKAHEAD_DAYS + 1)
+    ).astimezone(UTC)
 
 
 def _empty_account_sync_result(account: ICloudCalendarAccount) -> dict[str, Any]:
@@ -838,14 +894,12 @@ def _clean_source(value: str) -> str:
     return source[:80] or "ui"
 
 
-
-
-
-
 def _clean_calendar_visitor_name(value: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(value or "")).strip()
     cleaned = cleaned.strip(" \t\r\n'\"`")
-    cleaned = re.sub(r"^(?:visitor_name|visitor name|person|name)\s*[:=-]\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^(?:visitor_name|visitor name|person|name)\s*[:=-]\s*", "", cleaned, flags=re.IGNORECASE
+    )
     cleaned = re.sub(r"\bopen\s+gate\b", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip(" \t\r\n'\"`:-|/.,;\u2013\u2014")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -853,7 +907,10 @@ def _clean_calendar_visitor_name(value: str) -> str:
         return ""
     if len(cleaned) <= ICLOUD_VISITOR_NAME_MAX_CHARS:
         return cleaned
-    return cleaned[:ICLOUD_VISITOR_NAME_MAX_CHARS].rsplit(" ", 1)[0].strip() or cleaned[:ICLOUD_VISITOR_NAME_MAX_CHARS]
+    return (
+        cleaned[:ICLOUD_VISITOR_NAME_MAX_CHARS].rsplit(" ", 1)[0].strip()
+        or cleaned[:ICLOUD_VISITOR_NAME_MAX_CHARS]
+    )
 
 
 def _looks_like_calendar_visitor_name(value: str) -> bool:

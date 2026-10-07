@@ -2,6 +2,7 @@ import { DoorOpen, Gauge, Lock, MapPinned, SlidersHorizontal, Warehouse } from "
 import React from "react";
 import { LoadingState } from "../ui/primitives";
 import { RouteErrorBoundary } from "../RouteErrorBoundary";
+import { DirectoryRefreshContext } from "../features/directory/reads";
 import type { AccessEvent, Anomaly, ExpectedPresenceSummary, Group, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, RealtimeMessage, Schedule, UserAccount, Vehicle, ViewKey } from "../api/types";
 const Dashboard = React.lazy(() => import("../views/DashboardView").then((module) => ({ default: module.Dashboard })));
 const GroupsView = React.lazy(() => import("../views/GroupsView").then((module) => ({ default: module.GroupsView })));
@@ -54,10 +55,10 @@ export function View(props: {
   let content: React.ReactNode;
   switch (props.view) {
     case "people":
-      content = <PeopleView garageDoors={props.integrationStatus?.garage_door_entities ?? []} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
+      content = <PeopleView refreshToken={props.dataRefreshToken} garageDoors={props.integrationStatus?.garage_door_entities ?? []} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
       break;
     case "groups":
-      content = <GroupsView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} />;
+      content = <GroupsView refreshToken={props.dataRefreshToken} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} />;
       break;
     case "schedules":
       content = <SchedulesView schedules={props.schedules} query={props.search} refreshToken={props.dataRefreshToken} refresh={props.refresh} />;
@@ -66,7 +67,7 @@ export function View(props: {
       content = <PassesView query={props.search} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} />;
       break;
     case "vehicles":
-      content = <VehiclesView groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
+      content = <VehiclesView refreshToken={props.dataRefreshToken} groups={props.groups} people={props.people} query={props.search} refresh={props.refresh} schedules={props.schedules} vehicles={props.vehicles} />;
       break;
     case "top_charts":
       content = <TopChartsView query={props.search} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} />;
@@ -81,7 +82,7 @@ export function View(props: {
       content = <AlertsView refreshDashboard={props.refresh} refreshToken={props.dataRefreshToken} resetToken={props.historyResetToken} targetId={new URLSearchParams(props.locationSearch).get("alert")} />;
       break;
     case "reports":
-      content = <ReportsView events={props.events} people={props.people} presence={props.presence} />;
+      content = <ReportsView events={props.events} people={props.people} presence={props.presence} refreshToken={props.dataRefreshToken} />;
       break;
     case "integrations":
       content = <IntegrationsView currentUser={props.currentUser} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
@@ -128,12 +129,14 @@ export function View(props: {
         : <div className="permission-state" role="alert">Administrator access required for Users.</div>;
       break;
     default:
-      content = <Dashboard {...props} currentUser={props.currentUser} navigateToView={props.navigateToView} />;
+      content = <Dashboard {...props} currentUser={props.currentUser} navigateToView={props.navigateToView} refreshToken={props.dataRefreshToken} />;
       break;
   }
   return (
     <RouteErrorBoundary view={props.view}>
-      <React.Suspense fallback={<RouteLoading />}>{content}</React.Suspense>
+      <DirectoryRefreshContext.Provider value={props.dataRefreshToken}>
+        <React.Suspense fallback={<RouteLoading />}>{content}</React.Suspense>
+      </DirectoryRefreshContext.Provider>
     </RouteErrorBoundary>
   );
 }

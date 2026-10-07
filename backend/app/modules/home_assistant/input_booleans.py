@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-
 INPUT_BOOLEAN_ACTIONS = {"turn_on", "turn_off"}
 
 
@@ -15,11 +14,11 @@ class InputBooleanCommandOutcome:
 
 
 class HomeAssistantInputBooleanClient(Protocol):
-    async def call_service(self, service_name: str, service_data: dict[str, Any]) -> dict[str, Any]:
-        ...
+    async def call_service(
+        self, service_name: str, service_data: dict[str, Any]
+    ) -> dict[str, Any]: ...
 
-    async def get_state(self, entity_id: str) -> Any:
-        ...
+    async def get_state(self, entity_id: str) -> Any: ...
 
 
 async def command_input_boolean(
@@ -45,7 +44,7 @@ async def command_input_boolean(
 
     try:
         await client.call_service(f"input_boolean.{action}", {"entity_id": entity_id})
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
         return InputBooleanCommandOutcome(
             entity_id=entity_id,
             action=action,
@@ -55,7 +54,7 @@ async def command_input_boolean(
 
     try:
         state = await client.get_state(entity_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
         return InputBooleanCommandOutcome(
             entity_id=entity_id,
             action=action,

@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-
 Outcome = Literal[
     "succeeded",
     "blocked",
@@ -113,7 +112,7 @@ def decode_cursor(value: str | None) -> UnifiedCursor | None:
         payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
         if not isinstance(payload, dict) or payload.get("v") != 1:
             raise ValueError
-        occurred_at = datetime.fromisoformat(str(payload["at"]).replace("Z", "+00:00"))
+        occurred_at = datetime.fromisoformat(str(payload["at"]))
         kind = str(payload["kind"])
         row_id = str(payload["id"]).strip()
         if occurred_at.tzinfo is None or kind not in {"trace", "audit"} or not row_id:
@@ -155,7 +154,9 @@ def resolve_time_range(
         if from_at is None or to_at is None:
             raise InvalidTimeRangeError("Both from and to are required for a custom time range.")
         if from_at.tzinfo is None or to_at.tzinfo is None:
-            raise InvalidTimeRangeError("Custom timestamps must include an explicit timezone offset.")
+            raise InvalidTimeRangeError(
+                "Custom timestamps must include an explicit timezone offset."
+            )
         resolved_from = from_at.astimezone(UTC)
         resolved_to = to_at.astimezone(UTC)
         if resolved_from >= resolved_to:
@@ -180,7 +181,7 @@ def resolve_time_range(
 
 
 def cursor_for_item(item: dict[str, Any]) -> UnifiedCursor:
-    occurred_at = datetime.fromisoformat(str(item["occurred_at"]).replace("Z", "+00:00"))
+    occurred_at = datetime.fromisoformat(str(item["occurred_at"]))
     kind = str(item["kind"])
     row_id = str(item["trace_id"] if kind == "trace" else item["audit_id"])
     return UnifiedCursor(

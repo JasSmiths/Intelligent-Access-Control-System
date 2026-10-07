@@ -1,5 +1,7 @@
 import { Camera, CircleDot, Clock3, DoorOpen, Plus, Save, Send, Trash2, Volume2 } from "lucide-react";
 import React from "react";
+import { useDirectoryOptions } from "../directory/reads";
+import { DirectoryPagination } from "../directory/DirectoryPagination";
 import type { NotificationTriggerOption, Person, Schedule, UnifiProtectCamera } from "../../api/types";
 import type { NotificationAction, NotificationActionableOption, NotificationCondition, NotificationGateMalfunctionStageOption, NotificationIntegration, NotificationRule, NotificationVariable, PresenceConditionMode } from "../../api/workflows";
 import { notificationEventLabel, titleCase } from "../../lib/format";
@@ -176,6 +178,7 @@ function NotificationConditionCard({
   onChange: (condition: NotificationCondition) => void;
   onRemove: () => void;
 }) {
+  const personOptions = useDirectoryOptions("people", people, condition.person_id ? [condition.person_id] : [], condition.type === "presence" && condition.mode === "person_home");
   return (
     <article className="workflow-condition-card">
       <div className="workflow-card-title">
@@ -206,9 +209,11 @@ function NotificationConditionCard({
           {condition.mode === "person_home" ? (
             <label className="field compact-field">
               <span>Person</span>
-              <select value={condition.person_id ?? ""} onChange={(event) => onChange({ ...condition, person_id: event.target.value })}>
+              <input aria-label="Search condition person" placeholder="Search people" value={personOptions.query} onChange={(event) => personOptions.setQuery(event.target.value)} />
+              <DirectoryPagination page={personOptions} />
+              <select aria-label="Person" value={condition.person_id ?? ""} onChange={(event) => onChange({ ...condition, person_id: event.target.value })}>
                 <option value="">Select person</option>
-                {people.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}
+                {personOptions.items.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}
               </select>
             </label>
           ) : null}

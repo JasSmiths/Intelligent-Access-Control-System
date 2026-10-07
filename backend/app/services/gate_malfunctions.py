@@ -1,6 +1,5 @@
 import asyncio
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
@@ -14,8 +13,8 @@ from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import (
     AccessEvent,
-    GateMalfunctionState,
     GateMalfunctionNotificationOutbox,
+    GateMalfunctionState,
     GateMalfunctionTimelineEvent,
     GateStateObservation,
     Person,
@@ -26,13 +25,39 @@ from app.models import (
 from app.models.enums import AccessDirection, GateMalfunctionStatus
 from app.modules.gate.base import GateState
 from app.modules.notifications.base import NotificationContext
-from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.services.access_devices import get_access_device_service
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
+from app.services.gate_controller import UnsupportedModuleError, get_gate_controller
+from app.services.gate_malfunction_policy import (
+    ATTEMPT_CLAIM_STALE_SECONDS,
+    ATTEMPT_OFFSETS_SECONDS,
+    MALFUNCTION_STAGE_ORDER,
+    MALFUNCTION_TRIGGER_SECONDS,
+    MILESTONE_TRIGGERS,
+    NOTIFICATION_RETRY_SECONDS,
+    NOTIFICATION_SENDING_STALE_SECONDS,
+    NOTIFICATION_TERMINAL_STATUSES,
+    UNRESOLVED_STATUSES,
+    UNSAFE_GATE_STATES,
+    GateMalfunctionReadContext,
+    GateSnapshot,
+    _coerce_gate_state_value,
+    access_event_details,
+    coerce_gate_state,
+    coerce_uuid,
+    downtime_seconds,
+    format_duration,
+    history_cursor,
+    normalize_notification_stage,
+    parse_datetime,
+    parse_history_cursor,
+    state_is_on,
+    trace_summary,
+    vehicle_label,
+)
 from app.services.home_assistant import KEEP_GATE_OPEN_HA_ENTITY_ID
 from app.services.maintenance import is_maintenance_mode_active
-from app.services.workflows.notification_payloads import GATE_MALFUNCTION_STAGE_LABELS
 from app.services.notifications import (
     GATE_MALFUNCTION_EVENT_TYPE,
     get_notification_service,
@@ -43,75 +68,9 @@ from app.services.telemetry import (
     span_id,
     trace_id,
 )
+from app.services.workflows.notification_payloads import GATE_MALFUNCTION_STAGE_LABELS
 
 logger = get_logger(__name__)
-
-MALFUNCTION_TRIGGER_SECONDS = 5 * 60
-ATTEMPT_OFFSETS_SECONDS = {
-    1: 5 * 60,
-    2: 5 * 60 + 45,
-    3: 10 * 60 + 45,
-    4: 70 * 60 + 45,
-    5: 190 * 60 + 45,
-}
-MILESTONE_TRIGGERS = [
-    (30 * 60, "30m", "Gate malfunction open for 30 minutes", "warning"),
-    (60 * 60, "60m", "Gate malfunction open for 60 minutes", "critical"),
-    (120 * 60, "2hrs", "Gate malfunction open for 2 hours", "critical"),
-]
-MALFUNCTION_STAGE_ORDER = {
-    "initial": 0,
-    "30m": 1,
-    "60m": 2,
-    "2hrs": 3,
-    "fubar": 4,
-    "resolved": 5,
-}
-UNSAFE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
-UNRESOLVED_STATUSES = {GateMalfunctionStatus.ACTIVE, GateMalfunctionStatus.FUBAR}
-NOTIFICATION_TERMINAL_STATUSES = {"sent", "skipped", "review_required"}
-NOTIFICATION_RETRY_SECONDS = [60, 5 * 60, 15 * 60]
-NOTIFICATION_SENDING_STALE_SECONDS = 5 * 60
-ATTEMPT_CLAIM_STALE_SECONDS = 5 * 60
-
-
-@dataclass(frozen=True)
-class GateSnapshot:
-    entity_id: str
-    name: str
-    state: GateState
-    state_changed_at: datetime | None
-    observed_at: datetime
-    keep_open_active: bool = False
-    keep_open_entity_id: str | None = None
-
-    @property
-    def unsafe_open(self) -> bool:
-        return self.state in UNSAFE_GATE_STATES
-
-
-@dataclass(frozen=True)
-class GateMalfunctionReadContext:
-    id: uuid.UUID
-    gate_entity_id: str
-    gate_name: str | None
-    status: GateMalfunctionStatus
-    opened_at: datetime
-    declared_at: datetime
-    resolved_at: datetime | None
-    last_gate_state: str | None
-
-    def as_payload(self) -> dict[str, Any]:
-        return {
-            "id": str(self.id),
-            "gate_entity_id": self.gate_entity_id,
-            "gate_name": self.gate_name,
-            "status": self.status.value,
-            "opened_at": self.opened_at.isoformat(),
-            "declared_at": self.declared_at.isoformat(),
-            "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
-            "last_gate_state": self.last_gate_state,
-        }
 
 
 async def active_stuck_open_malfunction_at(
@@ -154,15 +113,6 @@ async def active_stuck_open_malfunction_at(
     )
 
 
-def _coerce_gate_state_value(value: Any) -> GateState:
-    if isinstance(value, GateState):
-        return value
-    try:
-        return GateState(str(value or "").lower())
-    except ValueError:
-        return GateState.UNKNOWN
-
-
 class GateMalfunctionService:
     """Persistent state machine for stuck-open gate recovery."""
 
@@ -202,7 +152,10 @@ class GateMalfunctionService:
                     .order_by(GateMalfunctionState.opened_at.desc())
                 )
             ).all()
-            return [await self._serialize_malfunction(session, row, include_timeline=include_timeline) for row in rows]
+            return [
+                await self._serialize_malfunction(session, row, include_timeline=include_timeline)
+                for row in rows
+            ]
 
     async def history(
         self,
@@ -235,10 +188,12 @@ class GateMalfunctionService:
             )
             if status:
                 try:
-                    query = query.where(GateMalfunctionState.status == GateMalfunctionStatus(status))
+                    query = query.where(
+                        GateMalfunctionState.status == GateMalfunctionStatus(status)
+                    )
                 except ValueError:
                     return {"items": [], "next_cursor": None}
-            cursor_opened_at, cursor_id = self._parse_history_cursor(cursor)
+            cursor_opened_at, cursor_id = parse_history_cursor(cursor)
             if cursor_opened_at and cursor_id:
                 query = query.where(
                     or_(
@@ -251,17 +206,19 @@ class GateMalfunctionService:
                 )
             rows = (await session.scalars(query.limit(bounded_limit + 1))).all()
             items = rows[:bounded_limit]
-            next_cursor = self._history_cursor(items[-1]) if len(rows) > bounded_limit and items else None
+            next_cursor = history_cursor(items[-1]) if len(rows) > bounded_limit and items else None
             return {
                 "items": [
-                    await self._serialize_malfunction(session, row, include_timeline=include_timeline)
+                    await self._serialize_malfunction(
+                        session, row, include_timeline=include_timeline
+                    )
                     for row in items
                 ],
                 "next_cursor": next_cursor,
             }
 
     async def trace(self, malfunction_id: uuid.UUID | str) -> dict[str, Any] | None:
-        row_id = self._coerce_uuid(malfunction_id)
+        row_id = coerce_uuid(malfunction_id)
         if row_id is None:
             return None
         async with AsyncSessionLocal() as session:
@@ -284,7 +241,12 @@ class GateMalfunctionService:
         confirm: bool,
     ) -> dict[str, Any]:
         normalized_action = action.strip().lower()
-        if normalized_action not in {"recheck_live_state", "run_attempt_now", "mark_resolved", "mark_fubar"}:
+        if normalized_action not in {
+            "recheck_live_state",
+            "run_attempt_now",
+            "mark_resolved",
+            "mark_fubar",
+        }:
             return {"changed": False, "error": "Unsupported malfunction override action."}
         if not confirm:
             return {
@@ -297,14 +259,16 @@ class GateMalfunctionService:
                 "target": str(malfunction_id),
             }
 
-        row_id = self._coerce_uuid(malfunction_id)
+        row_id = coerce_uuid(malfunction_id)
         if row_id is None:
             return {"changed": False, "error": "Invalid malfunction ID."}
 
         if normalized_action == "recheck_live_state":
             snapshot = await self._current_gate_snapshot(refresh=True)
             if snapshot.state == GateState.CLOSED:
-                await self._resolve_for_closed_gate(snapshot, reason=f"Manual recheck by {actor}: {reason}")
+                await self._resolve_for_closed_gate(
+                    snapshot, reason=f"Manual recheck by {actor}: {reason}"
+                )
             return {
                 "changed": snapshot.state == GateState.CLOSED,
                 "state": snapshot.state.value,
@@ -312,7 +276,9 @@ class GateMalfunctionService:
             }
 
         if normalized_action == "run_attempt_now":
-            return await self._execute_attempt_for_id(row_id, actor=actor, reason=reason, manual=True)
+            return await self._execute_attempt_for_id(
+                row_id, actor=actor, reason=reason, manual=True
+            )
 
         queue_fubar_notification = False
         queue_resolved_notification = False
@@ -384,7 +350,7 @@ class GateMalfunctionService:
 
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._poll_interval_seconds)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     async def evaluate_once(self) -> None:
@@ -405,7 +371,9 @@ class GateMalfunctionService:
 
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
         if event.type == "gate.state_changed":
-            task = asyncio.create_task(self.evaluate_once(), name="gate-malfunction-realtime-evaluation")
+            task = asyncio.create_task(
+                self.evaluate_once(), name="gate-malfunction-realtime-evaluation"
+            )
             task.add_done_callback(_log_background_task_error)
             return
         if event.type not in {"notification.sent", "notification.failed", "notification.skipped"}:
@@ -420,31 +388,35 @@ class GateMalfunctionService:
         status: dict[str, Any] = {}
         try:
             status = await get_access_device_service().status(refresh=refresh)
-        except Exception as exc:
-            logger.warning("gate_malfunction_access_device_status_failed", extra={"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
+            logger.warning(
+                "gate_malfunction_access_device_status_failed", extra={"error": str(exc)}
+            )
 
         gates = status.get("gate_entities") if isinstance(status.get("gate_entities"), list) else []
         primary = gates[0] if gates and isinstance(gates[0], dict) else {}
         entity_id = str(primary.get("entity_id") or status.get("gate_entity_id") or "primary_gate")
         name = str(primary.get("name") or entity_id)
         raw_state = str(status.get("current_gate_state") or primary.get("state") or "")
-        changed_at = self._parse_datetime(
+        changed_at = parse_datetime(
             status.get("current_gate_state_changed_at")
             or primary.get("state_changed_at")
             or primary.get("last_changed")
         )
-        state = self._coerce_gate_state(raw_state)
-        keep_open_entity_id = str(status.get("keep_gate_open_entity_id") or KEEP_GATE_OPEN_HA_ENTITY_ID)
-        keep_open_active = bool(status.get("keep_gate_open_active")) or self._state_is_on(
+        state = coerce_gate_state(raw_state)
+        keep_open_entity_id = str(
+            status.get("keep_gate_open_entity_id") or KEEP_GATE_OPEN_HA_ENTITY_ID
+        )
+        keep_open_active = bool(status.get("keep_gate_open_active")) or state_is_on(
             status.get("keep_gate_open_state")
         )
 
         if state == GateState.UNKNOWN:
             try:
-                state = self._coerce_gate_state(await get_gate_controller("configured").current_state())
+                state = coerce_gate_state(await get_gate_controller("configured").current_state())
             except UnsupportedModuleError as exc:
                 logger.warning("gate_malfunction_controller_unavailable", extra={"error": str(exc)})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
                 logger.warning("gate_malfunction_current_state_failed", extra={"error": str(exc)})
 
         return GateSnapshot(
@@ -551,7 +523,7 @@ class GateMalfunctionService:
                     kind="preceding_event",
                     occurred_at=last_event.occurred_at,
                     title=await self._access_event_label(session, last_event),
-                    details=self._access_event_details(last_event),
+                    details=access_event_details(last_event),
                 )
             await self._add_timeline_event(
                 session,
@@ -648,7 +620,10 @@ class GateMalfunctionService:
                             GateMalfunctionState.attempt_claimed_at <= stale_claim_cutoff,
                         ),
                     )
-                    .order_by(GateMalfunctionState.next_attempt_scheduled_at, GateMalfunctionState.opened_at)
+                    .order_by(
+                        GateMalfunctionState.next_attempt_scheduled_at,
+                        GateMalfunctionState.opened_at,
+                    )
                 )
             ).all()
         for row in rows:
@@ -759,12 +734,21 @@ class GateMalfunctionService:
             now = datetime.now(tz=UTC)
             if row.status != GateMalfunctionStatus.ACTIVE:
                 payload = await self._serialize_malfunction(session, row, include_timeline=True)
-                return {"changed": False, "malfunction": payload, "detail": "Malfunction is not active."}
+                return {
+                    "changed": False,
+                    "malfunction": payload,
+                    "detail": "Malfunction is not active.",
+                }
             if require_due_at and (
-                row.next_attempt_scheduled_at is None or row.next_attempt_scheduled_at > require_due_at
+                row.next_attempt_scheduled_at is None
+                or row.next_attempt_scheduled_at > require_due_at
             ):
                 payload = await self._serialize_malfunction(session, row, include_timeline=True)
-                return {"changed": False, "malfunction": payload, "detail": "Recovery attempt is no longer due."}
+                return {
+                    "changed": False,
+                    "malfunction": payload,
+                    "detail": "Recovery attempt is no longer due.",
+                }
             if await is_maintenance_mode_active():
                 payload = await self._serialize_malfunction(session, row, include_timeline=True)
                 return {
@@ -773,9 +757,11 @@ class GateMalfunctionService:
                     "paused": True,
                     "detail": "Maintenance Mode is active; recovery attempts are paused.",
                 }
-            if row.attempt_claim_token and row.attempt_claimed_at and (
-                now - row.attempt_claimed_at
-            ).total_seconds() < ATTEMPT_CLAIM_STALE_SECONDS:
+            if (
+                row.attempt_claim_token
+                and row.attempt_claimed_at
+                and (now - row.attempt_claimed_at).total_seconds() < ATTEMPT_CLAIM_STALE_SECONDS
+            ):
                 payload = await self._serialize_malfunction(session, row, include_timeline=True)
                 return {
                     "changed": False,
@@ -817,7 +803,11 @@ class GateMalfunctionService:
                 return {"changed": False, "error": "Gate malfunction not found."}
             if row.attempt_claim_token != claim_token:
                 payload = await self._serialize_malfunction(session, row, include_timeline=True)
-                return {"changed": False, "malfunction": payload, "detail": "Recovery claim no longer owns this attempt."}
+                return {
+                    "changed": False,
+                    "malfunction": payload,
+                    "detail": "Recovery claim no longer owns this attempt.",
+                }
             row.attempt_claim_token = None
             row.attempt_claimed_at = None
             row.last_checked_at = datetime.now(tz=UTC)
@@ -845,13 +835,21 @@ class GateMalfunctionService:
                 return {"changed": False, "error": "Gate malfunction not found."}
             if row.attempt_claim_token != claim_token:
                 payload = await self._serialize_malfunction(session, row, include_timeline=True)
-                return {"changed": False, "malfunction": payload, "detail": "Recovery claim no longer owns this attempt."}
+                return {
+                    "changed": False,
+                    "malfunction": payload,
+                    "detail": "Recovery claim no longer owns this attempt.",
+                }
             if row.status != GateMalfunctionStatus.ACTIVE:
                 row.attempt_claim_token = None
                 row.attempt_claimed_at = None
                 await session.commit()
                 payload = await self._serialize_malfunction(session, row, include_timeline=True)
-                return {"changed": False, "malfunction": payload, "detail": "Malfunction is not active."}
+                return {
+                    "changed": False,
+                    "malfunction": payload,
+                    "detail": "Malfunction is not active.",
+                }
             now = datetime.now(tz=UTC)
             await self._mark_resolved(session, row, now, reason=reason, snapshot=snapshot)
             row.attempt_claim_token = None
@@ -892,13 +890,21 @@ class GateMalfunctionService:
                 return {"changed": False, "error": "Gate malfunction not found."}
             if row.attempt_claim_token != claim_token:
                 payload = await self._serialize_malfunction(session, row, include_timeline=True)
-                return {"changed": False, "malfunction": payload, "detail": "Recovery claim no longer owns this attempt."}
+                return {
+                    "changed": False,
+                    "malfunction": payload,
+                    "detail": "Recovery claim no longer owns this attempt.",
+                }
             if row.status != GateMalfunctionStatus.ACTIVE:
                 row.attempt_claim_token = None
                 row.attempt_claimed_at = None
                 await session.commit()
                 payload = await self._serialize_malfunction(session, row, include_timeline=True)
-                return {"changed": False, "malfunction": payload, "detail": "Malfunction is not active."}
+                return {
+                    "changed": False,
+                    "malfunction": payload,
+                    "detail": "Malfunction is not active.",
+                }
             now = datetime.now(tz=UTC)
             attempt_number = row.fix_attempts_count + 1
             row.fix_attempts_count = attempt_number
@@ -917,7 +923,9 @@ class GateMalfunctionService:
                     "accepted": accepted,
                     "state": state,
                     "detail": detail,
-                    "scheduled_at": row.next_attempt_scheduled_at.isoformat() if row.next_attempt_scheduled_at else None,
+                    "scheduled_at": row.next_attempt_scheduled_at.isoformat()
+                    if row.next_attempt_scheduled_at
+                    else None,
                 },
                 attempt_number=attempt_number,
                 status="ok" if accepted else "error",
@@ -925,11 +933,21 @@ class GateMalfunctionService:
 
             if attempt_number >= max(ATTEMPT_OFFSETS_SECONDS):
                 if after_attempt and after_attempt.state == GateState.CLOSED:
-                    await self._mark_resolved(session, row, now, reason="Gate closed after final recovery attempt.", snapshot=after_attempt)
+                    await self._mark_resolved(
+                        session,
+                        row,
+                        now,
+                        reason="Gate closed after final recovery attempt.",
+                        snapshot=after_attempt,
+                    )
                 else:
-                    await self._mark_fubar(session, row, now, reason="Automated recovery attempts exhausted.")
+                    await self._mark_fubar(
+                        session, row, now, reason="Automated recovery attempts exhausted."
+                    )
             elif row.status == GateMalfunctionStatus.ACTIVE:
-                row.next_attempt_scheduled_at = row.opened_at + timedelta(seconds=ATTEMPT_OFFSETS_SECONDS[attempt_number + 1])
+                row.next_attempt_scheduled_at = row.opened_at + timedelta(
+                    seconds=ATTEMPT_OFFSETS_SECONDS[attempt_number + 1]
+                )
                 await self._update_trace(session, row)
 
             await session.commit()
@@ -980,8 +998,7 @@ class GateMalfunctionService:
         async with AsyncSessionLocal() as session:
             rows = (
                 await session.scalars(
-                    select(GateMalfunctionState)
-                    .where(
+                    select(GateMalfunctionState).where(
                         GateMalfunctionState.gate_entity_id == snapshot.entity_id,
                         GateMalfunctionState.status.in_(list(UNRESOLVED_STATUSES)),
                     )
@@ -995,12 +1012,14 @@ class GateMalfunctionService:
                 await self._mark_resolved(session, row, now, reason=reason, snapshot=snapshot)
             await session.commit()
             for row in rows:
-                payloads.append(await self._serialize_malfunction(session, row, include_timeline=True))
+                payloads.append(
+                    await self._serialize_malfunction(session, row, include_timeline=True)
+                )
 
         for payload in payloads:
             await event_bus.publish("gate_malfunction.resolved", payload)
             await event_bus.publish("gate_malfunction.updated", payload)
-            malfunction_id = self._coerce_uuid(payload.get("id"))
+            malfunction_id = coerce_uuid(payload.get("id"))
             if malfunction_id:
                 await self._queue_notification(
                     malfunction_id,
@@ -1041,7 +1060,9 @@ class GateMalfunctionService:
         )
         await self._update_trace(session, row)
 
-    async def _mark_fubar(self, session, row: GateMalfunctionState, now: datetime, *, reason: str) -> None:
+    async def _mark_fubar(
+        self, session, row: GateMalfunctionState, now: datetime, *, reason: str
+    ) -> None:
         if row.status == GateMalfunctionStatus.FUBAR:
             return
         if row.status == GateMalfunctionStatus.RESOLVED:
@@ -1076,7 +1097,7 @@ class GateMalfunctionService:
         severity: str,
         occurred_at: datetime,
     ) -> None:
-        normalized_stage = self._normalize_notification_stage(stage)
+        normalized_stage = normalize_notification_stage(stage)
         outbox_id: uuid.UUID | None = None
         async with AsyncSessionLocal() as session:
             row = await session.get(GateMalfunctionState, malfunction_id)
@@ -1088,7 +1109,9 @@ class GateMalfunctionService:
                     GateMalfunctionNotificationOutbox.stage == normalized_stage,
                 )
             )
-            if outbox and (outbox.recovery_version != 1 or outbox.status in NOTIFICATION_TERMINAL_STATUSES):
+            if outbox and (
+                outbox.recovery_version != 1 or outbox.status in NOTIFICATION_TERMINAL_STATUSES
+            ):
                 return
             if outbox is None:
                 outbox = GateMalfunctionNotificationOutbox(
@@ -1109,7 +1132,11 @@ class GateMalfunctionService:
                     kind="notification_requested",
                     occurred_at=occurred_at,
                     title=f"{subject} notification queued",
-                    details={"trigger": GATE_MALFUNCTION_EVENT_TYPE, "stage": normalized_stage, "severity": severity},
+                    details={
+                        "trigger": GATE_MALFUNCTION_EVENT_TYPE,
+                        "stage": normalized_stage,
+                        "severity": severity,
+                    },
                     notification_trigger=normalized_stage,
                 )
                 await self._update_trace(session, row)
@@ -1157,7 +1184,8 @@ class GateMalfunctionService:
                             ),
                             and_(
                                 GateMalfunctionNotificationOutbox.status == "failed",
-                                GateMalfunctionNotificationOutbox.attempts_count < len(NOTIFICATION_RETRY_SECONDS),
+                                GateMalfunctionNotificationOutbox.attempts_count
+                                < len(NOTIFICATION_RETRY_SECONDS),
                                 or_(
                                     GateMalfunctionNotificationOutbox.next_retry_at.is_(None),
                                     GateMalfunctionNotificationOutbox.next_retry_at <= now,
@@ -1167,12 +1195,16 @@ class GateMalfunctionService:
                                 GateMalfunctionNotificationOutbox.status == "sending",
                                 or_(
                                     GateMalfunctionNotificationOutbox.last_attempt_at.is_(None),
-                                    GateMalfunctionNotificationOutbox.last_attempt_at <= stale_cutoff,
+                                    GateMalfunctionNotificationOutbox.last_attempt_at
+                                    <= stale_cutoff,
                                 ),
                             ),
                         ),
                     )
-                    .order_by(GateMalfunctionNotificationOutbox.next_retry_at, GateMalfunctionNotificationOutbox.occurred_at)
+                    .order_by(
+                        GateMalfunctionNotificationOutbox.next_retry_at,
+                        GateMalfunctionNotificationOutbox.occurred_at,
+                    )
                     .limit(20)
                 )
             ).all()
@@ -1187,19 +1219,27 @@ class GateMalfunctionService:
                 .where(GateMalfunctionNotificationOutbox.id == outbox_id)
                 .with_for_update()
             )
-            if not outbox or outbox.recovery_version != 1 or outbox.status in NOTIFICATION_TERMINAL_STATUSES:
+            if (
+                not outbox
+                or outbox.recovery_version != 1
+                or outbox.status in NOTIFICATION_TERMINAL_STATUSES
+            ):
                 return
             now = datetime.now(tz=UTC)
             from app.services.notification_runs import MAX_DISPATCH_AGE_SECONDS
+
             if (now - outbox.occurred_at).total_seconds() > MAX_DISPATCH_AGE_SECONDS:
                 outbox.status = "review_required"
                 outbox.last_error = "dispatch_age_exceeded"
                 outbox.next_retry_at = None
                 await session.commit()
                 return
-            if outbox.status == "sending" and outbox.last_attempt_at and (
-                now - outbox.last_attempt_at
-            ).total_seconds() < NOTIFICATION_SENDING_STALE_SECONDS:
+            if (
+                outbox.status == "sending"
+                and outbox.last_attempt_at
+                and (now - outbox.last_attempt_at).total_seconds()
+                < NOTIFICATION_SENDING_STALE_SECONDS
+            ):
                 return
             if (
                 outbox.status == "failed"
@@ -1245,7 +1285,9 @@ class GateMalfunctionService:
             await self._finalize_outbox_result(outbox_id, "failed", str(exc))
             logger.exception("gate_malfunction_notification_dispatch_failed")
 
-    async def _finalize_outbox_result(self, outbox_id: uuid.UUID, status: str, error: str = "") -> None:
+    async def _finalize_outbox_result(
+        self, outbox_id: uuid.UUID, status: str, error: str = ""
+    ) -> None:
         async with AsyncSessionLocal() as session:
             outbox = await session.scalar(
                 select(GateMalfunctionNotificationOutbox)
@@ -1257,7 +1299,9 @@ class GateMalfunctionService:
             if status == "review_required":
                 outbox.status = "review_required"
                 outbox.next_retry_at = None
-                outbox.last_error = "Notification delivery requires review; automatic resend is disabled."
+                outbox.last_error = (
+                    "Notification delivery requires review; automatic resend is disabled."
+                )
             elif status == "sent":
                 outbox.status = "sent"
                 outbox.next_retry_at = None
@@ -1269,19 +1313,22 @@ class GateMalfunctionService:
             else:
                 outbox.status = "failed"
                 outbox.last_error = error
-                retry_index = max(0, min(outbox.attempts_count - 1, len(NOTIFICATION_RETRY_SECONDS) - 1))
+                retry_index = max(
+                    0, min(outbox.attempts_count - 1, len(NOTIFICATION_RETRY_SECONDS) - 1)
+                )
                 outbox.next_retry_at = (
-                    datetime.now(tz=UTC) + timedelta(seconds=NOTIFICATION_RETRY_SECONDS[retry_index])
+                    datetime.now(tz=UTC)
+                    + timedelta(seconds=NOTIFICATION_RETRY_SECONDS[retry_index])
                     if outbox.attempts_count < len(NOTIFICATION_RETRY_SECONDS)
                     else None
                 )
             await session.commit()
 
     async def _record_notification_dispatch(self, event_type: str, payload: dict[str, Any]) -> None:
-        malfunction_id = self._coerce_uuid(payload.get("malfunction_id"))
+        malfunction_id = coerce_uuid(payload.get("malfunction_id"))
         if malfunction_id is None:
             return
-        stage = self._normalize_notification_stage(payload.get("malfunction_stage"))
+        stage = normalize_notification_stage(payload.get("malfunction_stage"))
         async with AsyncSessionLocal() as session:
             row = await session.get(GateMalfunctionState, malfunction_id)
             if not row:
@@ -1317,7 +1364,9 @@ class GateMalfunctionService:
             serialized = await self._serialize_malfunction(session, row, include_timeline=True)
         await event_bus.publish("gate_malfunction.updated", serialized)
 
-    async def _create_trace(self, session, row: GateMalfunctionState, snapshot: GateSnapshot) -> None:
+    async def _create_trace(
+        self, session, row: GateMalfunctionState, snapshot: GateSnapshot
+    ) -> None:
         trace = TelemetryTrace(
             trace_id=str(row.telemetry_trace_id),
             name=f"Gate Malfunction - {row.gate_name or row.gate_entity_id}",
@@ -1336,7 +1385,9 @@ class GateMalfunctionService:
                 "gate_state": snapshot.state.value,
                 "opened_at": row.opened_at.isoformat(),
                 "declared_at": row.declared_at.isoformat(),
-                "next_attempt_scheduled_at": row.next_attempt_scheduled_at.isoformat() if row.next_attempt_scheduled_at else None,
+                "next_attempt_scheduled_at": row.next_attempt_scheduled_at.isoformat()
+                if row.next_attempt_scheduled_at
+                else None,
                 "fix_attempts_count": row.fix_attempts_count,
                 "attempt_in_progress": False,
             },
@@ -1363,14 +1414,20 @@ class GateMalfunctionService:
             return
         finished_at = row.resolved_at or row.fubar_at
         trace.status = row.status.value
-        trace.level = "error" if row.status == GateMalfunctionStatus.FUBAR else "warning" if row.status == GateMalfunctionStatus.ACTIVE else "info"
+        trace.level = (
+            "error"
+            if row.status == GateMalfunctionStatus.FUBAR
+            else "warning"
+            if row.status == GateMalfunctionStatus.ACTIVE
+            else "info"
+        )
         trace.ended_at = finished_at
         trace.duration_ms = (
             max(0.0, (finished_at - row.opened_at).total_seconds() * 1000)
             if finished_at
             else max(0.0, (datetime.now(tz=UTC) - row.opened_at).total_seconds() * 1000)
         )
-        trace.summary = self._trace_summary(row)
+        trace.summary = trace_summary(row)
         trace.context = sanitize_payload(
             {
                 **(trace.context or {}),
@@ -1380,13 +1437,19 @@ class GateMalfunctionService:
                 "declared_at": row.declared_at.isoformat(),
                 "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
                 "fubar_at": row.fubar_at.isoformat() if row.fubar_at else None,
-                "next_attempt_scheduled_at": row.next_attempt_scheduled_at.isoformat() if row.next_attempt_scheduled_at else None,
+                "next_attempt_scheduled_at": row.next_attempt_scheduled_at.isoformat()
+                if row.next_attempt_scheduled_at
+                else None,
                 "fix_attempts_count": row.fix_attempts_count,
                 "attempt_in_progress": bool(row.attempt_claim_token),
-                "attempt_claimed_at": row.attempt_claimed_at.isoformat() if row.attempt_claimed_at else None,
+                "attempt_claimed_at": row.attempt_claimed_at.isoformat()
+                if row.attempt_claimed_at
+                else None,
                 "last_gate_state": row.last_gate_state,
-                "last_known_vehicle_event_id": str(row.last_known_vehicle_event_id) if row.last_known_vehicle_event_id else None,
-                "total_downtime_seconds": self._downtime_seconds(row),
+                "last_known_vehicle_event_id": str(row.last_known_vehicle_event_id)
+                if row.last_known_vehicle_event_id
+                else None,
+                "total_downtime_seconds": downtime_seconds(row),
             }
         )
 
@@ -1405,14 +1468,17 @@ class GateMalfunctionService:
         status: str = "ok",
     ) -> None:
         generated_span_id = span_id()
-        step_order = int(
-            await session.scalar(
-                select(func.count()).select_from(GateMalfunctionTimelineEvent).where(
-                    GateMalfunctionTimelineEvent.malfunction_id == row.id
+        step_order = (
+            int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(GateMalfunctionTimelineEvent)
+                    .where(GateMalfunctionTimelineEvent.malfunction_id == row.id)
                 )
+                or 0
             )
-            or 0
-        ) + 1
+            + 1
+        )
         safe_details = sanitize_payload(details or {})
         session.add(
             GateMalfunctionTimelineEvent(
@@ -1465,18 +1531,24 @@ class GateMalfunctionService:
         occurred_at: datetime,
         stage: str,
     ) -> dict[str, str]:
-        last_known_vehicle = await self._last_known_vehicle_label(session, row.last_known_vehicle_event_id)
+        last_known_vehicle = await self._last_known_vehicle_label(
+            session, row.last_known_vehicle_event_id
+        )
         resolution_time = row.resolved_at or row.fubar_at
-        normalized_stage = self._normalize_notification_stage(stage)
-        previous_sent = await self._has_previous_stage_notification(session, row.id, normalized_stage)
+        normalized_stage = normalize_notification_stage(stage)
+        previous_sent = await self._has_previous_stage_notification(
+            session, row.id, normalized_stage
+        )
         return {
-            "message": self._trace_summary(row),
+            "message": trace_summary(row),
             "malfunction_id": str(row.id),
             "malfunction_stage": normalized_stage,
-            "malfunction_stage_label": GATE_MALFUNCTION_STAGE_LABELS.get(normalized_stage, normalized_stage),
+            "malfunction_stage_label": GATE_MALFUNCTION_STAGE_LABELS.get(
+                normalized_stage, normalized_stage
+            ),
             "malfunction_has_previous_notification": "true" if previous_sent else "false",
             "telemetry_trace_id": str(row.telemetry_trace_id or ""),
-            "malfunction_duration": self._format_duration(self._downtime_seconds(row, now=occurred_at)),
+            "malfunction_duration": format_duration(downtime_seconds(row, now=occurred_at)),
             "malfunction_opened_time": row.opened_at.isoformat(),
             "malfunction_fix_attempt_time": occurred_at.isoformat(),
             "malfunction_fix_attempts": str(row.fix_attempts_count),
@@ -1495,7 +1567,9 @@ class GateMalfunctionService:
         *,
         include_timeline: bool,
     ) -> dict[str, Any]:
-        last_known_vehicle = await self._last_known_vehicle_label(session, row.last_known_vehicle_event_id)
+        last_known_vehicle = await self._last_known_vehicle_label(
+            session, row.last_known_vehicle_event_id
+        )
         payload = {
             "id": str(row.id),
             "gate_entity_id": row.gate_entity_id,
@@ -1506,23 +1580,32 @@ class GateMalfunctionService:
             "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
             "fubar_at": row.fubar_at.isoformat() if row.fubar_at else None,
             "fix_attempts_count": row.fix_attempts_count,
-            "next_attempt_scheduled_at": row.next_attempt_scheduled_at.isoformat() if row.next_attempt_scheduled_at else None,
+            "next_attempt_scheduled_at": row.next_attempt_scheduled_at.isoformat()
+            if row.next_attempt_scheduled_at
+            else None,
             "attempt_in_progress": bool(row.attempt_claim_token),
-            "attempt_claimed_at": row.attempt_claimed_at.isoformat() if row.attempt_claimed_at else None,
-            "last_known_vehicle_event_id": str(row.last_known_vehicle_event_id) if row.last_known_vehicle_event_id else None,
+            "attempt_claimed_at": row.attempt_claimed_at.isoformat()
+            if row.attempt_claimed_at
+            else None,
+            "last_known_vehicle_event_id": str(row.last_known_vehicle_event_id)
+            if row.last_known_vehicle_event_id
+            else None,
             "last_known_vehicle": last_known_vehicle,
             "telemetry_trace_id": row.telemetry_trace_id,
             "last_gate_state": row.last_gate_state,
             "last_checked_at": row.last_checked_at.isoformat() if row.last_checked_at else None,
-            "total_downtime_seconds": self._downtime_seconds(row),
-            "summary": self._trace_summary(row),
+            "total_downtime_seconds": downtime_seconds(row),
+            "summary": trace_summary(row),
         }
         if include_timeline:
             timeline = (
                 await session.scalars(
                     select(GateMalfunctionTimelineEvent)
                     .where(GateMalfunctionTimelineEvent.malfunction_id == row.id)
-                    .order_by(GateMalfunctionTimelineEvent.occurred_at, GateMalfunctionTimelineEvent.created_at)
+                    .order_by(
+                        GateMalfunctionTimelineEvent.occurred_at,
+                        GateMalfunctionTimelineEvent.created_at,
+                    )
                 )
             ).all()
             payload["timeline"] = [self._serialize_timeline_event(event) for event in timeline]
@@ -1545,55 +1628,22 @@ class GateMalfunctionService:
     async def _last_known_vehicle_label(self, session, event_id: uuid.UUID | None) -> str:
         if not event_id:
             return "No preceding vehicle event"
-        event = await session.get(AccessEvent, event_id, options=[selectinload(AccessEvent.vehicle)])
+        event = await session.get(
+            AccessEvent, event_id, options=[selectinload(AccessEvent.vehicle)]
+        )
         if not event:
             return "Preceding event no longer exists"
         return await self._access_event_label(session, event)
 
     async def _access_event_label(self, session, event: AccessEvent) -> str:
         person = await session.get(Person, event.person_id) if event.person_id else None
-        vehicle = event.vehicle or (await session.get(Vehicle, event.vehicle_id) if event.vehicle_id else None)
+        vehicle = event.vehicle or (
+            await session.get(Vehicle, event.vehicle_id) if event.vehicle_id else None
+        )
         subject = person.display_name if person else event.registration_number
-        vehicle_label = self._vehicle_label(vehicle, event.registration_number)
+        label = vehicle_label(vehicle, event.registration_number)
         verb = "entered" if event.direction == AccessDirection.ENTRY else "exited"
-        return f"{subject} {verb} in {vehicle_label}" if vehicle_label else f"{subject} {verb}"
-
-    def _access_event_details(self, event: AccessEvent) -> dict[str, Any]:
-        return {
-            "event_id": str(event.id),
-            "registration_number": event.registration_number,
-            "direction": event.direction.value,
-            "decision": event.decision.value,
-            "occurred_at": event.occurred_at.isoformat(),
-        }
-
-    def _vehicle_label(self, vehicle: Vehicle | None, fallback: str) -> str:
-        if not vehicle:
-            return fallback
-        label = " ".join(part for part in [vehicle.make, vehicle.model] if part)
-        return label or vehicle.description or vehicle.registration_number or fallback
-
-    def _trace_summary(self, row: GateMalfunctionState) -> str:
-        gate = row.gate_name or row.gate_entity_id
-        if row.status == GateMalfunctionStatus.RESOLVED:
-            return f"{gate} malfunction resolved after {self._format_duration(self._downtime_seconds(row))}."
-        if row.status == GateMalfunctionStatus.FUBAR:
-            return f"{gate} is FUBAR after {row.fix_attempts_count} automated recovery attempts."
-        return f"{gate} is open; next recovery attempt is scheduled after {row.fix_attempts_count} attempts."
-
-    def _downtime_seconds(self, row: GateMalfunctionState, *, now: datetime | None = None) -> int:
-        end = row.resolved_at or row.fubar_at or now or datetime.now(tz=UTC)
-        return max(0, int((end - row.opened_at).total_seconds()))
-
-    def _format_duration(self, seconds: int) -> str:
-        remaining = max(0, int(seconds))
-        hours, remaining = divmod(remaining, 3600)
-        minutes, seconds = divmod(remaining, 60)
-        if hours:
-            return f"{hours}h {minutes}m"
-        if minutes:
-            return f"{minutes}m {seconds}s"
-        return f"{seconds}s"
+        return f"{subject} {verb} in {label}" if label else f"{subject} {verb}"
 
     async def _has_previous_stage_notification(
         self,
@@ -1601,60 +1651,20 @@ class GateMalfunctionService:
         malfunction_id: uuid.UUID,
         stage: str,
     ) -> bool:
-        current_order = MALFUNCTION_STAGE_ORDER.get(self._normalize_notification_stage(stage), 0)
+        current_order = MALFUNCTION_STAGE_ORDER.get(normalize_notification_stage(stage), 0)
         rows = (
             await session.scalars(
-                select(GateMalfunctionNotificationOutbox.stage)
-                .where(
+                select(GateMalfunctionNotificationOutbox.stage).where(
                     GateMalfunctionNotificationOutbox.malfunction_id == malfunction_id,
                     GateMalfunctionNotificationOutbox.status == "sent",
                 )
             )
         ).all()
         return any(
-            MALFUNCTION_STAGE_ORDER.get(self._normalize_notification_stage(row_stage), 999) < current_order
+            MALFUNCTION_STAGE_ORDER.get(normalize_notification_stage(row_stage), 999)
+            < current_order
             for row_stage in rows
         )
-
-    def _normalize_notification_stage(self, value: Any) -> str:
-        stage = str(value or "").strip().lower()
-        return stage if stage in MALFUNCTION_STAGE_ORDER else "initial"
-
-    def _coerce_gate_state(self, value: Any) -> GateState:
-        return _coerce_gate_state_value(value)
-
-    def _state_is_on(self, value: Any) -> bool:
-        return str(value or "").strip().lower() == "on"
-
-    def _parse_datetime(self, value: Any) -> datetime | None:
-        if not value:
-            return None
-        if isinstance(value, datetime):
-            return value if value.tzinfo else value.replace(tzinfo=UTC)
-        try:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-    def _history_cursor(self, row: GateMalfunctionState) -> str:
-        return f"{row.opened_at.isoformat()}|{row.id}"
-
-    def _parse_history_cursor(self, value: str | None) -> tuple[datetime | None, uuid.UUID | None]:
-        if not value or "|" not in value:
-            return None, None
-        opened_at_text, row_id_text = value.split("|", 1)
-        opened_at = self._parse_datetime(opened_at_text)
-        row_id = self._coerce_uuid(row_id_text)
-        return opened_at, row_id
-
-    def _coerce_uuid(self, value: Any) -> uuid.UUID | None:
-        if isinstance(value, uuid.UUID):
-            return value
-        try:
-            return uuid.UUID(str(value))
-        except (TypeError, ValueError):
-            return None
 
 
 @lru_cache

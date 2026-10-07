@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from app.modules.dvla.vehicle_enquiry import (
@@ -67,12 +67,14 @@ def normalize_vehicle_enquiry_response(
     first_registration_date = _first_registration_date(vehicle, display)
     if first_registration_date:
         first_mot_due = _first_mot_due_date(first_registration_date)
-        if (today or date.today()) < first_mot_due:
+        if (today or datetime.now().astimezone().date()) < first_mot_due:
             mot_status = "Not Required"
             mot_expiry = first_mot_due
 
     return NormalizedDvlaVehicle(
-        registration_number=str(display.get("registrationNumber") or registration_number or "").strip().upper(),
+        registration_number=str(display.get("registrationNumber") or registration_number or "")
+        .strip()
+        .upper(),
         make=_optional_text(display.get("make")),
         colour=_optional_text(display.get("colour") or display.get("color")),
         fuel_type=_optional_text(display.get("fuelType")),
@@ -86,7 +88,11 @@ def normalize_vehicle_enquiry_response(
 async def test_vehicle_enquiry_connection(values: dict[str, Any]) -> dict[str, Any]:
     config = await get_runtime_config()
     api_key = str(values.get("dvla_api_key") or config.dvla_api_key or "")
-    endpoint_url = str(values.get("dvla_vehicle_enquiry_url") or config.dvla_vehicle_enquiry_url or DEFAULT_VEHICLE_ENQUIRY_URL)
+    endpoint_url = str(
+        values.get("dvla_vehicle_enquiry_url")
+        or config.dvla_vehicle_enquiry_url
+        or DEFAULT_VEHICLE_ENQUIRY_URL
+    )
     registration_number = str(
         values.get("dvla_test_registration_number")
         or config.dvla_test_registration_number

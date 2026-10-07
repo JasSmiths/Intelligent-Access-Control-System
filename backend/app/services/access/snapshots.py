@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.logging import get_logger
+from app.services.snapshot_recovery import protect_event_id_from_access_event
 from app.services.snapshots import (
     SNAPSHOT_HEIGHT,
     SNAPSHOT_WIDTH,
@@ -11,7 +12,6 @@ from app.services.snapshots import (
     apply_snapshot_to_access_event,
     get_snapshot_manager,
 )
-from app.services.snapshot_recovery import protect_event_id_from_access_event
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS
 from app.services.unifi_protect import get_unifi_protect_service
 
@@ -42,8 +42,10 @@ async def capture_access_event_snapshot(event: Any, *, trace: Any | None = None)
     metadata = None
     source = "camera_snapshot"
     try:
-        metadata = await manager.capture_access_event_snapshot(event.id, camera=GATE_CAMERA_IDENTIFIER)
-    except Exception as exc:
+        metadata = await manager.capture_access_event_snapshot(
+            event.id, camera=GATE_CAMERA_IDENTIFIER
+        )
+    except Exception as exc:  # noqa: BLE001 - Optional evidence failure must not alter committed access decisions.
         capture_error = exc
         logger.info(
             "access_event_snapshot_capture_skipped",
@@ -71,7 +73,7 @@ async def capture_access_event_snapshot(event: Any, *, trace: Any | None = None)
                 captured_at=event.occurred_at,
             )
             source = "protect_event_thumbnail"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Optional evidence failure must not alter committed access decisions.
             logger.info(
                 "access_event_snapshot_thumbnail_capture_skipped",
                 extra={

@@ -1,6 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
@@ -20,8 +20,8 @@ from app.services.auth import (
     count_users,
     create_access_token,
     create_user,
-    normalize_username,
     extract_http_token,
+    normalize_username,
     revoke_access_token,
     serialize_user,
     set_session_cookie,
@@ -86,8 +86,8 @@ class AuthStatusResponse(BaseModel):
 @router.get("/status", response_model=AuthStatusResponse)
 async def auth_status(
     request: Request,
-    include_photo: bool = Query(default=False),
-    session: AsyncSession = Depends(get_db_session),
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    include_photo: Annotated[bool, Query()] = False,
 ) -> AuthStatusResponse:
     setup_required = await count_users(session) == 0
     if setup_required:
@@ -103,7 +103,9 @@ async def auth_status(
                 include_photo=include_photo,
                 photo_url_path="/api/v1/auth/me/photo",
             )
-        ) if user else None,
+        )
+        if user
+        else None,
     )
 
 
@@ -111,7 +113,7 @@ async def auth_status(
 async def first_run_setup(
     request: SetupRequest,
     response: Response,
-    session: AsyncSession = Depends(get_db_session),
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserResponse:
     if await count_users(session) > 0:
         raise HTTPException(
@@ -126,7 +128,9 @@ async def first_run_setup(
             first_name=request.first_name,
             last_name=request.last_name,
             full_name=compose_full_name(request.first_name, request.last_name),
-            profile_photo_data_url=await normalize_profile_photo_or_400(request.profile_photo_data_url),
+            profile_photo_data_url=await normalize_profile_photo_or_400(
+                request.profile_photo_data_url
+            ),
             mobile_phone_number=request.mobile_phone_number,
             email=request.email,
             password=request.password,
@@ -138,7 +142,9 @@ async def first_run_setup(
         await session.refresh(user)
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User already exists") from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="User already exists"
+        ) from exc
 
     token, expires_at = await create_access_token(user, remember_me=True)
     await set_session_cookie(response, token, expires_at)
@@ -149,12 +155,14 @@ async def first_run_setup(
 async def login(
     request: LoginRequest,
     response: Response,
-    session: AsyncSession = Depends(get_db_session),
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserResponse:
     user = await session.scalar(
         select(User).where(User.username == normalize_username(request.username))
     )
-    password_ok = bool(user and user.is_active) and await verify_password_async(request.password, user.password_hash)
+    password_ok = bool(user and user.is_active) and await verify_password_async(
+        request.password, user.password_hash
+    )
     if not password_ok:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
@@ -168,9 +176,7 @@ async def login(
 
 @router.post("/logout")
 async def logout(
-    request: Request,
-    response: Response,
-    session: AsyncSession = Depends(get_db_session),
+    request: Request, response: Response, session: Annotated[AsyncSession, Depends(get_db_session)]
 ) -> dict[str, str]:
     await revoke_access_token(session, await extract_http_token(request))
     await clear_session_cookie(response)
@@ -178,14 +184,13 @@ async def logout(
 
 
 @router.get("/me", response_model=UserResponse)
-async def me(user: User = Depends(current_user)) -> UserResponse:
+async def me(user: Annotated[User, Depends(current_user)]) -> UserResponse:
     return UserResponse(**serialize_user(user, photo_url_path="/api/v1/auth/me/photo"))
 
 
 @router.get("/me/photo")
 async def my_photo(
-    user: User = Depends(current_user),
-    variant: PhotoVariant = Query(default="full"),
+    user: Annotated[User, Depends(current_user)], variant: Annotated[PhotoVariant, Query()] = "full"
 ) -> Response:
     return await data_url_media_response(user.profile_photo_data_url, variant=variant)
 
@@ -193,8 +198,8 @@ async def my_photo(
 @router.patch("/me/preferences", response_model=UserResponse)
 async def update_my_preferences(
     preferences: dict[str, Any],
-    user: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserResponse:
     db_user = await session.get(User, user.id)
     if not db_user:

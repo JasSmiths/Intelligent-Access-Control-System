@@ -1,5 +1,5 @@
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
@@ -11,12 +11,20 @@ from app.core.config import settings
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.db.session import AsyncSessionLocal
 from app.models import AccessDevice, AccessDeviceProviderBinding, SystemSetting, User
-from app.modules.access_devices.base import AccessDeviceBinding, binding_is_commandable, validate_gate_admission_device_key
+from app.modules.access_devices.base import (
+    AccessDeviceBinding,
+    binding_is_commandable,
+    validate_gate_admission_device_key,
+)
 from app.modules.home_assistant.covers import normalize_cover_entities
 from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.mutation_context import load_active_admin
-from app.services.telemetry import TELEMETRY_CATEGORY_CRUD, actor_from_user, audit_diff, write_audit_log
-
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_CRUD,
+    actor_from_user,
+    audit_diff,
+    write_audit_log,
+)
 
 SECRET_KEYS = {
     "home_assistant_token",
@@ -49,25 +57,61 @@ def validate_dynamic_setting_keys(updates: dict[str, Any]) -> None:
 
 
 DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
-    "missed_exit_recovery_enabled": ("missed_exit_recovery", False, "Enable opted-in resident missed exit recovery."),
-    "missed_exit_recovery_gate_latitude": ("missed_exit_recovery", None, "Top gate latitude; exact-location iPhone tracking required."),
+    "missed_exit_recovery_enabled": (
+        "missed_exit_recovery",
+        False,
+        "Enable opted-in resident missed exit recovery.",
+    ),
+    "missed_exit_recovery_gate_latitude": (
+        "missed_exit_recovery",
+        None,
+        "Top gate latitude; exact-location iPhone tracking required.",
+    ),
     "missed_exit_recovery_gate_longitude": ("missed_exit_recovery", None, "Top gate longitude."),
     "app_name": ("general", settings.app_name, "Application display name."),
     "log_level": ("general", settings.log_level, "Backend log level."),
     "site_timezone": ("general", settings.site_timezone, "Site timezone."),
     "auth_cookie_name": ("auth", settings.auth_cookie_name, "HTTP-only auth cookie name."),
-    "auth_access_token_minutes": ("auth", settings.auth_access_token_minutes, "Default session length in minutes."),
-    "auth_remember_days": ("auth", settings.auth_remember_days, "Remember-me session length in days."),
-    "auth_cookie_secure": ("auth", settings.auth_cookie_secure, "Set secure cookies only over HTTPS."),
-    "lpr_debounce_quiet_seconds": ("lpr", settings.lpr_debounce_quiet_seconds, "Quiet period before resolving LPR reads."),
-    "lpr_debounce_max_seconds": ("lpr", settings.lpr_debounce_max_seconds, "Maximum LPR debounce window."),
+    "auth_access_token_minutes": (
+        "auth",
+        settings.auth_access_token_minutes,
+        "Default session length in minutes.",
+    ),
+    "auth_remember_days": (
+        "auth",
+        settings.auth_remember_days,
+        "Remember-me session length in days.",
+    ),
+    "auth_cookie_secure": (
+        "auth",
+        settings.auth_cookie_secure,
+        "Set secure cookies only over HTTPS.",
+    ),
+    "lpr_debounce_quiet_seconds": (
+        "lpr",
+        settings.lpr_debounce_quiet_seconds,
+        "Quiet period before resolving LPR reads.",
+    ),
+    "lpr_debounce_max_seconds": (
+        "lpr",
+        settings.lpr_debounce_max_seconds,
+        "Maximum LPR debounce window.",
+    ),
     "lpr_vehicle_session_idle_seconds": (
         "lpr",
         settings.lpr_vehicle_session_idle_seconds,
         "Seconds without matching plate or vehicle detections before a physical gate visit is considered finished.",
     ),
-    "lpr_similarity_threshold": ("lpr", settings.lpr_similarity_threshold, "Plate similarity threshold."),
-    "lpr_allowed_smart_zones": ("lpr", ["default"], "UniFi smart-zone diagnostic list used for LPR zone-status visibility."),
+    "lpr_similarity_threshold": (
+        "lpr",
+        settings.lpr_similarity_threshold,
+        "Plate similarity threshold.",
+    ),
+    "lpr_allowed_smart_zones": (
+        "lpr",
+        ["default"],
+        "UniFi smart-zone diagnostic list used for LPR zone-status visibility.",
+    ),
     "lpr_zone_filter_mode": (
         "lpr",
         "shadow",
@@ -95,7 +139,9 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
     ),
     "gate_control_provider": (
         "access",
-        settings.gate_controller if settings.gate_controller in {"home_assistant", "esphome"} else "home_assistant",
+        settings.gate_controller
+        if settings.gate_controller in {"home_assistant", "esphome"}
+        else "home_assistant",
         "Primary provider for gate and garage-door cover commands.",
     ),
     "gate_failover_provider": (
@@ -108,21 +154,41 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         "",
         "Explicit entry gate for automatic admission; must be enabled, commandable and an automatic-access target. Unset blocks activation.",
     ),
-    "home_assistant_url": ("integrations", str(settings.home_assistant_url) if settings.home_assistant_url else "", "Home Assistant base URL."),
-    "home_assistant_token": ("integrations", settings.home_assistant_token or "", "Home Assistant long-lived access token."),
+    "home_assistant_url": (
+        "integrations",
+        str(settings.home_assistant_url) if settings.home_assistant_url else "",
+        "Home Assistant base URL.",
+    ),
+    "home_assistant_token": (
+        "integrations",
+        settings.home_assistant_token or "",
+        "Home Assistant long-lived access token.",
+    ),
     "home_assistant_gate_entities": (
         "integrations",
         [],
         "Configured Home Assistant gate cover entities.",
     ),
-    "home_assistant_gate_open_service": ("integrations", settings.home_assistant_gate_open_service, "Cover open service."),
+    "home_assistant_gate_open_service": (
+        "integrations",
+        settings.home_assistant_gate_open_service,
+        "Cover open service.",
+    ),
     "home_assistant_garage_door_entities": (
         "integrations",
         [],
         "Configured Home Assistant garage door cover entities.",
     ),
-    "home_assistant_tts_service": ("integrations", settings.home_assistant_tts_service, "TTS service name."),
-    "home_assistant_default_media_player": ("integrations", settings.home_assistant_default_media_player or "", "Default announcement media player."),
+    "home_assistant_tts_service": (
+        "integrations",
+        settings.home_assistant_tts_service,
+        "TTS service name.",
+    ),
+    "home_assistant_default_media_player": (
+        "integrations",
+        settings.home_assistant_default_media_player or "",
+        "Default announcement media player.",
+    ),
     "esphome_devices": ("integrations", "[]", "Configured ESPHome native API devices."),
     "apprise_urls": ("integrations", settings.apprise_urls or "", "Apprise notification URLs."),
     "dvla_api_key": ("integrations", "", "DVLA Vehicle Enquiry Service API key."),
@@ -131,16 +197,28 @@ DEFAULT_DYNAMIC_SETTINGS: dict[str, tuple[str, Any, str]] = {
         "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles",
         "DVLA Vehicle Enquiry Service endpoint URL.",
     ),
-    "dvla_test_registration_number": ("integrations", "AA19AAA", "VRN used for DVLA connection tests."),
+    "dvla_test_registration_number": (
+        "integrations",
+        "AA19AAA",
+        "VRN used for DVLA connection tests.",
+    ),
     "dvla_timeout_seconds": ("integrations", 10.0, "DVLA Vehicle Enquiry Service HTTP timeout."),
     "unifi_protect_host": ("integrations", "", "UniFi Protect console hostname or IP address."),
     "unifi_protect_port": ("integrations", 443, "UniFi Protect console HTTPS port."),
     "unifi_protect_username": ("integrations", "", "UniFi Protect local user username."),
     "unifi_protect_password": ("integrations", "", "UniFi Protect local user password."),
     "unifi_protect_api_key": ("integrations", "", "UniFi Protect Integration API key."),
-    "unifi_protect_verify_ssl": ("integrations", False, "Verify the UniFi Protect console TLS certificate."),
+    "unifi_protect_verify_ssl": (
+        "integrations",
+        False,
+        "Verify the UniFi Protect console TLS certificate.",
+    ),
     "unifi_protect_snapshot_width": ("integrations", 1280, "Default UniFi Protect snapshot width."),
-    "unifi_protect_snapshot_height": ("integrations", 720, "Default UniFi Protect snapshot height."),
+    "unifi_protect_snapshot_height": (
+        "integrations",
+        720,
+        "Default UniFi Protect snapshot height.",
+    ),
     "llm_provider": ("llm", settings.llm_provider, "Active LLM provider."),
     "llm_timeout_seconds": ("llm", settings.llm_timeout_seconds, "LLM HTTP timeout."),
     "openai_api_key": ("llm", settings.openai_api_key or "", "OpenAI API key."),
@@ -249,7 +327,11 @@ def decrypted_value(record: SystemSetting) -> Any:
 def setting_payload(key: str, value: Any) -> dict[str, Any]:
     if key in SECRET_KEYS:
         if key == "esphome_devices":
-            encoded = json.dumps(value if value is not None else [], separators=(",", ":")) if not isinstance(value, str) else value
+            encoded = (
+                json.dumps(value if value is not None else [], separators=(",", ":"))
+                if not isinstance(value, str)
+                else value
+            )
             return {"encrypted": encrypt_secret(encoded)} if encoded else {"encrypted": ""}
         return {"encrypted": encrypt_secret(str(value or ""))} if value else {"encrypted": ""}
     return {"plain": value}
@@ -278,11 +360,7 @@ def string_list_value(value: Any) -> list[str]:
     raw = str(value).strip()
     if not raw:
         return []
-    return [
-        item.strip()
-        for item in raw.replace(",", "\n").splitlines()
-        if item.strip()
-    ]
+    return [item.strip() for item in raw.replace(",", "\n").splitlines() if item.strip()]
 
 
 def json_list_value(value: Any) -> list[Any]:
@@ -314,7 +392,9 @@ def normalize_esphome_devices(
             continue
         host = str(item.get("host") or "").strip()
         name = str(item.get("name") or host or f"ESPHome Device {index + 1}").strip()
-        base_id = normalize_esphome_device_id(str(item.get("id") or item.get("key") or name or host))
+        base_id = normalize_esphome_device_id(
+            str(item.get("id") or item.get("key") or name or host)
+        )
         device_id = base_id or f"esphome_{index + 1}"
         if device_id in seen:
             suffix = 2
@@ -371,7 +451,10 @@ async def get_runtime_config() -> RuntimeConfig:
     global _RUNTIME_CONFIG_CACHE, _RUNTIME_CONFIG_CACHE_LOADED_AT
 
     now = monotonic()
-    if _RUNTIME_CONFIG_CACHE is not None and now - _RUNTIME_CONFIG_CACHE_LOADED_AT <= _RUNTIME_CONFIG_CACHE_TTL_SECONDS:
+    if (
+        _RUNTIME_CONFIG_CACHE is not None
+        and now - _RUNTIME_CONFIG_CACHE_LOADED_AT <= _RUNTIME_CONFIG_CACHE_TTL_SECONDS
+    ):
         return _RUNTIME_CONFIG_CACHE
 
     async with AsyncSessionLocal() as session:
@@ -387,15 +470,15 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
     Hardware validation must use this read, then pass the returned snapshot to
     the provider. The process cache is only suitable for non-authoritative reads.
     """
-    records = (await session.scalars(
-        select(SystemSetting).where(SystemSetting.key.in_(list(DEFAULT_DYNAMIC_SETTINGS)))
-        .execution_options(populate_existing=True)
-    )).all()
+    records = (
+        await session.scalars(
+            select(SystemSetting)
+            .where(SystemSetting.key.in_(list(DEFAULT_DYNAMIC_SETTINGS)))
+            .execution_options(populate_existing=True)
+        )
+    ).all()
 
-    values = {
-        key: default
-        for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()
-    }
+    values = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
     for record in records:
         values[record.key] = decrypted_value(record)
 
@@ -431,7 +514,8 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
         ),
         gate_failover_provider=(
             str(values["gate_failover_provider"]).strip().lower()
-            if str(values["gate_failover_provider"]).strip().lower() in {"none", "home_assistant", "esphome"}
+            if str(values["gate_failover_provider"]).strip().lower()
+            in {"none", "home_assistant", "esphome"}
             else "none"
         ),
         gate_admission_device_key=str(values["gate_admission_device_key"] or "").strip() or None,
@@ -447,7 +531,9 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
             default_open_service=str(values["home_assistant_gate_open_service"]),
         ),
         home_assistant_tts_service=str(values["home_assistant_tts_service"]),
-        home_assistant_default_media_player=str(values["home_assistant_default_media_player"] or ""),
+        home_assistant_default_media_player=str(
+            values["home_assistant_default_media_player"] or ""
+        ),
         esphome_devices=normalize_esphome_devices(values["esphome_devices"]),
         apprise_urls=str(values["apprise_urls"] or ""),
         dvla_api_key=str(values["dvla_api_key"] or ""),
@@ -479,7 +565,9 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
     return config
 
 
-async def list_settings(category: str | None = None, *, reveal: bool = False) -> list[dict[str, Any]]:
+async def list_settings(
+    category: str | None = None, *, reveal: bool = False
+) -> list[dict[str, Any]]:
     async with AsyncSessionLocal() as session:
         query = select(SystemSetting).order_by(SystemSetting.category, SystemSetting.key)
         query = query.where(SystemSetting.key.in_(list(DEFAULT_DYNAMIC_SETTINGS)))
@@ -500,20 +588,41 @@ async def list_settings(category: str | None = None, *, reveal: bool = False) ->
 
 
 async def update_settings(
-    updates: dict[str, Any], *, user: User | None = None, source: str = "system",
+    updates: dict[str, Any],
+    *,
+    user: User | None = None,
+    source: str = "system",
 ) -> list[dict[str, Any]]:
     """Own setting writes and their mandatory audit in one transaction."""
     validate_dynamic_setting_keys(updates)
 
     async with AsyncSessionLocal() as session:
-        current_actor = (await load_active_admin(session, user.id,
-                         auth_version=user.auth_session_version, lock=True) if user else None)
-        target_config_keys = {"gate_admission_device_key", "gate_control_provider", "gate_failover_provider",
-                              "home_assistant_url", "home_assistant_token", "home_assistant_gate_open_service", "esphome_devices",
-                              "schedule_default_policy", "site_timezone"}
+        current_actor = (
+            await load_active_admin(
+                session, user.id, auth_version=user.auth_session_version, lock=True
+            )
+            if user
+            else None
+        )
+        target_config_keys = {
+            "gate_admission_device_key",
+            "gate_control_provider",
+            "gate_failover_provider",
+            "home_assistant_url",
+            "home_assistant_token",
+            "home_assistant_gate_open_service",
+            "esphome_devices",
+            "schedule_default_policy",
+            "site_timezone",
+        }
         if set(updates) & target_config_keys:
             query = select(AccessDevice.id)
-            if set(updates) & {"gate_control_provider", "gate_failover_provider", "schedule_default_policy", "site_timezone"}:
+            if set(updates) & {
+                "gate_control_provider",
+                "gate_failover_provider",
+                "schedule_default_policy",
+                "site_timezone",
+            }:
                 pass  # Provider order applies to every gate and garage.
             else:
                 providers = []
@@ -521,7 +630,11 @@ async def update_settings(
                     providers.append("esphome")
                 if any(key.startswith("home_assistant_") for key in updates):
                     providers.append("home_assistant")
-                affected = [AccessDevice.provider_bindings.any(AccessDeviceProviderBinding.provider.in_(providers))]
+                affected = [
+                    AccessDevice.provider_bindings.any(
+                        AccessDeviceProviderBinding.provider.in_(providers)
+                    )
+                ]
                 if "gate_admission_device_key" in updates:
                     affected.append(AccessDevice.kind == "gate")
                 query = query.where(or_(*affected))
@@ -530,43 +643,83 @@ async def update_settings(
                 await AccessDeviceCommandJournal.assert_configurable(session, target_id)
         for key in sorted(updates):
             # Also serialize creation of a newly introduced setting with no row yet.
-            await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:setting))"),
-                                  {"setting": f"iacs:setting:{key}"})
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:setting))"),
+                {"setting": f"iacs:setting:{key}"},
+            )
         records = {
             record.key: record
-            for record in (await session.scalars(select(SystemSetting).order_by(SystemSetting.key)
-                           .with_for_update().execution_options(populate_existing=True))).all()
+            for record in (
+                await session.scalars(
+                    select(SystemSetting)
+                    .order_by(SystemSetting.key)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
         }
         before = {key: public_value(row) for key, row in records.items() if key in updates}
         changed_keys = []
-        if set(updates) & {"gate_admission_device_key", "home_assistant_url", "home_assistant_token", "esphome_devices"}:
+        if set(updates) & {
+            "gate_admission_device_key",
+            "home_assistant_url",
+            "home_assistant_token",
+            "esphome_devices",
+        }:
             candidate = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
             candidate.update({key: decrypted_value(row) for key, row in records.items()})
-            candidate.update({key: value for key, value in updates.items()
-                              if not (key in records and records[key].is_secret and value in (None, "")
-                                      and key not in CLEARABLE_SECRET_KEYS)})
+            candidate.update(
+                {
+                    key: value
+                    for key, value in updates.items()
+                    if not (
+                        key in records
+                        and records[key].is_secret
+                        and value in (None, "")
+                        and key not in CLEARABLE_SECRET_KEYS
+                    )
+                }
+            )
             await _validate_admission_setting(session, candidate)
         if any(key.startswith("missed_exit_recovery_") for key in updates):
-            from app.services.resident_recovery_evidence import gate_coordinates
             from types import SimpleNamespace
+
+            from app.services.resident_recovery_evidence import gate_coordinates
+
             candidate = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
             candidate.update({key: decrypted_value(row) for key, row in records.items()})
             candidate.update(updates)
             if type(candidate["missed_exit_recovery_enabled"]) is not bool:
                 raise ValueError("Recovery enablement must be a boolean.")
-            if candidate["missed_exit_recovery_enabled"] and (gate_coordinates(SimpleNamespace(**candidate)) is None
-                    or not candidate["gate_admission_device_key"]):
-                raise ValueError("Configure the top gate coordinates and admission gate before enabling recovery.")
+            if candidate["missed_exit_recovery_enabled"] and (
+                gate_coordinates(SimpleNamespace(**candidate)) is None
+                or not candidate["gate_admission_device_key"]
+            ):
+                raise ValueError(
+                    "Configure the top gate coordinates and admission gate before enabling recovery."
+                )
             from app.models import ResidentRecoveryJourney
-            journeys = list((await session.scalars(select(ResidentRecoveryJourney)
-                .order_by(ResidentRecoveryJourney.person_id).with_for_update())).all())
+
+            journeys = list(
+                (
+                    await session.scalars(
+                        select(ResidentRecoveryJourney)
+                        .order_by(ResidentRecoveryJourney.person_id)
+                        .with_for_update()
+                    )
+                ).all()
+            )
             for journey in journeys:
                 journey.samples, journey.invalid_reason = [], "recovery_settings_changed"
         for key, value in updates.items():
             category, _, description = DEFAULT_DYNAMIC_SETTINGS[key]
             record = records.get(key)
             if record:
-                if record.is_secret and (value is None or value == "") and key not in CLEARABLE_SECRET_KEYS:
+                if (
+                    record.is_secret
+                    and (value is None or value == "")
+                    and key not in CLEARABLE_SECRET_KEYS
+                ):
                     continue
                 if decrypted_value(record) == value:
                     continue
@@ -585,12 +738,17 @@ async def update_settings(
             changed_keys.append(key)
         if changed_keys:
             await write_audit_log(
-                session, category=TELEMETRY_CATEGORY_CRUD, action="settings.update",
+                session,
+                category=TELEMETRY_CATEGORY_CRUD,
+                action="settings.update",
                 actor=actor_from_user(current_actor) if current_actor else "System",
                 actor_user_id=current_actor.id if current_actor else None,
-                target_entity="SystemSetting", target_label=", ".join(sorted(changed_keys)[:8]),
-                diff=audit_diff({key: before.get(key) for key in changed_keys},
-                                {key: public_value(records[key]) for key in changed_keys}),
+                target_entity="SystemSetting",
+                target_label=", ".join(sorted(changed_keys)[:8]),
+                diff=audit_diff(
+                    {key: before.get(key) for key in changed_keys},
+                    {key: public_value(records[key]) for key in changed_keys},
+                ),
                 metadata={"keys": sorted(changed_keys), "source": source},
             )
         await session.commit()
@@ -602,18 +760,34 @@ async def _validate_admission_setting(session: AsyncSession, candidate: dict[str
     key = str(candidate["gate_admission_device_key"] or "").strip() or None
     if key is None:
         return  # Explicitly unset is valid configuration but blocks automatic admission.
-    device = await session.scalar(select(AccessDevice).where(AccessDevice.key == key)
-                                  .options(selectinload(AccessDevice.provider_bindings)).with_for_update())
+    device = await session.scalar(
+        select(AccessDevice)
+        .where(AccessDevice.key == key)
+        .options(selectinload(AccessDevice.provider_bindings))
+        .with_for_update()
+    )
     facts = []
     if device is not None:
-        facts.append({
-            "key": device.key, "kind": device.kind, "enabled": device.enabled,
-            "open_for_access": device.open_for_access,
-            "commandable": any(binding_is_commandable(
-                AccessDeviceBinding(binding.provider, binding.external_id, binding.enabled, binding.config or {}),
-                home_assistant_url=str(candidate["home_assistant_url"] or ""),
-                home_assistant_token=str(candidate["home_assistant_token"] or ""),
-                esphome_devices=normalize_esphome_devices(candidate["esphome_devices"]),
-            ) for binding in device.provider_bindings),
-        })
+        facts.append(
+            {
+                "key": device.key,
+                "kind": device.kind,
+                "enabled": device.enabled,
+                "open_for_access": device.open_for_access,
+                "commandable": any(
+                    binding_is_commandable(
+                        AccessDeviceBinding(
+                            binding.provider,
+                            binding.external_id,
+                            binding.enabled,
+                            binding.config or {},
+                        ),
+                        home_assistant_url=str(candidate["home_assistant_url"] or ""),
+                        home_assistant_token=str(candidate["home_assistant_token"] or ""),
+                        esphome_devices=normalize_esphome_devices(candidate["esphome_devices"]),
+                    )
+                    for binding in device.provider_bindings
+                ),
+            }
+        )
     validate_gate_admission_device_key(key, device_facts=facts, allow_unset=False)

@@ -89,15 +89,16 @@ def test_fingerprint_excludes_progress_but_binds_actual_configuration():
     ({"status": "success", "delivery": "accepted", "requires_reconciliation": False}, "succeeded"),
 ])
 def test_action_checkpoint_preserves_delivery_uncertainty(outcome, expected):
-    from app.services.automation_dispatch import action_checkpoint_state
-    assert action_checkpoint_state(outcome) == expected
+    from app.services.workflows.execution_contracts import AutomationActionResult
+    result = AutomationActionResult.from_payload({"id": "fixture", "type": "gate.open", **outcome})
+    assert result.checkpoint_state == expected
 
 
 def test_public_recovery_contract_exposes_operation_identity_without_private_dispatch_inputs():
     import json
     from pathlib import Path
     from app.models import AutomationRun
-    from app.services.automations import serialize_run
+    from app.services.automation_serialization import serialize_run
     fixture_path = Path(__file__).parent / "contracts/fixtures/automations/recovery_run.json"
     expected = json.loads(fixture_path.read_text())
     run = AutomationRun(id=uuid.UUID(expected["id"]), rule_id=uuid.UUID(expected["rule_id"]),

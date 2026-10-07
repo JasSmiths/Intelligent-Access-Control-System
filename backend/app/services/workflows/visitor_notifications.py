@@ -1,23 +1,30 @@
 """Visitor notification facts and window formatting without messaging/provider I/O."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.modules.notifications.base import NotificationContext
+from app.services.workflows.notification_payloads import (
+    _duration_label_from_seconds,
+    trigger_severity,
+)
+
 if TYPE_CHECKING:
     from app.services.event_bus import RealtimeEvent
-from app.services.workflows.notification_payloads import trigger_severity, _duration_label_from_seconds
 
 
-
-
-def visitor_pass_notification_contexts_from_event(event: RealtimeEvent) -> list[NotificationContext]:
+def visitor_pass_notification_contexts_from_event(
+    event: RealtimeEvent,
+) -> list[NotificationContext]:
     if not event.type.startswith("visitor_pass."):
         return []
     payload = event.payload if isinstance(event.payload, dict) else {}
-    visitor_pass = payload.get("visitor_pass") if isinstance(payload.get("visitor_pass"), dict) else None
+    visitor_pass = (
+        payload.get("visitor_pass") if isinstance(payload.get("visitor_pass"), dict) else None
+    )
     if not visitor_pass:
         return []
 
@@ -58,9 +65,9 @@ def _visitor_pass_notification_facts(
     make = _visitor_pass_text(visitor_pass.get("vehicle_make"))
     colour = _visitor_pass_text(visitor_pass.get("vehicle_colour"))
     time_window = _visitor_pass_time_window(visitor_pass)
-    duration = _visitor_pass_text(visitor_pass.get("duration_human")) or _duration_label_from_seconds(
-        visitor_pass.get("duration_on_site_seconds")
-    )
+    duration = _visitor_pass_text(
+        visitor_pass.get("duration_human")
+    ) or _duration_label_from_seconds(visitor_pass.get("duration_on_site_seconds"))
     occurred_at = _visitor_pass_occurred_at(event_type, visitor_pass)
     access_event_id = (
         _visitor_pass_text(visitor_pass.get("departure_event_id"))
@@ -88,14 +95,18 @@ def _visitor_pass_notification_facts(
         "visitor_pass_vehicle_make": make,
         "visitor_pass_vehicle_colour": colour,
         "visitor_pass_duration_on_site": duration,
-        "visitor_pass_duration_on_site_seconds": _visitor_pass_text(visitor_pass.get("duration_on_site_seconds")),
+        "visitor_pass_duration_on_site_seconds": _visitor_pass_text(
+            visitor_pass.get("duration_on_site_seconds")
+        ),
         "vehicle_registration_number": plate,
         "registration_number": plate,
         "vehicle_make": make,
         "vehicle_color": colour,
         "vehicle_colour": colour,
         "duration_human": duration,
-        "duration_on_site_seconds": _visitor_pass_text(visitor_pass.get("duration_on_site_seconds")),
+        "duration_on_site_seconds": _visitor_pass_text(
+            visitor_pass.get("duration_on_site_seconds")
+        ),
         "access_event_id": access_event_id,
         "arrival_event_id": _visitor_pass_text(visitor_pass.get("arrival_event_id")),
         "departure_event_id": _visitor_pass_text(visitor_pass.get("departure_event_id")),
@@ -123,10 +134,9 @@ def _visitor_pass_notification_subject(event_type: str, visitor_pass: dict[str, 
 def _visitor_pass_notification_message(event_type: str, visitor_pass: dict[str, Any]) -> str:
     visitor_name = _visitor_pass_name(visitor_pass)
     vehicle = _visitor_pass_vehicle_label(visitor_pass)
-    time_window = _visitor_pass_time_window(visitor_pass)
-    duration = _visitor_pass_text(visitor_pass.get("duration_human")) or _duration_label_from_seconds(
-        visitor_pass.get("duration_on_site_seconds")
-    )
+    duration = _visitor_pass_text(
+        visitor_pass.get("duration_human")
+    ) or _duration_label_from_seconds(visitor_pass.get("duration_on_site_seconds"))
     if event_type == "visitor_pass_created":
         return f"Visitor Pass created for {visitor_name}."
     if event_type == "visitor_pass_cancelled":
@@ -155,9 +165,13 @@ def _visitor_pass_occurred_at(event_type: str, visitor_pass: dict[str, Any]) -> 
             or visitor_pass.get("updated_at")
         )
     if event_type in {"visitor_pass_used", "visitor_pass_vehicle_arrived"}:
-        return _visitor_pass_text(visitor_pass.get("arrival_time") or visitor_pass.get("updated_at"))
+        return _visitor_pass_text(
+            visitor_pass.get("arrival_time") or visitor_pass.get("updated_at")
+        )
     if event_type == "visitor_pass_vehicle_exited":
-        return _visitor_pass_text(visitor_pass.get("departure_time") or visitor_pass.get("updated_at"))
+        return _visitor_pass_text(
+            visitor_pass.get("departure_time") or visitor_pass.get("updated_at")
+        )
     return _visitor_pass_text(visitor_pass.get("updated_at") or visitor_pass.get("created_at"))
 
 
@@ -172,11 +186,15 @@ def _visitor_pass_vehicle_label(visitor_pass: dict[str, Any]) -> str:
 
 
 def _visitor_pass_time_window(visitor_pass: dict[str, Any]) -> str:
-    explicit = _visitor_pass_text(visitor_pass.get("time_window") or visitor_pass.get("window_label"))
+    explicit = _visitor_pass_text(
+        visitor_pass.get("time_window") or visitor_pass.get("window_label")
+    )
     if explicit:
         return explicit
     return visitor_window_label_from_values(
-        visitor_pass.get("valid_from") or visitor_pass.get("window_start") or visitor_pass.get("expected_time"),
+        visitor_pass.get("valid_from")
+        or visitor_pass.get("window_start")
+        or visitor_pass.get("expected_time"),
         visitor_pass.get("valid_until") or visitor_pass.get("window_end"),
     )
 
@@ -189,7 +207,9 @@ def _visitor_pass_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def visitor_window_label_from_values(start_value: Any, end_value: Any, timezone_name: str | None = "Europe/London") -> str:
+def visitor_window_label_from_values(
+    start_value: Any, end_value: Any, timezone_name: str | None = "Europe/London"
+) -> str:
     timezone = safe_zoneinfo(timezone_name)
     start = parse_datetime_value(start_value)
     end = parse_datetime_value(end_value)
@@ -209,7 +229,7 @@ def parse_datetime_value(value: Any) -> datetime | None:
     if not text:
         return None
     try:
-        return _ensure_aware_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))
+        return _ensure_aware_utc(datetime.fromisoformat(text))
     except ValueError:
         return None
 
@@ -223,5 +243,5 @@ def _ensure_aware_utc(value: datetime) -> datetime:
 def safe_zoneinfo(timezone_name: str | None) -> ZoneInfo:
     try:
         return ZoneInfo(str(timezone_name or "Europe/London"))
-    except Exception:
+    except (ZoneInfoNotFoundError, ValueError):
         return ZoneInfo("Europe/London")

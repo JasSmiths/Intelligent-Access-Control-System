@@ -1,9 +1,10 @@
 import asyncio
 import inspect
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Callable
+from typing import Any
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -48,7 +49,9 @@ def public_unifi_protect_configured_value(config: RuntimeConfig) -> dict[str, An
 
 async def build_unifi_protect_client(config: RuntimeConfig):
     if not is_unifi_protect_configured(config):
-        raise UnifiProtectNotConfiguredError("UniFi Protect host, username, password, and API key are required.")
+        raise UnifiProtectNotConfiguredError(
+            "UniFi Protect host, username, password, and API key are required."
+        )
 
     try:
         from uiprotect import ProtectApiClient
@@ -120,7 +123,7 @@ async def _call_unifi_cleanup(owner: Any, method_name: str, label: str) -> None:
         result = method()
         if inspect.isawaitable(result):
             await result
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
         logger.debug("unifi_protect_close_failed", extra={"method": label, "error": str(exc)})
 
 
@@ -154,7 +157,7 @@ def subscribe_unifi_protect(
             callback = _bind_websocket_state_callback(state_callback, channel)
             try:
                 unsubscribers.append(method(callback))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
                 logger.debug(
                     "unifi_protect_state_subscription_failed",
                     extra={"method": state_method_name, "error": str(exc)},
@@ -165,7 +168,7 @@ def subscribe_unifi_protect(
         if callable(method):
             try:
                 unsubscribers.append(method(message_callback))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
                 logger.warning(
                     "unifi_protect_subscription_failed",
                     extra={"method": message_method_name, "error": str(exc)},
@@ -329,7 +332,9 @@ async def get_unifi_protect_event_thumbnail(
     event = await get_event_by_id(api, event_id)
     thumbnail_id = getattr(event, "thumbnail_id", None) or event_id
     try:
-        content = await api.get_event_thumbnail(thumbnail_id, width=width, height=height, retry_timeout=2)
+        content = await api.get_event_thumbnail(
+            thumbnail_id, width=width, height=height, retry_timeout=2
+        )
     except Exception as exc:
         raise UnifiProtectError(_protect_error_message(exc)) from exc
     if not content:
@@ -352,10 +357,14 @@ def serialize_unifi_camera(camera: Any) -> dict[str, Any]:
     camera_id = str(getattr(camera, "id", ""))
     return {
         "id": camera_id,
-        "name": str(getattr(camera, "display_name", None) or getattr(camera, "name", None) or camera_id),
+        "name": str(
+            getattr(camera, "display_name", None) or getattr(camera, "name", None) or camera_id
+        ),
         "model": _enum_value(getattr(camera, "type", None) or getattr(camera, "model", None)),
         "state": _enum_value(getattr(camera, "state", None)),
-        "is_adopted": bool(getattr(camera, "is_adopted", getattr(camera, "is_adopted_by_us", False))),
+        "is_adopted": bool(
+            getattr(camera, "is_adopted", getattr(camera, "is_adopted_by_us", False))
+        ),
         "is_recording": bool(getattr(camera, "is_recording", False)),
         "is_recording_enabled": bool(getattr(camera, "is_recording_enabled", False)),
         "is_video_ready": bool(getattr(camera, "is_video_ready", False)),
@@ -366,11 +375,15 @@ def serialize_unifi_camera(camera: Any) -> dict[str, Any]:
         "last_smart_detect_at": _isoformat(getattr(camera, "last_smart_detect", None)),
         "last_smart_detect_event_id": getattr(camera, "last_smart_detect_event_id", None),
         "last_smart_audio_detect_at": _isoformat(getattr(camera, "last_smart_audio_detect", None)),
-        "last_smart_audio_detect_event_id": getattr(camera, "last_smart_audio_detect_event_id", None),
+        "last_smart_audio_detect_event_id": getattr(
+            camera, "last_smart_audio_detect_event_id", None
+        ),
         "channels": [_serialize_channel(channel) for channel in getattr(camera, "channels", [])],
         "feature_flags": _serialize_camera_features(camera),
         "detections": _serialize_camera_detections(camera),
-        "smart_detect_zones": [_serialize_smart_detect_zone(zone) for zone in getattr(camera, "smart_detect_zones", [])],
+        "smart_detect_zones": [
+            _serialize_smart_detect_zone(zone) for zone in getattr(camera, "smart_detect_zones", [])
+        ],
         "snapshot_url": f"/api/v1/integrations/unifi-protect/cameras/{camera_id}/snapshot",
     }
 
@@ -383,13 +396,19 @@ def serialize_unifi_event(event: Any) -> dict[str, Any]:
         "id": event_id,
         "type": _enum_value(getattr(event, "type", None)),
         "camera_id": camera_id,
-        "camera_name": str(getattr(camera, "display_name", "") or getattr(camera, "name", "") or camera_id),
+        "camera_name": str(
+            getattr(camera, "display_name", "") or getattr(camera, "name", "") or camera_id
+        ),
         "start": _isoformat(getattr(event, "start", None)),
         "end": _isoformat(getattr(event, "end", None)),
         "score": int(getattr(event, "score", 0) or 0),
-        "smart_detect_types": [_enum_value(item) for item in getattr(event, "smart_detect_types", [])],
+        "smart_detect_types": [
+            _enum_value(item) for item in getattr(event, "smart_detect_types", [])
+        ],
         "thumbnail_url": f"/api/v1/integrations/unifi-protect/events/{event_id}/thumbnail",
-        "video_url": f"/api/v1/integrations/unifi-protect/events/{event_id}/video" if getattr(event, "end", None) else None,
+        "video_url": f"/api/v1/integrations/unifi-protect/events/{event_id}/video"
+        if getattr(event, "end", None)
+        else None,
         "metadata": _safe_metadata(getattr(event, "metadata", None)),
     }
 
@@ -398,12 +417,16 @@ def websocket_message_payload(message: Any) -> dict[str, Any]:
     new_obj = getattr(message, "new_obj", None)
     old_obj = getattr(message, "old_obj", None)
     changed_data = _redact_payload(getattr(message, "changed_data", {}) or {})
-    model_key = str(changed_data.get("modelKey") or _enum_value(getattr(new_obj, "model", None)) or "")
+    model_key = str(
+        changed_data.get("modelKey") or _enum_value(getattr(new_obj, "model", None)) or ""
+    )
     payload = {
         "action": _enum_value(getattr(message, "action", None)),
         "model": model_key,
         "changed_data": changed_data,
-        "object_id": str(getattr(new_obj, "id", "") or getattr(old_obj, "id", "") or changed_data.get("id", "")),
+        "object_id": str(
+            getattr(new_obj, "id", "") or getattr(old_obj, "id", "") or changed_data.get("id", "")
+        ),
     }
     if _looks_like_camera(new_obj, model_key):
         payload["camera"] = serialize_unifi_camera(new_obj)
@@ -442,8 +465,12 @@ def _serialize_camera_features(camera: Any) -> dict[str, Any]:
         "has_smart_detect": bool(getattr(flags, "has_smart_detect", False)),
         "has_package_camera": bool(getattr(flags, "has_package_camera", False)),
         "has_mic": bool(getattr(camera, "has_mic", False)),
-        "smart_detect_types": [_enum_value(item) for item in getattr(flags, "smart_detect_types", [])],
-        "smart_detect_audio_types": [_enum_value(item) for item in (getattr(flags, "smart_detect_audio_types", None) or [])],
+        "smart_detect_types": [
+            _enum_value(item) for item in getattr(flags, "smart_detect_types", [])
+        ],
+        "smart_detect_audio_types": [
+            _enum_value(item) for item in (getattr(flags, "smart_detect_audio_types", None) or [])
+        ],
     }
 
 
@@ -477,9 +504,7 @@ def _serialize_smart_detect_zone(zone: Any) -> dict[str, Any]:
 
 def _looks_like_camera(obj: Any, model_key: str) -> bool:
     return obj is not None and (
-        model_key.lower() == "camera"
-        or hasattr(obj, "channels")
-        or hasattr(obj, "is_video_ready")
+        model_key.lower() == "camera" or hasattr(obj, "channels") or hasattr(obj, "is_video_ready")
     )
 
 
@@ -487,7 +512,8 @@ def _looks_like_event(obj: Any, model_key: str) -> bool:
     return obj is not None and (
         model_key.lower() == "event"
         or hasattr(obj, "smart_detect_types")
-        or hasattr(obj, "camera_id") and hasattr(obj, "start")
+        or hasattr(obj, "camera_id")
+        and hasattr(obj, "start")
     )
 
 
@@ -519,7 +545,7 @@ def _model_to_dict(value: Any) -> Any:
     if callable(unifi_dict):
         try:
             return unifi_dict()
-        except Exception:
+        except Exception:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
             return str(value)
     return str(value)
 

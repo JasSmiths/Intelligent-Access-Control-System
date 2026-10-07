@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { missedExitRecoveryApi, type RecoveryAttempt } from "../../api/missedExitRecovery";
+import * as directory from "../../api/directory";
 import * as client from "../../api/client";
 import type { Person, UserAccount } from "../../api/types";
 import { MissedExitRecoveryView, RecoveryAttemptDetails } from "./MissedExitRecoveryView";
@@ -11,6 +12,8 @@ const person = { id: "owner-1", display_name: "Synthetic Resident", missed_exit_
 const attempt: RecoveryAttempt = { id: "attempt-1", occurred_at: "2026-10-02T10:00:00Z", owner_id: person.id, owner_name: person.display_name, registration_number: "SYNTH01", vehicle_id: "vehicle-1", event_id: "denied-event", recovery_event_id: "recovery-event", saga_id: "saga-1", command_id: "command-1", method: "phone_automatic", outcome: "command_pending", reason: "Entry accepted, physical verification pending", checks: { phone: { sample_age_seconds: 12, accuracy_m: 15, distance_m: 42, max_distance_m: 100, passed: true, latitude: 51.5, longitude: -0.1 }, provider_payload: { secret: "sensitive" } }, timeline: [{ at: "2026-10-02T10:00:01Z", stage: "access_decision", status: "committed", reason: "Entry committed" }, { at: "2026-10-02T10:00:02Z", stage: "command_verification", status: "pending", reason: "Physical outcome not yet verified" }], notification: { status: "not_requested", expires_at: null, action_at: null, delivery_id: null }, duration_ms: null, policy_version: "1" };
 const props = { currentUser: { id: "admin-1", role: "admin" } as UserAccount, people: [person], refreshToken: 0, refresh: vi.fn().mockResolvedValue(undefined) };
 beforeEach(() => {
+  vi.spyOn(directory, "readDirectory").mockResolvedValue({ items: [person], total: 1, next_cursor: null });
+  vi.spyOn(directory, "lookupDirectory").mockResolvedValue([person]);
   settings.save.mockReset();
   vi.spyOn(missedExitRecoveryApi, "attempts").mockResolvedValue({ items: [attempt], total: 26, offset: 0, limit: 25 });
   vi.spyOn(missedExitRecoveryApi, "attempt").mockResolvedValue(attempt);

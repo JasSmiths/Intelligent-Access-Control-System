@@ -1,3 +1,4 @@
+from app.services import gate_malfunction_policy as malfunction_policy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -171,16 +172,16 @@ def test_gate_malfunction_summary_distinguishes_active_resolved_and_fubar() -> N
         fix_attempts_count=2,
     )
 
-    assert "is open" in service._trace_summary(row)
+    assert "is open" in malfunction_policy.trace_summary(row)
 
     row.status = GateMalfunctionStatus.FUBAR
     row.fubar_at = opened_at + timedelta(hours=3, minutes=10, seconds=45)
     row.fix_attempts_count = 5
-    assert "FUBAR" in service._trace_summary(row)
+    assert "FUBAR" in malfunction_policy.trace_summary(row)
 
     row.status = GateMalfunctionStatus.RESOLVED
     row.resolved_at = opened_at + timedelta(minutes=12)
-    assert "resolved" in service._trace_summary(row)
+    assert "resolved" in malfunction_policy.trace_summary(row)
 
 
 def test_gate_malfunction_history_cursor_round_trips_opened_at_and_id() -> None:
@@ -196,7 +197,7 @@ def test_gate_malfunction_history_cursor_round_trips_opened_at_and_id() -> None:
         declared_at=opened_at + timedelta(minutes=5),
     )
 
-    parsed_opened_at, parsed_id = service._parse_history_cursor(service._history_cursor(row))
+    parsed_opened_at, parsed_id = malfunction_policy.parse_history_cursor(malfunction_policy.history_cursor(row))
 
     assert parsed_opened_at == opened_at
     assert parsed_id == row_id

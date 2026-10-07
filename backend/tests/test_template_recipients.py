@@ -115,7 +115,7 @@ async def test_mobile_fanout_sends_different_copy_to_each_actual_destination(mon
 @pytest.mark.asyncio
 async def test_voice_destinations_receive_their_own_copy(monkeypatch):
     service = owner.NotificationService()
-    monkeypatch.setattr(service, "_select_voice_targets", AsyncMock(return_value=["media_player.jason", "media_player.shared"]))
+    monkeypatch.setattr(service.recipients, "select_voice_targets", AsyncMock(return_value=["media_player.jason", "media_player.shared"]))
     monkeypatch.setattr(service, "_voice_announcements_preflight", AsyncMock(return_value=None))
     announcer = SimpleNamespace(announce=AsyncMock())
     monkeypatch.setattr(owner, "HomeAssistantTtsAnnouncer", lambda: announcer)

@@ -2,7 +2,6 @@
 
 from typing import Any
 
-
 RETAINED_LEGACY_COLUMNS = frozenset(
     {
         ("people", "home_assistant_presence_entity_id"),

@@ -7,10 +7,11 @@ import uuid
 import pytest
 
 from app.modules.access_devices.base import AccessDeviceBinding, AccessDeviceEntity
-from app.modules.gate import access_devices as adapter_module
+from app.services import gate_controller as adapter_module
 from app.modules.gate.base import CommandDelivery, GateCommandContext, GateState
 from app.services.access_device_commands import AccessDeviceCommandJournal, DeviceCommandClaim, device_command_receipt
-from app.services.access_devices import AccessDeviceOperationResult, AccessDeviceService
+from app.services.access_device_outcomes import AccessDeviceOperationResult
+from app.services.access_devices import AccessDeviceService
 from app.services.access_device_configuration import AccessDeviceConfiguration
 
 
@@ -79,8 +80,7 @@ async def test_aggregate_admission_follows_designated_target_only(monkeypatch, e
         async def open_access_gates(self, *_args, **_kwargs):
             return outcomes
 
-    monkeypatch.setattr(adapter_module, "get_access_device_service", lambda: Service())
-    result = await adapter_module.AccessDeviceGateController().open_gate("synthetic",
+    result = await adapter_module.AccessDeviceGateController(Service()).open_gate("synthetic",
         command_context=GateCommandContext(None, "", "intent", "key", require_admission=False))
     assert result.metadata["admission_verified"] is expected
     assert result.metadata["mechanically_confirmed"] is False
