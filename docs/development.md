@@ -98,6 +98,10 @@ Dependency changes belong in reviewed manifests and locks. The
 complete locked Python set, including development dependencies, and the frontend
 lock, and builds both images.
 
+The backend lock includes `multidict` 6.9.1, which fixes the C-extension
+reference leak in [GHSA-54p9-h82j-f925](https://github.com/aio-libs/multidict/security/advisories/GHSA-54p9-h82j-f925).
+Preserve this fix when refreshing the dependency lock.
+
 Use the [isolated validation harness](validation.md) for backend regression.
 If backend source is mounted into a running installation, perform code changes
 and validation in an isolated checkout. Existing installation startup,
