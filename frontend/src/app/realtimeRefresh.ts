@@ -1,7 +1,7 @@
 import type { RealtimeMessage, ViewKey } from "../api/types";
 import { isRecord, stringPayload } from "../lib/format";
 import type { ShellDataKey } from "./navigation";
-import type { RefreshSelection } from "./refreshCoordinator";
+export type RefreshSelection = { keys: Set<ShellDataKey>; route: boolean };
 
 type Impact = { keys: ShellDataKey[]; views?: ViewKey[] };
 const accessImpact: Impact = {

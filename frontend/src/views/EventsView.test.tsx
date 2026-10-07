@@ -25,11 +25,11 @@ it("opens older direct results when the target changes within the same route", a
     throw new Error(`Unexpected URL: ${path}`);
   });
   vi.stubGlobal("fetch", fetcher);
-  const { rerender } = render(<EventsView refreshToken={0} resetToken={0} targetId={null} />);
+  const { rerender } = render(<EventsView targetId={null} />);
   await waitFor(() => expect(screen.getByText("No events recorded yet.")).toBeInTheDocument());
-  rerender(<EventsView refreshToken={0} resetToken={0} targetId="id-1" />);
+  rerender(<EventsView targetId="id-1" />);
   await screen.findByText("FIRST11");
-  rerender(<EventsView refreshToken={0} resetToken={0} targetId="id-2" />);
+  rerender(<EventsView targetId="id-2" />);
   await screen.findByText("SECOND22");
   expect(screen.queryByText("FIRST11")).not.toBeInTheDocument();
   expect(fetcher.mock.calls.map(([path]) => path)).toContain("/api/v1/events/id-2");

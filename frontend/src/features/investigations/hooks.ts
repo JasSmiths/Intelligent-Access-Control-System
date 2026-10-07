@@ -1,3 +1,6 @@
+import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
+import type { RealtimeMessage } from "../../api/types";
+const investigationEventMatches = (event: RealtimeMessage) => event.type === "audit.log.created" || event.type.startsWith("automation.run.") || event.type === "access_event.finalized" || event.type === "access_event.finalize_failed";
 import React from "react";
 import {
   getActivityEpisode,
@@ -53,7 +56,7 @@ export function useInvestigationQueryState() {
   return { query, committedQuery, updateQuery, resetQuery };
 }
 
-export function useInvestigationData(query: InvestigationQuery, refreshToken: number) {
+export function useInvestigationData(query: InvestigationQuery) {
   const [filters, setFilters] = React.useState<InvestigationFilterCatalog | null>(null);
   const [overview, setOverview] = React.useState<InvestigationOverview | null>(null);
   const [page, setPage] = React.useState<ActivityPage | null>(null);
@@ -65,59 +68,35 @@ export function useInvestigationData(query: InvestigationQuery, refreshToken: nu
   const sequenceRef = React.useRef(0);
   const loadMoreAbortRef = React.useRef<AbortController | null>(null);
 
-  React.useEffect(() => {
-    const controller = new AbortController();
-    getInvestigationFilters({ signal: controller.signal })
-      .then(setFilters)
-      .catch((error) => {
-        if (!isAbortError(error)) {
-          if (String(error).includes("403")) setForbidden(true);
-          setError(errorMessage(error, "Unable to load investigation filters"));
-          setLoading(false);
-        }
-      });
-    return () => controller.abort();
-  }, [refreshToken]);
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    getInvestigationOverview({ signal: controller.signal })
-      .then(setOverview)
-      .catch((error) => {
-        if (!isAbortError(error)) {
-          if (String(error).includes("403")) setForbidden(true);
-          setError(errorMessage(error, "Unable to load the investigation overview"));
-        }
-      });
-    return () => controller.abort();
-  }, [refreshToken]);
-
-  React.useEffect(() => {
-    if (!filters) return undefined;
-    const controller = new AbortController();
-    loadMoreAbortRef.current?.abort();
-    loadMoreAbortRef.current = null;
+  const recordFailure = React.useCallback((failure: unknown, fallback: string) => {
+    if (String(failure).includes("403")) setForbidden(true);
+    setError(errorMessage(failure, fallback));
+  }, []);
+  const readFilters = React.useCallback(async (signal: AbortSignal) => {
+    try { const result = await getInvestigationFilters({ signal }); if (!signal.aborted) setFilters(result); }
+    catch (failure) { if (!signal.aborted && !isAbortError(failure)) { recordFailure(failure, "Unable to load investigation filters"); setLoading(false); } throw failure; }
+  }, [recordFailure]);
+  const readOverview = React.useCallback(async (signal: AbortSignal) => {
+    try { const result = await getInvestigationOverview({ signal }); if (!signal.aborted) setOverview(result); }
+    catch (failure) { if (!signal.aborted && !isAbortError(failure)) recordFailure(failure, "Unable to load the investigation overview"); throw failure; }
+  }, [recordFailure]);
+  useCoordinatedRead(readFilters, investigationEventMatches);
+  useCoordinatedRead(readOverview, investigationEventMatches);
+  const timezone = filters?.site_timezone;
+  const readPage = React.useCallback(async (signal: AbortSignal) => {
+    if (!timezone) return;
+    loadMoreAbortRef.current?.abort(); loadMoreAbortRef.current = null;
     const sequence = ++sequenceRef.current;
-    setLoadingMore(false);
-    setPage(null);
-    setLoading(true);
-    setError("");
-    setForbidden(false);
-    getActivityPage(query, filters.site_timezone, null, 30, { signal: controller.signal }).then((activityResult) => {
-      if (sequence !== sequenceRef.current || controller.signal.aborted) return;
-      setPage(activityResult);
-      setItems(activityResult.items);
-      setLoading(false);
-    }).catch((error) => {
-      if (sequence !== sequenceRef.current || controller.signal.aborted || isAbortError(error)) return;
-      if (String(error).includes("403")) setForbidden(true);
-      setPage(null);
-      setItems([]);
-      setError(errorMessage(error, "Unable to load recorded activity"));
-      setLoading(false);
-    });
-    return () => controller.abort();
-  }, [filters, query, refreshToken]);
+    setLoadingMore(false); setPage(null); setLoading(true); setError(""); setForbidden(false);
+    try {
+      const result = await getActivityPage(query, timezone, null, 30, { signal });
+      if (!signal.aborted && sequence === sequenceRef.current) { setPage(result); setItems(result.items); }
+    } catch (failure) {
+      if (!signal.aborted && sequence === sequenceRef.current && !isAbortError(failure)) { recordFailure(failure, "Unable to load recorded activity"); setPage(null); setItems([]); }
+      throw failure;
+    } finally { if (!signal.aborted && sequence === sequenceRef.current) setLoading(false); }
+  }, [query, timezone, recordFailure]);
+  useCoordinatedRead(readPage, investigationEventMatches, Boolean(timezone));
 
   const loadMore = React.useCallback(async () => {
     if (!page?.next_cursor || loading || loadingMore) return;
@@ -178,7 +157,7 @@ export function useEpisodeDetails() {
     setErrors((current) => ({ ...current, [episodeId]: "" }));
     try {
       const detail = await getActivityEpisode(episodeId, { signal: controller.signal });
-      setDetails((current) => ({ ...current, [episodeId]: detail }));
+      if (!controller.signal.aborted) setDetails((current) => ({ ...current, [episodeId]: detail }));
     } catch (error) {
       if (!isAbortError(error)) setErrors((current) => ({ ...current, [episodeId]: errorMessage(error, "Unable to load evidence") }));
     } finally {

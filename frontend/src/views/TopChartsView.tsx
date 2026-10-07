@@ -1,3 +1,6 @@
+import { useCoordinatedRead } from "../lib/useCoordinatedRead";
+import { auditResource } from "../lib/realtime";
+const chartEventMatches = (event: RealtimeMessage) => event.type === "access_event.finalized" || event.type === "leaderboard_overtake" || event.type === "vehicle_information.updated" || auditResource(event) === "vehicle";
 import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay, type OverlayPlacement } from "../lib/viewportPlacement";
 import {
 ArrowLeft,
@@ -90,65 +93,20 @@ export type LeaderboardResponse = {
 
 const TOP_CHARTS_PAGE_SIZE = 5;
 
-export function TopChartsView({ query, latestRealtime, refreshToken }: { query: string; latestRealtime: RealtimeMessage | null; refreshToken: number }) {
+export function TopChartsView({ query }: { query: string }) {
   const [leaderboard, setLeaderboard] = React.useState<LeaderboardResponse | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
   const [error, setError] = React.useState("");
   const [knownPage, setKnownPage] = React.useState(0);
   const [unknownPage, setUnknownPage] = React.useState(0);
-  const lastRefreshTokenRef = React.useRef(refreshToken);
-  const loadSequenceRef = React.useRef(0);
-  const loadAbortRef = React.useRef<AbortController | null>(null);
-
-  const load = React.useCallback(async () => {
-    const sequence = loadSequenceRef.current + 1;
-    loadSequenceRef.current = sequence;
-    loadAbortRef.current?.abort();
-    const controller = new AbortController();
-    loadAbortRef.current = controller;
-    setRefreshing(true);
-    setError("");
-    try {
-      const nextLeaderboard = await api.get<LeaderboardResponse>("/api/v1/leaderboard", { signal: controller.signal });
-      if (loadSequenceRef.current !== sequence) return;
-      setLeaderboard(nextLeaderboard);
-    } catch (loadError) {
-      if (isAbortError(loadError)) return;
-      if (loadSequenceRef.current !== sequence) return;
-      setError(loadError instanceof Error ? loadError.message : "Unable to load Top Charts.");
-    } finally {
-      if (loadSequenceRef.current === sequence) {
-        setLoading(false);
-        setRefreshing(false);
-        if (loadAbortRef.current === controller) {
-          loadAbortRef.current = null;
-        }
-      }
-    }
+  const read = React.useCallback(async (signal: AbortSignal) => {
+    setRefreshing(true); setError("");
+    try { const result = await api.get<LeaderboardResponse>("/api/v1/leaderboard", { signal }); if (!signal.aborted) setLeaderboard(result); }
+    catch (failure) { if (!signal.aborted && !isAbortError(failure)) setError(failure instanceof Error ? failure.message : "Unable to load Top Charts."); throw failure; }
+    finally { if (!signal.aborted) { setLoading(false); setRefreshing(false); } }
   }, []);
-
-  React.useEffect(() => () => {
-    loadSequenceRef.current += 1;
-    loadAbortRef.current?.abort();
-  }, []);
-
-  React.useEffect(() => {
-    load().catch(() => undefined);
-  }, [load]);
-
-  React.useEffect(() => {
-    if (lastRefreshTokenRef.current === refreshToken) return;
-    lastRefreshTokenRef.current = refreshToken;
-    load().catch(() => undefined);
-  }, [load, refreshToken]);
-
-  React.useEffect(() => {
-    if (!latestRealtime) return;
-    if (latestRealtime.type === "access_event.finalized" || latestRealtime.type === "leaderboard_overtake") {
-      load().catch(() => undefined);
-    }
-  }, [latestRealtime, load]);
+  const load = useCoordinatedRead(read, chartEventMatches);
 
   const knownRows = React.useMemo(
     () => (leaderboard?.known ?? []).filter((item) => leaderboardKnownMatches(item, query)),

@@ -1,3 +1,4 @@
+import { createReadSignals, ReadSignalsContext } from "../lib/readSignals";
 import { LoadingState } from "../ui/primitives";
 import { useModalFocus } from "../ui/useModalFocus";
 import { Bell, ChevronDown, Loader2, LogOut, Menu, RefreshCcw, Search, ShieldCheck, X } from "lucide-react";
@@ -12,11 +13,9 @@ import { AuthLoading, LoginPage, SetupPage, type AuthStatus } from "./auth";
 import { canAccessView, initialViewFromLocation, primaryNavItems, settingsNavItems, settingsNavViewKeys, viewFromPath, viewPaths, type ShellDataKey } from "./navigation";
 import { useProfilePreferences } from "./profile";
 import {
-  accessEventFromRealtime,
   applyIntegrationRealtimeEvent,
   applyMaintenanceRealtimeEvent,
   notificationToastFromRealtime,
-  realtimeMessageForRouteConsumers,
   realtimeStatus,
   type NotificationToast,
   type NotificationToastAction,
@@ -35,6 +34,9 @@ export function App() {
   const [theme, setTheme] = useTheme();
   const [authStatus, setAuthStatus] = React.useState<AuthStatus | null>(null);
   const currentUser = authStatus?.user ?? null;
+  const readSignals = React.useMemo(() => createReadSignals(currentUser ? `${currentUser.id}:${currentUser.role}` : "signed-out"), [currentUser?.id, currentUser?.role]);
+  const activeSignals = React.useRef(readSignals);
+  React.useLayoutEffect(() => { activeSignals.current = readSignals; return () => readSignals.dispose(); }, [readSignals]);
   const [profilePreferences, setProfilePreferences] = useProfilePreferences(currentUser);
   const [presence, setPresence] = React.useState<Presence[]>([]);
   const [expectedPresence, setExpectedPresence] = React.useState<ExpectedPresenceSummary | null>(null);
@@ -46,10 +48,8 @@ export function App() {
   const [schedules, setSchedules] = React.useState<Schedule[]>([]);
   const [integrationStatus, setIntegrationStatus] = React.useState<IntegrationStatus | null>(null);
   const [maintenanceStatus, setMaintenanceStatus] = React.useState<MaintenanceStatus | null>(null);
-  const [latestRealtime, setLatestRealtime] = React.useState<RealtimeMessage | null>(null);
   const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
   const [dashboardRefreshing, setDashboardRefreshing] = React.useState(false);
-  const [historyResetToken, setHistoryResetToken] = React.useState(0);
   const [realtimeConnection, setRealtimeConnection] = React.useState<RealtimeConnectionState>(() =>
     realtimeStatus("connecting", "Preparing live updates")
   );
@@ -128,12 +128,13 @@ export function App() {
   const refreshDashboard = React.useCallback(async () => {
     setDashboardRefreshing(true);
     try {
-      await refresh();
-      setHistoryResetToken((token) => token + 1);
+      const results = await Promise.allSettled([refresh(), readSignals.publish({ type: "refresh", reason: "manual", resetHistory: true })]);
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
     } finally {
       setDashboardRefreshing(false);
     }
-  }, [refresh]);
+  }, [refresh, readSignals]);
   const handleNotificationAction = React.useCallback(async (notificationId: string, action: NotificationToastAction) => {
     if (action.method !== "POST") return;
     await api.post(action.path);
@@ -145,15 +146,15 @@ export function App() {
     if (!selection.keys.size && !selection.route) return;
     setRealtimeStatus("refreshing", "Applying live update");
     refreshRealtime(selection)
-      .then(() => setRealtimeStatus("live", "Live update applied"))
-      .catch(() => setRealtimeStatus("reconnecting", "Refresh failed; waiting for the stream"));
-  }, [refreshRealtime, selectionForEvent, setRealtimeStatus]);
+      .then(() => { if (activeSignals.current === readSignals) setRealtimeStatus("live", "Live update applied"); })
+      .catch(() => { if (activeSignals.current === readSignals) setRealtimeStatus("reconnecting", "Refresh failed; waiting for the stream"); });
+  }, [refreshRealtime, selectionForEvent, readSignals, setRealtimeStatus]);
   const refreshFromRealtimeLifecycle = React.useCallback(() => {
     setRealtimeStatus("refreshing", "Pulling current site state");
-    refreshRealtime()
-      .then(() => setRealtimeStatus("live", "Data refreshed just now"))
-      .catch(() => setRealtimeStatus("reconnecting", "Refresh failed; retrying with the stream"));
-  }, [refreshRealtime, setRealtimeStatus]);
+    Promise.all([refreshRealtime(), readSignals.publish({ type: "refresh", reason: "connection", resetHistory: false })])
+      .then(() => { if (activeSignals.current === readSignals) setRealtimeStatus("live", "Data refreshed just now"); })
+      .catch(() => { if (activeSignals.current === readSignals) setRealtimeStatus("reconnecting", "Refresh failed; retrying with the stream"); });
+  }, [refreshRealtime, readSignals, setRealtimeStatus]);
   React.useEffect(() => {
     if (!authStatus?.authenticated) return;
     initialRefresh().catch(() => undefined);
@@ -162,12 +163,10 @@ export function App() {
     ? `${currentUser.id}:${currentUser.role}`
     : null;
   React.useLayoutEffect(() => {
-    setLatestRealtime(null);
     setNotificationToasts([]);
   }, [realtimeSessionKey]);
   const handleRealtimeMessage = React.useCallback((parsed: RealtimeMessage) => {
-    const routeRealtime = realtimeMessageForRouteConsumers(parsed);
-    if (routeRealtime) setLatestRealtime(routeRealtime);
+    void readSignals.publish({ type: "realtime", message: parsed }).catch(() => undefined);
     const notificationToast = notificationToastFromRealtime(parsed);
     if (notificationToast) {
       setNotificationToasts((current) => [notificationToast, ...current].slice(0, 4));
@@ -176,12 +175,8 @@ export function App() {
     if (applyMaintenanceRealtimeEvent(parsed, setMaintenanceStatus)) return;
     if (applyIntegrationRealtimeEvent(parsed, setIntegrationStatus)) return;
     if (parsed.type.startsWith("telemetry.")) return;
-    const finalizedEvent = accessEventFromRealtime(parsed);
-    if (finalizedEvent) {
-      setEvents((current) => [finalizedEvent, ...current.filter((item) => item.id !== finalizedEvent.id)].slice(0, 40));
-    }
     refreshFromRealtime(parsed);
-  }, [refreshFromRealtime]);
+  }, [refreshFromRealtime, readSignals]);
   useRealtimeConnection({
     sessionKey: realtimeSessionKey,
     onMessage: handleRealtimeMessage,
@@ -261,8 +256,7 @@ export function App() {
       setIntegrationStatus(null);
       setMaintenanceStatus(null);
       resetRefresh();
-      setLatestRealtime(null);
-      setNotificationToasts([]);
+        setNotificationToasts([]);
       setRouteSearch(null);
       setSettingsExpanded(false);
       setView("dashboard");
@@ -564,7 +558,8 @@ export function App() {
         ) : readState === "unavailable" ? (
           <section className="view-stack permission-state" role="alert"><h1>Site data unavailable</h1><p>Required {failedDescription} data could not be loaded. Editors are paused until a successful read.</p><button className="secondary-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button">Retry</button></section>
         ) : (
-          <>{readState === "stale" ? <div className="shell-stale-banner" role="status">Some site data is unavailable ({failedDescription}). Displayed information may be incomplete. <button className="secondary-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button">Retry</button></div> : null}<View
+          <>{readState === "stale" ? <div className="shell-stale-banner" role="status">Some site data is unavailable ({failedDescription}). Displayed information may be incomplete. <button className="secondary-button" onClick={() => refreshDashboard().catch(() => undefined)} type="button">Retry</button></div> : null}<ReadSignalsContext.Provider value={readSignals}><View
+            key={readSignals.accountKey}
             view={view}
             locationSearch={locationSearch}
             search={routeSearch?.view === view ? routeSearch.value : ""}
@@ -578,9 +573,7 @@ export function App() {
             schedules={schedules}
             integrationStatus={integrationStatus}
             maintenanceStatus={maintenanceStatus}
-            latestRealtime={latestRealtime}
             dataRefreshToken={dataRefreshToken}
-            historyResetToken={historyResetToken}
             refresh={refresh}
             currentUser={currentUser}
             navigateToView={navigateToView}
@@ -588,7 +581,7 @@ export function App() {
               setAuthStatus((current) => current ? { ...current, user } : current)
             }
             onMaintenanceStatusChanged={setMaintenanceStatus}
-          /></>
+          /></ReadSignalsContext.Provider></>
         )}
       </main>
       <SearchPalette

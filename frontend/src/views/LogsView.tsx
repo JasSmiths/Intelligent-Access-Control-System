@@ -5,11 +5,9 @@ import type { UserAccount } from "../api/types";
 import { InvestigationsWorkspace } from "../features/investigations/InvestigationsWorkspace";
 
 export function LogsView({
-  currentUser,
-  refreshToken
+  currentUser
 }: {
   currentUser: UserAccount;
-  refreshToken: number;
 }) {
   React.useEffect(() => {
     document.body.classList.add("investigations-route");
@@ -27,5 +25,5 @@ export function LogsView({
       </section>
     );
   }
-  return <InvestigationsWorkspace refreshToken={refreshToken} />;
+  return <InvestigationsWorkspace />;
 }

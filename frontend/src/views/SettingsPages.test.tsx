@@ -15,11 +15,11 @@ const devices = [
   { id: "secondary-id", key: "secondary", kind: "gate", name: "Secondary Gate", enabled: true, open_for_access: false, sort_order: 1, bindings: [], schedule_id: null, commandable: true, admission_eligible: false },
   { id: "disabled-id", key: "disabled", kind: "gate", name: "Disabled Gate", enabled: false, open_for_access: true, sort_order: 2, bindings: [], schedule_id: null, commandable: false, admission_eligible: false }
 ] as AccessDeviceEligibility[];
-const props = { kind: "gate" as const, title: "Gates", icon: DoorOpen, currentUser: admin, refreshToken: 0, schedules: [] };
+const props = { kind: "gate" as const, title: "Gates", icon: DoorOpen, currentUser: admin };
 beforeEach(() => {
   settingState.values.gate_admission_device_key = "";
   settingState.save.mockReset();
-  vi.spyOn(client.api, "get").mockImplementation(async (path) => path.startsWith("/api/v1/access-devices") ? devices : { cover_entities: [] });
+  vi.spyOn(client.api, "get").mockImplementation(async (path) => path === "/api/v1/schedules" ? [] : path.startsWith("/api/v1/access-devices") ? devices : { cover_entities: [] });
   vi.spyOn(client, "createActionConfirmation").mockResolvedValue({ confirmation_id: "synthetic-intent", confirmation_token: "synthetic-token", action: "settings.update", expires_at: "" });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -66,7 +66,7 @@ it("keeps entry selection read-only for standard users and absent from garage se
 });
 
 it("does not infer eligibility when an older response omits the authoritative flag", async () => {
-  vi.mocked(client.api.get).mockImplementation(async (path) => path.startsWith("/api/v1/access-devices")
+  vi.mocked(client.api.get).mockImplementation(async (path) => path === "/api/v1/schedules" ? [] : path.startsWith("/api/v1/access-devices")
     ? devices.map(({ admission_eligible: _eligible, commandable: _commandable, ...device }) => device) : { cover_entities: [] });
   settingState.values.gate_admission_device_key = "entry";
   await act(async () => { render(<AccessDevicesSettingsView {...props} />); });
@@ -100,7 +100,7 @@ it("propagates a saved current user before exit completes even when navigation u
   const onCurrentUserUpdated = vi.fn();
   vi.mocked(client.api.get).mockImplementation(async (path) => path === "/api/v1/users" ? [account] : { items: [], total: 0, next_cursor: null });
   vi.spyOn(client.api, "patch").mockResolvedValue(savedUser);
-  const view = render(<UsersView currentUser={account} onCurrentUserUpdated={onCurrentUserUpdated} refreshToken={0} />);
+  const view = render(<UsersView currentUser={account} onCurrentUserUpdated={onCurrentUserUpdated} />);
   await act(async () => {});
   fireEvent.click(screen.getByRole("button", { name: "Edit" }));
   const dialog = screen.getByRole("dialog", { name: "Edit User" });
@@ -121,7 +121,7 @@ it("publishes the generated password before exit and retains its saved-user labe
   const onCurrentUserUpdated = vi.fn();
   vi.mocked(client.api.get).mockImplementation(async (path) => path === "/api/v1/users" ? [account] : { items: [], total: 0, next_cursor: null });
   vi.spyOn(client.api, "post").mockResolvedValue({ user: savedUser, temporary_password: "synthetic-password" });
-  render(<UsersView currentUser={account} onCurrentUserUpdated={onCurrentUserUpdated} refreshToken={0} />);
+  render(<UsersView currentUser={account} onCurrentUserUpdated={onCurrentUserUpdated} />);
   await act(async () => {});
   fireEvent.click(screen.getByRole("button", { name: "Add User" }));
   const dialog = screen.getByRole("dialog", { name: "Add User" });

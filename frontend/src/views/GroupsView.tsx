@@ -3,6 +3,8 @@ import { useModalClose } from "../ui/useModalClose";
 import { useEditorDismiss } from "../ui/useEditorDismiss";
 import { Check, CircleDot, Plus, Users, X } from "lucide-react";
 import React from "react";
+import { useGroups } from "../features/directory/catalogs";
+import { ReadSignalsContext } from "../lib/readSignals";
 import { useDirectoryPage } from "../features/directory/reads";
 import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
@@ -21,30 +23,14 @@ export const groupCategoryOptions = [
   { value: "contractors", label: "Contractors" }
 ] as const;
 
-export function GroupsView({
-  groups,
-  people,
-  query,
-  refresh,
-  refreshToken = 0
-}: {
-  groups: Group[];
-  people: Person[];
-  query: string;
-  refresh: () => Promise<void>;
-  refreshToken?: number;
-}) {
+export function GroupsView({ query }: { query: string }) {
+  const catalog = useGroups(); const groups = catalog.items;
+  const signals = React.useContext(ReadSignalsContext);
+  const refresh = React.useCallback(() => signals?.publish({ type: "refresh", reason: "manual", resetHistory: false }) ?? catalog.refresh(), [signals, catalog.refresh]);
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedGroup, setSelectedGroup] = React.useState<Group | null>(null);
   const [error, setError] = React.useState("");
   const [saved, setSaved] = React.useState("");
-  const peopleByGroup = React.useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const person of people) {
-      if (person.group_id) counts.set(person.group_id, (counts.get(person.group_id) ?? 0) + 1);
-    }
-    return counts;
-  }, [people]);
   const filtered = groups.filter((group) =>
     matches(group.name, query) ||
     matches(titleCase(group.category), query) ||
@@ -74,11 +60,12 @@ export function GroupsView({
           <h1>Groups</h1>
           <p>Create access groups for family, friends, visitors, and contractors.</p>
         </div>
-        <button className="primary-button" onClick={openCreate} type="button">
+        <button className="primary-button" onClick={openCreate} disabled={!catalog.ready} type="button">
           <Plus size={17} /> Add Group
         </button>
       </div>
 
+      {catalog.error ? <div role="alert">{catalog.error}</div> : null}
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
@@ -87,12 +74,12 @@ export function GroupsView({
         {filtered.length ? (
           <div className="users-table groups-table">
             {filtered.map((group) => {
-              const peopleCount = group.people_count ?? peopleByGroup.get(group.id) ?? 0;
+              const peopleCount = group.people_count ?? 0;
               return (
                 <button
                   className="user-row group-row directory-row-button"
                   key={group.id}
-                  onClick={() => openEdit(group)}
+                  disabled={!catalog.ready} onClick={() => openEdit(group)}
                   aria-label={`Edit group ${group.name}`}
                   type="button"
                 >
@@ -110,15 +97,15 @@ export function GroupsView({
             })}
           </div>
         ) : (
-          <EmptyState icon={Users} label="No groups match this view" description={query ? "Try another group name or category in search." : "Organise people into groups to keep access policies easier to manage."} action={!query ? <button className="secondary-button" onClick={openCreate} type="button"><Plus size={15} /> Create group</button> : undefined} />
+          <EmptyState icon={Users} label="No groups match this view" description={query ? "Try another group name or category in search." : "Organise people into groups to keep access policies easier to manage."} action={!query ? <button className="secondary-button" onClick={openCreate} disabled={!catalog.ready} type="button"><Plus size={15} /> Create group</button> : undefined} />
         )}
       </div>
 
       {modalOpen ? (
         <GroupModal
           group={selectedGroup}
-          refreshToken={refreshToken}
-          members={selectedGroup ? people.filter((person) => person.group_id === selectedGroup.id) : []}
+          refreshToken={0}
+          members={[]}
           mode={selectedGroup ? "edit" : "create"}
           onClose={closeModal}
           onSaved={async () => {
@@ -229,7 +216,7 @@ export function GroupModal({
             <X size={16} />
           </button>
         </div>
-        {error ? <div className="auth-error">{error}</div> : null}
+      {error ? <div className="auth-error">{error}</div> : null}
         <label className="field">
           <span>Group name</span>
           <div className="field-control">

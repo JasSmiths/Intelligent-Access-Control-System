@@ -32,7 +32,7 @@ it.each(["resolve", "reject"] as const)("resets canceled pagination for a new qu
     .mockReturnValueOnce(oldMore.promise)
     .mockResolvedValueOnce(page("new-first", "new-cursor"))
     .mockReturnValueOnce(newMore.promise);
-  const { result, rerender } = renderHook(({ query }) => useInvestigationData(query, 0),
+  const { result, rerender } = renderHook(({ query }) => useInvestigationData(query),
     { initialProps: { query: DEFAULT_INVESTIGATION_QUERY } });
   await waitFor(() => expect(result.current.items[0]?.episode_id).toBe("old-first"));
   let oldRequest!: Promise<void>;
@@ -66,7 +66,7 @@ it("does not use an old cursor while the new first page is still loading", async
   const read = vi.spyOn(investigationApi, "getActivityPage")
     .mockResolvedValueOnce(page("old", "old-cursor"))
     .mockReturnValueOnce(next.promise);
-  const { result, rerender } = renderHook(({ query }) => useInvestigationData(query, 0),
+  const { result, rerender } = renderHook(({ query }) => useInvestigationData(query),
     { initialProps: { query: DEFAULT_INVESTIGATION_QUERY } });
   await waitFor(() => expect(result.current.loading).toBe(false));
   rerender({ query: { ...DEFAULT_INVESTIGATION_QUERY, q: "new-query" } });
@@ -82,7 +82,7 @@ it("aborts pagination on unmount", async () => {
   const read = vi.spyOn(investigationApi, "getActivityPage")
     .mockResolvedValueOnce(page("first", "cursor"))
     .mockReturnValueOnce(more.promise);
-  const { result, unmount } = renderHook(() => useInvestigationData(DEFAULT_INVESTIGATION_QUERY, 0));
+  const { result, unmount } = renderHook(() => useInvestigationData(DEFAULT_INVESTIGATION_QUERY));
   await waitFor(() => expect(result.current.loading).toBe(false));
   let request!: Promise<void>;
   act(() => { request = result.current.loadMore(); });
