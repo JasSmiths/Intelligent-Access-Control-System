@@ -110,6 +110,44 @@ and validation in an isolated checkout. Existing installation startup,
 deployment, production migration, provider sends, and hardware tests require
 separate authorization.
 
+## Change review and handoff
+
+Before editing, record the checkout path, branch/HEAD and existing changes. Reuse
+an appropriate isolated checkout when source is mounted into a running application.
+Use a named task branch for new isolated work; identify existing detached work
+explicitly at handoff. Preserve the original working state and separate pre-existing
+changes from the implementation diff. Do not claim work is committed, merged or
+deployed when it is only present as local edits.
+
+Before implementation, identify the domain owner, callers and contracts using
+[architecture](architecture.md#extension-rules). State the behavior being preserved
+and, for a hot path, how read/query count, retained history and payload size scale.
+Extend an existing owner when its responsibility fits; a new feature should not
+require copying policy into routes, the shell, vendor modules or multiple facades.
+
+Before handing off a change, review the complete implementation against these
+requirements and fix concrete issues found:
+
+1. Policy, transactions, authorization, hardware and durable handoffs have the
+   existing owners; composition is inert and dependencies remain explicit.
+2. Modules have cohesive responsibilities and typed contracts. New owners are
+   included in the applicable harness type targets. No new cycle, compatibility
+   shim, blanket lint suppression or weakened architecture baseline is introduced.
+3. Collection/history reads and payloads have explicit bounds; media and related
+   records do not hide unbounded reads, lazy loads or per-row queries. Relevant
+   performance evidence preserves equivalent results and states its limits.
+4. Frontend selection, invalidation, cancellation, permissions and dirty drafts
+   remain correct, including selected records outside the current page.
+5. Callers, tests, registrations, migrations and affected guides change together.
+   Run the [required checks](validation.md#choose-the-checks); fix failures and
+   rerun checks affected by the repair. Do not substitute DB-free checks for full
+   persistence, recovery and restore validation.
+
+Handoff includes a plain-English result, the exact worktree and branch/HEAD,
+commit state, checks and retained evidence, unresolved limitations and deployment
+status. Explain measured performance using the tested dataset and operation; do
+not turn a synthetic substep benchmark into an end-to-end latency claim.
+
 ## Configuration, authentication, and proxying
 
 [`core/config.py`](../backend/app/core/config.py) owns `IACS_` bootstrap

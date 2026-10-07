@@ -48,6 +48,35 @@ Read only the guides relevant to the task:
   compatibility shims, runtime schema bootstrap, setting aliases, or provider bypasses.
   Retire callers, registrations, tests, UI, and docs together.
 
+## Maintainability and efficiency
+
+- Follow the [extension rules](docs/architecture.md#extension-rules). Give each
+  change a clear owner; keep API adapters and route views thin. Extract coherent
+  policy, request lifetimes or rendering responsibilities instead of growing
+  central services, views or generic helper collections.
+- Keep integration composition inert and dependencies explicit. Use narrow typed
+  ports and checked workflow contracts; do not restore business back-imports,
+  duck-typed dispatcher hooks or duplicate authorization/command paths.
+- Keep collection reads bounded, filtered and ordered on the server. Reuse the
+  typed directory client, cursor pages and selected-ID/detail hydration. Never
+  fetch every page to recreate an unbounded list or move global search to the client.
+- Compact reads must avoid loading photo blobs, not merely omit them from JSON.
+  Use indexed exact/latest-row reads and bounded report predecessor state; do not
+  add full-history scans, per-row queries or stale authorization caches.
+- Preserve cancellation, request/account lifetimes, directory refresh context and
+  dirty drafts. Keep feature logic under its feature owner and shared UI independent
+  of features. Fresh selected metadata must survive pagination and invalidation.
+- Add new contract/owner modules to the applicable checked-body and strict type
+  targets in the validation harness. Do not relax lint/type rules or expand the
+  architecture baseline to make new violations pass; fix the dependency or owner.
+- For changed hot paths, retain before/after evidence using equivalent outputs,
+  small and target-scale synthetic data, query plans/row counts and memory/payload
+  measurements. Follow [validation](docs/validation.md#maintainability-and-performance-checks);
+  synthetic timings are not production guarantees.
+- Complete the [change review](docs/development.md#change-review-and-handoff)
+  before handoff. Report the exact checkout, branch/HEAD and commit state along
+  with checks, limitations and any remaining work.
+
 ## Required checks
 
 - Docs only: check links, source paths/commands, and `git diff --check`.

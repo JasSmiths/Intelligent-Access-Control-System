@@ -60,8 +60,9 @@ an operational bind mount: use an isolated checkout for code changes when the
 backend is mounted into a running application. Do not use `scripts/backend-pytest`
 for isolated regression; it can select the running Compose backend.
 
-Execution needs Docker and a compatible local backend tooling image with Python
-3.12 and `uv`. Build a dedicated image, allowing its image/package downloads:
+Use Python 3.12 or newer for the host harness and source checks; the architecture
+scanner parses Python 3.12 syntax. Execution also needs Docker and a compatible
+local backend tooling image with Python 3.12 and `uv`. Build a dedicated image, allowing its image/package downloads:
 
 ```sh
 docker build --target development -t iacs-validation-tooling:local backend
@@ -191,6 +192,37 @@ business back-imports, directory route transaction ownership, shared UI imports,
 and command/presence ownership. Its only retained construction exception is the
 existing synthetic simulation fixture. Keep its algorithm tests alongside changes
 to the scanner. Static scanning does not prove dynamic imports or every ORM write.
+
+Treat these checks as gates for future work. Do not add new cycle/writer allowances
+to [the baseline](../scripts/architecture/baseline.json), narrow lint coverage or
+remove failing assertions to accommodate a new dependency. A justified exception
+at an existing boundary needs a local explanation and behavior coverage; it must
+not mask a provider failure or change uncertain-command recovery semantics.
+
+When introducing or extracting an owner/contract module, update the applicable
+`mypy` and `typed-contracts` targets in
+[the harness](../scripts/validation/validate.py). Full-source lint covers `app`;
+the `test-names` check covers undefined names in backend and validation fixtures,
+including cases skipped in DB-free mode. Fixtures must patch the actual owner or
+inject its port, not restore retired imports or convenience getters. Classify new
+isolated suites in [the required inventory](../scripts/validation/recovery_checks.py)
+and run both host harness/source-selection tests when that machinery changes.
+
+For directory or selector changes, cover page/filter boundaries, ties and malformed
+cursors, selected IDs outside the first page, inactive/deleted metadata, refresh
+with unchanged first-page data, disabled/cancelled reads and draft preservation.
+Compact-photo tests must prove the raw columns stay unloaded and do not lazy load,
+while URLs, fallback snapshots and full-media detail reads still work.
+
+For hot-path changes, compare equivalent results before timing them. Use both small
+and target-scale synthetic fixtures with the same locks/tools; retain dataset size,
+query count, scanned/returned rows, actual query plans, repeated timings and peak
+allocation/payload size where applicable. Verify functional indexes with the real
+bound query and generic prepared plans. Check latest-snapshot lookups for absent
+plates as well as matches. Do not add brittle wall-clock assertions to unit tests
+or infer production latency, PostgreSQL memory or PDF performance from a narrower
+Python/query benchmark. Record any fixed overhead or unresolved growth in the
+selected-period output.
 
 [Directory persistence checks](../scripts/validation/test_directory_operations.py)
 exercise 1,000 people and 2,000 vehicles, cursor ties/filter changes, selected IDs

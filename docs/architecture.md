@@ -165,6 +165,48 @@ documentation. Do not leave aliases, fallback catalogs, provider bypasses, or
 runtime schema repair. Apply schema changes through Alembic. Update the relevant
 guide in the same change and run the checks in [validation](validation.md).
 
+## Extension rules
+
+Choose the owner before implementation. A feature should have one place for its
+policy and transaction, with small adapters for HTTP, UI and vendor protocols.
+Change the owners and contracts the feature actually needs; broad edits across
+unrelated services or views are a signal to review the boundary. File count alone
+is not a design goal: avoid both large mixed-purpose files and a scattering of
+one-function wrappers. Extract cohesive responsibilities with an explicit interface;
+introduce shared abstractions only for demonstrated shared behavior.
+
+| Change | Extension point and invariants |
+| --- | --- |
+| Directory field or operation | Extend the [directory services](../backend/app/services/directory/), [schemas](../backend/app/schemas/directory.py) and [typed client](../frontend/src/api/directory.ts) as needed. Keep validation, assignment changes, audit and commit with the service owner; routes adapt HTTP and confirmation. Migrate every consumer of a changed contract together. |
+| Notification behavior | Use the [planner](../backend/app/services/notification_planning.py), [recipients](../backend/app/services/notification_recipients.py) or [authorization](../backend/app/services/notification_authorization.py) owner. Keep transport orchestration and durable delivery separate from policy. |
+| Automation action or trigger | Extend the supported catalog and the [action handler](../backend/app/services/automation_actions.py), [webhook intake](../backend/app/services/automation_webhooks.py) or [time intake](../backend/app/services/automation_time_intake.py) owner. Preserve checked execution identities, deadlines, idempotency and uncertain outcomes; reuse command and authorization owners. |
+| Integration observation or effect | Keep vendor I/O in modules; bind narrow [effect ports](../backend/app/services/integration_effects.py) in [composition](../backend/app/composition.py). Binding must not start services or send requests. Business consumers do not become imports of vendor adapters. |
+| Report or dashboard behavior | Keep request, export and command lifetimes in [report](../frontend/src/features/reports/) or [dashboard](../frontend/src/features/dashboard/) hooks. Put rendering in focused components. Keep [duration policy](../backend/app/services/report_durations.py) pure with an explicit site timezone; the report service owns reads and export orchestration. |
+
+Type inputs, outputs and dependency ports. Use concrete schemas, dataclasses,
+protocols or TypedDicts for domain values rather than passing unstructured
+`dict[str, Any]` through policy. Variable JSON/provider metadata may remain dynamic
+at its boundary; validate it before it becomes an execution identity, action,
+deadline, state or outcome. Persisted/wire format changes need explicit migration
+and consumer changes, not silent casts or compatibility fallbacks.
+
+Collection APIs must define server-side filters, stable ordering and a bounded
+page/lookup size. Reset cursors when filters change, and hydrate selected identities
+outside the current page. Use the route directory refresh context so nested
+selectors receive invalidation without forwarding the same prop through every
+editor. Cancel superseded requests and protect local drafts when metadata changes.
+Do not rebuild a complete directory in the shell, concatenate every page, or
+apply a narrower local filter that hides valid server search matches.
+
+Select only needed database columns, including related rows. Compact media reads
+must not materialize photo blobs or trigger asynchronous lazy loads. Avoid query
+counts that grow once per returned row; batch selected-ID lookups within API bounds.
+Use index-backed exact plate and latest-snapshot reads. Report history must stay
+bounded to necessary predecessor state, with strictly prior timestamp semantics;
+stream projected timeline inputs and account separately for output/PDF cost.
+Performance changes must preserve authorization freshness, transaction ordering
+and recovery behavior. Do not trade those guarantees for a cache or a shorter path.
+
 ## Retirement boundaries
 
 The current application has no Alfred assistant, dedicated WhatsApp or Discord
