@@ -7,7 +7,6 @@ from typing import Literal
 
 from app.core.config import settings
 
-
 DEFAULT_AUTH_SECRET_KEY = "change-me-before-production"
 INSECURE_AUTH_SECRET_VALUES = {DEFAULT_AUTH_SECRET_KEY, "replace-with-a-long-random-secret"}
 AUTH_SECRET_PREVIOUS_SUFFIX = ".previous"
@@ -137,7 +136,9 @@ def _load_auth_secret() -> tuple[str, AuthSecretStatus]:
         if not value:
             raise AuthSecretError(f"Auth secret file is empty: {file_path}")
         if value in INSECURE_AUTH_SECRET_VALUES and not is_development:
-            raise AuthSecretError(f"Auth secret file contains a documented placeholder value: {file_path}")
+            raise AuthSecretError(
+                f"Auth secret file contains a documented placeholder value: {file_path}"
+            )
         _AUTH_SECRET_CACHE = (
             value,
             AuthSecretStatus(

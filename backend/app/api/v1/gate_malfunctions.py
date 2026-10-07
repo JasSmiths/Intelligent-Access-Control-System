@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -20,8 +20,7 @@ class GateMalfunctionOverrideRequest(BaseModel):
 
 @router.get("/active")
 async def active_gate_malfunctions(
-    include_timeline: bool = False,
-    _: User = Depends(current_user),
+    _: Annotated[User, Depends(current_user)], include_timeline: bool = False
 ) -> dict[str, Any]:
     return {
         "items": await get_gate_malfunction_service().active(include_timeline=include_timeline),
@@ -30,11 +29,11 @@ async def active_gate_malfunctions(
 
 @router.get("/history")
 async def gate_malfunction_history(
+    _: Annotated[User, Depends(current_user)],
     status: str | None = None,
     include_timeline: bool = False,
-    limit: int = Query(default=50, ge=1, le=100),
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: str | None = None,
-    _: User = Depends(current_user),
 ) -> dict[str, Any]:
     return await get_gate_malfunction_service().history_page(
         status=status,
@@ -46,8 +45,7 @@ async def gate_malfunction_history(
 
 @router.get("/{malfunction_id}/trace")
 async def gate_malfunction_trace(
-    malfunction_id: UUID,
-    _: User = Depends(current_user),
+    malfunction_id: UUID, _: Annotated[User, Depends(current_user)]
 ) -> dict[str, Any]:
     payload = await get_gate_malfunction_service().trace(malfunction_id)
     if not payload:
@@ -59,7 +57,7 @@ async def gate_malfunction_trace(
 async def override_gate_malfunction(
     malfunction_id: UUID,
     request: GateMalfunctionOverrideRequest,
-    user: User = Depends(admin_user),
+    user: Annotated[User, Depends(admin_user)],
 ) -> dict[str, Any]:
     result = await get_gate_malfunction_service().override(
         malfunction_id,

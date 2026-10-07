@@ -5,8 +5,9 @@ from typing import Any
 
 import httpx
 
-
-DEFAULT_VEHICLE_ENQUIRY_URL = "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles"
+DEFAULT_VEHICLE_ENQUIRY_URL = (
+    "https://driver-vehicle-licensing.api.gov.uk/vehicle-enquiry/v1/vehicles"
+)
 DEFAULT_TEST_REGISTRATION_NUMBER = "AA19AAA"
 ACRONYMS = {
     "BMW",
@@ -53,7 +54,9 @@ class DvlaVehicleEnquiryClient:
     async def lookup(self, registration_number: str) -> dict[str, Any]:
         vrn = normalize_registration_number(registration_number)
         if not vrn:
-            raise DvlaVehicleEnquiryError("Vehicle registration number is required.", status_code=400)
+            raise DvlaVehicleEnquiryError(
+                "Vehicle registration number is required.", status_code=400
+            )
         if not self.api_key:
             raise DvlaVehicleEnquiryError("DVLA API key is not configured.", status_code=400)
 
@@ -93,7 +96,9 @@ def normalize_registration_number(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", value or "").upper()
 
 
-def display_vehicle_record(vehicle: dict[str, Any], registration_number: str | None = None) -> dict[str, Any]:
+def display_vehicle_record(
+    vehicle: dict[str, Any], registration_number: str | None = None
+) -> dict[str, Any]:
     display = dict(vehicle)
     if registration_number:
         display["registrationNumber"] = normalize_registration_number(registration_number)

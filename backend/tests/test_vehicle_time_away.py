@@ -9,9 +9,9 @@ from app.models.enums import AccessDecision, AccessDirection
 from app.modules.notifications.base import NotificationContext
 from app.services.notifications import (
     VARIABLE_GROUPS,
-    render_template,
     sample_notification_context,
 )
+from app.services.workflows.context import render_template
 from app.services.notification_rendering import (
     context_variables,
 )

@@ -3,9 +3,10 @@ import { useModalClose } from "../../ui/useModalClose";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import { Camera, Check, Home, Send, UserPlus, UserRound, X, Zap } from "lucide-react";
 import React from "react";
+import { useDirectoryOptions } from "./reads";
+import { DirectoryPagination } from "./DirectoryPagination";
 
 import { api, createActionConfirmation } from "../../api/client";
-import { matches } from "../../lib/format";
 import { fileToDataUrl, mediaSource } from "../../lib/media";
 import { Badge } from "../../ui/primitives";
 import type { Group, HomeAssistantDiscovery, HomeAssistantManagedCover, Person, Schedule, Vehicle } from "../../api/types";
@@ -47,7 +48,6 @@ function suggestedPersonPronouns(firstName: string): PersonPronounFormValue {
 }
 
 export function PersonModal({
-  assignedVehicleIds,
   defaultPolicyOptionLabel,
   garageDoors,
   groups,
@@ -55,12 +55,10 @@ export function PersonModal({
   onClose: finishClose,
   onSaved: finishSaved,
   person,
-  people,
   schedules,
   setPageError,
   vehicles
 }: {
-  assignedVehicleIds: Set<string>;
   defaultPolicyOptionLabel: string;
   garageDoors: HomeAssistantManagedCover[];
   groups: Group[];
@@ -68,7 +66,6 @@ export function PersonModal({
   onClose: () => void;
   onSaved: () => Promise<void>;
   person: Person | null;
-  people: Person[];
   schedules: Schedule[];
   setPageError: (message: string) => void;
   vehicles: Vehicle[];
@@ -112,7 +109,9 @@ export function PersonModal({
   const [submitting, setSubmitting] = React.useState(false);
   const submittingRef = React.useRef(false);
   const [dirty, setDirty] = React.useState(false);
-  const [vehicleQuery, setVehicleQuery] = React.useState("");
+  const vehicleOptions = useDirectoryOptions("vehicles", vehicles, form.vehicle_ids);
+  const vehicleQuery = vehicleOptions.query;
+  const setVehicleQuery = vehicleOptions.setQuery;
   const requestClose = useEditorDismiss(onClose, dirty, submitting, "person changes");
   useModalFocus(modalRef, true, requestClose);
 
@@ -501,11 +500,12 @@ export function PersonModal({
         <div className="field">
           <span>Vehicles</span>
           <input aria-label="Search vehicle assignments" className="assignment-search" placeholder="Search plates or vehicles" value={vehicleQuery} onChange={(event) => setVehicleQuery(event.target.value)} />
+          <DirectoryPagination page={vehicleOptions} />
           <div className="vehicle-picker">
-            {vehicles.length ? vehicles.filter((vehicle) => matches(`${vehicle.registration_number} ${vehicle.description ?? ""} ${vehicle.make ?? ""} ${vehicle.model ?? ""}`, vehicleQuery)).map((vehicle) => {
+            {vehicleOptions.items.length ? vehicleOptions.items.map((vehicle) => {
               const selected = form.vehicle_ids.includes(vehicle.id);
-              const assigned = assignedVehicleIds.has(vehicle.id) && !selected;
-              const owners = people.filter((owner) => owner.id !== person?.id && owner.vehicles.some((owned) => owned.id === vehicle.id)).map((owner) => owner.display_name);
+              const assigned = Boolean(vehicle.person_ids?.length || vehicle.person_id) && !selected;
+              const owners = (vehicle.owners ?? []).filter((_, index) => vehicle.person_ids?.[index] !== person?.id);
               return (
                 <label className={selected ? "vehicle-option selected" : "vehicle-option"} key={vehicle.id}>
                   <input checked={selected} onChange={() => toggleVehicle(vehicle.id)} type="checkbox" />

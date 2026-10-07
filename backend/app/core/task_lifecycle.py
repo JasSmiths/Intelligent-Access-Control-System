@@ -12,7 +12,7 @@ async def drain_owned(awaitable):
             await asyncio.shield(task)
         except asyncio.CancelledError:
             cancelled = True
-        except Exception:
+        except Exception:  # noqa: BLE001 - Cleanup must drain every owned resource despite arbitrary task failures.
             break  # Retrieve the owned task's failure below.
     result = task.result()
     if cancelled:

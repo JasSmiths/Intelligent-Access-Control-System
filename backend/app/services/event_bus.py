@@ -1,12 +1,13 @@
 import asyncio
 import json
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Literal
 
-from fastapi import WebSocket
 import redis.asyncio as redis_asyncio
+from fastapi import WebSocket
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -130,7 +131,11 @@ class EventBus:
                 connection.sender_task.cancel()
         if connections:
             await asyncio.gather(
-                *(connection.sender_task for connection in connections if connection.sender_task is not None),
+                *(
+                    connection.sender_task
+                    for connection in connections
+                    if connection.sender_task is not None
+                ),
                 return_exceptions=True,
             )
         for connection in connections:
@@ -187,12 +192,16 @@ class EventBus:
             "listeners": len(self._listeners),
             "listener_tasks": len(self._listener_tasks),
             "websocket_queue_size": self._websocket_queue_size,
-            "websocket_queued_events": sum(connection.queue.qsize() for connection in self._connections.values()),
+            "websocket_queued_events": sum(
+                connection.queue.qsize() for connection in self._connections.values()
+            ),
             "websocket_queue_drops": self._websocket_queue_drops,
             "redis_connected": self._redis_connected,
             "redis_stream": self._stream_key if self._redis_enabled else None,
             "redis_last_id": self._stream_last_id if self._redis_enabled else None,
-            "redis_last_error": self._redis_last_publish_error or self._redis_last_read_error or self._redis_last_error,
+            "redis_last_error": self._redis_last_publish_error
+            or self._redis_last_read_error
+            or self._redis_last_error,
             "redis_last_publish_error": self._redis_last_publish_error,
             "redis_last_read_error": self._redis_last_read_error,
             "redis_publish_failures": self._redis_publish_failures,
@@ -226,7 +235,7 @@ class EventBus:
             self._redis_events_published += 1
             self._redis_connected = True
             self._redis_last_publish_error = None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Transport failures must preserve reconnection and client isolation.
             self._redis_publish_failures += 1
             self._redis_connected = False
             self._redis_last_publish_error = str(exc)[:500]
@@ -248,7 +257,7 @@ class EventBus:
                 if not self._stream_id_initialized:
                     self._stream_last_id = await self._initial_stream_id(redis)
                     self._stream_id_initialized = True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Transport failures must preserve reconnection and client isolation.
                 await _close_redis_client(redis)
                 self._redis = None
                 self._redis_connected = False
@@ -274,8 +283,11 @@ class EventBus:
     async def _initial_stream_id(self, redis: redis_asyncio.Redis) -> str:
         try:
             info = await redis.xinfo_stream(self._stream_key)
-        except Exception as exc:
-            logger.warning("event_bus_redis_stream_info_failed", extra={"stream": self._stream_key, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - Transport failures must preserve reconnection and client isolation.
+            logger.warning(
+                "event_bus_redis_stream_info_failed",
+                extra={"stream": self._stream_key, "error": str(exc)},
+            )
             return "0-0"
         stream_id = _dict_get(info, "last-generated-id") or _dict_get(info, b"last-generated-id")
         return _decode_text(stream_id) or "0-0"
@@ -296,7 +308,7 @@ class EventBus:
                 self._redis_last_read_error = None
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Transport failures must preserve reconnection and client isolation.
                 self._redis_connected = False
                 self._redis_read_failures += 1
                 self._redis_last_read_error = str(exc)[:500]
@@ -320,9 +332,7 @@ class EventBus:
         async with self._lock:
             connections = list(self._connections.values())
             listeners = [
-                listener
-                for listener, scope in self._listeners.items()
-                if scope in listener_scopes
+                listener for listener, scope in self._listeners.items() if scope in listener_scopes
             ]
 
         message = event.__dict__
@@ -356,7 +366,7 @@ class EventBus:
                     connection.queue.task_done()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Transport failures must preserve reconnection and client isolation.
                 self._connections.pop(websocket, None)
                 logger.warning(
                     "event_bus_websocket_send_failed",
@@ -410,12 +420,18 @@ def _stream_record_from_fields(fields: dict[Any, Any]) -> _StreamRecord | None:
         )
         return None
     if not isinstance(payload, dict):
-        logger.warning("event_bus_redis_record_invalid_payload", extra={"payload_type": type(payload).__name__})
+        logger.warning(
+            "event_bus_redis_record_invalid_payload", extra={"payload_type": type(payload).__name__}
+        )
         return None
     event_type = payload.get("type")
     event_payload = payload.get("payload")
     created_at = payload.get("created_at")
-    if not isinstance(event_type, str) or not isinstance(event_payload, dict) or not isinstance(created_at, str):
+    if (
+        not isinstance(event_type, str)
+        or not isinstance(event_payload, dict)
+        or not isinstance(created_at, str)
+    ):
         logger.warning(
             "event_bus_redis_record_invalid_shape",
             extra={

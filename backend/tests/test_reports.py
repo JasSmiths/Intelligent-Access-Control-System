@@ -1,10 +1,11 @@
 import base64
+import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
-import json
 from pathlib import Path
 from types import SimpleNamespace
-import uuid
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -15,9 +16,17 @@ from app.api.dependencies import current_user
 from app.api.v1 import reports as reports_api
 from app.db.session import get_db_session
 from app.models import AccessEvent, ReportExport, User, VisitorPass
-from app.models.enums import AccessDecision, AccessDirection, TimingClassification, UserRole, VisitorPassStatus, VisitorPassType
+from app.models.enums import (
+    AccessDecision,
+    AccessDirection,
+    TimingClassification,
+    UserRole,
+    VisitorPassStatus,
+    VisitorPassType,
+)
 from app.services import auth as auth_service
 from app.services import reports as reports_service
+from app.services import report_durations as duration_service
 from app.services import snapshots as snapshots_service
 
 
@@ -63,17 +72,19 @@ def make_event(
 def test_report_duration_formatting() -> None:
     start = datetime(2026, 5, 1, 8, 0, tzinfo=UTC)
 
-    short = reports_service.format_duration_info(
+    short = duration_service.format_duration_info(
         start,
         start + timedelta(hours=6, minutes=12),
         "Short duration",
+        timezone=ZoneInfo("UTC"),
     )
-    medium = reports_service.format_duration_info(
+    medium = duration_service.format_duration_info(
         start,
         start + timedelta(days=12, hours=3, minutes=8),
         "Medium duration",
+        timezone=ZoneInfo("UTC"),
     )
-    long = reports_service.format_duration_info(
+    long = duration_service.format_duration_info(
         start,
         start + timedelta(days=78),
         "Long duration",
@@ -84,6 +95,11 @@ def test_report_duration_formatting() -> None:
     assert medium["label"] == "12 Days, 3hrs 8m"
     assert long["label"] == "01/05/2026 - 08:00"
     assert long["tooltip"] == "2 Months, 18 Days"
+    london = duration_service.format_duration_info(
+        start, start + timedelta(days=78), "Long duration", timezone=ZoneInfo("Europe/London"),
+    )
+    assert london["label"] == "01/05/2026 - 09:00"
+    assert london["tooltip"] == long["tooltip"]
 
 
 def test_report_duration_lookup_handles_arrivals_and_departures() -> None:
@@ -100,9 +116,10 @@ def test_report_duration_lookup_handles_arrivals_and_departures() -> None:
         direction=AccessDirection.ENTRY,
     )
 
-    durations = reports_service.build_duration_lookup(
+    durations = duration_service.build_duration_lookup(
         [first_arrival, departure, next_arrival],
         [first_arrival, departure, next_arrival],
+        timezone=ZoneInfo("UTC"),
     )
 
     assert durations[str(first_arrival.id)]["label"] == "New Arrival"
@@ -495,6 +512,7 @@ class ReportReadSession:
     def __init__(self, event_batches=()):
         self.event_batches = iter(event_batches)
         self.queries = []
+        self.history = None
 
     async def scalar(self, statement):
         self.queries.append(statement)
@@ -503,6 +521,26 @@ class ReportReadSession:
     async def scalars(self, statement):
         self.queries.append(statement)
         return SimpleNamespace(all=lambda: next(self.event_batches))
+
+    async def execute(self, statement):
+        self.queries.append(statement)
+        if self.history is None:
+            self.history = next(self.event_batches)
+        params = statement.compile().params
+        boundary = params["occurred_at_1"]
+        history = [event for event in self.history if event.occurred_at < boundary]
+        if "direction_2" in params:
+            history = [event for event in history if event.direction == params["direction_2"]]
+            history = sorted(history, key=lambda event: event.occurred_at, reverse=True)[:1]
+        rows = [(event.id, event.registration_number, event.direction, event.decision, event.occurred_at) for event in history]
+        return SimpleNamespace(first=lambda: rows[0] if rows else None) if "direction_2" in params else rows
+
+    async def stream(self, statement):
+        self.queries.append(statement)
+        async def rows():
+            for event in next(self.event_batches):
+                yield (event.id, event.registration_number, event.direction, event.decision, event.occurred_at)
+        return rows()
 
     async def get(self, _model, _identity):
         return None
@@ -534,13 +572,13 @@ async def test_preview_contract_is_built_without_export_or_persistence(monkeypat
     session = ReportReadSession([[], [], []])
     preview = await reports_service.preview_person_movement_report(
         session, person_id=report_person().id,
-        period_start=datetime(2026, 7, 14, 9), period_end=datetime(2026, 7, 14, 10),
+        period_start=datetime(2026, 7, 14, 9), period_end=datetime(2026, 7, 14, 10),  # noqa: DTZ001 -- exercise civil site-time input
         include_denied=False, include_snapshots=True, include_confidence=True,
     )
     # Brand is an existing site presentation constant, outside this synthetic DTO fixture.
     preview["report"].pop("brand")
     assert preview == PREVIEW_CONTRACT["ready"]
-    assert len(session.queries) == 4
+    assert len(session.queries) == 5
 
 
 async def test_preview_complete_history_duration_and_media_are_shared_with_export_builder(monkeypatch):
@@ -564,7 +602,8 @@ async def test_preview_complete_history_duration_and_media_are_shared_with_expor
     assert first_departure["duration"] == {"label": "6hrs 0m"}
     assert first_departure["snapshot_url"] == f"/api/v1/events/{departures[0].id}/snapshot"
     assert "_snapshot_path" not in first_departure
-    assert all("LIMIT" not in str(query).upper() for query in session.queries)
+    assert "LIMIT" not in str(session.queries[1]).upper()
+    assert "LIMIT" not in str(session.queries[-1]).upper()
     # Export invokes this same snapshot builder; media availability is its only read-policy difference.
     exported = reports_service.public_report_snapshot(await reports_service.build_movement_report_snapshot(
         ReportReadSession([departures, [prior, *departures], departures]),
@@ -715,3 +754,82 @@ async def test_export_orchestration_preserves_actor_subject_utc_bounds_and_saved
     assert captured["audit"]["actor_user_id"] == actor.id
     assert captured["audit"]["metadata"]["subject_type"] == "person"
     assert captured["refreshed"] is True
+
+
+def _legacy_duration_lookup(events, history, timezone):
+    """Frozen pre-refactor policy oracle; intentionally inefficient."""
+    result = {}
+    history = sorted((event for event in history if duration_service.is_movement_event(event)), key=lambda event: event.occurred_at)
+    for event in events:
+        if not duration_service.is_movement_event(event):
+            result[str(event.id)] = {"label": "N/A", "tone": "muted"}
+            continue
+        before = [prior for prior in history if prior.occurred_at < event.occurred_at]
+        entry = event.direction == AccessDirection.ENTRY
+        if entry:
+            before = [prior for prior in before if duration_service.normalize_plate(prior.registration_number) == duration_service.normalize_plate(event.registration_number)]
+        arrival = next((prior for prior in reversed(before) if prior.direction == AccessDirection.ENTRY), None)
+        departure = next((prior for prior in reversed(before) if prior.direction == AccessDirection.EXIT), None)
+        if arrival is None:
+            result[str(event.id)] = {"label": "New Arrival", "tone": "new"} if entry else {"label": "No arrival found", "tone": "muted"}
+        elif departure is not None and departure.occurred_at > arrival.occurred_at:
+            result[str(event.id)] = duration_service.format_duration_info(departure.occurred_at, event.occurred_at, "Time since this vehicle was last on site", timezone=timezone) if entry else {"label": "No active visit", "tone": "muted"}
+        else:
+            result[str(event.id)] = {"label": "No prior departure", "tone": "muted"} if entry else duration_service.format_duration_info(arrival.occurred_at, event.occurred_at, "Time on site since last arrival", timezone=timezone)
+    return result
+
+
+def test_duration_pass_matches_original_policy_with_equal_times_and_cross_vehicle_history():
+    import random
+
+    randomizer = random.Random(4207)
+    start = datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+    history = [make_event(
+        occurred_at=start + timedelta(minutes=index // 3),
+        direction=randomizer.choice([AccessDirection.ENTRY, AccessDirection.EXIT, AccessDirection.DENIED]),
+        decision=randomizer.choice([AccessDecision.GRANTED, AccessDecision.GRANTED, AccessDecision.DENIED]),
+        registration_number=randomizer.choice(["AB12 CDE", "ab-12-cde", "XY34 ZZZ", "other"]),
+    ) for index in range(600)]
+    events = history[300:]
+    randomizer.shuffle(events)
+    timezone = reports_service._timezone("Europe/London")
+    assert duration_service.build_duration_lookup(events, history, timezone=timezone) == _legacy_duration_lookup(events, history, timezone)
+
+
+def test_bounded_predecessors_produce_same_durations_as_full_history():
+    start = datetime(2026, 5, 1, tzinfo=UTC)
+    history = [make_event(
+        occurred_at=start + timedelta(minutes=index // 2),
+        direction=AccessDirection.ENTRY if index % 3 else AccessDirection.EXIT,
+        registration_number=["ab-12-cde", "AB12 CDE", "XY34ZZZ"][index % 3],
+    ) for index in range(1000)]
+    period = history[-40:]
+    prior = [event for event in history if event.occurred_at < period[0].occurred_at]
+    seeds = {}
+    for event in prior:
+        seeds[(duration_service.normalize_plate(event.registration_number), event.direction)] = event
+        seeds[("global", event.direction)] = event
+    assert duration_service.build_duration_lookup(period, [*seeds.values(), *period], timezone=ZoneInfo("UTC")) == duration_service.build_duration_lookup(period, history, timezone=ZoneInfo("UTC"))
+
+
+async def test_predecessor_query_is_strictly_prior_and_projects_bounded_state():
+    from sqlalchemy.dialects import postgresql
+
+    class FakeSession:
+        def __init__(self):
+            self.queries = []
+
+        async def execute(self, query):
+            self.queries.append(str(query.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})))
+            return SimpleNamespace(first=lambda: None) if len(self.queries) <= 2 else []
+
+    session = FakeSession()
+    assert await reports_service._load_duration_predecessors(
+        session, selected_filter=AccessEvent.person_id == uuid.uuid4(),
+        period_start=datetime(2026, 5, 1, tzinfo=UTC), plates={"AB12CDE"},
+    ) == []
+    assert len(session.queries) == 3
+    assert all("occurred_at <" in query and "raw_payload" not in query for query in session.queries)
+    assert all("LIMIT 1" in query for query in session.queries[:2])
+    assert "DISTINCT ON" in session.queries[2]
+    assert "AB12CDE" in session.queries[2]

@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -99,10 +99,10 @@ class SearchCandidate:
 
 @router.get("", response_model=list[GlobalSearchResult], response_model_exclude_none=True)
 async def global_search(
-    q: str = Query(default="", max_length=120),
-    limit: int = Query(default=12, ge=1, le=25),
-    user: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    q: Annotated[str, Query(max_length=120)] = "",
+    limit: Annotated[int, Query(ge=1, le=25)] = 12,
 ) -> list[GlobalSearchResult]:
     query = q.strip()
     if not query:
@@ -221,7 +221,9 @@ def _person_candidate(person: Person) -> SearchCandidate:
         *_fact("Garage doors", ", ".join(person.garage_door_entity_ids or [])),
         *_fact(
             "Presence input_booleans",
-            ", ".join(getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or []),
+            ", ".join(
+                getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or []
+            ),
         ),
     ]
     label = _text(person.display_name) or "Unnamed person"
@@ -247,7 +249,11 @@ def _person_candidate(person: Person) -> SearchCandidate:
             group_name,
             schedule_name,
             _text(person.home_assistant_mobile_app_notify_service),
-            _text(" ".join(getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or [])),
+            _text(
+                " ".join(
+                    getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or []
+                )
+            ),
             *vehicle_regs,
         ),
         plate_texts=tuple(vehicle_regs),
@@ -281,7 +287,9 @@ async def _vehicle_candidates(session: AsyncSession, query: str = "") -> list[Se
                 )
             )
         ),
-        Vehicle.schedule.has(or_(Schedule.name.ilike(pattern), Schedule.description.ilike(pattern))),
+        Vehicle.schedule.has(
+            or_(Schedule.name.ilike(pattern), Schedule.description.ilike(pattern))
+        ),
     ]
     rows = (
         await session.scalars(
@@ -290,9 +298,9 @@ async def _vehicle_candidates(session: AsyncSession, query: str = "") -> list[Se
                 defer(Vehicle.vehicle_photo_data_url),
                 selectinload(Vehicle.owner).defer(Person.profile_photo_data_url),
                 selectinload(Vehicle.schedule),
-                selectinload(Vehicle.person_assignments).selectinload(
-                    VehiclePersonAssignment.person
-                ).defer(Person.profile_photo_data_url),
+                selectinload(Vehicle.person_assignments)
+                .selectinload(VehiclePersonAssignment.person)
+                .defer(Person.profile_photo_data_url),
             )
             .where(or_(*filters))
             .order_by(Vehicle.registration_number)
@@ -715,7 +723,9 @@ def _user_candidate(user: User) -> SearchCandidate:
     )
 
 
-async def _automation_rule_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+async def _automation_rule_candidates(
+    session: AsyncSession, query: str = ""
+) -> list[SearchCandidate]:
     pattern = _like_pattern(query)
     rows = (
         await session.scalars(
@@ -766,7 +776,9 @@ def _automation_rule_candidate(rule: AutomationRule) -> SearchCandidate:
     )
 
 
-async def _notification_rule_candidates(session: AsyncSession, query: str = "") -> list[SearchCandidate]:
+async def _notification_rule_candidates(
+    session: AsyncSession, query: str = ""
+) -> list[SearchCandidate]:
     pattern = _like_pattern(query)
     rows = (
         await session.scalars(

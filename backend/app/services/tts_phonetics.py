@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-
 VEHICLE_TTS_PHONETICS: dict[str, str] = {
     "BMW": "bee em double you",
     "BYD": "bee why dee",
@@ -15,7 +14,9 @@ VEHICLE_TTS_PHONETICS: dict[str, str] = {
 }
 
 _VEHICLE_TTS_PATTERN = re.compile(
-    r"\b(" + "|".join(re.escape(value) for value in sorted(VEHICLE_TTS_PHONETICS, key=len, reverse=True)) + r")\b"
+    r"\b("
+    + "|".join(re.escape(value) for value in sorted(VEHICLE_TTS_PHONETICS, key=len, reverse=True))
+    + r")\b"
 )
 
 

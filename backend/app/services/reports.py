@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from PIL import Image, ImageOps, UnidentifiedImageError
 from playwright.async_api import async_playwright
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,6 +23,13 @@ from app.core.config import settings
 from app.models import AccessEvent, Person, Presence, ReportExport, User, Vehicle, VisitorPass
 from app.models.enums import AccessDecision, AccessDirection, UserRole
 from app.services.profile_photos import stored_image_url
+from app.services.report_durations import (
+    MovementPoint,
+    MovementRecord,
+    build_duration_lookup,
+    is_movement_event,
+    normalize_plate,
+)
 from app.services.settings import get_runtime_config
 from app.services.snapshots import access_event_snapshot_payload, get_snapshot_manager
 from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
@@ -152,8 +159,8 @@ def resolve_report_boundary(
         local = value.replace(tzinfo=timezone, fold=candidate_fold)
         instant = local.astimezone(UTC)
         if instant.astimezone(timezone).replace(tzinfo=None) == value:
-            offset = local.utcoffset()
-            candidates[candidate_fold] = (instant, int(offset.total_seconds() / 60) if offset else 0)
+            utc_offset = local.utcoffset()
+            candidates[candidate_fold] = (instant, int(utc_offset.total_seconds() / 60) if utc_offset else 0)
     if not candidates:
         boundary = "Start" if field == "period_start" else "End"
         raise ReportExportError(
@@ -302,7 +309,7 @@ async def build_person_movement_report_snapshot(
     verify_snapshot_availability: bool = True,
 ) -> dict[str, Any]:
     vehicle_ids = [vehicle.id for vehicle in person.vehicles]
-    selected_plates = {_normalize_plate(vehicle.registration_number) for vehicle in person.vehicles}
+    selected_plates = {normalize_plate(vehicle.registration_number) for vehicle in person.vehicles}
     selected_filter = _selected_event_filter(person.id, vehicle_ids, selected_plates)
     report_events, serialized_events, all_timeline_events, summary = await _collect_movement_report_events(
         session,
@@ -350,7 +357,7 @@ async def build_person_movement_report_snapshot(
             "selected": [
                 serialize_timeline_event(event, timezone=timezone)
                 for event in report_events
-                if _is_movement_event(event)
+                if is_movement_event(event)
             ],
         },
     }
@@ -410,7 +417,7 @@ async def build_visitor_pass_movement_report_snapshot(
             "selected": [
                 serialize_timeline_event(event, timezone=timezone)
                 for event in report_events
-                if _is_movement_event(event)
+                if is_movement_event(event)
             ],
         },
     }
@@ -425,7 +432,7 @@ async def _collect_movement_report_events(
     options: dict[str, bool],
     timezone: ZoneInfo,
     verify_snapshot_availability: bool = True,
-) -> tuple[list[AccessEvent], list[dict[str, Any]], list[AccessEvent], dict[str, Any]]:
+) -> tuple[list[AccessEvent], list[dict[str, Any]], list[MovementPoint], dict[str, Any]]:
     movement_filters = (
         AccessEvent.decision == AccessDecision.GRANTED,
         AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
@@ -440,19 +447,20 @@ async def _collect_movement_report_events(
     if not options["include_denied"]:
         report_events = [event for event in report_events if event.decision != AccessDecision.DENIED]
 
-    selected_history = await _load_report_events(
-        session,
-        selected_filter,
-        AccessEvent.occurred_at <= period_end,
-        *movement_filters,
+    # Duration needs only the latest prior arrival/departure for each report
+    # plate, plus the latest subject-wide pair for cross-vehicle departures.
+    predecessors = await _load_duration_predecessors(
+        session, selected_filter=selected_filter, period_start=period_start,
+        plates={normalize_plate(event.registration_number) for event in report_events
+                if event.direction == AccessDirection.ENTRY and is_movement_event(event)},
     )
-    all_timeline_events = await _load_report_events(
+    all_timeline_events = await _load_timeline_events(
         session,
         AccessEvent.occurred_at >= period_start,
         AccessEvent.occurred_at <= period_end,
         *movement_filters,
     )
-    duration_lookup = build_duration_lookup(report_events, selected_history, timezone=timezone)
+    duration_lookup = build_duration_lookup(report_events, [*predecessors, *report_events], timezone=timezone)
     serialized_events = [
         serialize_report_event(
             event,
@@ -477,76 +485,49 @@ async def _load_report_events(
     return list((await session.scalars(query)).all())
 
 
-def build_duration_lookup(
-    report_events: list[AccessEvent],
-    selected_history: list[AccessEvent],
-    *,
-    timezone: ZoneInfo | None = None,
-) -> dict[str, dict[str, Any]]:
-    durations: dict[str, dict[str, Any]] = {}
-    history = sorted([event for event in selected_history if _is_movement_event(event)], key=lambda item: item.occurred_at)
-    for event in report_events:
-        event_id = str(event.id)
-        if not _is_movement_event(event):
-            durations[event_id] = {"label": "N/A", "tone": "muted"}
-            continue
-
-        event_plate = _normalize_plate(event.registration_number)
-        before = [item for item in history if item.occurred_at < event.occurred_at]
-        if event.direction == AccessDirection.ENTRY:
-            vehicle_before = [item for item in before if _normalize_plate(item.registration_number) == event_plate]
-            previous_arrival = _last_direction(vehicle_before, AccessDirection.ENTRY)
-            previous_departure = _last_direction(vehicle_before, AccessDirection.EXIT)
-            if not previous_arrival:
-                durations[event_id] = {"label": "New Arrival", "tone": "new"}
-            elif previous_departure and previous_departure.occurred_at > previous_arrival.occurred_at:
-                durations[event_id] = format_duration_info(
-                    previous_departure.occurred_at,
-                    event.occurred_at,
-                    "Time since this vehicle was last on site",
-                    timezone=timezone,
-                )
-            else:
-                durations[event_id] = {"label": "No prior departure", "tone": "muted"}
-            continue
-
-        previous_arrival = _last_direction(before, AccessDirection.ENTRY)
-        previous_departure = _last_direction(before, AccessDirection.EXIT)
-        if not previous_arrival:
-            durations[event_id] = {"label": "No arrival found", "tone": "muted"}
-        elif previous_departure and previous_departure.occurred_at > previous_arrival.occurred_at:
-            durations[event_id] = {"label": "No active visit", "tone": "muted"}
-        else:
-            durations[event_id] = format_duration_info(
-                previous_arrival.occurred_at,
-                event.occurred_at,
-                "Time on site since last arrival",
-                timezone=timezone,
-            )
-    return durations
+_MOVEMENT_COLUMNS = (
+    AccessEvent.id, AccessEvent.registration_number, AccessEvent.direction,
+    AccessEvent.decision, AccessEvent.occurred_at,
+)
 
 
-def format_duration_info(
-    start: datetime,
-    end: datetime,
-    detail: str,
-    *,
-    timezone: ZoneInfo | None = None,
-) -> dict[str, Any]:
-    total_minutes = max(0, int((end - start).total_seconds() // 60))
-    total_hours = total_minutes // 60
-    total_days = total_hours // 24
-    minutes = total_minutes % 60
-    hours = total_hours % 24
-    if total_hours < 24:
-        return {"label": f"{total_hours}hr{'s' if total_hours != 1 else ''} {minutes}m" if total_hours else f"{minutes}m"}
-    if total_days < 14:
-        return {"label": f"{_plural(total_days, 'Day')}, {hours}hr{'s' if hours != 1 else ''} {minutes}m"}
-    return {
-        "label": _format_reference_date(start, timezone or _timezone(settings.site_timezone)),
-        "tooltip": _verbose_duration(total_minutes),
-        "tooltipDetail": detail,
-    }
+async def _load_timeline_events(session: AsyncSession, *filters: Any) -> list[MovementPoint]:
+    query = select(*_MOVEMENT_COLUMNS).where(*filters).order_by(AccessEvent.occurred_at.asc())
+    # Read projected columns in batches, avoiding ORM identities and large JSON /
+    # snapshot fields. The public snapshot itself still retains the period rows.
+    result = await session.stream(query.execution_options(yield_per=1024))
+    return [MovementPoint(*row) async for row in result]
+
+
+async def _load_duration_predecessors(
+    session: AsyncSession, *, selected_filter: Any, period_start: datetime, plates: set[str],
+) -> list[MovementPoint]:
+    filters = (
+        selected_filter, AccessEvent.occurred_at < period_start,
+        AccessEvent.decision == AccessDecision.GRANTED,
+        AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
+    )
+    points: dict[uuid.UUID, MovementPoint] = {}
+    # Global predecessors preserve the existing subject-wide departure policy.
+    for direction in (AccessDirection.ENTRY, AccessDirection.EXIT):
+        row = (await session.execute(
+            select(*_MOVEMENT_COLUMNS).where(*filters, AccessEvent.direction == direction)
+            .order_by(AccessEvent.occurred_at.desc()).limit(1)
+        )).first()
+        if row is not None:
+            point = MovementPoint(*row)
+            points[point.id] = point
+    if plates:
+        plate = func.upper(func.regexp_replace(AccessEvent.registration_number, "[^a-zA-Z0-9]", "", "g"))
+        # PostgreSQL DISTINCT ON returns at most two state rows per report plate.
+        query = (select(*_MOVEMENT_COLUMNS)
+                 .where(*filters, plate.in_(sorted(plates)))
+                 .distinct(plate, AccessEvent.direction)
+                 .order_by(plate, AccessEvent.direction, AccessEvent.occurred_at.desc()))
+        for row in await session.execute(query):
+            point = MovementPoint(*row)
+            points[point.id] = point
+    return list(points.values())
 
 
 def serialize_report_person(person: Person) -> dict[str, Any]:
@@ -677,7 +658,7 @@ def serialize_report_event(
     }
 
 
-def serialize_timeline_event(event: AccessEvent, *, timezone: ZoneInfo) -> dict[str, Any]:
+def serialize_timeline_event(event: MovementRecord, *, timezone: ZoneInfo) -> dict[str, Any]:
     return {
         "id": str(event.id),
         "registration_number": event.registration_number,
@@ -801,7 +782,7 @@ def _visitor_pass_event_filter(visitor_pass: VisitorPass) -> Any:
         clauses.append(AccessEvent.id.in_(event_ids))
     plate = _optional_text(visitor_pass.number_plate)
     if plate:
-        clauses.append(AccessEvent.registration_number == _normalize_plate(plate))
+        clauses.append(AccessEvent.registration_number == normalize_plate(plate))
     return or_(*clauses)
 
 
@@ -931,24 +912,6 @@ def _optional_text(value: Any) -> str | None:
     return text or None
 
 
-def _last_direction(events: list[AccessEvent], direction: AccessDirection) -> AccessEvent | None:
-    for event in reversed(events):
-        if event.direction == direction:
-            return event
-    return None
-
-
-def _is_movement_event(event: AccessEvent) -> bool:
-    return event.decision == AccessDecision.GRANTED and event.direction in {
-        AccessDirection.ENTRY,
-        AccessDirection.EXIT,
-    }
-
-
-def _normalize_plate(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]", "", value).upper()
-
-
 def _day_progress(value: datetime, timezone: ZoneInfo) -> float:
     local = value.astimezone(timezone)
     minutes = local.hour * 60 + local.minute + local.second / 60
@@ -973,28 +936,6 @@ def _format_generated_at(value: datetime, timezone: ZoneInfo) -> str:
 
 def _format_date_only(value: datetime, timezone: ZoneInfo) -> str:
     return value.astimezone(timezone).strftime("%d %b %Y")
-
-
-def _format_reference_date(value: datetime, timezone: ZoneInfo) -> str:
-    local = value.astimezone(timezone)
-    return local.strftime("%d/%m/%Y - %H:%M")
-
-
-def _verbose_duration(total_minutes: int) -> str:
-    total_days = max(0, total_minutes // (24 * 60))
-    years = total_days // 365
-    months = (total_days % 365) // 30
-    days = (total_days % 365) % 30
-    parts = [
-        _plural(years, "Year") if years else None,
-        _plural(months, "Month") if months else None,
-        _plural(days, "Day") if days else None,
-    ]
-    return ", ".join(part for part in parts if part) or "Less than 1 Day"
-
-
-def _plural(value: int, singular: str) -> str:
-    return f"{value} {singular}{'' if value == 1 else 's'}"
 
 
 def _vehicle_title(vehicle: Vehicle) -> str:

@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, EmailStr, Field
@@ -20,8 +20,8 @@ from app.services.auth import (
     create_user,
     generate_temporary_password,
     hash_password_async,
-    normalize_username,
     normalize_mobile_phone_number,
+    normalize_username,
     serialize_user,
 )
 from app.services.profile_photos import ProfilePhotoError, normalize_profile_photo_data_url
@@ -130,9 +130,9 @@ class DeleteUserRequest(BaseModel):
 
 @router.get("", response_model=list[UserResponse])
 async def list_users(
-    include_photo: bool = Query(default=False),
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    include_photo: Annotated[bool, Query()] = False,
 ) -> list[UserResponse]:
     users = (await session.scalars(select(User).order_by(User.first_name, User.last_name))).all()
     return [UserResponse(**serialize_user(user, include_photo=include_photo)) for user in users]
@@ -141,9 +141,9 @@ async def list_users(
 @router.get("/{user_id}/photo")
 async def user_photo(
     user_id: uuid.UUID,
-    variant: PhotoVariant = Query(default="full"),
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    variant: Annotated[PhotoVariant, Query()] = "full",
 ) -> Response:
     user = await session.get(User, user_id)
     if not user:
@@ -154,8 +154,8 @@ async def user_photo(
 @router.post("", response_model=CreateUserResponse, status_code=status.HTTP_201_CREATED)
 async def add_user(
     request: CreateUserRequest,
-    actor: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    actor: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> CreateUserResponse:
     confirmation_payload = request.model_dump(
         mode="json",
@@ -177,14 +177,18 @@ async def add_user(
     )
     try:
         if request.person_id and not await session.get(Person, request.person_id):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Linked person not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Linked person not found"
+            )
         user = await create_user(
             session,
             username=request.username,
             first_name=request.first_name,
             last_name=request.last_name,
             full_name=compose_full_name(request.first_name, request.last_name),
-            profile_photo_data_url=await normalize_profile_photo_or_400(request.profile_photo_data_url),
+            profile_photo_data_url=await normalize_profile_photo_or_400(
+                request.profile_photo_data_url
+            ),
             mobile_phone_number=request.mobile_phone_number,
             email=request.email,
             password=temporary_password,
@@ -203,23 +207,31 @@ async def add_user(
             target_id=user.id,
             target_label=user.username,
             diff={"old": {}, "new": user_audit_snapshot(user)},
-            metadata={"temporary_password_generated": bool(request.generate_password or not request.temporary_password)},
+            metadata={
+                "temporary_password_generated": bool(
+                    request.generate_password or not request.temporary_password
+                )
+            },
         )
         await session.commit()
         await session.refresh(user)
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User already exists") from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="User already exists"
+        ) from exc
 
-    return CreateUserResponse(user=UserResponse(**serialize_user(user)), temporary_password=temporary_password)
+    return CreateUserResponse(
+        user=UserResponse(**serialize_user(user)), temporary_password=temporary_password
+    )
 
 
 @router.patch("/{user_id}", response_model=UserResponse)
 async def update_user(
     user_id: uuid.UUID,
     request: UpdateUserRequest,
-    actor: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    actor: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserResponse:
     user = await session.get(User, user_id)
     if not user:
@@ -240,7 +252,10 @@ async def update_user(
     before = user_audit_snapshot(user)
 
     if request.role is not None and request.role != user.role:
-        if user.role == UserRole.ADMIN and await _remaining_active_admins_after_change(session, user.id) == 0:
+        if (
+            user.role == UserRole.ADMIN
+            and await _remaining_active_admins_after_change(session, user.id) == 0
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Cannot remove the last active admin account.",
@@ -248,7 +263,11 @@ async def update_user(
         user.role = request.role
 
     if request.is_active is not None and request.is_active != user.is_active:
-        if user.is_active and user.role == UserRole.ADMIN and await _remaining_active_admins_after_change(session, user.id) == 0:
+        if (
+            user.is_active
+            and user.role == UserRole.ADMIN
+            and await _remaining_active_admins_after_change(session, user.id) == 0
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Cannot deactivate the last active admin account.",
@@ -264,14 +283,18 @@ async def update_user(
     if request.first_name is not None or request.last_name is not None:
         user.full_name = compose_full_name(user.first_name, user.last_name)
     if "profile_photo_data_url" in request.model_fields_set:
-        user.profile_photo_data_url = await normalize_profile_photo_or_400(request.profile_photo_data_url)
+        user.profile_photo_data_url = await normalize_profile_photo_or_400(
+            request.profile_photo_data_url
+        )
     if "email" in request.model_fields_set:
         user.email = request.email.strip().lower() if request.email else None
     if "mobile_phone_number" in request.model_fields_set:
         user.mobile_phone_number = normalize_mobile_phone_number(request.mobile_phone_number)
     if "person_id" in request.model_fields_set:
         if request.person_id and not await session.get(Person, request.person_id):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Linked person not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Linked person not found"
+            )
         user.person_id = request.person_id
     if request.preferences is not None:
         user.preferences = {**(user.preferences or {}), **request.preferences}
@@ -292,7 +315,9 @@ async def update_user(
         await session.refresh(user)
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User already exists") from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="User already exists"
+        ) from exc
 
     return UserResponse(**serialize_user(user))
 
@@ -301,8 +326,8 @@ async def update_user(
 async def reset_password(
     user_id: uuid.UUID,
     request: ResetPasswordRequest,
-    actor: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    actor: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ResetPasswordResponse:
     user = await session.get(User, user_id)
     if not user:
@@ -339,7 +364,11 @@ async def reset_password(
         target_id=user.id,
         target_label=user.username,
         diff={"old": {"password": "[redacted]"}, "new": {"password": "[redacted]"}},
-        metadata={"temporary_password_generated": bool(request.generate_password or not request.temporary_password)},
+        metadata={
+            "temporary_password_generated": bool(
+                request.generate_password or not request.temporary_password
+            )
+        },
     )
     await session.commit()
     return ResetPasswordResponse(temporary_password=temporary_password)
@@ -348,14 +377,18 @@ async def reset_password(
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
     user_id: uuid.UUID,
-    request: DeleteUserRequest | None = Body(default=None),
-    actor: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    actor: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    request: Annotated[DeleteUserRequest | None, Body()] = None,
 ) -> None:
     user = await session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    if user.role == UserRole.ADMIN and user.is_active and await _remaining_active_admins_after_change(session, user.id) == 0:
+    if (
+        user.role == UserRole.ADMIN
+        and user.is_active
+        and await _remaining_active_admins_after_change(session, user.id) == 0
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot delete the last active admin account.",

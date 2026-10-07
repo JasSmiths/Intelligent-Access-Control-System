@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any, AsyncIterator
+from typing import Any
 
 from app.modules.access_devices.base import (
     ACCESS_DEVICE_KIND_GARAGE_DOOR,
@@ -15,7 +16,11 @@ from app.modules.access_devices.base import (
     AccessDeviceStateObservation,
 )
 from app.modules.gate.base import CommandDelivery, GateState
-from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, get_home_assistant_client
+from app.modules.home_assistant.client import (
+    HomeAssistantClient,
+    HomeAssistantError,
+    get_home_assistant_client,
+)
 from app.modules.home_assistant.covers import (
     DEFAULT_CLOSE_SERVICE,
     DEFAULT_OPEN_SERVICE,
@@ -49,7 +54,7 @@ class HomeAssistantAccessDeviceProvider:
                 configured=True,
                 connected=True,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
             return AccessDeviceProviderStatus(
                 provider=self.provider_key,
                 configured=True,
@@ -58,7 +63,9 @@ class HomeAssistantAccessDeviceProvider:
                 last_error=str(exc),
             )
 
-    async def discover_covers(self, device_id: str | None = None) -> list[AccessDeviceDiscoveryItem]:
+    async def discover_covers(
+        self, device_id: str | None = None
+    ) -> list[AccessDeviceDiscoveryItem]:
         try:
             states = await self._client.list_states()
         except Exception as exc:
@@ -67,7 +74,9 @@ class HomeAssistantAccessDeviceProvider:
         for state in states:
             if not str(state.entity_id).startswith("cover."):
                 continue
-            name = str(state.attributes.get("friendly_name") or title_from_entity_id(state.entity_id))
+            name = str(
+                state.attributes.get("friendly_name") or title_from_entity_id(state.entity_id)
+            )
             device_class = str(state.attributes.get("device_class") or "").lower()
             label = f"{state.entity_id} {name}".lower()
             kind = (
@@ -101,14 +110,18 @@ class HomeAssistantAccessDeviceProvider:
             raise AccessDeviceProviderUnavailable(str(exc)) from exc
         return gate_state_from_cover_state(str(state.state))
 
-    async def observe_state(self, binding: AccessDeviceBinding, *, runtime_config: RuntimeConfig | None = None) -> AccessDeviceStateObservation:
+    async def observe_state(
+        self, binding: AccessDeviceBinding, *, runtime_config: RuntimeConfig | None = None
+    ) -> AccessDeviceStateObservation:
         # This adapter performs a fresh GET; it does not refresh the timestamp of
         # a locally cached value as if it were new physical evidence.
         if runtime_config is None:
             state = await self.current_state(binding)
         else:
             try:
-                observed = await self._client.get_state(binding.external_id, runtime_config=runtime_config)
+                observed = await self._client.get_state(
+                    binding.external_id, runtime_config=runtime_config
+                )
             except Exception as exc:
                 raise AccessDeviceProviderUnavailable(str(exc)) from exc
             state = gate_state_from_cover_state(str(observed.state))
@@ -119,7 +132,8 @@ class HomeAssistantAccessDeviceProvider:
         binding: AccessDeviceBinding,
         action: str,
         reason: str,
-        *, runtime_config: RuntimeConfig | None = None,
+        *,
+        runtime_config: RuntimeConfig | None = None,
     ) -> AccessDeviceCommandResult:
         if action not in {"open", "close"}:
             return AccessDeviceCommandResult(
@@ -138,14 +152,19 @@ class HomeAssistantAccessDeviceProvider:
             if runtime_config is None:
                 await self._client.call_service(service_name, {"entity_id": binding.external_id})
             else:
-                await self._client.call_service(service_name, {"entity_id": binding.external_id}, runtime_config=runtime_config)
+                await self._client.call_service(
+                    service_name, {"entity_id": binding.external_id}, runtime_config=runtime_config
+                )
         except HomeAssistantError as exc:
             if exc.delivery == "not_sent":
                 raise AccessDeviceProviderUnavailable(str(exc)) from exc
             if exc.delivery == "rejected":
                 return AccessDeviceCommandResult(
-                    accepted=False, state=GateState.UNKNOWN, detail=str(exc),
-                    provider=self.provider_key, external_id=binding.external_id,
+                    accepted=False,
+                    state=GateState.UNKNOWN,
+                    detail=str(exc),
+                    provider=self.provider_key,
+                    external_id=binding.external_id,
                     delivery=CommandDelivery.REJECTED,
                 )
             if exc.delivery != "accepted":
@@ -153,9 +172,12 @@ class HomeAssistantAccessDeviceProvider:
         except Exception as exc:
             raise AccessDeviceCommandUncertain(str(exc)) from exc
         try:
-            state = (await self._client.get_state(binding.external_id, runtime_config=runtime_config)
-                     if runtime_config is not None else await self._client.get_state(binding.external_id))
-        except Exception:
+            state = (
+                await self._client.get_state(binding.external_id, runtime_config=runtime_config)
+                if runtime_config is not None
+                else await self._client.get_state(binding.external_id)
+            )
+        except Exception:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
             # The service call has already returned successfully. Treating a
             # subsequent read failure as a rejected command could trigger an
             # unsafe duplicate/failover command. The service-level confirmer
@@ -169,7 +191,8 @@ class HomeAssistantAccessDeviceProvider:
                 external_id=binding.external_id,
                 metadata={
                     "service": service_name,
-                    "immediate_state_read": "unavailable", "acceptance_basis": "home_assistant_http_2xx",
+                    "immediate_state_read": "unavailable",
+                    "acceptance_basis": "home_assistant_http_2xx",
                     "state_verification_pending": True,
                 },
             )
@@ -180,7 +203,9 @@ class HomeAssistantAccessDeviceProvider:
             provider=self.provider_key,
             external_id=binding.external_id,
             metadata={"service": service_name, "acceptance_basis": "home_assistant_http_2xx"},
-            observation=AccessDeviceStateObservation(gate_state_from_cover_state(str(state.state)), datetime.now(tz=UTC)),
+            observation=AccessDeviceStateObservation(
+                gate_state_from_cover_state(str(state.state)), datetime.now(tz=UTC)
+            ),
         )
 
     async def subscribe_state_changes(self) -> AsyncIterator[dict[str, Any]]:

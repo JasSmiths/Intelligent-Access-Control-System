@@ -12,9 +12,9 @@ async function installDirectoryFixtures(page: Page) {
   const unexpected: string[] = [];
   const fixtures: Record<string, unknown> = {
     "/api/v1/auth/status": { setup_required: false, authenticated: true, user: { id: "directory-admin", username: "layout-admin", first_name: "Alex", last_name: "Operator", full_name: "Alex Operator", role: "admin", is_active: true, preferences: { sidebarCollapsed: false } } },
-    "/api/v1/people": [person],
+    "/api/v1/people": { items: [person], total: 1, next_cursor: null },
     "/api/v1/groups": [group],
-    "/api/v1/vehicles": [vehicle],
+    "/api/v1/vehicles": { items: [vehicle], total: 1, next_cursor: null },
     "/api/v1/schedules": [schedule],
     "/api/v1/presence": [],
     "/api/v1/presence/expected-today": { date: "2026-10-04", timezone: "Europe/London", generated_at: "2026-10-04T09:00:00Z", count: 0, learning: false, coverage: { regular_candidates: 0, learned_candidates: 0, learning_population: 0, ratio: 0 }, people: [] },

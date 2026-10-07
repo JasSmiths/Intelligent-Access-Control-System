@@ -32,7 +32,9 @@ UNKNOWN_DVLA_CONCURRENCY = 4
 class LeaderboardService:
     """Aggregates plate-read leaderboards and tracks the known-plate top spot."""
 
-    async def get_leaderboard(self, *, limit: int = 25, enrich_unknowns: bool = True) -> dict[str, Any]:
+    async def get_leaderboard(
+        self, *, limit: int = 25, enrich_unknowns: bool = True
+    ) -> dict[str, Any]:
         limit = max(1, min(limit, 100))
         async with AsyncSessionLocal() as session:
             known = await self._known_leaders(session, limit)
@@ -42,7 +44,15 @@ class LeaderboardService:
             unknown = await self._enrich_unknowns(unknown)
         else:
             unknown = [
-                {**row, "dvla": {"status": "skipped", "vehicle": None, "display_vehicle": None, "label": ""}}
+                {
+                    **row,
+                    "dvla": {
+                        "status": "skipped",
+                        "vehicle": None,
+                        "display_vehicle": None,
+                        "label": "",
+                    },
+                }
                 for row in unknown
             ]
 
@@ -112,7 +122,9 @@ class LeaderboardService:
                 AccessEvent.decision == AccessDecision.GRANTED,
                 AccessEvent.direction == AccessDirection.ENTRY,
             )
-            .group_by(AccessEvent.registration_number, AccessEvent.vehicle_id, AccessEvent.person_id)
+            .group_by(
+                AccessEvent.registration_number, AccessEvent.vehicle_id, AccessEvent.person_id
+            )
             .subquery()
         )
         query = (
@@ -171,10 +183,12 @@ class LeaderboardService:
                 AccessEvent.snapshot_width.label("snapshot_width"),
                 AccessEvent.snapshot_height.label("snapshot_height"),
                 AccessEvent.snapshot_camera.label("snapshot_camera"),
-                func.row_number().over(
+                func.row_number()
+                .over(
                     partition_by=AccessEvent.registration_number,
                     order_by=(AccessEvent.occurred_at.desc(), AccessEvent.created_at.desc()),
-                ).label("snapshot_rank"),
+                )
+                .label("snapshot_rank"),
             )
             .where(
                 AccessEvent.vehicle_id.is_(None),
@@ -242,7 +256,12 @@ class LeaderboardService:
                     height=snapshot_height,
                     camera=snapshot_camera,
                 ),
-                "dvla": {"status": "pending", "vehicle": None, "display_vehicle": None, "label": ""},
+                "dvla": {
+                    "status": "pending",
+                    "vehicle": None,
+                    "display_vehicle": None,
+                    "label": "",
+                },
             }
             for index, (
                 registration_number,
@@ -256,8 +275,7 @@ class LeaderboardService:
                 snapshot_width,
                 snapshot_height,
                 snapshot_camera,
-            )
-            in enumerate(rows, start=1)
+            ) in enumerate(rows, start=1)
         ]
 
     async def _current_top_known_leader(self, session: AsyncSession) -> dict[str, Any] | None:
@@ -289,7 +307,10 @@ class LeaderboardService:
 
         async def enrich(row: dict[str, Any]) -> dict[str, Any]:
             async with semaphore:
-                return {**row, "dvla": await self._lookup_unknown_vehicle(row["registration_number"])}
+                return {
+                    **row,
+                    "dvla": await self._lookup_unknown_vehicle(row["registration_number"]),
+                }
 
         return list(await asyncio.gather(*(enrich(row) for row in rows)))
 
@@ -305,7 +326,7 @@ class LeaderboardService:
                 "label": "",
                 "error": str(exc),
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
             logger.warning(
                 "leaderboard_dvla_lookup_failed",
                 extra={"registration_number": registration_number, "error": str(exc)},
@@ -364,17 +385,23 @@ class LeaderboardService:
                     person.profile_photo_data_url,
                     f"/api/v1/people/{person.id}/photo",
                     person.updated_at,
-                ) if person else None,
+                )
+                if person
+                else None,
             },
             "vehicle": {
                 "id": _uuid_text(vehicle.id) if vehicle else _uuid_text(vehicle_id),
-                "registration_number": vehicle.registration_number if vehicle else registration_number,
+                "registration_number": vehicle.registration_number
+                if vehicle
+                else registration_number,
                 "vehicle_photo_data_url": None,
                 "vehicle_photo_url": stored_image_url(
                     vehicle.vehicle_photo_data_url,
                     f"/api/v1/vehicles/{vehicle.id}/photo",
                     vehicle.updated_at,
-                ) if vehicle else None,
+                )
+                if vehicle
+                else None,
                 "make": vehicle.make if vehicle else "",
                 "model": vehicle.model if vehicle else "",
                 "color": vehicle.color if vehicle else "",
@@ -423,7 +450,9 @@ class LeaderboardService:
             "new_winner_name": new_winner_name,
             "overtaken_name": overtaken_name,
             "read_count": int(new_leader.get("read_count") or 0),
-            "vehicle_name": str(new_leader.get("vehicle_name") or new_leader.get("registration_number") or ""),
+            "vehicle_name": str(
+                new_leader.get("vehicle_name") or new_leader.get("registration_number") or ""
+            ),
             "registration_number": str(new_leader.get("registration_number") or ""),
             "message": (
                 f"{new_winner_name} has overtaken {overtaken_name} "
@@ -432,7 +461,11 @@ class LeaderboardService:
         }
 
     def _overtake_notification_facts(self, payload: dict[str, Any]) -> dict[str, str]:
-        new_vehicle = payload.get("new_winner", {}).get("vehicle", {}) if isinstance(payload.get("new_winner"), dict) else {}
+        new_vehicle = (
+            payload.get("new_winner", {}).get("vehicle", {})
+            if isinstance(payload.get("new_winner"), dict)
+            else {}
+        )
         return {
             "new_winner_name": str(payload.get("new_winner_name") or ""),
             "overtaken_name": str(payload.get("overtaken_name") or ""),

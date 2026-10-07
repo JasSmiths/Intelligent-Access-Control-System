@@ -16,14 +16,19 @@ This guide explains how to find and extend the current owners. Use
 shutdown. [API registration](../backend/app/api/router.py) defines the supported
 route groups. Request handlers validate input, authenticate callers, and adapt
 confirmation and responses; services own business rules and transactions;
-modules own vendor protocol I/O.
+modules own vendor protocol I/O. [Application composition](../backend/app/composition.py)
+wires Home Assistant effects, maintenance notification intake, and device status
+ports without starting I/O. Integration services do not import the business
+owners that consume their observations. The service-backed
+[gate controller](../backend/app/services/gate_controller.py) receives the device
+owner explicitly; vendor modules never construct business services.
 
 | Concern | Start here |
 | --- | --- |
 | LPR intake and processing | [AccessEventService](../backend/app/services/access_events.py), [durable intake](../backend/app/services/lpr_ingest.py), [access stages](../backend/app/services/access/) |
 | Movement and admission | [Direction FSM](../backend/app/services/movement_fsm.py), [movement ledger](../backend/app/services/movement_ledger.py), [admission](../backend/app/services/movement/admission.py) |
 | Gate and garage commands | [GateCommandCoordinator](../backend/app/services/gate_commands.py), [AccessDeviceService](../backend/app/services/access_devices.py) |
-| Directory, schedules, and passes | [Directory API](../backend/app/api/v1/directory.py), [schedule operations](../backend/app/services/schedule_operations.py), [visitor passes](../backend/app/services/visitor_passes.py) |
+| Directory, schedules, and passes | [Directory services](../backend/app/services/directory/), [schedule operations](../backend/app/services/schedule_operations.py), [visitor passes](../backend/app/services/visitor_passes.py) |
 | Notifications and automations | [NotificationService](../backend/app/services/notifications.py), [AutomationService](../backend/app/services/automations.py), [workflow contracts](../backend/app/services/workflows/) |
 | Configuration and authentication | [Runtime settings](../backend/app/services/settings.py), [bootstrap configuration](../backend/app/core/config.py), [authentication](../backend/app/services/auth.py) |
 | Schema and audit | [Models](../backend/app/models/), [Alembic migrations](../backend/alembic/versions/), [telemetry and audit](../backend/app/services/telemetry.py) |
@@ -33,6 +38,10 @@ modules own vendor protocol I/O.
 1. The LPR adapter produces a plate read. Webhook security validates the request
    before durable intake. AccessEventService stores intake, manages workers and
    debounce windows, and records explainable suppression.
+   [Pure candidate ranking](../backend/app/services/access/plate_matching.py)
+   preserves exact/fuzzy priority. The worker queries normalized active exact
+   candidates through a partial index before loading registrations for fuzzy
+   fallback; recognition authority is still checked at dispatch.
 2. [Evidence resolution](../backend/app/services/access/evidence.py) loads
    identity, schedules, movement history, and applicable camera/recovery evidence.
    The movement FSM resolves direction; the
@@ -67,12 +76,32 @@ configuration. Schedule evaluation and assignments have separate owners under
 require a plate when created. Calendar synchronization feeds the same pass owner.
 
 Notifications and automations use shared trigger, action, and template contracts.
+Notification planning, recipient selection and authorization have separate owners;
+the notification facade retains transport orchestration. Automation rule operations,
+webhook intake, time intake and action dispatch also have separate owners. The
+[dispatch ports](../backend/app/services/workflow_dispatch_ports.py) and
+[execution contracts](../backend/app/services/workflows/execution_contracts.py)
+check persisted action identity, status and deadlines at the boundary. New actions
+join the supported handler table and reuse existing authorization/command owners.
 Rules are database records. Required delivery handoffs join the originating
 transaction; the [notification run store](../backend/app/services/notification_runs.py)
 and [dispatcher](../backend/app/services/notification_dispatch.py) persist attempts
 and outcomes around provider I/O. Automations have their own durable runs and
 route hardware actions through the same command owners. An uncertain attempted
 effect needs review rather than an automatic resend.
+
+Directory routes delegate mutations, assignments and audit to the directory
+services. Read operations return bounded pages; editors hydrate explicitly selected
+identities through detail/lookup reads. Snapshot fallback uses per-registration
+latest-row lookups rather than ranking complete movement histories.
+
+Reports query the selected period and necessary predecessor state. The pure
+[duration policy](../backend/app/services/report_durations.py) owns the movement
+state and chronological calculation, with an explicit site timezone. Observations
+at the same timestamp do not establish one another's duration. Departures retain
+the existing cross-vehicle subject
+semantics. Timeline inputs stream in batches; report output still grows with the
+selected period and PDF generation remains a separate cost.
 
 Camera AI analyzes images through [provider implementations](../backend/app/ai/providers.py).
 Access evidence and UniFi snapshot analysis consume this interface. Reports and
@@ -93,6 +122,18 @@ Use [client.ts](../frontend/src/api/client.ts) for HTTP and the existing
 confirmation helpers for protected mutations. Backend permission and confirmation
 checks remain authoritative even when the UI hides an action.
 
+Directory pagination, search, selected-ID hydration and cancellation belong to
+[feature reads](../frontend/src/features/directory/reads.ts) and the
+[typed directory client](../frontend/src/api/directory.ts). The route boundary
+provides directory refresh context so nested selectors reload selected records
+outside the current page when shell data changes. Metadata refresh preserves
+local editor drafts, and selected chips remain separate from matching search rows.
+Dashboard resolves the
+identities needed for its visible data; Reports searches its subjects on the server.
+Report selection/preview/export and dashboard command receipts have dedicated
+feature hooks and components. Preserve those request and draft lifetimes when
+extending a view.
+
 The shell's realtime modules select affected data and route refreshes; the
 [refresh coordinator](../frontend/src/app/refreshCoordinator.ts) serializes reads.
 Preserve account/request lifetime checks so stale responses cannot overwrite
@@ -111,6 +152,13 @@ Find callers with `rg -l`, then read the owner and relevant tests. Keep feature
 logic out of the shell, provider I/O out of policy, and transaction ownership in
 services. Interactive mutations use trusted actor context and retain validation
 and durable audit in the domain owner.
+
+The architecture guard rejects runtime cycles, vendor imports of business owners,
+service imports of API adapters, direct directory-route transactions and shared UI
+imports of features. Runtime configuration through `services.settings` is the
+existing shared adapter configuration boundary. Explicit exception handling at
+vendor, cleanup and optional-publication boundaries preserves arbitrary failure
+truth; any lint exception there must have a local justification.
 
 Retiring a feature includes its callers, registrations, settings, tests, UI, and
 documentation. Do not leave aliases, fallback catalogs, provider bypasses, or

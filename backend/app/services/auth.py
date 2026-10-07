@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError, VerificationError
+from argon2.exceptions import VerificationError, VerifyMismatchError
 from fastapi import HTTPException, Request, Response, WebSocket, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
@@ -80,7 +80,9 @@ def normalize_mobile_phone_number(mobile_phone_number: str | None) -> str | None
     return mobile_phone_number.strip() or None
 
 
-def serialize_user(user: User, *, include_photo: bool = False, photo_url_path: str | None = None) -> dict[str, Any]:
+def serialize_user(
+    user: User, *, include_photo: bool = False, photo_url_path: str | None = None
+) -> dict[str, Any]:
     first_name = user.first_name or split_full_name(user.full_name)[0]
     last_name = user.last_name or split_full_name(user.full_name)[1]
     photo_path = photo_url_path or f"/api/v1/users/{user.id}/photo"
@@ -91,7 +93,9 @@ def serialize_user(user: User, *, include_photo: bool = False, photo_url_path: s
         "last_name": last_name,
         "full_name": compose_full_name(first_name, last_name) or user.full_name,
         "profile_photo_data_url": user.profile_photo_data_url if include_photo else None,
-        "profile_photo_url": stored_image_url(user.profile_photo_data_url, photo_path, getattr(user, "updated_at", None)),
+        "profile_photo_url": stored_image_url(
+            user.profile_photo_data_url, photo_path, getattr(user, "updated_at", None)
+        ),
         "email": user.email,
         "mobile_phone_number": user.mobile_phone_number,
         "role": user.role.value,
@@ -108,10 +112,16 @@ async def count_users(session: AsyncSession) -> int:
     return int(await session.scalar(select(func.count()).select_from(User)) or 0)
 
 
-async def count_active_admins(session: AsyncSession, exclude_user_id: uuid.UUID | None = None) -> int:
-    query = select(func.count()).select_from(User).where(
-        User.role == UserRole.ADMIN,
-        User.is_active.is_(True),
+async def count_active_admins(
+    session: AsyncSession, exclude_user_id: uuid.UUID | None = None
+) -> int:
+    query = (
+        select(func.count())
+        .select_from(User)
+        .where(
+            User.role == UserRole.ADMIN,
+            User.is_active.is_(True),
+        )
     )
     if exclude_user_id:
         query = query.where(User.id != exclude_user_id)
@@ -138,7 +148,9 @@ async def create_user(
         first_name, last_name = split_full_name(full_name)
     resolved_first_name = (first_name or "").strip()
     resolved_last_name = (last_name or "").strip()
-    resolved_full_name = compose_full_name(resolved_first_name, resolved_last_name) or (full_name or "").strip()
+    resolved_full_name = (
+        compose_full_name(resolved_first_name, resolved_last_name) or (full_name or "").strip()
+    )
     user = User(
         username=normalize_username(username),
         first_name=resolved_first_name,
@@ -262,7 +274,9 @@ async def revoke_access_token(session: AsyncSession, token: str | None) -> None:
 
 async def purge_expired_revoked_tokens(session: AsyncSession) -> None:
     """Auth-write participant; the caller owns commit/rollback."""
-    await session.execute(delete(RevokedAuthToken).where(RevokedAuthToken.expires_at <= func.clock_timestamp()))
+    await session.execute(
+        delete(RevokedAuthToken).where(RevokedAuthToken.expires_at <= func.clock_timestamp())
+    )
 
 
 async def authenticate_request(session: AsyncSession, request: Request) -> User | None:

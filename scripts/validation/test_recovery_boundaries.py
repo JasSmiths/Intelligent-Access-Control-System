@@ -58,12 +58,13 @@ from app.models import AccessEvent, AutomationRule, AutomationRun, GateCommandRe
 from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState, PresenceState, TimingClassification
 from app.modules.access_devices.base import AccessDeviceBinding, AccessDeviceCommandResult, AccessDeviceEntity
 from app.modules.access_devices.home_assistant import HomeAssistantAccessDeviceProvider
-from app.modules.gate import access_devices as gate_adapter
+from app.services import gate_controller as gate_adapter
 from app.modules.gate.base import GateCommandResult, GateState
 from app.modules.home_assistant.client import HomeAssistantClient
 from app.services import access_devices as devices_owner
 from app.services import automations as automation_owner
-from app.services.access_devices import AccessDeviceOperationResult, AccessDeviceProviderAttempt, AccessDeviceService
+from app.services.access_device_outcomes import AccessDeviceOperationResult, AccessDeviceProviderAttempt
+from app.services.access_devices import AccessDeviceService
 from app.services.event_bus import event_bus
 from app.services.gate_commands import GateCommandCoordinator, GateCommandIntent
 from app.services.movement_reconciliation import MovementReconciliationService
@@ -169,10 +170,9 @@ def _device_outcome(key, accepted, state):
 async def test_probe_01_multitarget_truth_is_order_independent(monkeypatch, case):
     outcomes = [_device_outcome(str(i), item[0], item[1]) for i, item in enumerate(case["targets"])]
     service = SimpleNamespace(open_access_gates=AsyncMock(return_value=outcomes))
-    monkeypatch.setattr(gate_adapter, "get_access_device_service", lambda: service)
     intent = GateCommandIntent(reason="Synthetic aggregate probe", source="synthetic-recovery",
                                idempotency_key="aggregate:" + case["id"])
-    outcome = await GateCommandCoordinator(lambda name: gate_adapter.AccessDeviceGateController()).execute_open(intent)
+    outcome = await GateCommandCoordinator(lambda name: gate_adapter.AccessDeviceGateController(service)).execute_open(intent)
     persisted, = await _rows(GateCommandRecord)
     assert len(outcome.metadata["access_device_outcomes"]) == len(outcomes)
     assert persisted.command_metadata["access_device_outcomes"] == outcome.metadata["access_device_outcomes"]

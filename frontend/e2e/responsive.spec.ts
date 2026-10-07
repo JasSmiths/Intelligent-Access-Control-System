@@ -100,6 +100,10 @@ async function mockOperationalNetwork(page: Page): Promise<NetworkMock> {
       case "/api/v1/reports/context":
         body = { site_timezone: "Europe/London", now: "2026-09-23T10:30:00Z" };
         break;
+      case "/api/v1/people":
+      case "/api/v1/vehicles":
+        body = { items: [], total: 0, next_cursor: null };
+        break;
       default:
         body = [];
     }

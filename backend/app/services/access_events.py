@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, literal_column, or_, select
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,10 +26,10 @@ from app.models.enums import MovementSagaState, VisitorPassStatus, VisitorPassTy
 from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
 from app.modules.notifications.base import NotificationContext
-from app.modules.registry import UnsupportedModuleError, get_gate_controller
 from app.services.access.enrichment import AccessEnrichment, independently
 from app.services.access.execution import AccessExecution
 from app.services.access.payloads import access_event_realtime_payload, notification_facts
+from app.services.access.plate_matching import add_debounce_read, match_candidates
 from app.services.access.reads import (
     EXTERNAL_ADMISSION_PAYLOAD_KEY,
     EXTERNAL_ADMISSION_SOURCE_LPR_OPEN_GATE,
@@ -63,6 +62,7 @@ from app.services.access.reads import (
     lpr_ingest_id_from_read,
 )
 from app.services.event_bus import RealtimeEvent, event_bus
+from app.services.gate_controller import UnsupportedModuleError, get_gate_controller
 from app.services.gate_malfunctions import active_stuck_open_malfunction_at
 from app.services.lpr_ingest import (
     LPR_INGEST_STATUS_FAILED,
@@ -83,7 +83,6 @@ from app.services.movement.sessions import (
     datetime_from_payload,
     gate_observation_from_read,
     normalize_registration_number,
-    plates_are_similar,
     read_direction_hint,
 )
 from app.services.movement.sessions import (
@@ -116,6 +115,7 @@ __all__ = [
     "AccessEventService",
     "get_access_event_service",
 ]
+
 
 class AccessEventService:
     """Coordinates plate reads into access events.
@@ -204,8 +204,12 @@ class AccessEventService:
             "pending_windows": len(self._pending),
             "movement_sessions_source": "durable",
             "started_at": self._started_at.isoformat() if self._started_at else None,
-            "last_heartbeat_at": self._last_heartbeat_at.isoformat() if self._last_heartbeat_at else None,
-            "last_processed_at": self._last_processed_at.isoformat() if self._last_processed_at else None,
+            "last_heartbeat_at": self._last_heartbeat_at.isoformat()
+            if self._last_heartbeat_at
+            else None,
+            "last_processed_at": self._last_processed_at.isoformat()
+            if self._last_processed_at
+            else None,
             "last_error": self._last_error,
             "last_error_at": self._last_error_at.isoformat() if self._last_error_at else None,
             "consecutive_failures": self._consecutive_failures,
@@ -218,7 +222,9 @@ class AccessEventService:
             return
         received_at = datetime.now(tz=UTC)
         read = self._read_with_webhook_trace(read, received_at)
-        ingest_row, should_wake_worker = await self._persist_lpr_ingest_read(read, received_at=received_at)
+        ingest_row, should_wake_worker = await self._persist_lpr_ingest_read(
+            read, received_at=received_at
+        )
         read = self._read_with_lpr_ingest_event(read, ingest_row)
         if not should_wake_worker:
             logger.info(
@@ -292,8 +298,6 @@ class AccessEventService:
             "captured_to_webhook_ms": captured_to_webhook_ms,
         }
         return _plate_read_with_payload(read, raw_payload)
-
-
 
     async def _persist_lpr_ingest_read(
         self,
@@ -390,8 +394,6 @@ class AccessEventService:
             ),
         )
         return self._read_with_lpr_ingest_event(read, row)
-
-
 
     async def _read_with_gate_observation(self, read: PlateRead) -> PlateRead:
         if self._should_preserve_supplied_gate_observation(read):
@@ -697,14 +699,18 @@ class AccessEventService:
                         vehicle_session_suppression,
                         runtime=self._runtime,
                     )
-                    await self._publish_suppressed_read(read, reason=vehicle_session_suppression.reason)
+                    await self._publish_suppressed_read(
+                        read, reason=vehicle_session_suppression.reason
+                    )
                     return
 
         external_admission = _external_admission_from_read(read)
         if not _known_vehicle_plate_match_from_read(read) and not external_admission:
             read = await self._read_with_visitor_pass_departure_match(read)
         if self._suppress_after_visitor_pass_resolution(read):
-            await self._publish_suppressed_read(read, reason="visitor_pass_plate_already_resolved_in_debounce_window")
+            await self._publish_suppressed_read(
+                read, reason="visitor_pass_plate_already_resolved_in_debounce_window"
+            )
             return
 
         window = self._add_to_debounce_window(read)
@@ -720,7 +726,9 @@ class AccessEventService:
                 self._remember_visitor_pass_resolution(window, read)
 
     async def _suppress_by_live_lpr_zone_filter(self, read: PlateRead) -> bool:
-        mode = getattr(self._runtime, "lpr_zone_filter_mode", "shadow") if self._runtime else "shadow"
+        mode = (
+            getattr(self._runtime, "lpr_zone_filter_mode", "shadow") if self._runtime else "shadow"
+        )
         try:
             decision = evaluate_lpr_zone_filter_for_read(read, mode=mode)
         except Exception as exc:  # noqa: BLE001 - worker recovery or fail-closed evidence boundary
@@ -792,7 +800,9 @@ class AccessEventService:
             )
             if not match:
                 return
-            result = await AccessExecution(self._movement_ledger, self._movement_sessions, self._lpr_ingest_repo())._persist_external_gate_open_admission(
+            result = await AccessExecution(
+                self._movement_ledger, self._movement_sessions, self._lpr_ingest_repo()
+            )._persist_external_gate_open_admission(
                 session,
                 match,
                 observed_at=observed_at,
@@ -804,18 +814,41 @@ class AccessEventService:
             await session.commit()
 
         access_event, anomalies, realtime_payload = result
-        await independently("external_snapshot", access_event.id, lambda: AccessEnrichment(runtime).capture_snapshot(access_event))
-        realtime_payload.update(access_event_realtime_payload(access_event, anomaly_count=len(anomalies), visitor_pass=None, visitor_pass_mode=None))
-        await independently("external_realtime", access_event.id, lambda: event_bus.publish("access_event.finalized", realtime_payload))
+        await independently(
+            "external_snapshot",
+            access_event.id,
+            lambda: AccessEnrichment(runtime).capture_snapshot(access_event),
+        )
+        realtime_payload.update(
+            access_event_realtime_payload(
+                access_event,
+                anomaly_count=len(anomalies),
+                visitor_pass=None,
+                visitor_pass_mode=None,
+            )
+        )
+        await independently(
+            "external_realtime",
+            access_event.id,
+            lambda: event_bus.publish("access_event.finalized", realtime_payload),
+        )
         for anomaly in anomalies:
+
             async def notify_anomaly(anomaly: Anomaly = anomaly) -> None:
-                await get_notification_service().notify(NotificationContext(
-                    event_type=anomaly.anomaly_type.value, subject=access_event.registration_number,
-                    severity=anomaly.severity.value,
-                    facts=notification_facts(access_event, None, None, anomaly.message)))
+                await get_notification_service().notify(
+                    NotificationContext(
+                        event_type=anomaly.anomaly_type.value,
+                        subject=access_event.registration_number,
+                        severity=anomaly.severity.value,
+                        facts=notification_facts(access_event, None, None, anomaly.message),
+                    )
+                )
+
             await independently("external_anomaly_notification", access_event.id, notify_anomaly)
 
-    async def _recent_iacs_gate_open_command(self, session: AsyncSession, observed_at: datetime) -> GateCommandRecord | None:
+    async def _recent_iacs_gate_open_command(
+        self, session: AsyncSession, observed_at: datetime
+    ) -> GateCommandRecord | None:
         command_window_start = observed_at - timedelta(seconds=90)
         command_window_end = observed_at + timedelta(seconds=15)
         return await session.scalar(
@@ -834,62 +867,72 @@ class AccessEventService:
             .limit(1)
         )
 
-
-
-
     def _clear_pending_reads(self) -> None:
         self._pending = []
         self._recent_visitor_pass_resolutions = []
 
     def _add_to_debounce_window(self, read: PlateRead) -> DebounceWindow:
-        for window in self._pending:
-            best = window.best_read
-            threshold = self._runtime.lpr_similarity_threshold if self._runtime else settings.lpr_similarity_threshold
-            if read.source == best.source and plates_are_similar(
-                read.registration_number, best.registration_number, threshold
-            ):
-                window.reads.append(read)
-                window.updated_at = read.captured_at
-                return window
-
-        window = DebounceWindow(first_seen=read.captured_at, updated_at=read.captured_at, reads=[read])
-        self._pending.append(window)
-        return window
+        threshold = (
+            self._runtime.lpr_similarity_threshold
+            if self._runtime
+            else settings.lpr_similarity_threshold
+        )
+        return add_debounce_read(self._pending, read, threshold)
 
     async def _read_with_known_vehicle_match(self, read: PlateRead) -> PlateRead:
-        registrations = await self._active_vehicle_registrations()
-        threshold = self._runtime.lpr_similarity_threshold if self._runtime else settings.lpr_similarity_threshold
-        best_match: dict[str, Any] | None = None
-        best_rank: tuple[bool, float, int, str] | None = None
-        for index, candidate in enumerate(_candidate_registration_numbers(read)):
-            match = self._known_vehicle_plate_match(candidate, registrations, threshold)
-            if not match:
-                continue
-            rank = (
-                bool(match["exact"]),
-                float(match["similarity"]),
-                -index,
-                str(match["registration_number"]),
-            )
-            if best_rank is None or rank > best_rank:
-                best_match = match
-                best_rank = rank
+        candidates = _candidate_registration_numbers(read)
+        registrations = await self._matching_vehicle_registrations(candidates)
+        threshold = (
+            self._runtime.lpr_similarity_threshold
+            if self._runtime
+            else settings.lpr_similarity_threshold
+        )
+        best_match = match_candidates(candidates, registrations, threshold)
 
         if not best_match:
             return read
 
         raw_payload = dict(read.raw_payload or {})
         raw_payload[KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY] = best_match
-        return _plate_read_with_payload(read, raw_payload, registration_number=str(best_match["registration_number"]))
+        return _plate_read_with_payload(
+            read, raw_payload, registration_number=str(best_match["registration_number"])
+        )
 
-    async def _active_vehicle_registrations(self) -> list[str]:
+    async def _matching_vehicle_registrations(self, candidates: tuple[str, ...]) -> list[str]:
+        if not candidates:
+            return []
         async with AsyncSessionLocal() as session:
-            registrations = (
-                await session.scalars(
-                    select(Vehicle.registration_number).where(Vehicle.is_active.is_(True))
+            # These fixed SQL literals match the functional index even when PostgreSQL
+            # chooses a generic prepared plan. Plate candidates remain bound values.
+            normalized = func.upper(
+                func.regexp_replace(
+                    Vehicle.registration_number,
+                    literal_column("'[^A-Za-z0-9]'"),
+                    literal_column("''"),
+                    literal_column("'g'"),
                 )
-            ).all()
-        return [str(registration) for registration in registrations]
+            )
+            exact = list(
+                (
+                    await session.scalars(
+                        select(Vehicle.registration_number).where(
+                            Vehicle.is_active.is_(True),
+                            normalized.in_(candidates),
+                        )
+                    )
+                ).all()
+            )
+            if exact:
+                return exact
+            return list(
+                (
+                    await session.scalars(
+                        select(Vehicle.registration_number).where(
+                            Vehicle.is_active.is_(True),
+                        )
+                    )
+                ).all()
+            )
 
     async def _read_with_gate_malfunction_context(self, read: PlateRead) -> PlateRead:
         gate_observation = gate_observation_from_read(read)
@@ -962,12 +1005,9 @@ class AccessEventService:
             gate_observation=gate_observation_from_read(read),
         )
         registration_number = str(
-            getattr(match.session, "registration_number", None)
-            or read.registration_number
+            getattr(match.session, "registration_number", None) or read.registration_number
         )
         return _plate_read_with_payload(read, raw_payload, registration_number=registration_number)
-
-
 
     async def _ignore_unknown_gate_malfunction_read(self, read: PlateRead) -> None:
         gate_observation = gate_observation_from_read(read)
@@ -1052,46 +1092,6 @@ class AccessEventService:
         }
         return _plate_read_with_payload(read, raw_payload, registration_number=plate)
 
-    def _known_vehicle_plate_match(
-        self,
-        detected_registration_number: str,
-        stored_registration_numbers: list[str],
-        threshold: float,
-    ) -> dict[str, Any] | None:
-        detected = normalize_registration_number(detected_registration_number)
-        if not detected:
-            return None
-
-        best_match: dict[str, Any] | None = None
-        for stored_registration_number in stored_registration_numbers:
-            stored_lookup = str(stored_registration_number).strip().upper().replace(" ", "")
-            stored = normalize_registration_number(stored_lookup)
-            if not stored:
-                continue
-            similarity = 1.0 if detected == stored else SequenceMatcher(a=detected, b=stored).ratio()
-            exact = detected == stored
-            if not exact and similarity < threshold:
-                continue
-            candidate = {
-                "detected_registration_number": detected,
-                "registration_number": stored_lookup or stored,
-                "normalized_registration_number": stored,
-                "similarity": similarity,
-                "threshold": threshold,
-                "exact": exact,
-            }
-            if not best_match or (
-                candidate["exact"],
-                candidate["similarity"],
-                candidate["registration_number"],
-            ) > (
-                best_match["exact"],
-                best_match["similarity"],
-                best_match["registration_number"],
-            ):
-                best_match = candidate
-        return best_match
-
     def _pop_exact_known_plate_window(self, window: DebounceWindow) -> DebounceWindow:
         exact_read = next(
             (read for read in window.reads if _is_exact_known_vehicle_plate_match(read)),
@@ -1099,8 +1099,14 @@ class AccessEventService:
         )
         return self._pop_related_read_window(window, exact_read)
 
-    def _pop_related_read_window(self, window: DebounceWindow, anchor_read: PlateRead) -> DebounceWindow:
-        max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
+    def _pop_related_read_window(
+        self, window: DebounceWindow, anchor_read: PlateRead
+    ) -> DebounceWindow:
+        max_seconds = (
+            self._runtime.lpr_debounce_max_seconds
+            if self._runtime
+            else settings.lpr_debounce_max_seconds
+        )
         related: list[DebounceWindow] = []
         remaining: list[DebounceWindow] = []
         for item in self._pending:
@@ -1119,11 +1125,7 @@ class AccessEventService:
         if not related:
             return window
 
-        reads = [
-            read
-            for related_window in [window, *related]
-            for read in related_window.reads
-        ]
+        reads = [read for related_window in [window, *related] for read in related_window.reads]
         return DebounceWindow(
             first_seen=min(read.captured_at for read in reads),
             updated_at=max(read.captured_at for read in reads),
@@ -1169,7 +1171,9 @@ class AccessEventService:
                     registration_number=row.registration_number,
                     first_seen=row.started_at,
                     debounce_expires_at=row.debounce_expires_at or row.started_at,
-                    gate_cycle_expires_at=row.gate_cycle_expires_at or row.debounce_expires_at or row.started_at,
+                    gate_cycle_expires_at=row.gate_cycle_expires_at
+                    or row.debounce_expires_at
+                    or row.started_at,
                     direction=row.direction,
                     decision=row.decision,
                 )
@@ -1178,8 +1182,14 @@ class AccessEventService:
         )
         return decision.reason
 
-    def _remember_visitor_pass_resolution(self, window: DebounceWindow, anchor_read: PlateRead) -> None:
-        max_seconds = self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds
+    def _remember_visitor_pass_resolution(
+        self, window: DebounceWindow, anchor_read: PlateRead
+    ) -> None:
+        max_seconds = (
+            self._runtime.lpr_debounce_max_seconds
+            if self._runtime
+            else settings.lpr_debounce_max_seconds
+        )
         self._recent_visitor_pass_resolutions.append(
             ResolvedPlateWindow(
                 source=anchor_read.source,
@@ -1215,13 +1225,16 @@ class AccessEventService:
             "plate_read.suppressed",
             {
                 "registration_number": read.registration_number,
-                "detected_registration_number": match.get("detected_registration_number") or read.registration_number,
+                "detected_registration_number": match.get("detected_registration_number")
+                or read.registration_number,
                 "source": read.source,
                 "reason": reason,
             },
         )
 
-    async def _record_suppressed_movement_read(self, read: PlateRead, *, reason: str) -> MovementSagaRecord:
+    async def _record_suppressed_movement_read(
+        self, read: PlateRead, *, reason: str
+    ) -> MovementSagaRecord:
         async with AsyncSessionLocal() as session:
             saga = await self._movement_ledger.create_movement_saga(
                 session,
@@ -1260,9 +1273,14 @@ class AccessEventService:
         for window in self._pending:
             quiet_for = (now - window.updated_at).total_seconds()
             total_age = (now - window.first_seen).total_seconds()
-            if (
-                quiet_for >= (self._runtime.lpr_debounce_quiet_seconds if self._runtime else settings.lpr_debounce_quiet_seconds)
-                or total_age >= (self._runtime.lpr_debounce_max_seconds if self._runtime else settings.lpr_debounce_max_seconds)
+            if quiet_for >= (
+                self._runtime.lpr_debounce_quiet_seconds
+                if self._runtime
+                else settings.lpr_debounce_quiet_seconds
+            ) or total_age >= (
+                self._runtime.lpr_debounce_max_seconds
+                if self._runtime
+                else settings.lpr_debounce_max_seconds
             ):
                 ready.append(window)
             else:
@@ -1339,7 +1357,9 @@ class AccessEventService:
             return
         read = window.best_read
         external_admission = _external_admission_from_read(read)
-        direction_read = read if _is_visitor_pass_plate_match(read) or external_admission else window.first_read
+        direction_read = (
+            read if _is_visitor_pass_plate_match(read) or external_admission else window.first_read
+        )
         finalize_started_at = datetime.now(tz=UTC)
         webhook_trace = _webhook_trace_for_window(window)
         webhook_received_at = (
@@ -1349,7 +1369,9 @@ class AccessEventService:
         )
         captured_to_webhook_ms = _float_from_payload(webhook_trace.get("captured_to_webhook_ms"))
         if captured_to_webhook_ms is None:
-            captured_to_webhook_ms = _datetime_delta_ms(webhook_received_at, window.first_read.captured_at)
+            captured_to_webhook_ms = _datetime_delta_ms(
+                webhook_received_at, window.first_read.captured_at
+            )
         webhook_to_finalize_ms = _datetime_delta_ms(finalize_started_at, webhook_received_at)
         logger.info(
             "plate_read_finalize_started",
@@ -1360,13 +1382,19 @@ class AccessEventService:
                 "first_seen": window.first_seen.isoformat(),
                 "updated_at": window.updated_at.isoformat(),
                 "finalize_started_at": finalize_started_at.isoformat(),
-                "first_seen_to_finalize_ms": _datetime_delta_ms(finalize_started_at, window.first_seen),
-                "last_read_to_finalize_ms": _datetime_delta_ms(finalize_started_at, window.updated_at),
+                "first_seen_to_finalize_ms": _datetime_delta_ms(
+                    finalize_started_at, window.first_seen
+                ),
+                "last_read_to_finalize_ms": _datetime_delta_ms(
+                    finalize_started_at, window.updated_at
+                ),
                 "captured_to_webhook_ms": captured_to_webhook_ms,
                 "webhook_to_finalize_ms": webhook_to_finalize_ms,
                 "exact_known_vehicle": _is_exact_known_vehicle_plate_match(read),
                 "visitor_pass_match": _is_visitor_pass_plate_match(read) is not None,
-                "external_admission_mode": external_admission.get("mode") if external_admission else None,
+                "external_admission_mode": external_admission.get("mode")
+                if external_admission
+                else None,
             },
         )
         trace = telemetry.start_trace(
@@ -1421,25 +1449,38 @@ class AccessEventService:
                         "detected_registration_number": _detected_registration_number(item),
                         "confidence": item.confidence,
                         "captured_at": item.captured_at.isoformat(),
-                        "candidate_registration_numbers": list(_candidate_registration_numbers(item)),
+                        "candidate_registration_numbers": list(
+                            _candidate_registration_numbers(item)
+                        ),
                         WEBHOOK_TRACE_PAYLOAD_KEY: _webhook_trace_from_read(item),
                     }
                     for item in window.reads
                 ],
             },
         )
-        execution = AccessExecution(self._movement_ledger, self._movement_sessions, self._lpr_ingest_repo())
+        execution = AccessExecution(
+            self._movement_ledger, self._movement_sessions, self._lpr_ingest_repo()
+        )
         result = await execution.execute(
-            window, read=read, direction_read=direction_read,
-            runtime=self._runtime or await get_runtime_config(), trace=trace,
-            finalize_started_at=finalize_started_at, webhook_trace=webhook_trace)
+            window,
+            read=read,
+            direction_read=direction_read,
+            runtime=self._runtime or await get_runtime_config(),
+            trace=trace,
+            finalize_started_at=finalize_started_at,
+            webhook_trace=webhook_trace,
+        )
         if result is None:
-            trace.finish(status="ok", summary="Previously committed movement reused; no hardware replay.")
+            trace.finish(
+                status="ok", summary="Previously committed movement reused; no hardware replay."
+            )
             return
         await AccessEnrichment(result.runtime).run(result, trace=trace)
 
+
 def _datetime_delta_ms(end: datetime, start: datetime) -> float:
     return round(max(0.0, (end - start).total_seconds()) * 1000.0, 3)
+
 
 @lru_cache
 def get_access_event_service() -> AccessEventService:

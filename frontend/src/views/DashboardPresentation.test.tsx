@@ -1,5 +1,6 @@
+import * as directoryApi from "../api/directory";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AccessEvent, Anomaly, IntegrationStatus, UserAccount } from "../api/types";
 import { Dashboard } from "./DashboardView";
 
@@ -10,7 +11,12 @@ const props = {
   currentUser: { id: "dashboard-presentation", role: "admin", first_name: "Test" } as UserAccount,
   navigateToView: vi.fn(), onMaintenanceStatusChanged: vi.fn()
 };
-afterEach(() => { cleanup(); vi.clearAllMocks(); sessionStorage.clear(); });
+beforeEach(() => {
+  vi.spyOn(directoryApi, "listVehicles").mockResolvedValue({ items: [], total: 0, next_cursor: null });
+  vi.spyOn(directoryApi, "lookupVehicleRegistrations").mockResolvedValue([]);
+  vi.spyOn(directoryApi, "lookupPeople").mockResolvedValue([]);
+});
+afterEach(() => { cleanup(); vi.restoreAllMocks(); sessionStorage.clear(); });
 
 it.each([true, false])("links grouped=%s alerts to a durable record UUID", (grouped) => {
   const memberId = "d882ffcb-4a35-4c77-bda5-fb8c1b0bab31";

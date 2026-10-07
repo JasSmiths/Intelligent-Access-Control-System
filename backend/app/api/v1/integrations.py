@@ -1,51 +1,58 @@
-from difflib import SequenceMatcher
 import re
+from difflib import SequenceMatcher
+from typing import Annotated
 from uuid import UUID
-
-from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.confirmations import require_confirmed_action, send_confirmed_notification
 from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
-from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError, display_vehicle_record, normalize_registration_number
 from app.models import Person, User
-from app.modules.access_devices.registry import get_access_device_provider
 from app.modules.access_devices.base import resolve_legacy_cover_key
+from app.modules.access_devices.registry import get_access_device_provider
+from app.modules.dvla.vehicle_enquiry import (
+    DvlaVehicleEnquiryError,
+    display_vehicle_record,
+    normalize_registration_number,
+)
+from app.modules.home_assistant.client import (
+    HomeAssistantClient as DefaultHomeAssistantClient,
+)
+from app.modules.home_assistant.client import (
+    HomeAssistantError,
+    HomeAssistantService,
+    HomeAssistantState,
+    get_home_assistant_client,
+)
 from app.modules.home_assistant.covers import (
     cover_entity_state_payload,
     detected_garage_door_entities,
     detected_gate_entities,
     normalize_cover_entities,
 )
-from app.modules.home_assistant.client import (
-    HomeAssistantClient as DefaultHomeAssistantClient,
-    HomeAssistantError,
-    HomeAssistantService,
-    HomeAssistantState,
-    get_home_assistant_client,
-)
-from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.modules.notifications.apprise_client import (
     normalize_apprise_url,
     split_apprise_urls,
     summarize_apprise_url,
     validate_apprise_urls,
 )
+from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.services.access_devices import get_access_device_service
 from app.services.dvla import lookup_vehicle_registration, normalize_vehicle_enquiry_response
-from app.services.home_assistant import get_home_assistant_service
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
+from app.services.home_assistant import get_home_assistant_service
 from app.services.maintenance import is_maintenance_mode_active
-from app.services.recovery_tracker_discovery import RecoveryTrackerDiscovery, discover_recovery_trackers
-from app.services.notifications import get_notification_service
+from app.services.recovery_tracker_discovery import (
+    RecoveryTrackerDiscovery,
+    discover_recovery_trackers,
+)
 from app.services.settings import get_runtime_config, normalize_esphome_device_id, update_settings
 from app.services.telemetry import (
-    TELEMETRY_CATEGORY_CRUD,
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
     emit_audit_log,
@@ -60,6 +67,7 @@ def _home_assistant_client() -> DefaultHomeAssistantClient:
     if HomeAssistantClient is DefaultHomeAssistantClient:
         return get_home_assistant_client()
     return HomeAssistantClient()
+
 
 async def _raise_if_maintenance_active() -> None:
     if await is_maintenance_mode_active():
@@ -90,7 +98,7 @@ async def update_integration_settings(
         service = get_home_assistant_service()
         await service.stop()
         await service.start()
-    if any(key.startswith("esphome_") or key.startswith("gate_") for key in values):
+    if any(key.startswith(("esphome_", "gate_")) for key in values):
         await get_access_device_service().restart()
 
 
@@ -161,17 +169,19 @@ class DvlaLookupRequest(BaseModel):
 
 
 @router.get("/home-assistant/status")
-async def home_assistant_status(refresh: bool = False, _: User = Depends(current_user)) -> dict:
+async def home_assistant_status(
+    _: Annotated[User, Depends(current_user)], refresh: bool = False
+) -> dict:
     return await get_home_assistant_service().status(refresh=refresh)
 
 
 @router.get("/gate/status")
-async def gate_status(refresh: bool = False, _: User = Depends(current_user)) -> dict:
+async def gate_status(_: Annotated[User, Depends(current_user)], refresh: bool = False) -> dict:
     return await get_access_device_service().status(refresh=refresh)
 
 
 @router.get("/esphome/devices")
-async def esphome_devices(_: User = Depends(admin_user)) -> dict:
+async def esphome_devices(_: Annotated[User, Depends(admin_user)]) -> dict:
     config = await get_runtime_config()
     return {"devices": [_esphome_device_summary(device) for device in config.esphome_devices]}
 
@@ -179,8 +189,8 @@ async def esphome_devices(_: User = Depends(admin_user)) -> dict:
 @router.post("/esphome/devices")
 async def add_esphome_device(
     request: ESPHomeDeviceRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
     confirmation_payload = request.model_dump(
         mode="json",
@@ -202,7 +212,11 @@ async def add_esphome_device(
     await update_integration_settings(
         user,
         {"esphome_devices": devices},
-        before={"esphome_devices": [_esphome_device_summary(device) for device in config.esphome_devices]},
+        before={
+            "esphome_devices": [
+                _esphome_device_summary(device) for device in config.esphome_devices
+            ]
+        },
         after={"esphome_devices": [_esphome_device_summary(device) for device in devices]},
     )
     return {"devices": [_esphome_device_summary(device) for device in devices]}
@@ -212,8 +226,8 @@ async def add_esphome_device(
 async def update_esphome_device(
     device_id: str,
     request: ESPHomeDevicePatchRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
     confirmation_payload = request.model_dump(
         mode="json",
@@ -262,9 +276,9 @@ async def update_esphome_device(
 @router.delete("/esphome/devices/{device_id}")
 async def remove_esphome_device(
     device_id: str,
-    request: IntegrationConfirmationRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    request: Annotated[IntegrationConfirmationRequest | None, Body()] = None,
 ) -> dict:
     await require_confirmed_action(
         session,
@@ -290,7 +304,7 @@ async def remove_esphome_device(
 
 
 @router.get("/esphome/status")
-async def esphome_status(refresh: bool = False, _: User = Depends(current_user)) -> dict:
+async def esphome_status(_: Annotated[User, Depends(current_user)], refresh: bool = False) -> dict:
     status = await get_access_device_provider("esphome").status(refresh=refresh)
     return status.__dict__
 
@@ -298,9 +312,9 @@ async def esphome_status(refresh: bool = False, _: User = Depends(current_user))
 @router.post("/esphome/devices/{device_id}/test")
 async def test_esphome_device(
     device_id: str,
-    request: IntegrationConfirmationRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    request: Annotated[IntegrationConfirmationRequest | None, Body()] = None,
 ) -> dict:
     await require_confirmed_action(
         session,
@@ -323,16 +337,15 @@ async def test_esphome_device(
 
 
 @router.get("/esphome/entities")
-async def esphome_entities(device_id: str | None = None, _: User = Depends(admin_user)) -> dict:
+async def esphome_entities(
+    _: Annotated[User, Depends(admin_user)], device_id: str | None = None
+) -> dict:
     try:
         entities = await get_access_device_provider("esphome").discover_covers(device_id=device_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
-        "cover_entities": [
-            _serialize_esphome_entity(entity)
-            for entity in entities
-        ],
+        "cover_entities": [_serialize_esphome_entity(entity) for entity in entities],
         "gate_suggestions": [
             {**_serialize_esphome_entity(entity), "enabled": True}
             for entity in entities
@@ -348,16 +361,16 @@ async def esphome_entities(device_id: str | None = None, _: User = Depends(admin
 
 @router.get("/home-assistant/recovery-trackers", response_model=RecoveryTrackerDiscovery)
 async def home_assistant_recovery_trackers(
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> RecoveryTrackerDiscovery:
     return await discover_recovery_trackers(session, _home_assistant_client())
 
 
 @router.get("/home-assistant/entities")
 async def home_assistant_entities(
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
     try:
         client = _home_assistant_client()
@@ -366,21 +379,35 @@ async def home_assistant_entities(
     except HomeAssistantError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    cover_entities = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("cover.")]
-    input_boolean_entities = [
-        _serialize_ha_entity(state) for state in states if state.entity_id.startswith("input_boolean.")
+    cover_entities = [
+        _serialize_ha_entity(state) for state in states if state.entity_id.startswith("cover.")
     ]
-    media_players = [_serialize_ha_entity(state) for state in states if state.entity_id.startswith("media_player.")]
+    input_boolean_entities = [
+        _serialize_ha_entity(state)
+        for state in states
+        if state.entity_id.startswith("input_boolean.")
+    ]
+    media_players = [
+        _serialize_ha_entity(state)
+        for state in states
+        if state.entity_id.startswith("media_player.")
+    ]
     mobile_app_notification_services = [
         _serialize_ha_service(service)
         for service in services
         if service.service_id.startswith("notify.mobile_app_")
     ]
-    gate_suggestions = [cover_entity_state_payload(entity) for entity in detected_gate_entities(states)]
-    garage_door_suggestions = [cover_entity_state_payload(entity) for entity in detected_garage_door_entities(states)]
+    gate_suggestions = [
+        cover_entity_state_payload(entity) for entity in detected_gate_entities(states)
+    ]
+    garage_door_suggestions = [
+        cover_entity_state_payload(entity) for entity in detected_garage_door_entities(states)
+    ]
     people = (
         await session.scalars(
-            select(Person).where(Person.is_active.is_(True)).order_by(Person.first_name, Person.last_name)
+            select(Person)
+            .where(Person.is_active.is_(True))
+            .order_by(Person.first_name, Person.last_name)
         )
     ).all()
 
@@ -400,9 +427,9 @@ async def home_assistant_entities(
 
 @router.post("/home-assistant/gates/auto-detect")
 async def auto_detect_home_assistant_gates(
-    request: IntegrationConfirmationRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    request: Annotated[IntegrationConfirmationRequest | None, Body()] = None,
 ) -> dict:
     await require_confirmed_action(
         session,
@@ -436,9 +463,9 @@ async def auto_detect_home_assistant_gates(
 
 @router.post("/home-assistant/garage-doors/auto-detect")
 async def auto_detect_home_assistant_garage_doors(
-    request: IntegrationConfirmationRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    request: Annotated[IntegrationConfirmationRequest | None, Body()] = None,
 ) -> dict:
     await require_confirmed_action(
         session,
@@ -471,7 +498,7 @@ async def auto_detect_home_assistant_garage_doors(
 
 
 @router.get("/apprise/urls")
-async def apprise_urls(_: User = Depends(admin_user)) -> dict:
+async def apprise_urls(_: Annotated[User, Depends(admin_user)]) -> dict:
     config = await get_runtime_config()
     urls = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
     return {"urls": [summarize_apprise_url(index, url) for index, url in enumerate(urls)]}
@@ -480,8 +507,8 @@ async def apprise_urls(_: User = Depends(admin_user)) -> dict:
 @router.post("/apprise/urls")
 async def add_apprise_url(
     request: AddAppriseUrlRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
     normalized = normalize_apprise_url(request.url.strip())
     await require_confirmed_action(
@@ -514,9 +541,9 @@ async def add_apprise_url(
 @router.delete("/apprise/urls/{index}")
 async def remove_apprise_url(
     index: int,
-    request: IntegrationConfirmationRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    request: Annotated[IntegrationConfirmationRequest | None, Body()] = None,
 ) -> dict:
     await require_confirmed_action(
         session,
@@ -542,7 +569,9 @@ async def remove_apprise_url(
 
 
 @router.post("/dvla/lookup")
-async def dvla_lookup(request: DvlaLookupRequest, user: User = Depends(current_user)) -> dict[str, object]:
+async def dvla_lookup(
+    request: DvlaLookupRequest, user: Annotated[User, Depends(current_user)]
+) -> dict[str, object]:
     registration_number = normalize_registration_number(request.registration_number)
     try:
         vehicle = await lookup_vehicle_registration(registration_number)
@@ -597,14 +626,18 @@ async def dvla_lookup(request: DvlaLookupRequest, user: User = Depends(current_u
 @router.post("/gate/open", response_model=None)
 async def open_gate(
     request: GateOpenRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict | JSONResponse:
     await _raise_if_maintenance_active()
     if not request.confirmation_token:
-        raise HTTPException(status_code=428, detail="Server-side confirmation is required for this action.")
+        raise HTTPException(
+            status_code=428, detail="Server-side confirmation is required for this action."
+        )
     try:
-        plan = await get_access_device_service().preview_gate_open(target_device_key=request.target_device_key)
+        plan = await get_access_device_service().preview_gate_open(
+            target_device_key=request.target_device_key
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     confirmation = await require_confirmed_action(
@@ -620,8 +653,12 @@ async def open_gate(
             reason=request.reason,
             source="manual_admin",
             actor=actor_from_user(user),
-            actor_user_id=str(user.id), auth_version=user.auth_session_version,
-            metadata={"actor_user_id": str(user.id), "actor_auth_session_version": user.auth_session_version},
+            actor_user_id=str(user.id),
+            auth_version=user.auth_session_version,
+            metadata={
+                "actor_user_id": str(user.id),
+                "actor_auth_session_version": user.auth_session_version,
+            },
             intent_id=str(confirmation.id),
             idempotency_key=str(confirmation.id),
             target_device_key=request.target_device_key,
@@ -650,19 +687,27 @@ async def open_gate(
         actor_user_id=user.id,
         target_entity="Gate",
         target_label=request.target_device_key or "All configured access gates",
-        outcome="uncertain" if result.delivery == "unknown" else "success" if result.accepted else "failed",
+        outcome="uncertain"
+        if result.delivery == "unknown"
+        else "success"
+        if result.accepted
+        else "failed",
         level="warning" if result.delivery == "unknown" else "info" if result.accepted else "error",
         metadata={"reason": request.reason, **receipt},
     )
     await _commit_if_supported(session)
     if not result.accepted:
         # Keep the legacy HTTP status/detail while exposing the durable outcome.
-        return JSONResponse(status_code=503, content={**receipt, "detail": result.detail or "Gate command failed."})
+        return JSONResponse(
+            status_code=503, content={**receipt, "detail": result.detail or "Gate command failed."}
+        )
     return receipt
 
 
 @router.get("/gate/commands/{command_id}")
-async def gate_command_receipt(command_id: UUID, response: Response, user: User = Depends(admin_user)) -> dict:
+async def gate_command_receipt(
+    command_id: UUID, response: Response, user: Annotated[User, Depends(admin_user)]
+) -> dict:
     response.headers["Cache-Control"] = "no-store"
     receipt = await get_gate_command_coordinator().get_receipt(command_id)
     if receipt is None:
@@ -672,23 +717,32 @@ async def gate_command_receipt(command_id: UUID, response: Response, user: User 
 
 @router.get("/gate/commands")
 async def gate_command_receipt_by_intent(
-    response: Response, intent_id: UUID | None = None, before_id: UUID | None = None,
-    limit: int = Query(default=25, ge=1, le=100), user: User = Depends(admin_user),
+    response: Response,
+    user: Annotated[User, Depends(admin_user)],
+    intent_id: UUID | None = None,
+    before_id: UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     if intent_id is None:
         try:
-            return await get_gate_command_coordinator().list_receipts(limit=limit, before_id=before_id)
+            return await get_gate_command_coordinator().list_receipts(
+                limit=limit, before_id=before_id
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     receipt = await get_gate_command_coordinator().get_receipt(intent_id=str(intent_id))
     if receipt is None:
-        raise HTTPException(status_code=404, detail="No recorded gate command is available for this intent.")
+        raise HTTPException(
+            status_code=404, detail="No recorded gate command is available for this intent."
+        )
     return receipt
 
 
 @router.get("/cover/commands/{command_id}")
-async def cover_command_receipt(command_id: UUID, response: Response, user: User = Depends(admin_user)) -> dict:
+async def cover_command_receipt(
+    command_id: UUID, response: Response, user: Annotated[User, Depends(admin_user)]
+) -> dict:
     response.headers["Cache-Control"] = "no-store"
     receipt = await get_access_device_service().command_receipt(command_id)
     if receipt is None:
@@ -698,26 +752,33 @@ async def cover_command_receipt(command_id: UUID, response: Response, user: User
 
 @router.get("/cover/commands")
 async def cover_command_receipt_by_intent(
-    response: Response, intent_id: UUID | None = None, before_id: UUID | None = None,
-    limit: int = Query(default=25, ge=1, le=100), user: User = Depends(admin_user),
+    response: Response,
+    user: Annotated[User, Depends(admin_user)],
+    intent_id: UUID | None = None,
+    before_id: UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     if intent_id is None:
         try:
-            return await get_access_device_service().list_command_receipts(limit=limit, before_id=before_id)
+            return await get_access_device_service().list_command_receipts(
+                limit=limit, before_id=before_id
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     receipt = await get_access_device_service().command_receipt(intent_id=str(intent_id))
     if receipt is None:
-        raise HTTPException(status_code=404, detail="No recorded device command is available for this intent.")
+        raise HTTPException(
+            status_code=404, detail="No recorded device command is available for this intent."
+        )
     return receipt
 
 
 @router.post("/cover/command", response_model=None)
 async def cover_command(
     request: CoverCommandRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict | JSONResponse:
     await _raise_if_maintenance_active()
     device_key = resolve_legacy_cover_key(entity_id=request.entity_id, target=request.target)
@@ -726,7 +787,9 @@ async def cover_command(
 
     devices = {
         device.key: device
-        for device in await get_access_device_service().list_devices(kind="garage_door", enabled_only=True)
+        for device in await get_access_device_service().list_devices(
+            kind="garage_door", enabled_only=True
+        )
     }
     device = devices.get(device_key)
     if not device:
@@ -751,7 +814,8 @@ async def cover_command(
         request.action,
         request.reason,
         schedule_source="garage_door",
-        actor_user_id=str(user.id), auth_version=user.auth_session_version,
+        actor_user_id=str(user.id),
+        auth_version=user.auth_session_version,
         intent_id=str(confirmation.id),
         idempotency_key=str(confirmation.id),
         target_plan=plan,
@@ -781,85 +845,131 @@ async def cover_command(
         target_entity="Cover",
         target_id=device.key,
         target_label=device.name,
-        outcome="uncertain" if outcome.delivery == "unknown" else "success" if outcome.accepted else "failed",
-        level="warning" if outcome.delivery == "unknown" else "info" if outcome.accepted else "error",
+        outcome="uncertain"
+        if outcome.delivery == "unknown"
+        else "success"
+        if outcome.accepted
+        else "failed",
+        level="warning"
+        if outcome.delivery == "unknown"
+        else "info"
+        if outcome.accepted
+        else "error",
         metadata={"reason": request.reason, **receipt},
     )
     await _commit_if_supported(session)
     if not outcome.accepted:
-        return JSONResponse(status_code=503, content={**receipt, "detail": outcome.detail or "Garage door command failed."})
+        return JSONResponse(
+            status_code=503,
+            content={**receipt, "detail": outcome.detail or "Garage door command failed."},
+        )
     return receipt
 
 
 @router.post("/announcements/say")
 async def say_announcement(
     request: AnnouncementRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, str]:
     await _raise_if_maintenance_active()
     config = await get_runtime_config()
     target = request.entity_id or config.home_assistant_default_media_player
     if not target:
-        raise HTTPException(status_code=400, detail="No media_player entity configured or supplied.")
+        raise HTTPException(
+            status_code=400, detail="No media_player entity configured or supplied."
+        )
 
     confirmation_payload = request.model_dump(exclude={"confirmation_token"}, exclude_none=True)
     result = await send_confirmed_notification(
-        session, user=user, action="announcement.say", payload=confirmation_payload,
+        session,
+        user=user,
+        action="announcement.say",
+        payload=confirmation_payload,
         confirmation_token=request.confirmation_token,
-        context=NotificationContext(event_type="integration_test", subject="Announcement", severity="info",
-                                    facts={"message": request.message}),
-        direct_action={"type": "voice", "delivery_mode": "literal", "target": target,
-                       "title": "Announcement", "message": request.message,
-                       "configured_default": not bool(request.entity_id)},
+        context=NotificationContext(
+            event_type="integration_test",
+            subject="Announcement",
+            severity="info",
+            facts={"message": request.message},
+        ),
+        direct_action={
+            "type": "voice",
+            "delivery_mode": "literal",
+            "target": target,
+            "title": "Announcement",
+            "message": request.message,
+            "configured_default": not bool(request.entity_id),
+        },
     )
     return {"status": "sent", "entity_id": target, "notification_run_id": result.run_id}
-
 
 
 @router.post("/home-assistant/mobile-notifications/test")
 async def send_home_assistant_mobile_notification_test(
     request: TestHomeAssistantMobileNotificationRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, str]:
     person_name = request.person_name.strip() or "this person"
     body = f"Mobile notifications are linked for {person_name}."
     result = await send_confirmed_notification(
-        session, user=user, action="notification.mobile_test",
+        session,
+        user=user,
+        action="notification.mobile_test",
         payload=request.model_dump(exclude={"confirmation_token"}, exclude_none=True),
         confirmation_token=request.confirmation_token,
-        context=NotificationContext(event_type="integration_test", subject="IACS Home Assistant test",
-                                    severity="info", facts={"message": body}),
-        direct_action={"type": "mobile", "delivery_mode": "literal", "target": request.service_name,
-                       "title": "IACS Home Assistant test", "message": body},
+        context=NotificationContext(
+            event_type="integration_test",
+            subject="IACS Home Assistant test",
+            severity="info",
+            facts={"message": body},
+        ),
+        direct_action={
+            "type": "mobile",
+            "delivery_mode": "literal",
+            "target": request.service_name,
+            "title": "IACS Home Assistant test",
+            "message": body,
+        },
     )
-    return {"status": "sent", "service_name": request.service_name, "notification_run_id": result.run_id}
-
+    return {
+        "status": "sent",
+        "service_name": request.service_name,
+        "notification_run_id": result.run_id,
+    }
 
 
 @router.post("/notifications/test")
 async def send_test_notification(
     request: TestNotificationRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, str | None]:
     config = await get_runtime_config()
     if not config.apprise_urls:
         raise HTTPException(status_code=400, detail="Apprise is not configured.")
 
     result = await send_confirmed_notification(
-        session, user=user, action="notification.test",
+        session,
+        user=user,
+        action="notification.test",
         payload=request.model_dump(exclude={"confirmation_token"}, exclude_none=True),
         confirmation_token=request.confirmation_token,
-        context=NotificationContext(event_type="integration_test", subject=request.subject,
-                                    severity=request.severity, facts={"message": request.message}),
+        context=NotificationContext(
+            event_type="integration_test",
+            subject=request.subject,
+            severity=request.severity,
+            facts={"message": request.message},
+        ),
     )
     return {
-        "status": "sent", "delivery_status": result.status, "notification_run_id": result.run_id,
-        "title": result.notification.title, "body": result.notification.body,
+        "status": "sent",
+        "delivery_status": result.status,
+        "notification_run_id": result.run_id,
+        "title": result.notification.title,
+        "body": result.notification.body,
     }
-
 
 
 def _esphome_device_summary(device: dict) -> dict:
@@ -988,7 +1098,9 @@ def _suggest_person_mapping(
         entity_label = f"{entity.get(id_key, '')} {entity.get(name_key) or ''}"
         entity_tokens = _name_tokens(entity_label)
         token_score = len(person_tokens & entity_tokens) / max(len(person_tokens), 1)
-        ratio_score = SequenceMatcher(None, " ".join(sorted(person_tokens)), " ".join(sorted(entity_tokens))).ratio()
+        ratio_score = SequenceMatcher(
+            None, " ".join(sorted(person_tokens)), " ".join(sorted(entity_tokens))
+        ).ratio()
         score = max(token_score, ratio_score)
         if score > best_score:
             best_score = score

@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import * as directory from "../../api/directory";
 import * as client from "../../api/client";
 import { integrationsApi, type RecoveryTrackerDiscovery } from "../../api/integrations";
 import { missedExitRecoveryApi } from "../../api/missedExitRecovery";
@@ -32,6 +33,8 @@ function editOwner() {
   fireEvent.change(tracker(), { target: { value: "device_tracker.first" } });
 }
 beforeEach(() => {
+  vi.spyOn(directory, "readDirectory").mockResolvedValue({ items: [owner, second], total: 2, next_cursor: null });
+  vi.spyOn(directory, "lookupDirectory").mockImplementation(async (_kind, ids) => [owner, second].filter((item) => ids.includes(item.id)));
   vi.spyOn(client.api, "get").mockImplementation(async <T,>() => rows() as T);
   vi.spyOn(integrationsApi, "getRecoveryTrackers").mockResolvedValue({ status: "complete", reason: null, trackers: [], mappings: [] });
   vi.spyOn(client.api, "patch").mockResolvedValue(rows(true, 51.5, -0.1));
@@ -124,8 +127,11 @@ it("preserves owner drafts during save and displays the saved response until dir
   expect(ownerToggle()).toHaveValue("true"); expect(tracker()).toHaveValue("device_tracker.first");
   await act(async () => view.rerender(<RecoveryConfiguration {...value} people={[{ ...owner }, second]} />));
   expect(tracker()).toHaveValue("device_tracker.first");
+  vi.mocked(directory.lookupDirectory).mockResolvedValue([saved]);
   await act(async () => view.rerender(<RecoveryConfiguration {...value} people={[saved, second]} />));
-  await act(async () => view.rerender(<RecoveryConfiguration {...value} people={[{ ...saved, missed_exit_recovery_tracker_entity_id: "device_tracker.changed" }, second]} />));
+  const changed = { ...saved, missed_exit_recovery_tracker_entity_id: "device_tracker.changed" };
+  vi.mocked(directory.lookupDirectory).mockResolvedValue([changed]);
+  await act(async () => view.rerender(<RecoveryConfiguration {...value} people={[changed, second]} />));
   expect(tracker()).toHaveValue("device_tracker.changed");
 });
 
@@ -175,6 +181,7 @@ it("does not use a stale discovery response after the saved notification destina
   const value = props(); let view!: ReturnType<typeof render>;
   await act(async () => { view = render(<RecoveryConfiguration {...value} />); });
   fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
+  vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }]);
   await act(async () => view.rerender(<RecoveryConfiguration {...value} people={[{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }, second]} />));
   await act(async () => pending.resolve(matched));
   expect(tracker()).toHaveValue("");
@@ -186,6 +193,7 @@ it("revokes an untouched automatic suggestion when the saved destination changes
   await act(async () => { view = render(<RecoveryConfiguration {...value} />); });
   fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
   expect(tracker()).toHaveValue("device_tracker.renamed_iphone");
+  vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }]);
   await act(async () => view.rerender(<RecoveryConfiguration {...value} people={[{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }, second]} />));
   expect(tracker()).toHaveValue("");
 });

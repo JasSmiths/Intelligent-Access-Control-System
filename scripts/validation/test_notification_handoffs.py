@@ -79,7 +79,8 @@ async def test_arrival_captures_vehicle_absence_in_committed_notification():
     from app.models import AccessEvent, Person, Vehicle
     from app.models.enums import AccessDecision, AccessDirection
     from app.services.access.delivery import reserve_verified_arrival_notification
-    from app.services.notifications import context_variables, render_template
+    from app.services.notification_rendering import context_variables
+    from app.services.workflows.context import render_template
     from app.services.workflows.vehicle_away import vehicle_time_away_seconds
 
     now = datetime(2026, 10, 2, 12, tzinfo=UTC)

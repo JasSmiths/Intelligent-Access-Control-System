@@ -1,9 +1,10 @@
 import asyncio
+from collections.abc import Callable, Coroutine
 from dataclasses import asdict
 from datetime import UTC, datetime
 from functools import lru_cache
 from time import monotonic
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 from app.core.logging import get_logger
 from app.core.task_lifecycle import drain_owned
@@ -14,8 +15,8 @@ from app.modules.unifi_protect.client import (
     get_unifi_protect_event_thumbnail,
     get_unifi_protect_event_video,
     get_unifi_protect_snapshot,
-    is_unifi_protect_stream_metadata_only,
     is_unifi_protect_configured,
+    is_unifi_protect_stream_metadata_only,
     list_bootstrap_cameras,
     list_unifi_protect_events,
     load_unifi_protect_bootstrap,
@@ -26,7 +27,10 @@ from app.modules.unifi_protect.client import (
     websocket_message_payload,
 )
 from app.services.event_bus import event_bus
-from app.services.lpr_timing import extract_unifi_protect_track_observations, get_lpr_timing_recorder
+from app.services.lpr_timing import (
+    extract_unifi_protect_track_observations,
+    get_lpr_timing_recorder,
+)
 from app.services.settings import get_runtime_config
 from app.services.vehicle_visual_detections import (
     get_vehicle_presence_tracker,
@@ -139,15 +143,27 @@ class UnifiProtectIntegrationService:
         camera_identifier: str | None = None,
     ) -> dict[str, Any]:
         api = await self._ensure_api(subscribe=True)
-        camera = gate_lpr_camera_from_bootstrap(list_bootstrap_cameras(api), camera_identifier=camera_identifier)
-        resolved = resolve_camera_smart_zone_names(camera, zone_values) if camera is not None else zone_values
+        camera = gate_lpr_camera_from_bootstrap(
+            list_bootstrap_cameras(api), camera_identifier=camera_identifier
+        )
+        resolved = (
+            resolve_camera_smart_zone_names(camera, zone_values)
+            if camera is not None
+            else zone_values
+        )
         day_night, day_night_source = camera_day_night(camera)
         return {
             "camera_id": str(getattr(camera, "id", "") or "") if camera is not None else None,
-            "camera_name": str(getattr(camera, "display_name", None) or getattr(camera, "name", None) or "") if camera is not None else None,
+            "camera_name": str(
+                getattr(camera, "display_name", None) or getattr(camera, "name", None) or ""
+            )
+            if camera is not None
+            else None,
             "camera_identifier": camera_identifier,
             "smart_zones": resolved,
-            "smart_zone_matches": resolve_camera_smart_zone_matches(camera, zone_values) if camera is not None else [],
+            "smart_zone_matches": resolve_camera_smart_zone_matches(camera, zone_values)
+            if camera is not None
+            else [],
             "time_of_day": day_night,
             "time_of_day_source": day_night_source,
         }
@@ -177,8 +193,11 @@ class UnifiProtectIntegrationService:
         event = None
         try:
             event = await api.get_event(event_id)
-        except Exception as exc:
-            logger.debug("unifi_protect_event_lookup_for_track_failed", extra={"event_id": event_id, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
+            logger.debug(
+                "unifi_protect_event_lookup_for_track_failed",
+                extra={"event_id": event_id, "error": str(exc)},
+            )
         try:
             track = await api.api_request_obj(f"events/{event_id}/smartDetectTrack")
         except Exception as exc:
@@ -199,22 +218,37 @@ class UnifiProtectIntegrationService:
         api = await self._ensure_api(subscribe=True)
         method = getattr(api, "send_alarm_webhook_public", None)
         if not callable(method):
-            raise UnifiProtectError("Installed uiprotect package does not expose Alarm Manager webhook tests.")
+            raise UnifiProtectError(
+                "Installed uiprotect package does not expose Alarm Manager webhook tests."
+            )
         try:
             result = await method(trigger_id)
         except Exception as exc:
             raise UnifiProtectError(str(exc)) from exc
         return {"trigger_id": trigger_id, "result": result}
 
-    async def snapshot(self, camera_id: str, *, width: int | None = None, height: int | None = None, channel: str | None = None):
+    async def snapshot(
+        self,
+        camera_id: str,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        channel: str | None = None,
+    ):
         api = await self._ensure_api(subscribe=True)
         async with self._media_semaphore:
-            return await get_unifi_protect_snapshot(api, camera_id, width=width, height=height, channel=channel)
+            return await get_unifi_protect_snapshot(
+                api, camera_id, width=width, height=height, channel=channel
+            )
 
-    async def event_thumbnail(self, event_id: str, *, width: int | None = None, height: int | None = None):
+    async def event_thumbnail(
+        self, event_id: str, *, width: int | None = None, height: int | None = None
+    ):
         api = await self._ensure_api(subscribe=True)
         async with self._media_semaphore:
-            return await get_unifi_protect_event_thumbnail(api, event_id, width=width, height=height)
+            return await get_unifi_protect_event_thumbnail(
+                api, event_id, width=width, height=height
+            )
 
     async def event_video(self, event_id: str):
         api = await self._ensure_api(subscribe=True)
@@ -230,8 +264,13 @@ class UnifiProtectIntegrationService:
             await load_unifi_protect_bootstrap(api)
             cameras = list_bootstrap_cameras(api)
             if not cameras:
-                raise UnifiProtectError("UniFi Protect connection succeeded, but no readable cameras were returned.")
-            return {"camera_count": len(cameras), "cameras": [serialize_unifi_camera(camera) for camera in cameras[:5]]}
+                raise UnifiProtectError(
+                    "UniFi Protect connection succeeded, but no readable cameras were returned."
+                )
+            return {
+                "camera_count": len(cameras),
+                "cameras": [serialize_unifi_camera(camera) for camera in cameras[:5]],
+            }
         finally:
             await close_unifi_protect_client(api)
 
@@ -280,7 +319,7 @@ class UnifiProtectIntegrationService:
         for unsubscribe in self._unsubscribers:
             try:
                 unsubscribe()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
                 logger.debug("unifi_protect_unsubscribe_failed", extra={"error": str(exc)})
         self._unsubscribers.clear()
 
@@ -303,7 +342,9 @@ class UnifiProtectIntegrationService:
         if not stream_metadata_only:
             try:
                 self._spawn_background(
-                    get_lpr_timing_recorder().record_unifi_protect_message(message, received_at=received_at),
+                    get_lpr_timing_recorder().record_unifi_protect_message(
+                        message, received_at=received_at
+                    ),
                     name="unifi-protect-lpr-timing-message",
                 )
                 self._spawn_background(
@@ -326,18 +367,20 @@ class UnifiProtectIntegrationService:
                     )
             except RuntimeError:
                 logger.debug("unifi_protect_lpr_timing_without_loop")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
                 logger.debug("unifi_protect_lpr_timing_failed", extra={"error": str(exc)})
 
         try:
             payload = websocket_message_payload(message)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
             logger.debug("unifi_protect_ws_payload_failed", extra={"error": str(exc)})
             return
         if not stream_metadata_only:
             try:
                 self._spawn_background(
-                    get_vehicle_presence_tracker().record_unifi_realtime_payload(payload, received_at=received_at),
+                    get_vehicle_presence_tracker().record_unifi_realtime_payload(
+                        payload, received_at=received_at
+                    ),
                     name="unifi-protect-vehicle-presence-message",
                 )
             except RuntimeError:
@@ -348,10 +391,15 @@ class UnifiProtectIntegrationService:
             event_type = "protect.camera.updated"
         if payload.get("event"):
             event_type = "protect.event.detected"
-        if event_type in {"protect.updated", "protect.camera.updated"} and not self._should_publish_update(event_type, payload):
+        if event_type in {
+            "protect.updated",
+            "protect.camera.updated",
+        } and not self._should_publish_update(event_type, payload):
             return
         try:
-            self._spawn_background(event_bus.publish(event_type, payload), name=f"unifi-protect-publish:{event_type}")
+            self._spawn_background(
+                event_bus.publish(event_type, payload), name=f"unifi-protect-publish:{event_type}"
+            )
         except RuntimeError:
             logger.debug("unifi_protect_ws_without_loop")
 
@@ -377,10 +425,14 @@ class UnifiProtectIntegrationService:
             logger.debug("unifi_protect_state_without_loop")
 
     def _realtime_connected(self) -> bool:
-        return all(self._websocket_states[channel] == "connected" for channel in PROTECT_WEBSOCKET_CHANNELS)
+        return all(
+            self._websocket_states[channel] == "connected" for channel in PROTECT_WEBSOCKET_CHANNELS
+        )
 
     def _realtime_error(self) -> str | None:
-        failed = [channel for channel, state in self._websocket_states.items() if state == "auth_failed"]
+        failed = [
+            channel for channel, state in self._websocket_states.items() if state == "auth_failed"
+        ]
         if not failed:
             return None
         return f"UniFi Protect websocket authentication failed: {', '.join(failed)}."
@@ -427,7 +479,7 @@ class UnifiProtectIntegrationService:
                         await asyncio.sleep(delay)
                     try:
                         track = await api.api_request_obj(f"events/{event_id}/smartDetectTrack")
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
                         logger.debug(
                             "unifi_protect_lpr_track_probe_failed",
                             extra={"event_id": event_id, "attempt": attempt, "error": str(exc)},
@@ -494,21 +546,25 @@ class UnifiProtectIntegrationService:
         if any(item == "licenseplate" for item in smart_types):
             return True
 
-        event_type = str(_enum_value(getattr(event, "type", None)) or _dict_get(changed_data, "type") or "").lower()
+        event_type = str(
+            _enum_value(getattr(event, "type", None)) or _dict_get(changed_data, "type") or ""
+        ).lower()
         if event_type == "smartdetectzone":
             return True
 
         camera = getattr(event, "camera", None)
         camera_name = str(
-            getattr(camera, "display_name", "")
-            or getattr(camera, "name", "")
-            or ""
+            getattr(camera, "display_name", "") or getattr(camera, "name", "") or ""
         ).lower()
         if "lpr" in camera_name or "license" in camera_name:
             return True
 
         changed_text = str(changed_data).lower()
-        return "licenseplate" in changed_text or "detectedthumbnails" in changed_text or "detected_thumbnails" in changed_text
+        return (
+            "licenseplate" in changed_text
+            or "detectedthumbnails" in changed_text
+            or "detected_thumbnails" in changed_text
+        )
 
 
 def _runtime_with_overrides(runtime, values: dict[str, Any]):
@@ -523,7 +579,9 @@ def _runtime_with_overrides(runtime, values: dict[str, Any]):
     return runtime.__class__(**fields)
 
 
-def gate_lpr_camera_from_bootstrap(cameras: list[Any], *, camera_identifier: str | None = None) -> Any | None:
+def gate_lpr_camera_from_bootstrap(
+    cameras: list[Any], *, camera_identifier: str | None = None
+) -> Any | None:
     identifier = _normalize_camera_identifier(camera_identifier)
     if identifier:
         for camera in cameras:
@@ -531,15 +589,24 @@ def gate_lpr_camera_from_bootstrap(cameras: list[Any], *, camera_identifier: str
                 return camera
 
     for camera in cameras:
-        if _normalize_camera_identifier(getattr(camera, "display_name", None) or getattr(camera, "name", None)) == GATE_LPR_CAMERA_NAME:
+        if (
+            _normalize_camera_identifier(
+                getattr(camera, "display_name", None) or getattr(camera, "name", None)
+            )
+            == GATE_LPR_CAMERA_NAME
+        ):
             return camera
 
     for camera in cameras:
-        if _normalize_camera_identifier(getattr(camera, "mac", None)) == _normalize_camera_identifier(GATE_LPR_CAMERA_DEVICE):
+        if _normalize_camera_identifier(
+            getattr(camera, "mac", None)
+        ) == _normalize_camera_identifier(GATE_LPR_CAMERA_DEVICE):
             return camera
 
     for camera in cameras:
-        label = _normalize_camera_identifier(getattr(camera, "display_name", None) or getattr(camera, "name", None))
+        label = _normalize_camera_identifier(
+            getattr(camera, "display_name", None) or getattr(camera, "name", None)
+        )
         if label and "gate" in label and "lpr" in label:
             return camera
     return None
@@ -564,7 +631,9 @@ def resolve_camera_smart_zone_names(camera: Any, zone_values: list[str]) -> list
     return _dedupe_preserving_order(resolved)
 
 
-def resolve_camera_smart_zone_matches(camera: Any, zone_values: list[str]) -> list[dict[str, str | None]]:
+def resolve_camera_smart_zone_matches(
+    camera: Any, zone_values: list[str]
+) -> list[dict[str, str | None]]:
     lookup: dict[str, dict[str, str | None]] = {}
     for zone in getattr(camera, "smart_detect_zones", []) or []:
         zone_id = _string_or_none(getattr(zone, "id", None))
@@ -667,7 +736,7 @@ def _camera_to_dict(camera: Any) -> dict[str, Any]:
         try:
             value = unifi_dict()
             return value if isinstance(value, dict) else {}
-        except Exception:
+        except Exception:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
             return {}
     return {}
 

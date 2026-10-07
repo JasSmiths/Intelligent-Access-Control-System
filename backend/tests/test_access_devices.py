@@ -19,11 +19,11 @@ from app.modules.access_devices.home_assistant import HomeAssistantAccessDeviceP
 from app.modules.access_devices.registry import get_access_device_provider
 from app.modules.gate.base import GateState
 from app.services import access_devices as access_devices_module
-from app.services.access_devices import (
+from app.services.access_device_outcomes import (
     AccessDeviceOperationResult,
     AccessDeviceProviderAttempt,
-    AccessDeviceService,
 )
+from app.services.access_devices import AccessDeviceService
 
 
 @pytest.fixture(autouse=True)

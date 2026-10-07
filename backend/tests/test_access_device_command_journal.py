@@ -270,9 +270,9 @@ def wire_provider(monkeypatch, provider, admission_key):
 @pytest_asyncio.fixture
 async def maintenance_owner(monkeypatch):
     from app.models import MaintenanceModeState
-    from app.services import maintenance
+    from app.services import maintenance, notifications
 
-    monkeypatch.setattr(maintenance, "get_notification_service", lambda: SimpleNamespace(
+    monkeypatch.setattr(notifications, "get_notification_service", lambda: SimpleNamespace(
         enqueue_in_session=AsyncMock(), dispatcher=SimpleNamespace(wake=Mock())))
     monkeypatch.setattr(maintenance, "_sync_home_assistant", AsyncMock())
     monkeypatch.setattr(maintenance.event_bus, "publish", AsyncMock())
@@ -297,7 +297,7 @@ async def maintenance_owner(monkeypatch):
 
 
 async def maintenance_subject(monkeypatch, *, kind, action):
-    from app.modules.gate import access_devices as gate_adapter
+    from app.services import gate_controller as gate_adapter
     from app.services.gate_commands import GateCommandCoordinator, GateCommandIntent
 
     device = await persisted_device(kind=kind)
@@ -307,10 +307,9 @@ async def maintenance_subject(monkeypatch, *, kind, action):
     identity = str(uuid.uuid4())
     if kind == "gate":
         plan = await service.preview_gate_open(target_device_key=device.key, require_admission=False)
-        monkeypatch.setattr(gate_adapter, "get_access_device_service", lambda: service)
 
         async def invoke():
-            return await GateCommandCoordinator(lambda _name: gate_adapter.AccessDeviceGateController()).execute_open(
+            return await GateCommandCoordinator(lambda _name: gate_adapter.AccessDeviceGateController(service)).execute_open(
                 GateCommandIntent(reason="Synthetic", source="synthetic", intent_id=identity, idempotency_key=identity,
                     target_device_key=device.key, target_plan=plan, require_admission=False, bypass_schedule=True))
     else:
@@ -646,7 +645,7 @@ async def test_automatic_entry_precondition_is_global_and_never_opens_on_unknown
     monkeypatch, maintenance_owner, initial, expected_sends, admitted,
 ):
     from app.models import GateCommandRecord
-    from app.modules.gate import access_devices as gate_adapter
+    from app.services import gate_controller as gate_adapter
     from app.services.gate_commands import GateCommandCoordinator, GateCommandIntent
 
     entry, secondary = await persisted_device(), await persisted_device()
@@ -670,13 +669,12 @@ async def test_automatic_entry_precondition_is_global_and_never_opens_on_unknown
                       key=lambda item: item.device_id != str(entry.id))
 
     monkeypatch.setattr(service._configuration, "list_devices_for_session", subjects)
-    monkeypatch.setattr(gate_adapter, "get_access_device_service", lambda: service)
     plan = await service.preview_gate_open(require_admission=True, automatic_entry_policy=True)
     identity = str(uuid.uuid4())
     intent = GateCommandIntent(reason="Synthetic automatic entry", source="synthetic", intent_id=identity,
         idempotency_key=identity, target_plan=plan, require_admission=True, automatic_entry_policy=True,
         bypass_schedule=True, authorize_dispatch=AsyncMock())
-    coordinator = GateCommandCoordinator(lambda _name: gate_adapter.AccessDeviceGateController())
+    coordinator = GateCommandCoordinator(lambda _name: gate_adapter.AccessDeviceGateController(service))
     result = await coordinator.execute_open(intent)
     assert sum(len(provider.calls) for provider in providers.values()) == expected_sends
     assert result.admission_verified is admitted

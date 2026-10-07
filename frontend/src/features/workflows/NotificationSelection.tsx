@@ -3,6 +3,7 @@ import { useModalFocus } from "../../ui/useModalFocus";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import { ArrowLeft, Check, Clock3, Users, X } from "lucide-react";
 import React from "react";
+import { useDirectoryOptions } from "../directory/reads";
 import type { Person, Schedule, UserAccount } from "../../api/types";
 import type { NotificationAction, NotificationActionType, NotificationCondition, NotificationIntegration, NotificationTriggerGroup } from "../../api/workflows";
 import { titleCase } from "../../lib/format";
@@ -167,7 +168,8 @@ export function NotificationActionModal({
   React.useEffect(() => { onDirtyChange?.(Boolean(selectedMethodId)); return () => onDirtyChange?.(false); }, [onDirtyChange, selectedMethodId]);
   const requestClose = useEditorDismiss(onClose, Boolean(selectedMethodId), false, "notification action selection");
   const query = searchQuery.trim().toLowerCase();
-  const currentUserPerson = React.useMemo(() => findCurrentUserPerson(people, currentUser), [currentUser, people]);
+  const personOptions = useDirectoryOptions("people", people, currentUser.person_id ? [currentUser.person_id] : []);
+  const currentUserPerson = React.useMemo(() => findCurrentUserPerson(personOptions.items, currentUser), [currentUser, personOptions.items]);
   const methodsByCategory = React.useMemo(
     () => buildNotificationActionMethods(integrations, currentUserPerson),
     [currentUserPerson, integrations]

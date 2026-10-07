@@ -26,10 +26,10 @@ from app.services.notifications import (
     NotificationService,
     TRIGGER_CATALOG,
     VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE,
-    presence_condition_matches,
-    render_template,
     visitor_pass_notification_contexts_from_event,
 )
+from app.services.notification_planning import presence_condition_matches
+from app.services.workflows.context import render_template
 from app.services.notification_rendering import (
     context_variables,
     gate_malfunction_notification_content,
@@ -597,7 +597,7 @@ async def test_gate_malfunction_actions_filter_each_channel_by_stage(monkeypatch
     monkeypatch.setattr("app.services.notifications.get_runtime_config", fake_runtime_config)
     monkeypatch.setattr(NotificationService, "_record_notification_span", lambda *_args, **_kwargs: None)
 
-    actions = await NotificationService()._gate_malfunction_actions_for_delivery(
+    actions = await NotificationService().planner._gate_malfunction_actions_for_delivery(
         [
             {"type": "mobile", "gate_malfunction_stages": ["30m"]},
             {"type": "in_app", "gate_malfunction_stages": []},
@@ -695,7 +695,7 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
 async def test_home_assistant_mobile_targets_accept_specific_notify_services() -> None:
     service = NotificationService()
 
-    targets = await service._select_home_assistant_mobile_targets(
+    targets = await service.recipients.select_home_assistant_mobile_targets(
         SimpleNamespace(),
         {
             "target_mode": "selected",
@@ -706,7 +706,7 @@ async def test_home_assistant_mobile_targets_accept_specific_notify_services() -
     assert targets == ["notify.mobile_app_jason"]
 
     with pytest.raises(NotificationDeliveryError):
-        await service._select_home_assistant_mobile_targets(
+        await service.recipients.select_home_assistant_mobile_targets(
             SimpleNamespace(),
             {
                 "target_mode": "selected",
@@ -1195,7 +1195,7 @@ async def test_voice_action_applies_phonetics_only_to_spoken_message(monkeypatch
         return None
 
     monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
-    monkeypatch.setattr(service, "_select_voice_targets", fake_select_voice_targets)
+    monkeypatch.setattr(service.recipients, "select_voice_targets", fake_select_voice_targets)
     monkeypatch.setattr(service, "_voice_announcements_preflight", fake_voice_preflight)
 
     await service._send_voice(action, SimpleNamespace(home_assistant_default_media_player=""))
@@ -1227,7 +1227,7 @@ async def test_voice_action_attempts_all_targets_before_reporting_failures(monke
         return None
 
     monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
-    monkeypatch.setattr(service, "_select_voice_targets", fake_select_voice_targets)
+    monkeypatch.setattr(service.recipients, "select_voice_targets", fake_select_voice_targets)
     monkeypatch.setattr(service, "_voice_announcements_preflight", fake_voice_preflight)
 
     with pytest.raises(NotificationDeliveryError) as excinfo:
@@ -1260,7 +1260,7 @@ async def test_voice_action_preflight_on_sends_to_targets(monkeypatch) -> None:
 
     monkeypatch.setattr("app.services.notifications.HomeAssistantClient", FakeHomeAssistantClient)
     monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
-    monkeypatch.setattr(service, "_select_voice_targets", fake_select_voice_targets)
+    monkeypatch.setattr(service.recipients, "select_voice_targets", fake_select_voice_targets)
 
     outcome = await service._send_voice({"message": "BMW arrived"}, SimpleNamespace(home_assistant_default_media_player=""))
 
@@ -1360,7 +1360,7 @@ async def test_voice_action_state_lookup_failure_suppresses_without_tts(monkeypa
 
     monkeypatch.setattr("app.services.notifications.HomeAssistantClient", FakeHomeAssistantClient)
     monkeypatch.setattr("app.services.notifications.HomeAssistantTtsAnnouncer", FakeTtsAnnouncer)
-    monkeypatch.setattr(service, "_select_voice_targets", fake_select_voice_targets)
+    monkeypatch.setattr(service.recipients, "select_voice_targets", fake_select_voice_targets)
 
     outcome = await service._send_voice({"message": "BMW arrived"}, SimpleNamespace(home_assistant_default_media_player=""))
 

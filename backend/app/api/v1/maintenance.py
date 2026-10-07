@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -20,17 +20,19 @@ class MaintenanceModeRequest(BaseModel):
 
 
 @router.get("/status")
-async def maintenance_status(_: User = Depends(current_user)) -> dict[str, Any]:
+async def maintenance_status(_: Annotated[User, Depends(current_user)]) -> dict[str, Any]:
     return await get_status()
 
 
 @router.post("/enable")
 async def enable_maintenance_mode(
     request: MaintenanceModeRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
-    await _require_confirmation(session, user=user, action="maintenance_mode.enable", request=request)
+    await _require_confirmation(
+        session, user=user, action="maintenance_mode.enable", request=request
+    )
     return await set_mode(
         True,
         actor=actor_from_user(user),
@@ -44,10 +46,12 @@ async def enable_maintenance_mode(
 @router.post("/disable")
 async def disable_maintenance_mode(
     request: MaintenanceModeRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
-    await _require_confirmation(session, user=user, action="maintenance_mode.disable", request=request)
+    await _require_confirmation(
+        session, user=user, action="maintenance_mode.disable", request=request
+    )
     return await set_mode(
         False,
         actor=actor_from_user(user),

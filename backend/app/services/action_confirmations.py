@@ -142,23 +142,34 @@ async def consume_action_confirmation(
             payload_hash=expected_payload_hash,
             now=datetime.now(tz=UTC),
         )
-        if expected_hardware_plan is not None and (row.metadata_ or {}).get("hardware_plan") != expected_hardware_plan:
+        if (
+            expected_hardware_plan is not None
+            and (row.metadata_ or {}).get("hardware_plan") != expected_hardware_plan
+        ):
             raise ActionConfirmationError(
-                "Hardware targets or configuration changed. Create a fresh confirmation.", status_code=409,
+                "Hardware targets or configuration changed. Create a fresh confirmation.",
+                status_code=409,
             )
     except ActionConfirmationError as exc:
         if row.consumed_at is None:
             row.consumed_at = datetime.now(tz=UTC)
             row.outcome = "rejected"
-            await write_audit_log(session, **_confirmation_rejection(
-                user, action=action, payload_hash=expected_payload_hash,
-                reason=exc.detail, row=row,
-            ))
+            await write_audit_log(
+                session,
+                **_confirmation_rejection(
+                    user,
+                    action=action,
+                    payload_hash=expected_payload_hash,
+                    reason=exc.detail,
+                    row=row,
+                ),
+            )
             if commit:
                 await session.commit()
         else:
-            _emit_confirmation_rejected(user, action=action, payload_hash=expected_payload_hash,
-                                        reason=exc.detail, row=row)
+            _emit_confirmation_rejected(
+                user, action=action, payload_hash=expected_payload_hash, reason=exc.detail, row=row
+            )
         raise
 
     row.consumed_at = datetime.now(tz=UTC)
@@ -218,9 +229,13 @@ def _validate_confirmation_row(
     if str(row.actor_user_id) != str(user.id):
         raise ActionConfirmationError("Confirmation belongs to a different user.", status_code=403)
     if row.action != normalized_action:
-        raise ActionConfirmationError("Confirmation action does not match this request.", status_code=403)
+        raise ActionConfirmationError(
+            "Confirmation action does not match this request.", status_code=403
+        )
     if row.payload_hash != payload_hash:
-        raise ActionConfirmationError("Confirmation payload does not match this request.", status_code=403)
+        raise ActionConfirmationError(
+            "Confirmation payload does not match this request.", status_code=403
+        )
 
 
 def _canonical_payload(value: Any) -> Any:
@@ -238,7 +253,7 @@ def _canonical_payload(value: Any) -> Any:
         return _canonical_timestamp(value)
     if isinstance(value, str) and ISO_TIMESTAMP_PATTERN.fullmatch(value):
         try:
-            return _canonical_timestamp(datetime.fromisoformat(value.replace("Z", "+00:00")))
+            return _canonical_timestamp(datetime.fromisoformat(value))
         except ValueError:
             return value
     return value
@@ -262,23 +277,23 @@ def _confirmation_rejection(
     reason: str,
     row: ActionConfirmation | None = None,
 ) -> dict[str, Any]:
-    return dict(
-        category=TELEMETRY_CATEGORY_INTEGRATIONS,
-        action="real_world_action.confirmation.rejected",
-        actor=actor_from_user(user),
-        actor_user_id=user.id,
-        target_entity=row.target_entity if row else None,
-        target_id=row.target_id if row else None,
-        target_label=row.target_label if row else None,
-        outcome="failed",
-        level="warning",
-        metadata={
+    return {
+        "category": TELEMETRY_CATEGORY_INTEGRATIONS,
+        "action": "real_world_action.confirmation.rejected",
+        "actor": actor_from_user(user),
+        "actor_user_id": user.id,
+        "target_entity": row.target_entity if row else None,
+        "target_id": row.target_id if row else None,
+        "target_label": row.target_label if row else None,
+        "outcome": "failed",
+        "level": "warning",
+        "metadata": {
             "confirmation_id": str(row.id) if row else None,
             "action": _normalize_action(action),
             "payload_hash": payload_hash,
             "reason": reason,
         },
-    )
+    }
 
 
 def _emit_confirmation_rejected(user: User, **kwargs: Any) -> None:

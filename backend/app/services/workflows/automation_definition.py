@@ -3,6 +3,7 @@
 Normalization is shared by editing, trigger intake, previews and execution.
 Captured facts are data, never authority to execute a hardware action.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,9 +16,16 @@ from typing import Any
 from app.services.automation_policy import TriggerProvenance
 from app.services.type_helpers import as_dict
 from app.services.workflows.catalog import (
-    automation_action_catalog, automation_condition_catalog, automation_trigger_catalog, automation_variables,
+    automation_action_catalog,
+    automation_condition_catalog,
+    automation_trigger_catalog,
+    automation_variables,
 )
-from app.services.workflows.context import canonical_key, normalize_string_list, referenced_variable_names
+from app.services.workflows.context import (
+    canonical_key,
+    normalize_string_list,
+    referenced_variable_names,
+)
 
 WEBHOOK_KEY_PREFIX = "whk_"
 WEBHOOK_KEY_RANDOM_BYTES = 32
@@ -28,11 +36,16 @@ CONDITION_CATALOG = automation_condition_catalog()
 ACTION_CATALOG = automation_action_catalog()
 VARIABLES = automation_variables()
 VARIABLE_BY_NAME = {variable.name.lower(): variable for variable in VARIABLES}
-TRIGGER_SCOPES = {trigger["type"]: set(trigger.get("scopes") or []) for group in TRIGGER_CATALOG for trigger in group["triggers"]}
+TRIGGER_SCOPES = {
+    trigger["type"]: set(trigger.get("scopes") or [])
+    for group in TRIGGER_CATALOG
+    for trigger in group["triggers"]
+}
 TIME_TRIGGER_KEYS = {"time.specific_datetime", "time.every_x", "time.cron"}
 INTEGRATION_ACTION_KEYS = {
     "integration.icloud_calendar.sync": ("icloud_calendar", "sync_calendars"),
 }
+
 
 @dataclass
 class AutomationContext:
@@ -73,7 +86,11 @@ def normalize_rule_payload(value: dict[str, Any]) -> dict[str, Any]:
 def normalize_triggers(value: Any, *, generate_webhook_keys: bool = False) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    allowed = {trigger_type for group in TRIGGER_CATALOG for trigger_type in [item["type"] for item in group["triggers"]]}
+    allowed = {
+        trigger_type
+        for group in TRIGGER_CATALOG
+        for trigger_type in [item["type"] for item in group["triggers"]]
+    }
     normalized = []
     for index, raw in enumerate(value):
         if not isinstance(raw, dict):
@@ -172,7 +189,9 @@ def normalize_trigger_config(
 def normalize_conditions(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    allowed = {condition["type"] for group in CONDITION_CATALOG for condition in group["conditions"]}
+    allowed = {
+        condition["type"] for group in CONDITION_CATALOG for condition in group["conditions"]
+    }
     conditions = []
     for index, raw in enumerate(value):
         if not isinstance(raw, dict):
@@ -186,9 +205,7 @@ def normalize_conditions(value: Any) -> list[dict[str, Any]]:
                 "id": str(raw.get("id") or f"condition-{index + 1}"),
                 "type": condition_type,
                 "config": {
-                    key: item
-                    for key, item in config.items()
-                    if key in {"person_id", "vehicle_id"}
+                    key: item for key, item in config.items() if key in {"person_id", "vehicle_id"}
                 },
             }
         )
@@ -198,11 +215,9 @@ def normalize_conditions(value: Any) -> list[dict[str, Any]]:
 def normalize_actions(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    allowed = {
-        action["type"]
-        for group in ACTION_CATALOG
-        for action in group["actions"]
-    } | set(INTEGRATION_ACTION_KEYS)
+    allowed = {action["type"] for group in ACTION_CATALOG for action in group["actions"]} | set(
+        INTEGRATION_ACTION_KEYS
+    )
     actions = []
     for index, raw in enumerate(value):
         if not isinstance(raw, dict):
@@ -229,9 +244,7 @@ def normalize_action_config(action_type: str, config: dict[str, Any]) -> dict[st
             "notification_rule_name": optional_text(config.get("notification_rule_name")),
         }
     if action_type.startswith("garage_door."):
-        return {
-            "target_entity_ids": normalize_string_list(config.get("target_entity_ids"))
-        }
+        return {"target_entity_ids": normalize_string_list(config.get("target_entity_ids"))}
     if action_type in INTEGRATION_ACTION_KEYS:
         return integration_action_config(action_type, config)
     return {}
@@ -266,7 +279,9 @@ def facts_from_payload(trigger_key: str, payload: dict[str, Any]) -> dict[str, A
                 "visitor_pass_vehicle_make": visitor_pass.get("vehicle_make"),
                 "visitor_pass_vehicle_colour": visitor_pass.get("vehicle_colour"),
                 "visitor_pass_duration_on_site": visitor_pass.get("duration_human"),
-                "visitor_pass_duration_on_site_seconds": visitor_pass.get("duration_on_site_seconds"),
+                "visitor_pass_duration_on_site_seconds": visitor_pass.get(
+                    "duration_on_site_seconds"
+                ),
                 "registration_number": visitor_pass.get("number_plate"),
                 "vehicle_make": visitor_pass.get("vehicle_make"),
                 "vehicle_colour": visitor_pass.get("vehicle_colour"),
@@ -297,7 +312,10 @@ def entities_from_payload(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def build_context_variables(context: AutomationContext) -> dict[str, str]:
-    facts = {canonical_key(key): "" if value is None else str(value) for key, value in context.facts.items()}
+    facts = {
+        canonical_key(key): "" if value is None else str(value)
+        for key, value in context.facts.items()
+    }
 
     def pick(*keys: str, default: str = "") -> str:
         for key in keys:
@@ -312,18 +330,49 @@ def build_context_variables(context: AutomationContext) -> dict[str, str]:
         "LastName": pick("last_name"),
         "DisplayName": pick("display_name", "person_name"),
         "PersonId": pick("person_id", default=context.entities.get("person_id", "")),
-        "Registration": pick("registration_number", "vehicle_registration_number", "visitor_pass_vehicle_registration"),
-        "VehicleRegistrationNumber": pick("vehicle_registration_number", "registration_number", "visitor_pass_vehicle_registration"),
+        "Registration": pick(
+            "registration_number",
+            "vehicle_registration_number",
+            "visitor_pass_vehicle_registration",
+        ),
+        "VehicleRegistrationNumber": pick(
+            "vehicle_registration_number",
+            "registration_number",
+            "visitor_pass_vehicle_registration",
+        ),
         "VehicleId": pick("vehicle_id", default=context.entities.get("vehicle_id", "")),
-        "VehicleName": pick("vehicle_name", "vehicle_display_name", "vehicle_description", "registration_number"),
+        "VehicleName": pick(
+            "vehicle_name",
+            "vehicle_display_name",
+            "vehicle_description",
+            "registration_number",
+        ),
         "VehicleMake": pick("vehicle_make", "make", "visitor_pass_vehicle_make"),
-        "VehicleColour": pick("vehicle_colour", "vehicle_color", "colour", "color", "visitor_pass_vehicle_colour"),
-        "VehicleColor": pick("vehicle_color", "vehicle_colour", "color", "colour", "visitor_pass_vehicle_colour"),
-        "VisitorPassId": pick("visitor_pass_id", default=context.entities.get("visitor_pass_id", "")),
+        "VehicleColour": pick(
+            "vehicle_colour",
+            "vehicle_color",
+            "colour",
+            "color",
+            "visitor_pass_vehicle_colour",
+        ),
+        "VehicleColor": pick(
+            "vehicle_color",
+            "vehicle_colour",
+            "color",
+            "colour",
+            "visitor_pass_vehicle_colour",
+        ),
+        "VisitorPassId": pick(
+            "visitor_pass_id", default=context.entities.get("visitor_pass_id", "")
+        ),
         "VisitorName": pick("visitor_name"),
-        "VisitorPassVehicleRegistration": pick("visitor_pass_vehicle_registration", "number_plate", "registration_number"),
+        "VisitorPassVehicleRegistration": pick(
+            "visitor_pass_vehicle_registration", "number_plate", "registration_number"
+        ),
         "VisitorPassVehicleMake": pick("visitor_pass_vehicle_make", "vehicle_make"),
-        "VisitorPassVehicleColour": pick("visitor_pass_vehicle_colour", "vehicle_colour", "vehicle_color"),
+        "VisitorPassVehicleColour": pick(
+            "visitor_pass_vehicle_colour", "vehicle_colour", "vehicle_color"
+        ),
         "VisitorPassDurationOnSite": pick("visitor_pass_duration_on_site", "duration_human"),
         "MaintenanceModeReason": pick("maintenance_mode_reason", "reason"),
         "MaintenanceModeDuration": pick("maintenance_mode_duration", "duration_label"),
@@ -355,7 +404,7 @@ def context_missing_references(context: AutomationContext, value: Any) -> list[s
         if not context.variables.get(variable.name):
             missing.append(variable.name)
     if missing:
-        context.missing_required_variables = sorted(set([*context.missing_required_variables, *missing]))
+        context.missing_required_variables = sorted({*context.missing_required_variables, *missing})
     return sorted(set(missing))
 
 
@@ -363,23 +412,32 @@ def trigger_matches(trigger: dict[str, Any], context: AutomationContext) -> bool
     if trigger["type"] != context.trigger_key:
         return False
     config = as_dict(trigger.get("config"))
-    facts = {canonical_key(key): str(value).lower() for key, value in context.facts.items() if value is not None}
+    facts = {
+        canonical_key(key): str(value).lower()
+        for key, value in context.facts.items()
+        if value is not None
+    }
     if config.get("person_id") and str(config["person_id"]) != context.entities.get("person_id"):
         return False
     if config.get("vehicle_id") and str(config["vehicle_id"]) != context.entities.get("vehicle_id"):
         return False
-    if config.get("visitor_pass_id") and str(config["visitor_pass_id"]) != context.entities.get("visitor_pass_id"):
+    if config.get("visitor_pass_id") and str(config["visitor_pass_id"]) != context.entities.get(
+        "visitor_pass_id"
+    ):
         return False
     if config.get("registration_number"):
         expected = str(config["registration_number"]).strip().replace(" ", "").lower()
         actual = facts.get(canonical_key("registration_number"), "").replace(" ", "")
         if expected and expected != actual:
             return False
-    if config.get("webhook_key") and str(config["webhook_key"]) != str(context.facts.get("webhook_key") or ""):
+    if config.get("webhook_key") and str(config["webhook_key"]) != str(
+        context.facts.get("webhook_key") or ""
+    ):
         return False
-    if config.get("source_ip") and str(config["source_ip"]) != str(context.facts.get("source_ip") or ""):
-        return False
-    return True
+    return not (
+        config.get("source_ip")
+        and str(config["source_ip"]) != str(context.facts.get("source_ip") or "")
+    )
 
 
 def subject_for_trigger(trigger_key: str, payload: dict[str, Any]) -> str:
@@ -411,7 +469,7 @@ def parse_datetime(value: Any) -> datetime | None:
     if not text:
         return None
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
         return ensure_aware(parsed)
     except ValueError:
         return None
@@ -444,9 +502,14 @@ def safe_int(value: Any, *, default: int = 1, minimum: int | None = None) -> int
 
 
 def captured_automation_context(trigger_key: str, payload: dict[str, Any]) -> AutomationContext:
-    context = AutomationContext(trigger_key=trigger_key, subject=subject_for_trigger(trigger_key, payload),
-        trigger_payload=payload, facts=facts_from_payload(trigger_key, payload), entities=entities_from_payload(payload),
-        scopes=set(TRIGGER_SCOPES.get(trigger_key, {"event"})))
+    context = AutomationContext(
+        trigger_key=trigger_key,
+        subject=subject_for_trigger(trigger_key, payload),
+        trigger_payload=payload,
+        facts=facts_from_payload(trigger_key, payload),
+        entities=entities_from_payload(payload),
+        scopes=set(TRIGGER_SCOPES.get(trigger_key, {"event"})),
+    )
     if trigger_key.startswith("time."):
         context.scopes.update({"time", "event"})
     context.variables = build_context_variables(context)
@@ -455,9 +518,15 @@ def captured_automation_context(trigger_key: str, payload: dict[str, Any]) -> Au
 
 def restored_automation_context(snapshot: dict[str, Any]) -> AutomationContext:
     captured = snapshot["dispatch"]
-    context = AutomationContext(trigger_key=captured["trigger_key"], subject=captured["subject"], trigger_payload={},
-        facts=dict(captured["facts"]), entities=dict(captured["entities"]), variables=dict(captured["variables"]),
-        scopes=set(captured["scopes"]))
+    context = AutomationContext(
+        trigger_key=captured["trigger_key"],
+        subject=captured["subject"],
+        trigger_payload={},
+        facts=dict(captured["facts"]),
+        entities=dict(captured["entities"]),
+        variables=dict(captured["variables"]),
+        scopes=set(captured["scopes"]),
+    )
     context.provenance = TriggerProvenance(**captured["provenance"])
     return context
 
@@ -472,7 +541,6 @@ def integration_action_config(action_type: str, config: dict[str, Any]) -> dict[
     }
 
 
-
 AUTOMATION_BRIDGE_IGNORED_EVENT_TYPES = {
     "notification.trigger",
     "notification.sent",
@@ -483,7 +551,9 @@ AUTOMATION_BRIDGE_IGNORED_EVENT_TYPES = {
 AUTOMATION_BRIDGE_IGNORED_EVENT_PREFIXES = ("automation.run.",)
 
 
-def automation_triggers_for_origin(event_type: str, payload: dict[str, Any], *, occurred_at: str) -> list[tuple[str, dict[str, Any]]]:
+def automation_triggers_for_origin(
+    event_type: str, payload: dict[str, Any], *, occurred_at: str
+) -> list[tuple[str, dict[str, Any]]]:
     if event_type in AUTOMATION_BRIDGE_IGNORED_EVENT_TYPES or event_type.startswith(
         AUTOMATION_BRIDGE_IGNORED_EVENT_PREFIXES
     ):
@@ -491,7 +561,9 @@ def automation_triggers_for_origin(event_type: str, payload: dict[str, Any], *, 
     if event_type == "maintenance_mode.changed":
         return [
             (
-                "maintenance_mode.enabled" if payload.get("is_active") else "maintenance_mode.disabled",
+                "maintenance_mode.enabled"
+                if payload.get("is_active")
+                else "maintenance_mode.disabled",
                 {**payload, "occurred_at": occurred_at},
             )
         ]
@@ -513,7 +585,9 @@ def automation_triggers_for_origin(event_type: str, payload: dict[str, Any], *, 
     return []
 
 
-def access_event_vehicle_triggers(payload: dict[str, Any], *, occurred_at: str) -> list[tuple[str, dict[str, Any]]]:
+def access_event_vehicle_triggers(
+    payload: dict[str, Any], *, occurred_at: str
+) -> list[tuple[str, dict[str, Any]]]:
     decision = str(payload.get("decision") or "").lower()
     vehicle_id = optional_text(payload.get("vehicle_id"))
     if decision == "granted" and vehicle_id:
@@ -524,4 +598,9 @@ def access_event_vehicle_triggers(payload: dict[str, Any], *, occurred_at: str) 
         trigger_key = "vehicle.unknown_plate"
     else:
         return []
-    return [(trigger_key, {**payload, "occurred_at": payload.get("occurred_at") or occurred_at})]
+    return [
+        (
+            trigger_key,
+            {**payload, "occurred_at": payload.get("occurred_at") or occurred_at},
+        )
+    ]

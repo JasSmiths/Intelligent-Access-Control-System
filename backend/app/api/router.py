@@ -5,8 +5,8 @@ from app.api.v1 import (
     access_devices,
     action_confirmations,
     ai,
-    automations,
     auth,
+    automations,
     diagnostics,
     directory,
     events,
@@ -37,22 +37,34 @@ api_router.include_router(health.router, tags=["Health"])
 api_router.include_router(access.router, prefix="/access", tags=["Access Events"])
 api_router.include_router(access_devices.router, prefix="/access-devices", tags=["Access Devices"])
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
-api_router.include_router(action_confirmations.router, prefix="/action-confirmations", tags=["Integrations"])
+api_router.include_router(
+    action_confirmations.router, prefix="/action-confirmations", tags=["Integrations"]
+)
 api_router.include_router(ai.router, prefix="/ai", tags=["AI Providers"])
 api_router.include_router(automations.router, prefix="/automations", tags=["Automations"])
 api_router.include_router(diagnostics.router, prefix="/diagnostics", tags=["Diagnostics"])
 api_router.include_router(directory.router, tags=["Directory"])
 api_router.include_router(events.router, tags=["Access Events"])
-api_router.include_router(gate_malfunctions.router, prefix="/gate-malfunctions", tags=["Gate Telemetry"])
+api_router.include_router(
+    gate_malfunctions.router, prefix="/gate-malfunctions", tags=["Gate Telemetry"]
+)
 api_router.include_router(integrations.router, prefix="/integrations", tags=["Integrations"])
-api_router.include_router(icloud_calendar.router, prefix="/integrations/icloud-calendar", tags=["Integrations"])
+api_router.include_router(
+    icloud_calendar.router, prefix="/integrations/icloud-calendar", tags=["Integrations"]
+)
 api_router.include_router(leaderboard.router, tags=["Top Charts"])
-api_router.include_router(missed_exit_recovery.router, prefix="/missed-exit-recovery", tags=["Missed Exit Recovery"])
+api_router.include_router(
+    missed_exit_recovery.router, prefix="/missed-exit-recovery", tags=["Missed Exit Recovery"]
+)
 api_router.include_router(maintenance.router, prefix="/maintenance", tags=["Maintenance"])
-api_router.include_router(notification_snapshots.router, prefix="/notification-snapshots", tags=["Notifications"])
+api_router.include_router(
+    notification_snapshots.router, prefix="/notification-snapshots", tags=["Notifications"]
+)
 api_router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 api_router.include_router(schedules.router, prefix="/schedules", tags=["Schedules"])
-api_router.include_router(unifi_protect.router, prefix="/integrations/unifi-protect", tags=["UniFi Protect"])
+api_router.include_router(
+    unifi_protect.router, prefix="/integrations/unifi-protect", tags=["UniFi Protect"]
+)
 api_router.include_router(realtime.router, prefix="/realtime", tags=["Realtime"])
 api_router.include_router(reports.router, prefix="/reports", tags=["Reports"])
 api_router.include_router(settings.router, prefix="/settings", tags=["Settings"])

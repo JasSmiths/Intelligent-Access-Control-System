@@ -421,9 +421,9 @@ async def test_confirmed_workflow_freezes_selected_audience_and_reuses_validated
     service, providers = delivery
     user = await actor()
     target = "media_player.original" if kind == "voice" else "notify.mobile_app_original"
-    discovery_name = "_all_media_player_targets" if kind == "voice" else "_all_home_assistant_mobile_targets"
+    discovery_name = "all_media_player_targets" if kind == "voice" else "all_home_assistant_mobile_targets"
     discovered = AsyncMock(return_value=[target])
-    monkeypatch.setattr(service, discovery_name, discovered)
+    monkeypatch.setattr(service.recipients, discovery_name, discovered)
     monkeypatch.setattr(service, "_voice_announcements_preflight", AsyncMock(return_value=None))
     rules = [{"id": "synthetic-rule", "name": "Synthetic workflow", "trigger_event": "integration_test",
         "is_active": True, "conditions": [], "actions": [{"id": "synthetic-action", "type": kind,

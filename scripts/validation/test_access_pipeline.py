@@ -21,7 +21,7 @@ from app.models import AccessDevice, AccessDeviceCommandRecord, AccessDeviceProv
 from app.models.enums import AccessDecision, AccessDirection, MovementSagaState, PresenceState, VisitorPassStatus, VisitorPassType
 from app.modules.gate.base import CommandDelivery, GateState
 from app.modules.access_devices.base import AccessDeviceCommandResult, AccessDeviceStateObservation
-from app.modules.gate import access_devices as gate_adapter
+from app.services import gate_controller as gate_adapter
 from app.services import access_devices as devices_owner, access_device_configuration as configuration_owner
 from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.access_devices import AccessDeviceService
@@ -161,7 +161,6 @@ async def h(monkeypatch):
     monkeypatch.setattr(devices_owner, 'COMMAND_CONFIRMATION_TIMEOUT_SECONDS', 0)
     monkeypatch.setattr(devices_owner, 'CLOSE_COMMAND_CONFIRMATION_TIMEOUT_SECONDS', 0)
     monkeypatch.setattr(devices_owner, 'emit_audit_log', lambda **kwargs: None)
-    monkeypatch.setattr(gate_adapter, 'get_access_device_service', lambda: fake.devices)
     monkeypatch.setattr(owner, 'is_maintenance_mode_active', AsyncMock(return_value=False))
     monkeypatch.setattr(owner.telemetry, 'start_trace', lambda *a, **kw: Trace())
     monkeypatch.setattr(enrichment, 'lookup_normalized_vehicle_registration', fake.lookup)
@@ -173,7 +172,7 @@ async def h(monkeypatch):
     monkeypatch.setattr(owner, 'get_notification_service', lambda: fake.notifications)
     monkeypatch.setattr(enrichment, 'get_notification_service', lambda: fake.notifications)
     monkeypatch.setattr(enrichment, 'get_lpr_zone_shadow_service', lambda: SimpleNamespace(record_decision=AsyncMock()))
-    monkeypatch.setattr(hardware, 'get_gate_command_coordinator', lambda: GateCommandCoordinator(lambda name: gate_adapter.AccessDeviceGateController()))
+    monkeypatch.setattr(hardware, 'get_gate_command_coordinator', lambda: GateCommandCoordinator(lambda name: gate_adapter.AccessDeviceGateController(fake.devices)))
     monkeypatch.setattr(hardware, 'get_access_device_service', lambda: fake.devices)
     monkeypatch.setattr(owner.event_bus, 'publish', fake.publish)
     monkeypatch.setattr(enrichment, 'apply_person_presence_input_boolean_actions', fake.presence_effect)

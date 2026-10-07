@@ -14,15 +14,15 @@ from app.db.session import get_db_session
 from app.models import AuditLog, User
 from app.models.enums import VisitorPassStatus, VisitorPassType
 from app.services.event_bus import event_bus
+from app.services.notifications import get_notification_service
 from app.services.telemetry import actor_from_user
 from app.services.visitor_passes import (
     DEFAULT_WINDOW_MINUTES,
     VisitorPassError,
     get_visitor_pass_service,
-    serialize_visitor_pass,
     publish_pass_change,
+    serialize_visitor_pass,
 )
-from app.services.notifications import get_notification_service
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -115,7 +115,9 @@ def visitor_pass_response(payload: dict[str, Any]) -> VisitorPassResponse:
     return VisitorPassResponse(**payload)
 
 
-def visitor_pass_log_response(row: AuditLog, actor_user: User | None = None) -> VisitorPassLogResponse:
+def visitor_pass_log_response(
+    row: AuditLog, actor_user: User | None = None
+) -> VisitorPassLogResponse:
     return VisitorPassLogResponse(
         id=str(row.id),
         timestamp=row.timestamp.isoformat(),
@@ -152,18 +154,20 @@ def visitor_pass_server_error(operation: str, exc: Exception) -> HTTPException:
 
 @router.get("", response_model=list[VisitorPassResponse])
 async def list_visitor_passes(
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     statuses: Annotated[list[VisitorPassStatus] | None, Query(alias="status")] = None,
-    q: str | None = Query(default=None, max_length=160),
-    limit: int = Query(default=100, ge=1, le=500),
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    q: Annotated[str | None, Query(max_length=160)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[VisitorPassResponse]:
     service = get_visitor_pass_service()
     try:
         changed = await service.refresh_statuses(session=session, publish=False)
         if changed:
             await session.commit()
-        passes = await service.list_passes(session, statuses=statuses or None, search=q, limit=limit)
+        passes = await service.list_passes(
+            session, statuses=statuses or None, search=q, limit=limit
+        )
         return [visitor_pass_response(serialize_visitor_pass(pass_)) for pass_ in passes]
     except Exception as exc:
         await session.rollback()
@@ -173,8 +177,8 @@ async def list_visitor_passes(
 @router.post("", response_model=VisitorPassResponse, status_code=status.HTTP_201_CREATED)
 async def create_visitor_pass(
     request: VisitorPassCreateRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> VisitorPassResponse:
     service = get_visitor_pass_service()
     try:
@@ -182,7 +186,9 @@ async def create_visitor_pass(
             session,
             user=user,
             action="visitor_pass.create",
-            payload=request.model_dump(mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True),
+            payload=request.model_dump(
+                mode="json", exclude={"confirmation_token"}, exclude_none=True, exclude_unset=True
+            ),
             confirmation_token=request.confirmation_token,
         )
         visitor_pass = await service.create_pass(
@@ -207,7 +213,9 @@ async def create_visitor_pass(
         return visitor_pass_response(payload)
     except VisitorPassError as exc:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -218,15 +226,17 @@ async def create_visitor_pass(
 @router.get("/{pass_id}", response_model=VisitorPassResponse)
 async def get_visitor_pass(
     pass_id: uuid.UUID,
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> VisitorPassResponse:
     service = get_visitor_pass_service()
     try:
         await service.refresh_statuses(session=session, publish=False)
         visitor_pass = await service.get_pass(session, pass_id)
         if not visitor_pass:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found"
+            )
         await session.commit()
         return visitor_pass_response(serialize_visitor_pass(visitor_pass))
     except HTTPException:
@@ -239,15 +249,17 @@ async def get_visitor_pass(
 @router.get("/{pass_id}/logs", response_model=list[VisitorPassLogResponse])
 async def get_visitor_pass_logs(
     pass_id: uuid.UUID,
-    limit: int = Query(default=100, ge=1, le=250),
-    _: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=250)] = 100,
 ) -> list[VisitorPassLogResponse]:
     service = get_visitor_pass_service()
     try:
         visitor_pass = await service.get_pass(session, pass_id)
         if not visitor_pass:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found"
+            )
         logs = (
             await session.scalars(
                 select(AuditLog)
@@ -277,14 +289,16 @@ async def get_visitor_pass_logs(
 async def update_visitor_pass(
     pass_id: uuid.UUID,
     request: VisitorPassUpdateRequest,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> VisitorPassResponse:
     service = get_visitor_pass_service()
     try:
         visitor_pass = await service.get_pass(session, pass_id)
         if not visitor_pass:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found"
+            )
         confirmation_payload = request.model_dump(
             mode="json",
             exclude={"confirmation_token"},
@@ -307,23 +321,15 @@ async def update_visitor_pass(
             window_minutes=request.window_minutes,
             pass_type=request.pass_type,
             visitor_phone=(
-                request.visitor_phone
-                if "visitor_phone" in request.model_fields_set
-                else None
+                request.visitor_phone if "visitor_phone" in request.model_fields_set else None
             ),
             visitor_phone_provided="visitor_phone" in request.model_fields_set,
             number_plate=request.number_plate,
             number_plate_provided="number_plate" in request.model_fields_set,
-            valid_from=(
-                request.valid_from
-                if "valid_from" in request.model_fields_set
-                else None
-            ),
+            valid_from=(request.valid_from if "valid_from" in request.model_fields_set else None),
             valid_from_provided="valid_from" in request.model_fields_set,
             valid_until=(
-                request.valid_until
-                if "valid_until" in request.model_fields_set
-                else None
+                request.valid_until if "valid_until" in request.model_fields_set else None
             ),
             valid_until_provided="valid_until" in request.model_fields_set,
             actor=actor_from_user(user),
@@ -347,21 +353,27 @@ async def update_visitor_pass(
 @router.post("/{pass_id}/cancel", response_model=VisitorPassResponse)
 async def cancel_visitor_pass(
     pass_id: uuid.UUID,
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     request: VisitorPassCancelRequest | None = None,
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
 ) -> VisitorPassResponse:
     service = get_visitor_pass_service()
     try:
         visitor_pass = await service.get_pass(session, pass_id)
         if not visitor_pass:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
-        confirmation_payload = request.model_dump(
-            mode="json",
-            exclude={"confirmation_token"},
-            exclude_none=True,
-            exclude_unset=True,
-        ) if request else {}
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found"
+            )
+        confirmation_payload = (
+            request.model_dump(
+                mode="json",
+                exclude={"confirmation_token"},
+                exclude_none=True,
+                exclude_unset=True,
+            )
+            if request
+            else {}
+        )
         confirmation_payload["pass_id"] = str(pass_id)
         await require_confirmed_action(
             session,
@@ -395,15 +407,17 @@ async def cancel_visitor_pass(
 @router.delete("/{pass_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_visitor_pass(
     pass_id: uuid.UUID,
-    request: VisitorPassConfirmationRequest | None = Body(default=None),
-    user: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
+    user: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    request: Annotated[VisitorPassConfirmationRequest | None, Body()] = None,
 ) -> None:
     service = get_visitor_pass_service()
     try:
         visitor_pass = await service.get_pass(session, pass_id)
         if not visitor_pass:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found"
+            )
         await require_confirmed_action(
             session,
             user=user,
@@ -420,7 +434,7 @@ async def delete_visitor_pass(
         )
         await session.commit()
         await event_bus.publish("visitor_pass.deleted", {"visitor_pass": snapshot})
-        return None
+        return
     except HTTPException:
         raise
     except Exception as exc:

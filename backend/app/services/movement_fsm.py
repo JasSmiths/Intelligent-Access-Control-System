@@ -1,11 +1,11 @@
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Iterable
+from typing import Any
 
 from app.models.enums import AccessDecision, AccessDirection, PresenceState
 from app.modules.gate.base import GateState
-
 
 ARRIVAL_GATE_STATES = {GateState.CLOSED}
 DEPARTURE_GATE_STATES = {GateState.OPEN, GateState.OPENING, GateState.CLOSING}
@@ -133,7 +133,9 @@ class MovementDirectionFSM:
                     "movement_state": MovementState.DIRECTION_RESOLVED.value,
                 }
             )
-            return MovementDecision(MovementState.DIRECTION_RESOLVED, AccessDirection.EXIT, resolution)
+            return MovementDecision(
+                MovementState.DIRECTION_RESOLVED, AccessDirection.EXIT, resolution
+            )
 
         if intent.gate_malfunction and (intent.person_known or intent.vehicle_known):
             direction = (
@@ -207,7 +209,9 @@ class MovementDirectionFSM:
                         "movement_state": MovementState.DIRECTION_RESOLVED.value,
                     }
                 )
-                return MovementDecision(MovementState.DIRECTION_RESOLVED, AccessDirection.ENTRY, resolution)
+                return MovementDecision(
+                    MovementState.DIRECTION_RESOLVED, AccessDirection.ENTRY, resolution
+                )
             resolution.update(
                 {
                     "source": "gate_state",
@@ -215,7 +219,9 @@ class MovementDirectionFSM:
                     "movement_state": MovementState.DIRECTION_RESOLVED.value,
                 }
             )
-            return MovementDecision(MovementState.DIRECTION_RESOLVED, AccessDirection.EXIT, resolution)
+            return MovementDecision(
+                MovementState.DIRECTION_RESOLVED, AccessDirection.EXIT, resolution
+            )
 
         if intent.explicit_direction in {AccessDirection.ENTRY, AccessDirection.EXIT}:
             resolution.update(
@@ -225,7 +231,9 @@ class MovementDirectionFSM:
                     "movement_state": MovementState.DIRECTION_RESOLVED.value,
                 }
             )
-            return MovementDecision(MovementState.DIRECTION_RESOLVED, intent.explicit_direction, resolution)
+            return MovementDecision(
+                MovementState.DIRECTION_RESOLVED, intent.explicit_direction, resolution
+            )
 
         if not intent.person_known:
             resolution.update(
@@ -235,7 +243,9 @@ class MovementDirectionFSM:
                     "movement_state": MovementState.DIRECTION_RESOLVED.value,
                 }
             )
-            return MovementDecision(MovementState.DIRECTION_RESOLVED, AccessDirection.ENTRY, resolution)
+            return MovementDecision(
+                MovementState.DIRECTION_RESOLVED, AccessDirection.ENTRY, resolution
+            )
 
         direction = (
             AccessDirection.EXIT

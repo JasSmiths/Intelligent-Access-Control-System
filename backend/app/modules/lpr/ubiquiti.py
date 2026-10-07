@@ -7,7 +7,6 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from app.modules.lpr.base import PlateRead, now_utc
 
-
 PLATE_KEYS = {
     "registrationnumber",
     "registration_number",
@@ -78,10 +77,16 @@ class UbiquitiLprPayload(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     registration_number: str = Field(
-        validation_alias=AliasChoices("registrationNumber", "registration_number", "Registration Number")
+        validation_alias=AliasChoices(
+            "registrationNumber", "registration_number", "Registration Number"
+        )
     )
-    confidence: float = Field(default=1.0, validation_alias=AliasChoices("confidence", "Confidence"))
-    captured_at: datetime | None = Field(default=None, validation_alias=AliasChoices("capturedAt", "captured_at"))
+    confidence: float = Field(
+        default=1.0, validation_alias=AliasChoices("confidence", "Confidence")
+    )
+    captured_at: datetime | None = Field(
+        default=None, validation_alias=AliasChoices("capturedAt", "captured_at")
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -131,7 +136,11 @@ class UbiquitiLprAdapter:
     source_name = "ubiquiti"
 
     def to_plate_read(self, payload: object) -> PlateRead:
-        parsed = payload if isinstance(payload, UbiquitiLprPayload) else UbiquitiLprPayload.model_validate(payload)
+        parsed = (
+            payload
+            if isinstance(payload, UbiquitiLprPayload)
+            else UbiquitiLprPayload.model_validate(payload)
+        )
         raw_payload: dict[str, Any] = parsed.model_dump(by_alias=True, mode="json")
         candidates = extract_plate_candidates(raw_payload)
         if parsed.registration_number not in candidates:
@@ -166,7 +175,9 @@ def extract_plate_candidates(payload: Any) -> list[str]:
         candidates.append(direct)
 
     for trigger in _alarm_triggers(payload):
-        trigger_text = " ".join(str(trigger.get(key, "")) for key in ("key", "type", "source", "name"))
+        trigger_text = " ".join(
+            str(trigger.get(key, "")) for key in ("key", "type", "source", "name")
+        )
         if _looks_like_lpr_trigger(trigger_text):
             candidates.extend(_trigger_plate_candidates(trigger))
 
@@ -178,7 +189,9 @@ def extract_plate_candidates(payload: Any) -> list[str]:
     return _rank_plate_candidates(candidates)
 
 
-def extract_plate_smart_zone_evidence(payload: Any, registration_number: str) -> PlateSmartZoneEvidence:
+def extract_plate_smart_zone_evidence(
+    payload: Any, registration_number: str
+) -> PlateSmartZoneEvidence:
     """Return smart-zone evidence scoped to the plate that produced this read."""
 
     target = _normalize_plate(registration_number)
@@ -190,7 +203,8 @@ def extract_plate_smart_zone_evidence(payload: Any, registration_number: str) ->
         return _plate_zone_evidence_from_mapping(
             trigger,
             source="alarm.trigger",
-            camera_identifier=_camera_identifier_from_trigger(trigger) or _camera_identifier_from_payload(payload),
+            camera_identifier=_camera_identifier_from_trigger(trigger)
+            or _camera_identifier_from_payload(payload),
         )
 
     direct_plate = _normalize_plate(_first_present(payload, PLATE_KEYS) or "")
@@ -206,7 +220,8 @@ def extract_plate_smart_zone_evidence(payload: Any, registration_number: str) ->
         return _plate_zone_evidence_from_mapping(
             nested,
             source="payload.nested",
-            camera_identifier=_camera_identifier_from_payload(nested) or _camera_identifier_from_payload(payload),
+            camera_identifier=_camera_identifier_from_payload(nested)
+            or _camera_identifier_from_payload(payload),
         )
 
     return _empty_plate_zone_evidence()
@@ -293,12 +308,13 @@ def _collect_alarm_trigger_zones(payload: dict[str, Any], zones: list[str]) -> N
         if not isinstance(trigger, dict):
             continue
         descriptor = " ".join(
-            str(trigger.get(key, ""))
-            for key in ("key", "type", "source", "name", "label")
+            str(trigger.get(key, "")) for key in ("key", "type", "source", "name", "label")
         ).lower()
         if not any(marker in descriptor for marker in SMART_ZONE_TRIGGER_MARKERS):
             continue
-        _collect_zone_value(trigger.get("value") or trigger.get("zone") or trigger.get("zoneName"), zones)
+        _collect_zone_value(
+            trigger.get("value") or trigger.get("zone") or trigger.get("zoneName"), zones
+        )
 
 
 def _collect_zone_value(value: Any, zones: list[str]) -> None:
@@ -325,7 +341,9 @@ def _collect_zone_value(value: Any, zones: list[str]) -> None:
 
 
 def _normalize_zone_name(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().casefold().replace("_", " ").replace("-", " "))
+    return re.sub(
+        r"\s+", " ", str(value or "").strip().casefold().replace("_", " ").replace("-", " ")
+    )
 
 
 def _dedupe_preserving_order(values: list[str]) -> list[str]:
@@ -342,7 +360,9 @@ def _dedupe_preserving_order(values: list[str]) -> list[str]:
 
 def _looks_like_lpr_trigger(value: str) -> bool:
     normalized = value.lower()
-    return any(token in normalized for token in ("lpr", "license", "licence", "plate", "registration"))
+    return any(
+        token in normalized for token in ("lpr", "license", "licence", "plate", "registration")
+    )
 
 
 def _empty_plate_zone_evidence() -> PlateSmartZoneEvidence:
@@ -365,7 +385,9 @@ def _alarm_triggers(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [trigger for trigger in triggers if isinstance(trigger, dict)]
 
 
-def _matching_lpr_trigger(payload: dict[str, Any], registration_number: str) -> dict[str, Any] | None:
+def _matching_lpr_trigger(
+    payload: dict[str, Any], registration_number: str
+) -> dict[str, Any] | None:
     for trigger in _alarm_triggers(payload):
         if _trigger_registration_number(trigger) == registration_number:
             return trigger
@@ -373,7 +395,9 @@ def _matching_lpr_trigger(payload: dict[str, Any], registration_number: str) -> 
 
 
 def _trigger_registration_number(trigger: dict[str, Any]) -> str:
-    descriptor = " ".join(str(trigger.get(key, "")) for key in ("key", "type", "source", "name", "label"))
+    descriptor = " ".join(
+        str(trigger.get(key, "")) for key in ("key", "type", "source", "name", "label")
+    )
     if not _looks_like_lpr_trigger(descriptor):
         return ""
     return _best_plate_candidate(_trigger_plate_candidates(trigger)) or ""
@@ -533,7 +557,13 @@ def _find_plate_mapping(value: Any, registration_number: str) -> dict[str, Any] 
 
 
 def _camera_identifier_from_trigger(trigger: dict[str, Any]) -> str | None:
-    return _text_or_none(trigger.get("device") or trigger.get("deviceId") or trigger.get("device_id") or trigger.get("cameraId") or trigger.get("camera_id"))
+    return _text_or_none(
+        trigger.get("device")
+        or trigger.get("deviceId")
+        or trigger.get("device_id")
+        or trigger.get("cameraId")
+        or trigger.get("camera_id")
+    )
 
 
 def _camera_identifier_from_payload(payload: dict[str, Any]) -> str | None:
@@ -552,7 +582,9 @@ def _camera_identifier_from_payload(payload: dict[str, Any]) -> str | None:
         if isinstance(sources, list):
             for source in sources:
                 if isinstance(source, dict):
-                    identifier = _text_or_none(source.get("device") or source.get("deviceId") or source.get("device_id"))
+                    identifier = _text_or_none(
+                        source.get("device") or source.get("deviceId") or source.get("device_id")
+                    )
                     if identifier:
                         return identifier
     return None
@@ -592,7 +624,7 @@ def _extract_timestamp(payload: dict[str, Any]) -> datetime | None:
         return datetime.fromtimestamp(seconds, tz=UTC)
     if isinstance(value, str):
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
         except ValueError:
             return None
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

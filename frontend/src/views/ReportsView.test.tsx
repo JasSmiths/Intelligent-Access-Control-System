@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import * as directoryApi from "../api/directory";
 import { api } from "../api/client";
 import type { Person } from "../api/types";
 import type { VisitorPass } from "../features/passes/types";
@@ -51,6 +52,11 @@ async function selectResident() {
   fireEvent.focus(screen.getByRole("combobox", { name: "Subject" }));
   fireEvent.click(screen.getByRole("option", { name: /Synthetic Resident/ }));
 }
+
+beforeEach(() => {
+  vi.spyOn(directoryApi, "readDirectory").mockResolvedValue({ items: [person], total: 1, next_cursor: null });
+  vi.spyOn(directoryApi, "lookupDirectory").mockResolvedValue([person]);
+});
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
@@ -207,4 +213,36 @@ it("cancels a historical lookup when another subject is selected", async () => {
   await act(async () => { lookup.resolve({ report_id: "123456", report: ready.report } as ReportExportResponse); });
   expect(screen.queryByText("Exported Report")).not.toBeInTheDocument();
   expect(screen.getByRole("combobox", { name: "Subject" })).toHaveValue("Synthetic Resident");
+});
+
+
+it("finds a subject outside the shell page and retains its selection after search pages change", async () => {
+  setupReports();
+  const later = { ...person, id: "later-person", display_name: "Later Resident" };
+  vi.mocked(directoryApi.readDirectory).mockResolvedValue({ items: [later], total: 1, next_cursor: null });
+  vi.mocked(directoryApi.lookupDirectory).mockResolvedValue([later]);
+  const preview = vi.spyOn(reportsApi, "preview").mockResolvedValue(ready);
+  render(<ReportsView events={[]} people={[]} presence={[]} />);
+  const subject = screen.getByRole("combobox", { name: "Subject" });
+  fireEvent.focus(subject);
+  fireEvent.change(subject, { target: { value: "Later" } });
+  fireEvent.click(await screen.findByRole("option", { name: /Later Resident/ }));
+  await act(async () => {});
+  expect(preview).toHaveBeenLastCalledWith(expect.objectContaining({ person_id: later.id }), expect.anything());
+  vi.mocked(directoryApi.readDirectory).mockResolvedValue({ items: [], total: 0, next_cursor: null });
+  fireEvent.click(screen.getByRole("button", { name: "Snapshots" }));
+  await act(async () => {});
+  expect(preview).toHaveBeenLastCalledWith(expect.objectContaining({ person_id: later.id, include_snapshots: false }), expect.anything());
+});
+
+
+it("clears a selected inactive identity without treating another directory page as deletion", async () => {
+  setupReports();
+  vi.spyOn(reportsApi, "preview").mockResolvedValue(ready);
+  vi.mocked(directoryApi.lookupDirectory).mockResolvedValue([{ ...person, is_active: false }]);
+  render(<ReportsView events={[]} people={[person]} presence={[]} />);
+  await selectResident();
+  await act(async () => {});
+  expect(screen.getByRole("combobox", { name: "Subject" })).toHaveValue("");
+  expect(screen.getByRole("button", { name: "Export PDF" })).toBeDisabled();
 });

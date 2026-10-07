@@ -1,4 +1,5 @@
 import React from "react";
+import { listPeople, listVehicles } from "../api/directory";
 import { api } from "../api/client";
 import type { AccessEvent, Anomaly, ExpectedPresenceSummary, Group, IntegrationStatus, MaintenanceStatus, Person, Presence, RealtimeMessage, Schedule, UserAccount, Vehicle, ViewKey } from "../api/types";
 import { criticalShellDataKeysForView, shellDataKeysForView, type ShellDataKey } from "./navigation";
@@ -38,7 +39,8 @@ export function useShellRefresh(view: ViewKey, user: UserAccount | null, setters
       const coordinator = createRefreshCoordinator(async ({ keys, route }) => {
         if ([...keys].some((key) => !loaded.has(key))) setLoading(true);
         async function fetchKey<Key extends ShellDataKey>(key: Key) {
-          const value = await api.get<ShellData[Key]>(paths[key], { signal: controller.signal });
+          const options = { signal: controller.signal };
+          const value = (key === "people" ? (await listPeople({}, options)).items : key === "vehicles" ? (await listVehicles({}, options)).items : await api.get<ShellData[Key]>(paths[key], options)) as ShellData[Key];
           if (controller.signal.aborted) return;
           settersRef.current[key](value);
           loaded.add(key);

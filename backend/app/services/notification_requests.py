@@ -11,10 +11,13 @@ from app.models import ActionConfirmation, MaintenanceModeState
 from app.services.action_confirmations import confirmation_token_hash
 from app.services.mutation_context import MutationError, load_active_admin
 
-
 CONFIG_KEYS = {
-    "voice": ("home_assistant_url", "home_assistant_token", "home_assistant_tts_service",
-              "home_assistant_default_media_player"),
+    "voice": (
+        "home_assistant_url",
+        "home_assistant_token",
+        "home_assistant_tts_service",
+        "home_assistant_default_media_player",
+    ),
     "mobile": ("home_assistant_url", "home_assistant_token", "apprise_urls"),
     "in_app": (),
 }
@@ -37,13 +40,24 @@ async def confirmed_origin(session, *, actor_user_id, auth_version, operation_id
     user = await load_active_admin(session, actor_user_id, auth_version=auth_version, lock=True)
     operation = uuid.UUID(str(operation_id))
     approval = await session.get(ActionConfirmation, operation)
-    valid = (approval is not None and approval.actor_user_id == user.id
-             and approval.action == action and approval.outcome == "consumed"
-             and approval.consumed_at is not None)
+    valid = (
+        approval is not None
+        and approval.actor_user_id == user.id
+        and approval.action == action
+        and approval.outcome == "consumed"
+        and approval.consumed_at is not None
+    )
     if not valid:
-        raise MutationError("confirmation_required", "A consumed requester-bound confirmation is required.")
-    return user, {"user_id": str(user.id), "auth_version": user.auth_session_version,
-                  "operation_id": str(operation), "authority": "api", "action": action}
+        raise MutationError(
+            "confirmation_required", "A consumed requester-bound confirmation is required."
+        )
+    return user, {
+        "user_id": str(user.id),
+        "auth_version": user.auth_session_version,
+        "operation_id": str(operation),
+        "authority": "api",
+        "action": action,
+    }
 
 
 async def confirmed_attempt_denial(session, payload, run_id, *, plan, runtime_config) -> str | None:
@@ -60,7 +74,9 @@ async def confirmed_attempt_denial(session, payload, run_id, *, plan, runtime_co
             return "confirmed_delivery_identity_mismatch"
         if origin.get("authority") != "api":
             return "confirmed_actor_no_longer_authorized"
-        await load_active_admin(session, origin["user_id"], auth_version=origin["auth_version"], lock=True)
+        await load_active_admin(
+            session, origin["user_id"], auth_version=origin["auth_version"], lock=True
+        )
         if origin.get("action") == "announcement.say":
             maintenance = await session.get(MaintenanceModeState, 1, populate_existing=True)
             if maintenance is not None and maintenance.is_active:

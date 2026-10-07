@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,7 +52,11 @@ class GateCommandResult:
 
     def __post_init__(self) -> None:
         if self.delivery is None:
-            object.__setattr__(self, "delivery", GateCommandDelivery.ACCEPTED if self.accepted else GateCommandDelivery.REJECTED)
+            object.__setattr__(
+                self,
+                "delivery",
+                GateCommandDelivery.ACCEPTED if self.accepted else GateCommandDelivery.REJECTED,
+            )
 
 
 @dataclass(frozen=True)
@@ -76,8 +81,9 @@ class GateController(Protocol):
     async def preview_manual_gate_open(self) -> dict[str, Any]:
         """Resolve exact manual targets without issuing commands or claiming admission."""
 
-    async def open_gate(self, reason: str, *, bypass_schedule: bool = False,
-                        command_context: GateCommandContext) -> GateCommandResult:
+    async def open_gate(
+        self, reason: str, *, bypass_schedule: bool = False, command_context: GateCommandContext
+    ) -> GateCommandResult:
         """Open the gate for an audited reason."""
 
     async def current_state(self) -> GateState:

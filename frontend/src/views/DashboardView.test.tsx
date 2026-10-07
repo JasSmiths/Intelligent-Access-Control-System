@@ -1,3 +1,4 @@
+import * as directoryApi from "../api/directory";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
@@ -5,7 +6,8 @@ import { integrationsApi, type GateCommandReceipt } from "../api/integrations";
 import type { AccessEvent, ActionConfirmation, ExpectedPresenceSummary, IntegrationStatus, Person, Presence, UserAccount, Vehicle } from "../api/types";
 import contract from "../api/fixtures/gateCommandReceipts.generated.json";
 import { CommandReceiptDetails } from "../features/integrations/CommandReceiptDetails";
-import { Dashboard, formatTime } from "./DashboardView";
+import { Dashboard } from "./DashboardView";
+import { formatTime } from "../features/dashboard/model";
 
 const admin = { id: "synthetic-admin", first_name: "Synthetic", last_name: "Admin", role: "admin" } as UserAccount;
 const confirmation = { confirmation_id: "synthetic-intent", confirmation_token: "synthetic-token", action: "gate.open", expires_at: "2026-09-12T15:00:00Z" };
@@ -31,6 +33,9 @@ async function clickGate(name: string) {
   await act(async () => fireEvent.click(screen.getByRole("button", { name: `Open ${name}` })));
 }
 beforeEach(() => {
+  vi.spyOn(directoryApi, "listVehicles").mockResolvedValue({ items: [], total: 0, next_cursor: null });
+  vi.spyOn(directoryApi, "lookupVehicleRegistrations").mockResolvedValue([]);
+  vi.spyOn(directoryApi, "lookupPeople").mockResolvedValue([]);
   vi.useFakeTimers();
   sessionStorage.clear();
   props.refresh.mockClear();
@@ -259,9 +264,9 @@ it("lists the people inside now and who exited today in the presence hover popov
     { person_id: "katherine", display_name: "Katherine Johnson", state: "exited", last_changed_at: at(23, 11, 30) }
   ];
   const vehicles = [
-    { registration_number: "kat1", person_id: "katherine", person_ids: ["katherine"] } as Vehicle,
-    { registration_number: "SHARE1", person_ids: ["margaret", "joan"] } as Vehicle,
-    { registration_number: "FB1", owner: "Fallback Owner" } as Vehicle
+    { id: "kat-vehicle", registration_number: "kat1", person_id: "katherine", person_ids: ["katherine"] } as Vehicle,
+    { id: "shared-vehicle", registration_number: "SHARE1", person_ids: ["margaret", "joan"] } as Vehicle,
+    { id: "fallback-vehicle", registration_number: "FB1", owner: "Fallback Owner" } as Vehicle
   ];
   const events = [
     accessEvent({ id: "kat-exit", direction: "exit", occurred_at: at(23, 11, 30), registration_number: "KAT1" }),

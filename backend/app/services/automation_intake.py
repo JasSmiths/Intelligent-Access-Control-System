@@ -4,6 +4,7 @@ No commit, wake, realtime publication, provider call or execution occurs here.
 The caller supplies durable origin identity and facts captured by its mutation.
 Target preview only reads configuration; dispatch revalidates it before I/O.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -22,13 +23,26 @@ from app.services.automation_policy import HARDWARE_ACTION_TYPES, hardware_actio
 from app.services.telemetry import sanitize_payload
 from app.services.type_helpers import as_dict
 from app.services.workflows.automation_definition import (
-    AutomationContext, captured_automation_context, normalize_actions, normalize_conditions, normalize_triggers, trigger_matches,
+    AutomationContext,
+    captured_automation_context,
+    normalize_actions,
+    normalize_conditions,
+    normalize_triggers,
+    trigger_matches,
 )
 from app.services.workflows.context import normalize_string_list
 
+
 async def reserve_trigger(
-    session: AsyncSession, trigger_key: str, payload: dict[str, Any], *,
-    origin_kind: str, origin_id: str, actor: str = "Automation Engine", source: str = "domain", trace_id: str | None = None,
+    session: AsyncSession,
+    trigger_key: str,
+    payload: dict[str, Any],
+    *,
+    origin_kind: str,
+    origin_id: str,
+    actor: str = "Automation Engine",
+    source: str = "domain",
+    trace_id: str | None = None,
     eligible_rule_ids: set[uuid.UUID] | None = None,
 ) -> list[uuid.UUID]:
     """Required-origin participant: capture facts and reserve runs before caller commit.
@@ -41,23 +55,47 @@ async def reserve_trigger(
         raise ValueError("A stable automation origin and trigger are required.")
     context = captured_automation_context(trigger_key, payload)
     statement = select(AutomationRule).where(
-        AutomationRule.is_active.is_(True), AutomationRule.trigger_keys.contains([trigger_key]))
+        AutomationRule.is_active.is_(True), AutomationRule.trigger_keys.contains([trigger_key])
+    )
     if eligible_rule_ids is not None:
         # The verified webhook admission owner supplies these IDs, never its body.
         statement = statement.where(AutomationRule.id.in_(eligible_rule_ids))
-    rules = (await session.scalars(statement.order_by(AutomationRule.created_at, AutomationRule.id)
-        .with_for_update().execution_options(populate_existing=True))).all()
+    rules = (
+        await session.scalars(
+            statement.order_by(AutomationRule.created_at, AutomationRule.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).all()
     identities = []
     for rule in rules:
         if any(trigger_matches(trigger, context) for trigger in normalize_triggers(rule.triggers)):
-            identities.append(await reserve_occurrence(session, rule, context,
-                origin_kind=origin_kind, origin_id=origin_id, actor=actor, source=source, trace_id=trace_id))
+            identities.append(
+                await reserve_occurrence(
+                    session,
+                    rule,
+                    context,
+                    origin_kind=origin_kind,
+                    origin_id=origin_id,
+                    actor=actor,
+                    source=source,
+                    trace_id=trace_id,
+                )
+            )
     return identities
 
 
-
-async def reserve_occurrence(session: AsyncSession, rule: AutomationRule, context: AutomationContext, *,
-                              origin_kind: str, origin_id: str, actor: str, source: str, trace_id: str | None = None) -> uuid.UUID:
+async def reserve_occurrence(
+    session: AsyncSession,
+    rule: AutomationRule,
+    context: AutomationContext,
+    *,
+    origin_kind: str,
+    origin_id: str,
+    actor: str,
+    source: str,
+    trace_id: str | None = None,
+) -> uuid.UUID:
     identity = uuid.uuid4()
     planned = []
     for action in normalize_actions(rule.actions):
@@ -67,14 +105,24 @@ async def reserve_occurrence(session: AsyncSession, rule: AutomationRule, contex
             try:
                 service = AccessDeviceConfiguration()
                 if action["type"] == "gate.open":
-                    item["automatic_entry_policy"] = (context.trigger_key.startswith("vehicle.")
-                        or context.trigger_key in {"visitor_pass.used", "visitor_pass.detected"})
-                    item["target_plan"] = await service.preview_gate_open(require_admission=True,
-                        automatic_entry_policy=item["automatic_entry_policy"], session=session)
+                    item["automatic_entry_policy"] = context.trigger_key.startswith(
+                        "vehicle."
+                    ) or context.trigger_key in {"visitor_pass.used", "visitor_pass.detected"}
+                    item["target_plan"] = await service.preview_gate_open(
+                        require_admission=True,
+                        automatic_entry_policy=item["automatic_entry_policy"],
+                        session=session,
+                    )
                 else:
                     targets = await automation_garage_targets(action, session=session)
-                    item["target_plans"] = [await service.preview_device_command(
-                        device.key, "open" if action["type"].endswith("open") else "close", session=session) for device in targets]
+                    item["target_plans"] = [
+                        await service.preview_device_command(
+                            device.key,
+                            "open" if action["type"].endswith("open") else "close",
+                            session=session,
+                        )
+                        for device in targets
+                    ]
                     if not targets:
                         item["preparation_error"] = "garage_door_not_configured"
             except (ValueError, LookupError) as exc:
@@ -82,16 +130,36 @@ async def reserve_occurrence(session: AsyncSession, rule: AutomationRule, contex
         planned.append(item)
     now = await session.scalar(select(func.clock_timestamp()))
     public = automation_execution_context_snapshot(context, rule, captured_at=now)
-    snapshot = {**public, "version": 1, "rule_fingerprint": automation_rule_fingerprint(rule),
-                "dispatch": {"trigger_key": context.trigger_key, "subject": context.subject,
-                    "facts": context.facts, "entities": context.entities, "variables": context.variables,
-                    "scopes": sorted(context.scopes), "provenance": asdict(context.provenance),
-                    "source_time": context.trigger_payload.get("scheduled_for") or context.trigger_payload.get("occurred_at") or now.isoformat()}}
-    return await AutomationRunStore().reserve(session, rule_id=rule.id, trigger_key=context.trigger_key,
-        occurrence=occurrence_key(origin_kind, origin_id, rule.id, context.trigger_key), context=snapshot,
-        planned=planned, trigger_payload=sanitize_payload(context.trigger_payload), actor=actor, source=source,
-        trace_id=trace_id, run_id=identity)
-
+    snapshot = {
+        **public,
+        "version": 1,
+        "rule_fingerprint": automation_rule_fingerprint(rule),
+        "dispatch": {
+            "trigger_key": context.trigger_key,
+            "subject": context.subject,
+            "facts": context.facts,
+            "entities": context.entities,
+            "variables": context.variables,
+            "scopes": sorted(context.scopes),
+            "provenance": asdict(context.provenance),
+            "source_time": context.trigger_payload.get("scheduled_for")
+            or context.trigger_payload.get("occurred_at")
+            or now.isoformat(),
+        },
+    }
+    return await AutomationRunStore().reserve(
+        session,
+        rule_id=rule.id,
+        trigger_key=context.trigger_key,
+        occurrence=occurrence_key(origin_kind, origin_id, rule.id, context.trigger_key),
+        context=snapshot,
+        planned=planned,
+        trigger_payload=sanitize_payload(context.trigger_payload),
+        actor=actor,
+        source=source,
+        trace_id=trace_id,
+        run_id=identity,
+    )
 
 
 async def automation_garage_targets(action: dict[str, Any], *, session: AsyncSession) -> list[Any]:
@@ -99,10 +167,11 @@ async def automation_garage_targets(action: dict[str, Any], *, session: AsyncSes
     target_ids = set(normalize_string_list(action_config.get("target_entity_ids")))
     return [
         device
-        for device in await AccessDeviceConfiguration().list_devices(kind="garage_door", enabled_only=True, session=session)
+        for device in await AccessDeviceConfiguration().list_devices(
+            kind="garage_door", enabled_only=True, session=session
+        )
         if not target_ids or device.key in target_ids
     ]
-
 
 
 def public_automation_context(context: AutomationContext) -> dict[str, Any]:
@@ -122,7 +191,6 @@ def public_automation_context(context: AutomationContext) -> dict[str, Any]:
         "warnings": context.warnings,
         "provenance": asdict(context.provenance),
     }
-
 
 
 def automation_execution_context_snapshot(

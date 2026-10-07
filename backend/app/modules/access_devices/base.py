@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from app.services.settings import RuntimeConfig
 
 from app.modules.gate.base import CommandDelivery, GateState
-
 
 ACCESS_DEVICE_KIND_GATE = "gate"
 ACCESS_DEVICE_KIND_GARAGE_DOOR = "garage_door"
@@ -50,7 +50,10 @@ class AccessDeviceEntity:
 
 
 def binding_is_commandable(
-    binding: AccessDeviceBinding, *, home_assistant_url: str, home_assistant_token: str,
+    binding: AccessDeviceBinding,
+    *,
+    home_assistant_url: str,
+    home_assistant_token: str,
     esphome_devices: list[dict[str, Any]],
 ) -> bool:
     """Static configuration check shared by settings and execution planning."""
@@ -70,7 +73,10 @@ def binding_is_commandable(
 
 
 def validate_gate_admission_device_key(
-    value: str | None, *, device_facts: list[dict[str, Any]], allow_unset: bool = True,
+    value: str | None,
+    *,
+    device_facts: list[dict[str, Any]],
+    allow_unset: bool = True,
 ) -> str | None:
     key = str(value or "").strip() or None
     if key is None:
@@ -78,10 +84,14 @@ def validate_gate_admission_device_key(
             return None
         raise ValueError("An admission gate must be explicitly configured before automatic access.")
     device = next((item for item in device_facts if item.get("key") == key), None)
-    if not device or device.get("kind") != "gate" or not all(
-        device.get(field) for field in ("enabled", "open_for_access", "commandable")
+    if (
+        not device
+        or device.get("kind") != "gate"
+        or not all(device.get(field) for field in ("enabled", "open_for_access", "commandable"))
     ):
-        raise ValueError("The admission gate must be enabled, commandable and selected for automatic access.")
+        raise ValueError(
+            "The admission gate must be enabled, commandable and selected for automatic access."
+        )
     return key
 
 
@@ -121,7 +131,11 @@ class AccessDeviceCommandResult:
 
     def __post_init__(self) -> None:
         if self.delivery is None:
-            object.__setattr__(self, "delivery", CommandDelivery.ACCEPTED if self.accepted else CommandDelivery.REJECTED)
+            object.__setattr__(
+                self,
+                "delivery",
+                CommandDelivery.ACCEPTED if self.accepted else CommandDelivery.REJECTED,
+            )
 
 
 @dataclass(frozen=True)
@@ -138,54 +152,77 @@ class AccessDeviceProvider(Protocol):
     provider_key: str
     display_name: str
 
-    async def configured(self) -> bool:
-        ...
+    async def configured(self) -> bool: ...
 
-    async def status(self, *, refresh: bool = False) -> AccessDeviceProviderStatus:
-        ...
+    async def status(self, *, refresh: bool = False) -> AccessDeviceProviderStatus: ...
 
-    async def discover_covers(self, device_id: str | None = None) -> list[AccessDeviceDiscoveryItem]:
-        ...
+    async def discover_covers(
+        self, device_id: str | None = None
+    ) -> list[AccessDeviceDiscoveryItem]: ...
 
-    async def current_state(self, binding: AccessDeviceBinding) -> GateState:
-        ...
+    async def current_state(self, binding: AccessDeviceBinding) -> GateState: ...
 
-    async def observe_state(self, binding: AccessDeviceBinding, *, runtime_config: RuntimeConfig | None = None) -> AccessDeviceStateObservation:
-        ...
+    async def observe_state(
+        self, binding: AccessDeviceBinding, *, runtime_config: RuntimeConfig | None = None
+    ) -> AccessDeviceStateObservation: ...
 
     async def command_cover(
         self,
         binding: AccessDeviceBinding,
         action: str,
         reason: str,
-        *, runtime_config: RuntimeConfig | None = None,
-    ) -> AccessDeviceCommandResult:
-        ...
+        *,
+        runtime_config: RuntimeConfig | None = None,
+    ) -> AccessDeviceCommandResult: ...
 
-    async def subscribe_state_changes(self) -> AsyncIterator[dict[str, Any]]:
-        ...
+    async def subscribe_state_changes(self) -> AsyncIterator[dict[str, Any]]: ...
 
 
 def gate_receipt_projection(
-    receipts: list[dict[str, Any]], *, admission_target_device_id: str | None,
+    receipts: list[dict[str, Any]],
+    *,
+    admission_target_device_id: str | None,
     expected_target_count: int,
 ) -> dict[str, Any]:
     """One public projection: transport acceptance, physical evidence and admission."""
     complete = bool(receipts) and len(receipts) == expected_target_count
-    admission = next((item for item in receipts if item["target_device_id"] == admission_target_device_id), None)
+    admission = next(
+        (item for item in receipts if item["target_device_id"] == admission_target_device_id), None
+    )
     accepted = complete and all(item["accepted"] for item in receipts)
     any_accepted = any(item["accepted"] for item in receipts)
     any_not_accepted = any(item["delivery"] in {"not_sent", "rejected"} for item in receipts)
-    physically_mixed = (any(item["verified"] for item in receipts)
-                        and any(not item["verified"] and item["delivery"] in {"not_sent", "rejected"} for item in receipts))
-    delivery = ("unknown" if not complete or any(item["delivery"] == "unknown" for item in receipts)
-                else "partial" if (any_accepted and any_not_accepted) or physically_mixed
-                else "accepted" if accepted
-                else "rejected" if any(item["delivery"] == "rejected" for item in receipts) else "not_sent")
+    physically_mixed = any(item["verified"] for item in receipts) and any(
+        not item["verified"] and item["delivery"] in {"not_sent", "rejected"} for item in receipts
+    )
+    delivery = (
+        "unknown"
+        if not complete or any(item["delivery"] == "unknown" for item in receipts)
+        else "partial"
+        if (any_accepted and any_not_accepted) or physically_mixed
+        else "accepted"
+        if accepted
+        else "rejected"
+        if any(item["delivery"] == "rejected" for item in receipts)
+        else "not_sent"
+    )
     mechanically_confirmed = complete and all(item["verified"] for item in receipts)
-    state = (admission["state"] if admission else receipts[0]["state"] if len(receipts) == 1
-             else "open" if mechanically_confirmed else "unknown")
-    return {"target_receipts": receipts, "admission_verified": bool(admission and admission["verified"]),
-            "mechanically_confirmed": mechanically_confirmed, "accepted": accepted, "delivery": delivery,
-            "requires_reconciliation": not complete or any(item["requires_reconciliation"] for item in receipts),
-            "state": state}
+    state = (
+        admission["state"]
+        if admission
+        else receipts[0]["state"]
+        if len(receipts) == 1
+        else "open"
+        if mechanically_confirmed
+        else "unknown"
+    )
+    return {
+        "target_receipts": receipts,
+        "admission_verified": bool(admission and admission["verified"]),
+        "mechanically_confirmed": mechanically_confirmed,
+        "accepted": accepted,
+        "delivery": delivery,
+        "requires_reconciliation": not complete
+        or any(item["requires_reconciliation"] for item in receipts),
+        "state": state,
+    }

@@ -14,7 +14,7 @@ from sqlalchemy import select, text
 
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRule, AutomationRun, AutomationWebhookNonce, AutomationWebhookSender, NotificationRule
-from app.services import automation_integration_actions, automations
+from app.services import automation_errors, automation_integration_actions, automations
 
 pytestmark = pytest.mark.asyncio
 KEY = "whk_synthetic_webhook_key_with_sufficient_length_for_tests"
@@ -65,7 +65,7 @@ async def test_nonce_sender_and_occurrence_commit_once_on_duplicate(monkeypatch)
     incoming = request()
     result = await service.handle_webhook(**incoming)
     assert result["accepted"] and result["hmac_verified"] and result["new_sender"]
-    with pytest.raises(automations.AutomationError, match="already used"):
+    with pytest.raises(automation_errors.AutomationError, match="already used"):
         await service.handle_webhook(**incoming)
     runs, senders, nonces = await stored()
     assert len(runs) == len(senders) == len(nonces) == 1
@@ -80,7 +80,7 @@ async def test_concurrent_same_signed_request_has_one_accepted_origin(monkeypatc
     incoming = request()
     outcomes = await _bounded(asyncio.gather(first.handle_webhook(**incoming), second.handle_webhook(**incoming), return_exceptions=True))
     assert sum(isinstance(item, dict) and item["accepted"] for item in outcomes) == 1
-    assert sum(isinstance(item, automations.AutomationError) for item in outcomes) == 1
+    assert sum(isinstance(item, automation_errors.AutomationError) for item in outcomes) == 1
     runs, senders, nonces = await stored()
     assert len(runs) == len(senders) == len(nonces) == 1 and senders[0].event_count == 1
 

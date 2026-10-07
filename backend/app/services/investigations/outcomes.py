@@ -7,7 +7,6 @@ from typing import Any
 
 from app.services.investigations.contracts import DispatchState, Outcome
 
-
 COMMAND_AUDIT_PREFIXES = (
     "access_device.command",
     "cover.command",
@@ -83,7 +82,11 @@ def assess_episode(
         },
     )
     action_results = _sequence(_mapping_value(automation, "action_results"))
-    action_skipped = any(_normalized(item.get("status")) == "skipped" for item in action_results if isinstance(item, Mapping))
+    action_skipped = any(
+        _normalized(item.get("status")) == "skipped"
+        for item in action_results
+        if isinstance(item, Mapping)
+    )
     automation_status = _normalized(_mapping_value(automation, "status"))
     skipped_command = _has_explicit_skipped_command(audits)
 
@@ -94,9 +97,14 @@ def assess_episode(
         dispatch_state = "accepted_unverified"
     elif "verified" in command_states:
         dispatch_state = "verified"
-    elif schedule_denied or "withheld" in command_states or (condition is not None and not command_records):
-        dispatch_state = "withheld"
-    elif automation_status == "skipped" or action_skipped or skipped_command:
+    elif (
+        schedule_denied
+        or "withheld" in command_states
+        or (condition is not None and not command_records)
+        or automation_status == "skipped"
+        or action_skipped
+        or skipped_command
+    ):
         dispatch_state = "withheld"
     elif command_records:
         dispatch_state = "unknown"
@@ -111,16 +119,23 @@ def assess_episode(
             reason=_schedule_reason(values),
         )
     if condition is not None:
-        condition_type = str(condition.get("type") or condition.get("name") or "condition").replace("_", " ")
+        condition_type = str(condition.get("type") or condition.get("name") or "condition").replace(
+            "_", " "
+        )
         detail = _first_text(condition, ("reason", "detail", "message", "description"))
         if not detail:
             details = condition.get("details")
-            detail = _first_text(details, ("reason", "detail", "message")) if isinstance(details, Mapping) else ""
+            detail = (
+                _first_text(details, ("reason", "detail", "message"))
+                if isinstance(details, Mapping)
+                else ""
+            )
         return EpisodeAssessment(
             outcome="blocked",
             dispatch_state="withheld",
             reason_code="condition_failed",
-            reason=detail or f"The {condition_type} condition did not pass, so no action was dispatched.",
+            reason=detail
+            or f"The {condition_type} condition did not pass, so no action was dispatched.",
         )
     if _trace_decision_denied(trace):
         return EpisodeAssessment(
@@ -253,7 +268,9 @@ def _command_evidence(
     automation: Mapping[str, Any] | None,
     gate_commands: Sequence[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
-    records: list[Mapping[str, Any]] = [record for record in gate_commands if isinstance(record, Mapping)]
+    records: list[Mapping[str, Any]] = [
+        record for record in gate_commands if isinstance(record, Mapping)
+    ]
 
     for audit in audits:
         action = str(audit.get("action") or "").strip().lower()
@@ -324,7 +341,8 @@ def _command_dispatch_state(record: Mapping[str, Any]) -> DispatchState | None:
         record.get("command_sent") is False
         or record.get("sent") is False
         or record.get("schedule_denied") is True
-        or reason_code in {"device_disabled", "schedule_denied", "schedule_not_allowed", "schedule_outside_window"}
+        or reason_code
+        in {"device_disabled", "schedule_denied", "schedule_not_allowed", "schedule_outside_window"}
     ):
         return "withheld"
 
@@ -429,7 +447,11 @@ def _truthy_key(values: Sequence[tuple[str, Any]], key: str) -> bool:
 
 
 def _contains_value(values: Sequence[tuple[str, Any]], expected: set[str]) -> bool:
-    return any(_normalized(item) in expected for _, item in values if not isinstance(item, (Mapping, list, tuple)))
+    return any(
+        _normalized(item) in expected
+        for _, item in values
+        if not isinstance(item, (Mapping, list, tuple))
+    )
 
 
 def _trace_decision_denied(trace: Mapping[str, Any] | None) -> bool:
@@ -454,7 +476,11 @@ def _mapping_value(value: Mapping[str, Any] | None, key: str) -> Any:
 
 
 def _sequence(value: Any) -> list[Any]:
-    return list(value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else []
+    return (
+        list(value)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+        else []
+    )
 
 
 def _failed_condition(automation: Mapping[str, Any] | None) -> Mapping[str, Any] | None:

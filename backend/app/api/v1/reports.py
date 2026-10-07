@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
@@ -14,9 +14,9 @@ from app.services.reports import (
     ReportExportError,
     create_person_movement_report_export,
     load_report_export,
+    preview_person_movement_report,
     report_export_payload,
     report_pdf_path,
-    preview_person_movement_report,
     report_preview_context,
 )
 
@@ -68,15 +68,17 @@ class ReportPreviewContext(BaseModel):
 
 
 @router.get("/context", response_model=ReportPreviewContext)
-async def get_report_preview_context(actor: User = Depends(current_user)) -> dict:
+async def get_report_preview_context(actor: Annotated[User, Depends(current_user)]) -> dict:
     return await report_preview_context()
 
 
-@router.post("/person-movements/preview", response_model=ReportPreviewReady | ReportPreviewTimeChoiceRequired)
+@router.post(
+    "/person-movements/preview", response_model=ReportPreviewReady | ReportPreviewTimeChoiceRequired
+)
 async def preview_movement_report(
     request: PersonMovementReportPreviewRequest,
-    actor: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    actor: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
     try:
         return await preview_person_movement_report(session, **request.model_dump())
@@ -87,8 +89,8 @@ async def preview_movement_report(
 @router.post("/person-movements/export")
 async def export_person_movement_report(
     request: PersonMovementReportExportRequest,
-    actor: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    actor: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
     try:
         row = await create_person_movement_report_export(
@@ -110,8 +112,8 @@ async def export_person_movement_report(
 @router.get("/{report_id}")
 async def get_report_export(
     report_id: str,
-    actor: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    actor: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
     row = await load_report_export(session, report_id, actor=actor)
     if not row:
@@ -122,8 +124,8 @@ async def get_report_export(
 @router.get("/{report_id}/pdf")
 async def download_report_export_pdf(
     report_id: str,
-    actor: User = Depends(current_user),
-    session: AsyncSession = Depends(get_db_session),
+    actor: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> FileResponse:
     row = await load_report_export(session, report_id, actor=actor)
     if not row:
@@ -131,7 +133,9 @@ async def download_report_export_pdf(
     try:
         path = report_pdf_path(row)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report PDF was not found.") from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Report PDF was not found."
+        ) from exc
     return FileResponse(
         path,
         filename=f"Crest-House-Access-Report-{row.report_number}.pdf",

@@ -15,14 +15,10 @@ from app.api.v1 import automations as automations_api
 from app.models import AutomationRule, AutomationRun, Presence
 from app.models.enums import PresenceState, UserRole
 from app.services import automation_integration_actions
-from app.services import automations
+from app.services import automations, automation_webhooks, automation_errors
 from app.services.automation_integration_actions import registered_integration_action_types
-from app.services.automations import (
-    AutomationService,
-    cron_from_recurrence,
-    due_time_trigger,
-    next_run_for_trigger,
-)
+from app.services.automations import AutomationService
+from app.services.automation_scheduling import cron_from_recurrence, due_time_trigger, next_run_for_trigger
 from app.services.workflows.automation_definition import (
     ACTION_CATALOG, CONDITION_CATALOG, TRIGGER_CATALOG, AutomationContext, build_context_variables, context_missing_references, facts_from_payload, normalize_actions, normalize_conditions, normalize_triggers, trigger_keys_for_triggers,
     INTEGRATION_ACTION_KEYS, automation_triggers_for_origin, generate_automation_webhook_key, is_high_entropy_webhook_key,
@@ -545,12 +541,12 @@ def test_high_impact_webhook_triggers_require_hmac_for_hardware_actions() -> Non
     )
     actions = normalize_actions([{"type": "gate.open", "config": {"reason": "test"}}])
 
-    automations.harden_webhook_triggers_for_actions(triggers, actions)
+    automation_webhooks.harden_webhook_triggers_for_actions(triggers, actions)
 
     config = triggers[0]["config"]
     assert is_high_entropy_webhook_key(config["webhook_key"])
     assert config["require_hmac"] is True
-    assert config["rate_limit_per_minute"] == automations.WEBHOOK_RATE_LIMIT_PER_MINUTE
+    assert config["rate_limit_per_minute"] == automation_webhooks.WEBHOOK_RATE_LIMIT_PER_MINUTE
 
 
 def test_webhook_hmac_and_source_policy_helpers() -> None:
@@ -565,7 +561,7 @@ def test_webhook_hmac_and_source_policy_helpers() -> None:
         hashlib.sha256,
     ).hexdigest()
 
-    assert automations.verify_webhook_hmac(
+    assert automation_webhooks.verify_webhook_hmac(
         key,
         raw_body,
         signature=f"sha256={signature}",
@@ -574,7 +570,7 @@ def test_webhook_hmac_and_source_policy_helpers() -> None:
         window_seconds=300,
         now=now,
     )
-    assert not automations.verify_webhook_hmac(
+    assert not automation_webhooks.verify_webhook_hmac(
         key,
         raw_body,
         signature=signature,
@@ -583,8 +579,8 @@ def test_webhook_hmac_and_source_policy_helpers() -> None:
         window_seconds=300,
         now=now,
     )
-    assert automations.webhook_source_allowed("192.0.2.10", ["192.0.2.0/24"])
-    assert not automations.webhook_source_allowed("198.51.100.10", ["192.0.2.0/24"])
+    assert automation_webhooks.webhook_source_allowed("192.0.2.10", ["192.0.2.0/24"])
+    assert not automation_webhooks.webhook_source_allowed("198.51.100.10", ["192.0.2.0/24"])
 
 
 class FakeNonceSession:
@@ -617,7 +613,7 @@ async def test_webhook_nonce_recorder_rejects_replay() -> None:
     now = datetime(2026, 5, 31, 12, 0, tzinfo=UTC)
     session = FakeNonceSession()
 
-    await automations.remember_webhook_nonce(
+    await automation_webhooks.remember_webhook_nonce(
         session,
         "hook-key",
         "192.0.2.10",
@@ -628,12 +624,12 @@ async def test_webhook_nonce_recorder_rejects_replay() -> None:
 
     assert len(session.added) == 1
     nonce_row = session.added[0]
-    assert nonce_row.nonce_hash == automations.webhook_nonce_hash("nonce-a")
+    assert nonce_row.nonce_hash == automation_webhooks.webhook_nonce_hash("nonce-a")
     assert nonce_row.expires_at == now + timedelta(seconds=300)
     assert "source_ip" not in session.last_scalar_statement
 
-    with pytest.raises(automations.AutomationError):
-        await automations.remember_webhook_nonce(
+    with pytest.raises(automation_errors.AutomationError):
+        await automation_webhooks.remember_webhook_nonce(
             FakeNonceSession(existing=True),
             "hook-key",
             "192.0.2.10",
@@ -647,8 +643,8 @@ async def test_webhook_nonce_recorder_rejects_replay() -> None:
 async def test_webhook_nonce_recorder_rejects_concurrent_duplicate() -> None:
     now = datetime(2026, 5, 31, 12, 0, tzinfo=UTC)
 
-    with pytest.raises(automations.AutomationError):
-        await automations.remember_webhook_nonce(
+    with pytest.raises(automation_errors.AutomationError):
+        await automation_webhooks.remember_webhook_nonce(
             FakeNonceSession(flush_error=True),
             "hook-key",
             "192.0.2.10",
@@ -733,7 +729,7 @@ async def test_unknown_hardware_rule_is_rejected_before_add_or_audit(monkeypatch
     audit = AsyncMock()
     monkeypatch.setattr(automations, "write_audit_log", audit)
     session = SimpleNamespace(add=lambda row: pytest.fail("Rejected rule was added"))
-    with pytest.raises(automations.AutomationError, match="Unknown plates"):
+    with pytest.raises(automation_errors.AutomationError, match="Unknown plates"):
         await AutomationService().create_rule(
             session, name="Synthetic unsafe rule", created_by=_policy_admin(),
             triggers=[{"type": "vehicle.unknown_plate", "config": {}}], conditions=[],
@@ -758,7 +754,7 @@ async def test_unknown_hardware_update_validates_merged_rule_before_mutation(mon
     audit = AsyncMock()
     session = SimpleNamespace(refresh=AsyncMock())
     monkeypatch.setattr(automations, "write_audit_log", audit)
-    with pytest.raises(automations.AutomationError, match="Unknown plates"):
+    with pytest.raises(automation_errors.AutomationError, match="Unknown plates"):
         await AutomationService().update_rule(session, rule, actor=_policy_admin(), **changes)
     assert automations.serialize_rule(rule) == before
     session.refresh.assert_awaited_once_with(rule, with_for_update=True)

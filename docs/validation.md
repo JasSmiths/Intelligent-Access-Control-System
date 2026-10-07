@@ -105,7 +105,9 @@ Access persistence tests verify command ordering and outcomes; synthetic timing
 samples are not performance acceptance checks.
 
 Full mode runs host source/configuration tests, architecture and Python checks,
-backend tests, lint/type checks, frontend tests/build and Compose configuration
+backend tests, full-source Ruff checks, undefined-name checks for backend and
+isolated validation fixtures, checked-body mypy checks, strict typed
+contract checks, frontend tests/build and Compose configuration
 validation. It then migrates disposable PostgreSQL, checks Alembic state and
 drift, runs persistence suites with separate database/Redis state, required
 schema and recovery diagnostics, and a synthetic `pg_dump`/`pg_restore` rehearsal.
@@ -174,3 +176,35 @@ An older backup can lose receipts for external effects accepted after that
 backup. Reconcile that gap before reactivation; a readable schema and successful
 restore do not establish that resuming work is safe. A code rollback must not
 erase durable attempts or reset uncertain work to pending.
+
+## Maintainability and performance checks
+
+The dependency guard requires zero detected runtime cycles. It also checks vendor
+business back-imports, directory route transaction ownership, shared UI imports,
+and command/presence ownership. Its only retained construction exception is the
+existing synthetic simulation fixture. Keep its algorithm tests alongside changes
+to the scanner. Static scanning does not prove dynamic imports or every ORM write.
+
+[Directory persistence checks](../scripts/validation/test_directory_operations.py)
+exercise 1,000 people and 2,000 vehicles, cursor ties/filter changes, selected IDs
+outside the current page, totals/search and bounded payloads. They retain
+`DIRECTORY_TARGET_SCALE_EVIDENCE` in pytest output.
+[Report benchmarks](../scripts/benchmarks/reports.py) compare the old history
+strategy with predecessor reads at small and one-million-movement scales and
+assert equal duration output. [Snapshot benchmarks](../scripts/benchmarks/directory_snapshots.py)
+compare complete-history ranking with indexed per-plate latest-row reads.
+[Plate query plans](../scripts/benchmarks/plate_lookup.sql) use a temporary
+2,000-registration table and roll it back. The required
+[prepared-query regression](../scripts/validation/test_plate_lookup_index.py)
+checks the actual worker query with PostgreSQL forced to use a generic prepared
+plan, so repeated requests retain the normalized active-plate index.
+
+Run these benchmarks only in disposable, network-isolated PostgreSQL namespaces
+with synthetic credentials and locked tools. The Python scripts fail closed on
+non-synthetic environments; inspect their CLI and guards before running. Retain
+JSON measurements and query plans outside the repository. Record the dataset,
+query/returned-row counts, repeated timings and peak Python allocation together.
+Timings vary with host contention; these are relative structural checks, not
+production latency budgets. Report output/PDF costs and PostgreSQL memory are
+not included in the report predecessor benchmark. Small datasets can incur a
+fixed allocation increase from the additional bounded queries.

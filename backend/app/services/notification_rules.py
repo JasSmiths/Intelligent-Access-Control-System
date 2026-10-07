@@ -60,7 +60,10 @@ async def _locked_rule(session: AsyncSession, rule_id: UUID) -> NotificationRule
 
 
 async def set_automation_activation(
-    session: AsyncSession, *, reference: dict[str, Any], active: bool,
+    session: AsyncSession,
+    *,
+    reference: dict[str, Any],
+    active: bool,
 ) -> dict[str, Any]:
     """Participate in a standing automation's transaction without an Admin identity.
 
@@ -78,7 +81,9 @@ async def set_automation_activation(
             raise MutationError("not_found", "Notification workflow not found.")
         # Preserve exact-name preference and the existing unique-partial match
         # contract. Lock and refresh the selected row before changing its state.
-        rules = (await session.scalars(select(NotificationRule).order_by(NotificationRule.name))).all()
+        rules = (
+            await session.scalars(select(NotificationRule).order_by(NotificationRule.name))
+        ).all()
         exact = [rule for rule in rules if rule.name.lower() == name]
         partial = [rule for rule in rules if name in rule.name.lower()]
         selected = exact[0] if exact else partial[0] if len(partial) == 1 else None

@@ -146,17 +146,16 @@ async def test_typed_pre_dispatch_refusal_is_not_sent() -> None:
 
 
 async def test_manual_preview_uses_configured_adapter_without_command_or_admission(monkeypatch):
-    from app.modules.gate import access_devices as adapter_module
-    from app.modules.gate.access_devices import AccessDeviceGateController
+    from app.services import gate_controller as adapter_module
+    from app.services.gate_controller import AccessDeviceGateController
     plan = {"scope": "all", "targets": [{"device_id": "synthetic-gate"}], "require_admission": False}
     preview = AsyncMock(return_value=plan)
     hardware = AsyncMock(side_effect=AssertionError("Preview cannot issue hardware commands"))
-    monkeypatch.setattr(adapter_module, "get_access_device_service", lambda: SimpleNamespace(
-        preview_gate_open=preview, open_access_gates=hardware))
+    devices = SimpleNamespace(preview_gate_open=preview, open_access_gates=hardware)
     selected = []
     def controller_factory(name):
         selected.append(name)
-        return AccessDeviceGateController()
+        return AccessDeviceGateController(devices)
     ledger = FakeGateCommandLedger()
     coordinator = GateCommandCoordinator(controller_factory=controller_factory, ledger=ledger)
     assert await coordinator.preview_manual_gate_open() is plan

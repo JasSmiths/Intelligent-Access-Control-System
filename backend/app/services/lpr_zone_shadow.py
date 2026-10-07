@@ -10,7 +10,6 @@ from app.models import LprZoneShadowObservation
 from app.modules.lpr.base import PlateRead
 from app.services.event_bus import event_bus
 
-
 SMART_ZONE_EVIDENCE_PAYLOAD_KEY = "_iacs_smart_zone_evidence"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
 VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY = "_iacs_visitor_pass_plate_match"
@@ -63,7 +62,9 @@ class LprZoneShadowService:
                 protect_event_id=protect_event_id,
                 camera_id=_metadata_text(metadata, ("smart_zone_evidence", "camera_id")),
                 camera_name=_metadata_text(metadata, ("smart_zone_evidence", "camera_name")),
-                camera_identifier=_metadata_text(metadata, ("smart_zone_evidence", "camera_identifier")),
+                camera_identifier=_metadata_text(
+                    metadata, ("smart_zone_evidence", "camera_identifier")
+                ),
                 observed_at=read.captured_at,
                 time_of_day=_time_of_day(metadata),
                 time_of_day_source=_metadata_text(metadata, ("time_of_day_source",)) or "unknown",
@@ -87,8 +88,12 @@ class LprZoneShadowService:
                     "target_zone_id": LPR_ZONE_FILTER_TARGET_ZONE_ID,
                     "accepted_statuses": sorted(LPR_ZONE_FILTER_ACCEPTED_STATUSES),
                     "should_suppress_live": filter_decision.should_suppress_live,
-                    "smart_zones": metadata.get("smart_zones") if isinstance(metadata.get("smart_zones"), list) else [],
-                    "raw_smart_zones": metadata.get("raw_smart_zones") if isinstance(metadata.get("raw_smart_zones"), list) else [],
+                    "smart_zones": metadata.get("smart_zones")
+                    if isinstance(metadata.get("smart_zones"), list)
+                    else [],
+                    "raw_smart_zones": metadata.get("raw_smart_zones")
+                    if isinstance(metadata.get("raw_smart_zones"), list)
+                    else [],
                 },
             )
             rows.append(row)
@@ -113,14 +118,24 @@ class LprZoneShadowService:
     ) -> list[dict[str, Any]]:
         statement = select(LprZoneShadowObservation)
         if plate:
-            statement = statement.where(LprZoneShadowObservation.registration_number.ilike(f"%{plate.strip()}%"))
+            statement = statement.where(
+                LprZoneShadowObservation.registration_number.ilike(f"%{plate.strip()}%")
+            )
         if status:
-            statement = statement.where(LprZoneShadowObservation.zone_status == status.strip().lower())
+            statement = statement.where(
+                LprZoneShadowObservation.zone_status == status.strip().lower()
+            )
         if decision:
-            statement = statement.where(LprZoneShadowObservation.shadow_decision == decision.strip().lower())
+            statement = statement.where(
+                LprZoneShadowObservation.shadow_decision == decision.strip().lower()
+            )
         if time_of_day:
-            statement = statement.where(LprZoneShadowObservation.time_of_day == time_of_day.strip().lower())
-        statement = statement.order_by(LprZoneShadowObservation.observed_at.desc(), LprZoneShadowObservation.created_at.desc()).limit(limit)
+            statement = statement.where(
+                LprZoneShadowObservation.time_of_day == time_of_day.strip().lower()
+            )
+        statement = statement.order_by(
+            LprZoneShadowObservation.observed_at.desc(), LprZoneShadowObservation.created_at.desc()
+        ).limit(limit)
         async with AsyncSessionLocal() as session:
             rows = (await session.scalars(statement)).all()
         return [serialize_lpr_zone_shadow_observation(row) for row in rows]
@@ -141,11 +156,17 @@ def evaluate_zone_shadow_decision(
     )
 
 
-def evaluate_lpr_zone_filter_for_read(read: PlateRead, *, mode: str = "shadow") -> ZoneShadowDecision:
-    return evaluate_lpr_zone_filter_decision(_smart_zone_metadata(read).get("zone_statuses"), mode=mode)
+def evaluate_lpr_zone_filter_for_read(
+    read: PlateRead, *, mode: str = "shadow"
+) -> ZoneShadowDecision:
+    return evaluate_lpr_zone_filter_decision(
+        _smart_zone_metadata(read).get("zone_statuses"), mode=mode
+    )
 
 
-def evaluate_lpr_zone_filter_decision(zone_statuses: Any, *, mode: str = "shadow") -> ZoneShadowDecision:
+def evaluate_lpr_zone_filter_decision(
+    zone_statuses: Any, *, mode: str = "shadow"
+) -> ZoneShadowDecision:
     normalized_mode = _normalize_zone_filter_mode(mode)
     usable_entries = _usable_zone_status_entries(zone_statuses)
     if not usable_entries:
@@ -160,7 +181,10 @@ def evaluate_lpr_zone_filter_decision(zone_statuses: Any, *, mode: str = "shadow
         )
 
     for entry in usable_entries:
-        if _zone_id(entry) == LPR_ZONE_FILTER_TARGET_ZONE_ID and _zone_status(entry) in LPR_ZONE_FILTER_ACCEPTED_STATUSES:
+        if (
+            _zone_id(entry) == LPR_ZONE_FILTER_TARGET_ZONE_ID
+            and _zone_status(entry) in LPR_ZONE_FILTER_ACCEPTED_STATUSES
+        ):
             status = _zone_status(entry)
             return ZoneShadowDecision(
                 shadow_decision="allowed",
@@ -233,7 +257,13 @@ def _zone_entries(metadata: dict[str, Any]) -> list[dict[str, Any]]:
         return entries or [{}]
     smart_zones = metadata.get("smart_zones")
     if isinstance(smart_zones, list) and smart_zones:
-        return [{"zone": str(smart_zones[0]), "zone_id": str(smart_zones[0]), "zone_name": str(smart_zones[0])}]
+        return [
+            {
+                "zone": str(smart_zones[0]),
+                "zone_id": str(smart_zones[0]),
+                "zone_name": str(smart_zones[0]),
+            }
+        ]
     return [{}]
 
 

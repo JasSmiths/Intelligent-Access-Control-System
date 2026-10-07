@@ -22,7 +22,6 @@ def composed_from_context(context: NotificationContext) -> ComposedNotification:
     )
 
 
-
 def context_variables(context: NotificationContext) -> dict[str, str]:
     facts = {
         canonical_key(key): "" if value is None else str(value)
@@ -52,7 +51,9 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "vehicle_registration_number",
         "registration_number",
     )
-    visitor_pass_make = pick("visitor_pass_vehicle_make", "visitor_pass_make", "vehicle_make", "make")
+    visitor_pass_make = pick(
+        "visitor_pass_vehicle_make", "visitor_pass_make", "vehicle_make", "make"
+    )
     visitor_pass_colour = pick(
         "visitor_pass_vehicle_colour",
         "visitor_pass_vehicle_color",
@@ -63,7 +64,9 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "colour",
         "color",
     )
-    visitor_pass_duration = pick("visitor_pass_duration_on_site", "duration_human", "duration_on_site")
+    visitor_pass_duration = pick(
+        "visitor_pass_duration_on_site", "duration_human", "duration_on_site"
+    )
     if not visitor_pass_duration:
         visitor_pass_duration = _duration_label_from_seconds(
             pick("visitor_pass_duration_on_site_seconds", "duration_on_site_seconds")
@@ -112,7 +115,9 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "FirstName": first_name,
         "FirstNamePossessive": _possessive(first_name),
         "ObjectPronoun": pick("object_pronoun", "pronoun_object", default="them"),
-        "PossessiveDeterminer": pick("possessive_determiner", "pronoun_possessive", default="their"),
+        "PossessiveDeterminer": pick(
+            "possessive_determiner", "pronoun_possessive", default="their"
+        ),
         "LastName": last_name,
         "DisplayName": display_name or first_name or "Unknown visitor",
         "GroupName": pick("group_name", "group"),
@@ -155,13 +160,19 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
         "GateStatus": pick("gate_status", "gate_state"),
         "IntegrationName": pick("integration_name", "integration", "provider_name"),
         "IntegrationStatus": pick("integration_status", "status"),
-        "IntegrationReason": pick("integration_reason", "degraded_reason", "failure_reason", "reason"),
+        "IntegrationReason": pick(
+            "integration_reason", "degraded_reason", "failure_reason", "reason"
+        ),
         "IntegrationLastConnectedAt": pick("integration_last_connected_at", "last_connected_at"),
         "IntegrationLastFailureAt": pick("integration_last_failure_at", "last_failure_at"),
         "GarageDoor": pick("garage_door"),
         "EntityId": pick("entity_id"),
-        "VisitorName": pick("visitor_name", "visitor_pass_name", default=display_name or context.subject),
-        "VisitorPassName": pick("visitor_pass_name", "visitor_name", default=display_name or context.subject),
+        "VisitorName": pick(
+            "visitor_name", "visitor_pass_name", default=display_name or context.subject
+        ),
+        "VisitorPassName": pick(
+            "visitor_pass_name", "visitor_name", default=display_name or context.subject
+        ),
         "VisitorPassRegistration": visitor_pass_registration,
         "VisitorPassTimeWindow": visitor_pass_time_window,
         "VisitorPassVehicleRegistration": visitor_pass_registration,
@@ -182,7 +193,6 @@ def context_variables(context: NotificationContext) -> dict[str, str]:
     }
 
 
-
 def context_occurred_at(context: NotificationContext) -> datetime:
     raw = context.facts.get("occurred_at") or context.facts.get("created_at") or ""
     if raw:
@@ -194,7 +204,6 @@ def context_occurred_at(context: NotificationContext) -> datetime:
     return datetime.now(tz=UTC)
 
 
-
 def snapshot_payload(media: dict[str, Any]) -> dict[str, str | bool] | None:
     if not media.get("attach_camera_snapshot") or not media.get("camera_id"):
         return None
@@ -204,7 +213,6 @@ def snapshot_payload(media: dict[str, Any]) -> dict[str, str | bool] | None:
         "camera_id": camera_id,
         "image_url": f"/api/v1/integrations/unifi-protect/cameras/{camera_id}/snapshot?width=960&height=540",
     }
-
 
 
 def gate_malfunction_notification_content(
@@ -236,7 +244,6 @@ def gate_malfunction_notification_content(
     }
 
 
-
 def gate_malfunction_plain_body(stage: str) -> str:
     normalized_stage = notification_payloads.normalize_gate_malfunction_stage(stage)
     if normalized_stage == "initial":
@@ -251,8 +258,9 @@ def gate_malfunction_plain_body(stage: str) -> str:
         return "The gate is still stuck open and Automatic recovery has exhausted its available fixes. Please check the gate when you can."
     if normalized_stage == "resolved":
         return "The gate malfunction has been resolved and the gate is closed again."
-    return "The gate has malfunctioned and is stuck open. Automatic recovery is trying to resolve it."
-
+    return (
+        "The gate has malfunctioned and is stuck open. Automatic recovery is trying to resolve it."
+    )
 
 
 def clean_notification_text(value: str) -> str:
@@ -260,7 +268,6 @@ def clean_notification_text(value: str) -> str:
     if len(text) > 1 and text.startswith('"') and text.endswith('"'):
         text = text[1:-1].strip()
     return text
-
 
 
 def postprocess_gate_malfunction_body(
@@ -279,7 +286,6 @@ def postprocess_gate_malfunction_body(
     return text[:500]
 
 
-
 def strip_gate_malfunction_prefixes(value: str) -> str:
     text = clean_notification_text(value)
     while True:
@@ -290,10 +296,8 @@ def strip_gate_malfunction_prefixes(value: str) -> str:
         text = next_text
 
 
-
 def strip_attention_prefix(value: str) -> str:
     return re.sub(r"^\s*attention\.\s*", "", value, flags=re.IGNORECASE).strip()
-
 
 
 def strip_update_prefix(value: str) -> str:
@@ -305,13 +309,11 @@ def strip_update_prefix(value: str) -> str:
     ).strip()
 
 
-
 def _possessive(value: str) -> str:
     cleaned = value.strip()
     if not cleaned:
         return ""
     return f"{cleaned}'" if cleaned.lower().endswith("s") else f"{cleaned}'s"
-
 
 
 def _time_label(value: str) -> str:
@@ -321,4 +323,3 @@ def _time_label(value: str) -> str:
         return datetime.fromisoformat(value).strftime("%H:%M")
     except ValueError:
         return value
-

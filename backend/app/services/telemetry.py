@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.parse import parse_qsl, urlencode
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -228,8 +228,7 @@ def sanitize_payload(value: Any, *, depth: int = 0, key: str | None = None) -> A
     if isinstance(value, list | tuple | set):
         items = list(value)
         sanitized_list = [
-            sanitize_payload(item, depth=depth + 1, key=key)
-            for item in items[:MAX_LIST_ITEMS]
+            sanitize_payload(item, depth=depth + 1, key=key) for item in items[:MAX_LIST_ITEMS]
         ]
         if len(items) > MAX_LIST_ITEMS:
             sanitized_list.append(f"[{len(items) - MAX_LIST_ITEMS} items truncated]")
@@ -243,8 +242,7 @@ def sanitize_query_string(query: str | bytes | None) -> str:
     query_text = query.decode("utf-8", errors="replace") if isinstance(query, bytes) else str(query)
     pairs = parse_qsl(query_text, keep_blank_values=True)
     sanitized = [
-        (key, "[redacted]" if _is_secret_key(key.lower()) else value)
-        for key, value in pairs
+        (key, "[redacted]" if _is_secret_key(key.lower()) else value) for key, value in pairs
     ]
     return urlencode(sanitized, doseq=True)
 
@@ -289,7 +287,9 @@ async def write_audit_log(
 def audit_log_event_payload(row: AuditLog) -> dict[str, Any]:
     log = {
         "id": str(row.id),
-        "timestamp": row.timestamp.isoformat() if row.timestamp else datetime.now(tz=UTC).isoformat(),
+        "timestamp": row.timestamp.isoformat()
+        if row.timestamp
+        else datetime.now(tz=UTC).isoformat(),
         "category": row.category,
         "action": row.action,
         "actor": row.actor,
@@ -392,8 +392,12 @@ class ActiveTrace:
                 duration_ms=max(0.0, (ended - started_at).total_seconds() * 1000),
                 status=status,
                 attributes=sanitize_payload(attributes) if attributes is not None else None,
-                input_payload=sanitize_payload(input_payload) if input_payload is not None else None,
-                output_payload=sanitize_payload(output_payload) if output_payload is not None else None,
+                input_payload=sanitize_payload(input_payload)
+                if input_payload is not None
+                else None,
+                output_payload=sanitize_payload(output_payload)
+                if output_payload is not None
+                else None,
                 error=_truncate_string(error) if error else None,
             )
         )
@@ -425,7 +429,9 @@ class ActiveTrace:
             registration_number=self.registration_number,
             access_event_id=_coerce_uuid(access_event_id or self.access_event_id),
             summary=summary or self.summary,
-            context=sanitize_payload({**(self.context or {}), **(context or {})}) if (self.context or context) else None,
+            context=sanitize_payload({**(self.context or {}), **(context or {})})
+            if (self.context or context)
+            else None,
             error=_truncate_string(error_text) if error_text else None,
         )
         self.service.enqueue_trace(row)
@@ -475,15 +481,21 @@ class ActiveSpan:
                 ended_at=ended_at,
                 duration_ms=(time.perf_counter_ns() - self._started_perf_ns) / 1_000_000,
                 status=status,
-                attributes=sanitize_payload(self.attributes) if self.attributes is not None else None,
-                input_payload=sanitize_payload(self.input_payload) if self.input_payload is not None else None,
-                output_payload=sanitize_payload(output_payload) if output_payload is not None else None,
+                attributes=sanitize_payload(self.attributes)
+                if self.attributes is not None
+                else None,
+                input_payload=sanitize_payload(self.input_payload)
+                if self.input_payload is not None
+                else None,
+                output_payload=sanitize_payload(output_payload)
+                if output_payload is not None
+                else None,
                 error=_truncate_string(error_text) if error_text else None,
             )
         )
         CURRENT_PARENT_SPAN_ID.reset(self._parent_token)
 
-    def __enter__(self) -> "ActiveSpan":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, _exc_type, exc, _traceback) -> None:
@@ -552,8 +564,12 @@ class TelemetryService:
                 duration_ms=max(0.0, (ended - started).total_seconds() * 1000),
                 status=status,
                 attributes=sanitize_payload(attributes) if attributes is not None else None,
-                input_payload=sanitize_payload(input_payload) if input_payload is not None else None,
-                output_payload=sanitize_payload(output_payload) if output_payload is not None else None,
+                input_payload=sanitize_payload(input_payload)
+                if input_payload is not None
+                else None,
+                output_payload=sanitize_payload(output_payload)
+                if output_payload is not None
+                else None,
                 error=_truncate_string(str(error)) if error else None,
             )
         )
@@ -683,7 +699,7 @@ def _is_large_media_key(key: str) -> bool:
 
 
 def _looks_like_data_url(value: str) -> bool:
-    return value.startswith("data:image/") or value.startswith("data:video/")
+    return value.startswith(("data:image/", "data:video/"))
 
 
 def _truncate_string(value: str) -> str:

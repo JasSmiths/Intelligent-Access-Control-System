@@ -1,27 +1,28 @@
-from contextlib import AsyncExitStack, asynccontextmanager
-from collections.abc import Awaitable, Callable
 import asyncio
+from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.router import api_router
+from app.composition import wire_application
 from app.core.config import settings, validate_startup_security_config
-from app.core.recovery_hold import is_recovery_hold
-from app.recovery_hold import RecoveryHoldMiddleware, verify_readable_schema
 from app.core.logging import configure_logging, get_logger
+from app.core.recovery_hold import is_recovery_hold
 from app.db.bootstrap import init_database
 from app.db.session import AsyncSessionLocal, engine
-from app.services.auth import authenticate_request, count_users
+from app.recovery_hold import RecoveryHoldMiddleware, verify_readable_schema
 from app.services.access_devices import get_access_device_service
-from app.services.event_bus import event_bus
 from app.services.access_events import get_access_event_service
+from app.services.auth import authenticate_request, count_users
 from app.services.automations import get_automation_service
-from app.services.home_assistant import get_home_assistant_service
+from app.services.event_bus import event_bus
 from app.services.gate_malfunctions import get_gate_malfunction_service
+from app.services.home_assistant import get_home_assistant_service
 from app.services.lpr_webhook_security import verify_lpr_webhook_request
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.movement_reconciliation import get_movement_reconciliation_service
@@ -63,10 +64,12 @@ class RequestBodyTooLarge(RuntimeError):
 async def _stop_owned_service(name: str, stop: Callable[[], Awaitable[None]]) -> None:
     try:
         await asyncio.wait_for(stop(), timeout=20)
-    except (Exception, asyncio.CancelledError) as exc:
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - Cleanup must drain every owned resource despite arbitrary task failures.
         # One failed resource must not keep later resources alive or conceal the
         # original startup exception. Stop methods remain responsible for children.
-        logger.error("service_cleanup_failed", extra={"service": name, "error_class": type(exc).__name__})
+        logger.error(
+            "service_cleanup_failed", extra={"service": name, "error_class": type(exc).__name__}
+        )
 
 
 async def _cancel_owned_task(task: asyncio.Task) -> None:
@@ -75,8 +78,11 @@ async def _cancel_owned_task(task: asyncio.Task) -> None:
         await task
     except asyncio.CancelledError:
         pass
-    except Exception as exc:
-        logger.error("background_task_failed", extra={"task": task.get_name(), "error_class": type(exc).__name__})
+    except Exception as exc:  # noqa: BLE001 - Cleanup must drain every owned resource despite arbitrary task failures.
+        logger.error(
+            "background_task_failed",
+            extra={"task": task.get_name(), "error_class": type(exc).__name__},
+        )
 
 
 @asynccontextmanager
@@ -85,7 +91,10 @@ async def lifespan(app: FastAPI):
     app.state.startup_complete = False
     configure_logging()
     validate_startup_security_config()
-    logger.info("starting_backend", extra={"app_name": settings.app_name, "environment": settings.environment})
+    logger.info(
+        "starting_backend",
+        extra={"app_name": settings.app_name, "environment": settings.environment},
+    )
     try:
         async with AsyncExitStack() as resources, AsyncExitStack() as producers:
             resources.push_async_callback(_stop_owned_service, "database", engine.dispose)
@@ -97,6 +106,7 @@ async def lifespan(app: FastAPI):
                 finally:
                     app.state.startup_complete = False
                 return
+            wire_application()
             await init_database()
             # Register before start so a partially started service is also closed.
             for name, service in (
@@ -111,20 +121,41 @@ async def lifespan(app: FastAPI):
                 ("gate_malfunctions", get_gate_malfunction_service()),
                 ("unifi_protect", get_unifi_protect_service()),
             ):
-                owner = producers if name in {
-                    "automations", "unifi_protect", "access_events", "movement_reconciliation"
-                } else resources
+                owner = (
+                    producers
+                    if name
+                    in {"automations", "unifi_protect", "access_events", "movement_reconciliation"}
+                    else resources
+                )
                 owner.push_async_callback(_stop_owned_service, name, service.stop)
                 await service.start()
             startup_at = datetime.now(tz=UTC)
             previous_runtime_state = read_backend_runtime_state()
             for name, create_coroutine in (
-                ("backend-runtime-heartbeat", lambda: run_backend_runtime_heartbeat(started_at=startup_at, previous_state=previous_runtime_state)),
-                ("missed-access-event-backfill", lambda: backfill_missed_access_events_safely(previous_runtime_state=previous_runtime_state, startup_at=startup_at)),
-                ("missed-access-event-reconciliation", lambda: run_missed_access_event_reconciliation()),
-                ("access-event-snapshot-recovery", lambda: recover_missing_access_event_snapshots_safely()),
+                (
+                    "backend-runtime-heartbeat",
+                    lambda: run_backend_runtime_heartbeat(
+                        started_at=startup_at, previous_state=previous_runtime_state
+                    ),
+                ),
+                (
+                    "missed-access-event-backfill",
+                    lambda: backfill_missed_access_events_safely(
+                        previous_runtime_state=previous_runtime_state, startup_at=startup_at
+                    ),
+                ),
+                (
+                    "missed-access-event-reconciliation",
+                    lambda: run_missed_access_event_reconciliation(),
+                ),
+                (
+                    "access-event-snapshot-recovery",
+                    lambda: recover_missing_access_event_snapshots_safely(),
+                ),
             ):
-                producers.push_async_callback(_cancel_owned_task, asyncio.create_task(create_coroutine(), name=name))
+                producers.push_async_callback(
+                    _cancel_owned_task, asyncio.create_task(create_coroutine(), name=name)
+                )
             app.state.startup_complete = True
             try:
                 yield
@@ -141,24 +172,63 @@ app = FastAPI(
     root_path=settings.root_path,
     openapi_tags=[
         {"name": "Health", "description": "Backend health and service readiness checks."},
-        {"name": "Authentication", "description": "First-run setup, login, logout, and current-user preferences."},
+        {
+            "name": "Authentication",
+            "description": "First-run setup, login, logout, and current-user preferences.",
+        },
         {"name": "AI Providers", "description": "Configured providers for camera image analysis."},
-        {"name": "Automations", "description": "System-wide trigger, condition, and action automation rules."},
-        {"name": "Diagnostics", "description": "Operational diagnostics and LPR timing instrumentation."},
-        {"name": "Directory", "description": "People, vehicles, groups, and directory-owned DVLA refresh actions."},
-        {"name": "Access Events", "description": "Access history, presence, anomalies, alerts, and alert snapshots."},
-        {"name": "Gate Telemetry", "description": "Gate malfunction state, history, trace lookup, and operator override."},
-        {"name": "Integrations", "description": "Home Assistant, Apprise, DVLA, iCloud Calendar, gate, cover, and announcement operations."},
+        {
+            "name": "Automations",
+            "description": "System-wide trigger, condition, and action automation rules.",
+        },
+        {
+            "name": "Diagnostics",
+            "description": "Operational diagnostics and LPR timing instrumentation.",
+        },
+        {
+            "name": "Directory",
+            "description": "People, vehicles, groups, and directory-owned DVLA refresh actions.",
+        },
+        {
+            "name": "Access Events",
+            "description": "Access history, presence, anomalies, alerts, and alert snapshots.",
+        },
+        {
+            "name": "Gate Telemetry",
+            "description": "Gate malfunction state, history, trace lookup, and operator override.",
+        },
+        {
+            "name": "Integrations",
+            "description": "Home Assistant, Apprise, DVLA, iCloud Calendar, gate, cover, and announcement operations.",
+        },
         {"name": "UniFi Protect", "description": "UniFi Protect cameras and media."},
         {"name": "Top Charts", "description": "Leaderboard and access rhythm rankings."},
         {"name": "Maintenance", "description": "Maintenance mode status and controls."},
-        {"name": "Notifications", "description": "Notification workflow catalog, rules, previews, and tests."},
-        {"name": "Schedules", "description": "Reusable weekly access windows and dependency checks."},
-        {"name": "Visitor Passes", "description": "Anticipated one-shot visitor access windows and telemetry."},
+        {
+            "name": "Notifications",
+            "description": "Notification workflow catalog, rules, previews, and tests.",
+        },
+        {
+            "name": "Schedules",
+            "description": "Reusable weekly access windows and dependency checks.",
+        },
+        {
+            "name": "Visitor Passes",
+            "description": "Anticipated one-shot visitor access windows and telemetry.",
+        },
         {"name": "Realtime", "description": "Dashboard realtime WebSocket channel."},
-        {"name": "Reports", "description": "Generated access and presence reports with PDF export."},
-        {"name": "Settings", "description": "Dynamic runtime settings and integration test actions."},
-        {"name": "Telemetry", "description": "Trace, audit, category, artifact, and purge endpoints."},
+        {
+            "name": "Reports",
+            "description": "Generated access and presence reports with PDF export.",
+        },
+        {
+            "name": "Settings",
+            "description": "Dynamic runtime settings and integration test actions.",
+        },
+        {
+            "name": "Telemetry",
+            "description": "Trace, audit, category, artifact, and purge endpoints.",
+        },
         {"name": "Users", "description": "Admin-managed local dashboard users."},
         {"name": "Webhooks", "description": "External event ingestion endpoints."},
         {"name": "Simulation", "description": "Hardware-free LPR simulation endpoints."},
@@ -188,9 +258,7 @@ PUBLIC_AUTH_PREFIXES = (
 )
 
 READ_ONLY_METHODS = {"GET", "HEAD"}
-ALWAYS_TRACE_API_PREFIXES = (
-    "/api/v1/webhooks/",
-)
+ALWAYS_TRACE_API_PREFIXES = ("/api/v1/webhooks/",)
 MAINTENANCE_IGNORED_WEBHOOK_PATHS = {
     "/api/v1/webhooks/ubiquiti/lpr",
 }
@@ -248,7 +316,9 @@ async def request_size_limit_middleware(request: Request, call_next):
             if int(content_length) > limit_bytes:
                 return _payload_too_large_response(limit_bytes)
         except ValueError:
-            return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header."})
+            return JSONResponse(
+                status_code=400, content={"detail": "Invalid Content-Length header."}
+            )
 
     original_receive = request._receive
     bytes_seen = 0
@@ -365,7 +435,13 @@ async def telemetry_http_middleware(request: Request, call_next):
         raise
 
     span.finish(output_payload={"status_code": response.status_code})
-    level = "error" if response.status_code >= 500 else "warning" if response.status_code >= 400 else "info"
+    level = (
+        "error"
+        if response.status_code >= 500
+        else "warning"
+        if response.status_code >= 400
+        else "info"
+    )
     trace.actor = actor_from_user(getattr(request.state, "user", None))
     trace.finish(
         status="error" if response.status_code >= 500 else "ok",

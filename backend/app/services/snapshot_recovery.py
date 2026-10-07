@@ -12,12 +12,13 @@ from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, Anomaly
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.unifi_protect.client import UnifiProtectError
-from app.services.snapshots import ALERT_SNAPSHOT_CONTEXT_KEY, alert_snapshot_metadata_from_event
 from app.services.snapshots import (
+    ALERT_SNAPSHOT_CONTEXT_KEY,
     SNAPSHOT_CONTENT_TYPE,
     SnapshotMetadata,
     access_event_snapshot_relative_path,
     access_event_snapshot_url,
+    alert_snapshot_metadata_from_event,
     apply_snapshot_to_access_event,
     get_snapshot_manager,
 )
@@ -57,7 +58,9 @@ class SnapshotRecoveryResult:
     repopulated_alerts: int = 0
 
 
-async def recover_missing_access_event_snapshots(*, limit: int = SNAPSHOT_RECOVERY_LIMIT) -> SnapshotRecoveryResult:
+async def recover_missing_access_event_snapshots(
+    *, limit: int = SNAPSHOT_RECOVERY_LIMIT
+) -> SnapshotRecoveryResult:
     """Rebuild missing access-event snapshots from retained UniFi Protect event thumbnails."""
 
     manager = get_snapshot_manager()
@@ -121,8 +124,10 @@ async def recover_missing_access_event_snapshots(*, limit: int = SNAPSHOT_RECOVE
                 )
                 recovered_event_ids.add(event.id)
                 result.restored += 1
-            except Exception as exc:
-                _set_recovery_status(event, "unavailable", protect_event_id=evidence.event_id, reason=str(exc))
+            except Exception as exc:  # noqa: BLE001 - Optional evidence failure must not alter committed access decisions.
+                _set_recovery_status(
+                    event, "unavailable", protect_event_id=evidence.event_id, reason=str(exc)
+                )
                 result.errors += 1
                 logger.info(
                     "access_event_snapshot_recovery_failed",
@@ -157,7 +162,13 @@ async def recover_missing_access_event_snapshots(*, limit: int = SNAPSHOT_RECOVE
                 anomaly.context = context
                 result.repopulated_alerts += 1
 
-        if result.archived or result.restored or result.repopulated_alerts or result.errors or result.skipped:
+        if (
+            result.archived
+            or result.restored
+            or result.repopulated_alerts
+            or result.errors
+            or result.skipped
+        ):
             await session.commit()
         else:
             await session.rollback()
@@ -182,7 +193,7 @@ async def recover_missing_access_event_snapshots_safely() -> None:
         await recover_missing_access_event_snapshots()
     except asyncio.CancelledError:
         raise
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Optional evidence failure must not alter committed access decisions.
         logger.info("access_event_snapshot_recovery_skipped", extra={"error": str(exc)})
 
 
@@ -243,7 +254,7 @@ async def find_protect_snapshot_evidence_by_plate_time(
             since=occurred_at - SNAPSHOT_RECOVERY_EVENT_LOOKUP_WINDOW,
             until=occurred_at + SNAPSHOT_RECOVERY_EVENT_LOOKUP_WINDOW,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Optional evidence failure must not alter committed access decisions.
         logger.info(
             "access_event_snapshot_recovery_protect_lookup_failed",
             extra={
@@ -263,7 +274,7 @@ async def find_protect_snapshot_evidence_by_plate_time(
             track = await protect.event_lpr_track(protect_event_id)
         except UnifiProtectError:
             continue
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - Optional evidence failure must not alter committed access decisions.
             logger.debug(
                 "access_event_snapshot_recovery_track_lookup_failed",
                 extra={"protect_event_id": protect_event_id, "error": str(exc)},
@@ -293,8 +304,12 @@ async def find_protect_snapshot_evidence_by_plate_time(
             evidence = ProtectSnapshotEvidence(
                 event_id=protect_event_id,
                 source="plate_time_lpr_track",
-                camera_id=_optional_text((track_event or {}).get("camera_id") or protect_event.get("camera_id")),
-                camera_name=_optional_text((track_event or {}).get("camera_name") or protect_event.get("camera_name")),
+                camera_id=_optional_text(
+                    (track_event or {}).get("camera_id") or protect_event.get("camera_id")
+                ),
+                camera_name=_optional_text(
+                    (track_event or {}).get("camera_name") or protect_event.get("camera_name")
+                ),
                 captured_at=captured_at,
                 confidence=confidence,
                 event=track_event if isinstance(track_event, dict) else protect_event,
@@ -333,7 +348,7 @@ def _ensure_snapshot_archive(manager, event: AccessEvent) -> bool:
     )
     try:
         return manager.ensure_access_event_archive(metadata)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Optional evidence failure must not alter committed access decisions.
         logger.info(
             "access_event_snapshot_archive_failed",
             extra={
@@ -380,7 +395,9 @@ def _set_recovery_status(
     event.raw_payload = raw_payload
 
 
-def _attach_protect_snapshot_evidence(event: AccessEvent, evidence: ProtectSnapshotEvidence) -> None:
+def _attach_protect_snapshot_evidence(
+    event: AccessEvent, evidence: ProtectSnapshotEvidence
+) -> None:
     if evidence.source != "plate_time_lpr_track":
         return
     raw_payload = dict(event.raw_payload or {})
@@ -440,7 +457,7 @@ def _parse_datetime(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return _aware_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        return _aware_utc(datetime.fromisoformat(value))
     except ValueError:
         return None
 

@@ -1,8 +1,9 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api/client";
-import type { Vehicle } from "../../api/types";
-import { VehicleModal } from "./VehicleEditor";
+import * as directory from "../../api/directory";
+import type { Person, Vehicle } from "../../api/types";
+import { VehicleModal, VehiclePeoplePicker } from "./VehicleEditor";
 import type { DvlaLookupResponse } from "./types";
 
 function deferred<T>() {
@@ -88,4 +89,19 @@ it("aborts the lookup and clears the debounce timer on unmount", async () => {
   pending.unmount();
   await act(async () => { vi.advanceTimersByTime(850); });
   expect(post).toHaveBeenCalledTimes(1);
+});
+
+it("keeps server search matches visible when a registration matches instead of the person's name", async () => {
+  const matching = { id: "matching-owner", display_name: "Synthetic Owner", group: "Residents" } as Person;
+  const selected = { id: "selected-owner", display_name: "Previously Selected" } as Person;
+  const read = vi.spyOn(directory, "readDirectory").mockResolvedValue({ items: [matching], total: 1, next_cursor: null });
+  vi.spyOn(directory, "lookupDirectory").mockResolvedValue([selected]);
+  render(<VehiclePeoplePicker groups={[]} people={[]} selectedPersonIds={[selected.id]} onToggle={vi.fn()} />);
+  await act(async () => { vi.advanceTimersByTime(0); });
+  fireEvent.change(screen.getByRole("textbox", { name: "Search people to assign" }), { target: { value: "SYNTH01" } });
+  await act(async () => { vi.advanceTimersByTime(150); });
+  expect(read.mock.calls.at(-1)?.[1]?.q).toBe("SYNTH01");
+  expect(screen.getByText("Synthetic Owner")).toBeInTheDocument();
+  expect(screen.getByText("Previously Selected")).toBeInTheDocument();
+  expect(screen.queryByText("No people match this search.")).not.toBeInTheDocument();
 });

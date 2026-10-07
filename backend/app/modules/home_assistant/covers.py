@@ -18,14 +18,16 @@ class CoverCommandOutcome:
 
 
 class HomeAssistantCoverClient(Protocol):
-    async def call_service(self, service_name: str, service_data: dict[str, Any]) -> dict[str, Any]:
-        ...
+    async def call_service(
+        self, service_name: str, service_data: dict[str, Any]
+    ) -> dict[str, Any]: ...
 
-    async def get_state(self, entity_id: str) -> Any:
-        ...
+    async def get_state(self, entity_id: str) -> Any: ...
 
 
-def normalize_cover_entities(value: Any, *, default_open_service: str = DEFAULT_OPEN_SERVICE) -> list[dict[str, Any]]:
+def normalize_cover_entities(
+    value: Any, *, default_open_service: str = DEFAULT_OPEN_SERVICE
+) -> list[dict[str, Any]]:
     if not value:
         return []
     if isinstance(value, dict):
@@ -46,7 +48,9 @@ def normalize_cover_entities(value: Any, *, default_open_service: str = DEFAULT_
     return entities
 
 
-def normalize_cover_entity(raw: Any, *, default_open_service: str = DEFAULT_OPEN_SERVICE) -> dict[str, Any] | None:
+def normalize_cover_entity(
+    raw: Any, *, default_open_service: str = DEFAULT_OPEN_SERVICE
+) -> dict[str, Any] | None:
     if isinstance(raw, str):
         entity_id = raw.strip()
         name = title_from_entity_id(entity_id)
@@ -76,7 +80,9 @@ def normalize_cover_entity(raw: Any, *, default_open_service: str = DEFAULT_OPEN
     }
 
 
-def enabled_cover_entities(value: Any, *, default_open_service: str = DEFAULT_OPEN_SERVICE) -> list[dict[str, Any]]:
+def enabled_cover_entities(
+    value: Any, *, default_open_service: str = DEFAULT_OPEN_SERVICE
+) -> list[dict[str, Any]]:
     return [
         entity
         for entity in normalize_cover_entities(value, default_open_service=default_open_service)
@@ -120,11 +126,13 @@ async def command_cover(
             detail=f"Unsupported cover action: {action}",
         )
 
-    service_name = str(entity.get("open_service") if action == "open" else entity.get("close_service"))
+    service_name = str(
+        entity.get("open_service") if action == "open" else entity.get("close_service")
+    )
     try:
         await client.call_service(service_name, {"entity_id": entity["entity_id"]})
         state = await client.get_state(str(entity["entity_id"]))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
         return CoverCommandOutcome(
             entity_id=str(entity["entity_id"]),
             name=str(entity.get("name") or entity["entity_id"]),
@@ -183,7 +191,9 @@ def _detected_cover_entities(states: list[Any], *, role: str) -> list[dict[str, 
         matches.append(
             {
                 "entity_id": state.entity_id,
-                "name": str(state.attributes.get("friendly_name") or title_from_entity_id(state.entity_id)),
+                "name": str(
+                    state.attributes.get("friendly_name") or title_from_entity_id(state.entity_id)
+                ),
                 "enabled": True,
                 "open_service": DEFAULT_OPEN_SERVICE,
                 "close_service": DEFAULT_CLOSE_SERVICE,

@@ -1,7 +1,11 @@
 from dataclasses import dataclass
 from typing import Any
 
-from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantError, get_home_assistant_client
+from app.modules.home_assistant.client import (
+    HomeAssistantClient,
+    HomeAssistantError,
+    get_home_assistant_client,
+)
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 
 
@@ -29,7 +33,9 @@ class HomeAssistantMobileAppNotifier:
         runtime_config=None,
     ) -> None:
         if not target.service_name.startswith("notify.mobile_app_"):
-            raise NotificationDeliveryError("Home Assistant target must be a notify.mobile_app_* service.", delivery="not_sent")
+            raise NotificationDeliveryError(
+                "Home Assistant target must be a notify.mobile_app_* service.", delivery="not_sent"
+            )
 
         data: dict[str, Any] = {
             "tag": f"iacs-{context.event_type}",

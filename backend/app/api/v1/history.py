@@ -5,7 +5,7 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, date, datetime, time
-from typing import Any, Generic, TypeVar
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException
@@ -13,10 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, or_
 
 
-T = TypeVar("T")
-
-
-class HistoryPage(BaseModel, Generic[T]):
+class HistoryPage[T](BaseModel):
     items: list[T]
     next_cursor: str | None
     as_of: datetime
@@ -36,7 +33,7 @@ def range_boundary(raw: str | None, timezone: ZoneInfo) -> datetime | None:
         if len(raw) == 10:
             local = datetime.combine(date.fromisoformat(raw), time.min, tzinfo=timezone)
         else:
-            local = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            local = datetime.fromisoformat(raw)
             if local.tzinfo is None:
                 local = local.replace(tzinfo=timezone)
         return local.astimezone(UTC)
@@ -49,7 +46,9 @@ def filter_digest(filters: dict[str, Any]) -> str:
     return hashlib.sha256(body.encode()).hexdigest()[:24]
 
 
-def read_cursor(raw: str | None, filters: dict[str, Any]) -> tuple[datetime, datetime | None, uuid.UUID | None]:
+def read_cursor(
+    raw: str | None, filters: dict[str, Any]
+) -> tuple[datetime, datetime | None, uuid.UUID | None]:
     if not raw:
         return datetime.now(UTC), None, None
     try:
@@ -66,9 +65,21 @@ def read_cursor(raw: str | None, filters: dict[str, Any]) -> tuple[datetime, dat
         raise HTTPException(status_code=422, detail="Invalid or stale history cursor.") from exc
 
 
-def write_cursor(cutoff: datetime, stamp: datetime, row_id: uuid.UUID, filters: dict[str, Any]) -> str:
-    body = {"v": 1, "f": filter_digest(filters), "a": cutoff.isoformat(), "t": stamp.isoformat(), "i": str(row_id)}
-    return base64.urlsafe_b64encode(json.dumps(body, separators=(",", ":")).encode()).decode().rstrip("=")
+def write_cursor(
+    cutoff: datetime, stamp: datetime, row_id: uuid.UUID, filters: dict[str, Any]
+) -> str:
+    body = {
+        "v": 1,
+        "f": filter_digest(filters),
+        "a": cutoff.isoformat(),
+        "t": stamp.isoformat(),
+        "i": str(row_id),
+    }
+    return (
+        base64.urlsafe_b64encode(json.dumps(body, separators=(",", ":")).encode())
+        .decode()
+        .rstrip("=")
+    )
 
 
 def older_than(stamp_column: Any, id_column: Any, stamp: datetime, row_id: uuid.UUID) -> Any:

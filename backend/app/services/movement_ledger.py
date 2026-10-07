@@ -9,9 +9,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
-from app.models import AccessDeviceCommandRecord, AccessEvent, GateCommandRecord, MovementSagaRecord, MovementSessionRecord
+from app.models import (
+    AccessDeviceCommandRecord,
+    AccessEvent,
+    GateCommandRecord,
+    MovementSagaRecord,
+    MovementSessionRecord,
+)
 from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState
-
 
 MOVEMENT_STATE_RANK = {
     MovementSagaState.OBSERVED: 10,
@@ -72,7 +77,10 @@ def gate_command_idempotency_key(intent: Any) -> str:
 
 
 def unattempted_access_gate_evidence(
-    row: GateCommandRecord, *, event_id: uuid.UUID, saga_id: uuid.UUID,
+    row: GateCommandRecord,
+    *,
+    event_id: uuid.UUID,
+    saga_id: uuid.UUID,
 ) -> dict[str, Any] | None:
     """Recognize only the ledger's retained no-attempt receipt, not event metadata."""
     metadata = row.command_metadata
@@ -88,18 +96,34 @@ def unattempted_access_gate_evidence(
         uuid.UUID(proof["reservation_id"])
     except (KeyError, TypeError, ValueError, AttributeError):
         return None
-    if (proof.get("kind") != "expired_unattempted_access_gate" or proof.get("version") != 1
-            or proof.get("access_event_id") != str(event_id) or proof.get("movement_saga_id") != str(saga_id)
-            or proof.get("intent_id") != expected_intent or metadata.get("intent_id") != expected_intent
-            or metadata.get("expires_at") != proof["dispatch_deadline"] or metadata.get("target_plan") is not None
-            or metadata.get("delivery") != "not_sent" or row.action != "open" or row.gate_key != "default"
-            or row.source != "automatic_lpr_grant" or row.access_event_id != event_id or row.movement_saga_id != saga_id
-            or row.idempotency_key != f"gate-command:open:default:event:{event_id}"
-            or row.state != GateCommandState.REJECTED or row.accepted is not False
-            or row.mechanically_confirmed or row.requires_reconciliation or row.started_at is not None
-            or row.lease_token is not None or row.lease_expires_at is not None
-            or deadline.tzinfo is None or checked_at.tzinfo is None or checked_at <= deadline
-            or row.completed_at != checked_at):
+    if (
+        proof.get("kind") != "expired_unattempted_access_gate"
+        or proof.get("version") != 1
+        or proof.get("access_event_id") != str(event_id)
+        or proof.get("movement_saga_id") != str(saga_id)
+        or proof.get("intent_id") != expected_intent
+        or metadata.get("intent_id") != expected_intent
+        or metadata.get("expires_at") != proof["dispatch_deadline"]
+        or metadata.get("target_plan") is not None
+        or metadata.get("delivery") != "not_sent"
+        or row.action != "open"
+        or row.gate_key != "default"
+        or row.source != "automatic_lpr_grant"
+        or row.access_event_id != event_id
+        or row.movement_saga_id != saga_id
+        or row.idempotency_key != f"gate-command:open:default:event:{event_id}"
+        or row.state != GateCommandState.REJECTED
+        or row.accepted is not False
+        or row.mechanically_confirmed
+        or row.requires_reconciliation
+        or row.started_at is not None
+        or row.lease_token is not None
+        or row.lease_expires_at is not None
+        or deadline.tzinfo is None
+        or checked_at.tzinfo is None
+        or checked_at <= deadline
+        or row.completed_at != checked_at
+    ):
         return None
     return proof
 
@@ -221,17 +245,29 @@ class MovementLedgerRepository:
         return True
 
     async def lock_gate_operation_in_session(
-        self, session: AsyncSession, idempotency_key: str, *, wait: bool = True,
+        self,
+        session: AsyncSession,
+        idempotency_key: str,
+        *,
+        wait: bool = True,
     ) -> bool:
         """Acquire before origin/parent rows; the nonblocking mode keeps recovery fair."""
         operation = "pg_advisory_xact_lock" if wait else "pg_try_advisory_xact_lock"
-        result = await session.scalar(text(f"SELECT {operation}(hashtext(:gate_key))"),
-            {"gate_key": f"iacs:gate-operation:{idempotency_key}"})
+        result = await session.scalar(
+            text(f"SELECT {operation}(hashtext(:gate_key))"),
+            {"gate_key": f"iacs:gate-operation:{idempotency_key}"},
+        )
         return True if wait else bool(result)
 
     async def record_unattempted_access_gate_in_session(
-        self, session: AsyncSession, *, event: AccessEvent, saga: MovementSagaRecord,
-        reservation_id: uuid.UUID, intent_id: uuid.UUID, dispatch_deadline: datetime,
+        self,
+        session: AsyncSession,
+        *,
+        event: AccessEvent,
+        saga: MovementSagaRecord,
+        reservation_id: uuid.UUID,
+        intent_id: uuid.UUID,
+        dispatch_deadline: datetime,
     ) -> GateCommandRecord:
         """Terminalize an absent expired core operation, never a previously attempted one.
 
@@ -240,33 +276,75 @@ class MovementLedgerRepository:
         No target plan or physical observation is fabricated.
         """
         now = await session.scalar(select(func.clock_timestamp()))
-        if (intent_id != uuid.uuid5(event.id, "automatic-gate-open") or saga.access_event_id != event.id
-                or event.decision != AccessDecision.GRANTED or event.direction != AccessDirection.ENTRY
-                or dispatch_deadline.tzinfo is None or now <= dispatch_deadline):
-            raise ValueError("Only an overdue retained automatic entry can be terminalized without sending.")
+        if (
+            intent_id != uuid.uuid5(event.id, "automatic-gate-open")
+            or saga.access_event_id != event.id
+            or event.decision != AccessDecision.GRANTED
+            or event.direction != AccessDirection.ENTRY
+            or dispatch_deadline.tzinfo is None
+            or now <= dispatch_deadline
+        ):
+            raise ValueError(
+                "Only an overdue retained automatic entry can be terminalized without sending."
+            )
         key = f"gate-command:open:default:event:{event.id}"
-        parent = await session.scalar(select(GateCommandRecord.id).where(or_(
-            GateCommandRecord.idempotency_key == key, GateCommandRecord.access_event_id == event.id,
-            GateCommandRecord.movement_saga_id == saga.id,
-            GateCommandRecord.command_metadata["intent_id"].astext == str(intent_id))))
-        child = await session.scalar(select(AccessDeviceCommandRecord.id).where(
-            AccessDeviceCommandRecord.intent_id == str(intent_id)))
+        parent = await session.scalar(
+            select(GateCommandRecord.id).where(
+                or_(
+                    GateCommandRecord.idempotency_key == key,
+                    GateCommandRecord.access_event_id == event.id,
+                    GateCommandRecord.movement_saga_id == saga.id,
+                    GateCommandRecord.command_metadata["intent_id"].astext == str(intent_id),
+                )
+            )
+        )
+        child = await session.scalar(
+            select(AccessDeviceCommandRecord.id).where(
+                AccessDeviceCommandRecord.intent_id == str(intent_id)
+            )
+        )
         if parent is not None or child is not None:
             raise ValueError("Retained command history prevents an absence proof.")
-        proof = {"kind": "expired_unattempted_access_gate", "version": 1,
-            "reservation_id": str(reservation_id), "access_event_id": str(event.id),
-            "movement_saga_id": str(saga.id), "intent_id": str(intent_id),
-            "dispatch_deadline": dispatch_deadline.isoformat(), "checked_at": now.isoformat()}
-        row = GateCommandRecord(idempotency_key=key, access_event_id=event.id, movement_saga_id=saga.id,
-            action="open", source="automatic_lpr_grant", gate_key="default", controller="configured",
-            reason="Automatic entry expired before any command was reserved.", actor="Access Event Automation",
-            registration_number=event.registration_number, bypass_schedule=False,
-            state=GateCommandState.REJECTED, accepted=False, gate_state="unknown", mechanically_confirmed=False,
-            requires_reconciliation=False, completed_at=now,
+        proof = {
+            "kind": "expired_unattempted_access_gate",
+            "version": 1,
+            "reservation_id": str(reservation_id),
+            "access_event_id": str(event.id),
+            "movement_saga_id": str(saga.id),
+            "intent_id": str(intent_id),
+            "dispatch_deadline": dispatch_deadline.isoformat(),
+            "checked_at": now.isoformat(),
+        }
+        row = GateCommandRecord(
+            idempotency_key=key,
+            access_event_id=event.id,
+            movement_saga_id=saga.id,
+            action="open",
+            source="automatic_lpr_grant",
+            gate_key="default",
+            controller="configured",
+            reason="Automatic entry expired before any command was reserved.",
+            actor="Access Event Automation",
+            registration_number=event.registration_number,
+            bypass_schedule=False,
+            state=GateCommandState.REJECTED,
+            accepted=False,
+            gate_state="unknown",
+            mechanically_confirmed=False,
+            requires_reconciliation=False,
+            completed_at=now,
             detail="Recognition deadline passed before command reservation; no gate request was sent.",
-            command_metadata={"recovery_version": 2, "intent_id": str(intent_id), "target_plan": None,
-                "expires_at": dispatch_deadline.isoformat(), "delivery": "not_sent",
-                "admission_verified": False, "target_receipts": [], "no_attempt_evidence": proof})
+            command_metadata={
+                "recovery_version": 2,
+                "intent_id": str(intent_id),
+                "target_plan": None,
+                "expires_at": dispatch_deadline.isoformat(),
+                "delivery": "not_sent",
+                "admission_verified": False,
+                "target_receipts": [],
+                "no_attempt_evidence": proof,
+            },
+        )
         session.add(row)
         await session.flush()
         return row
@@ -289,19 +367,33 @@ class MovementLedgerRepository:
                 await self.lock_gate_operation_in_session(session, idempotency_key)
                 now = await session.scalar(select(func.clock_timestamp()))
                 existing = await session.scalar(
-                    select(GateCommandRecord).where(GateCommandRecord.idempotency_key == idempotency_key).with_for_update()
+                    select(GateCommandRecord)
+                    .where(GateCommandRecord.idempotency_key == idempotency_key)
+                    .with_for_update()
                 )
-                if existing and existing.state == GateCommandState.LEASED and (
-                    not existing.lease_expires_at or existing.lease_expires_at <= now
+                if (
+                    existing
+                    and existing.state == GateCommandState.LEASED
+                    and (not existing.lease_expires_at or existing.lease_expires_at <= now)
                 ):
-                    self.mark_gate_command_uncertain(existing, at=now, detail="Gate command lease expired; delivery remains unknown.")
+                    self.mark_gate_command_uncertain(
+                        existing,
+                        at=now,
+                        detail="Gate command lease expired; delivery remains unknown.",
+                    )
                 if existing and existing.state in TERMINAL_GATE_COMMAND_STATES:
                     await session.commit()
-                    return GateCommandLease(existing, existing.lease_token or "", already_completed=True)
+                    return GateCommandLease(
+                        existing, existing.lease_token or "", already_completed=True
+                    )
 
-                active = existing if existing and existing.state == GateCommandState.LEASED else None
+                active = (
+                    existing if existing and existing.state == GateCommandState.LEASED else None
+                )
                 if not active:
-                    record = existing or self._new_gate_command_record(intent, idempotency_key=idempotency_key)
+                    record = existing or self._new_gate_command_record(
+                        intent, idempotency_key=idempotency_key
+                    )
                     if not existing:
                         session.add(record)
                     lease_token = uuid.uuid4().hex
@@ -336,10 +428,17 @@ class MovementLedgerRepository:
             if not row:
                 raise RuntimeError(f"Gate command {command_id} was not found.")
             now = await session.scalar(select(func.clock_timestamp()))
-            if (not lease_token or row.lease_token != lease_token or row.state != GateCommandState.LEASED
-                    or not row.lease_expires_at or row.lease_expires_at <= now):
+            if (
+                not lease_token
+                or row.lease_token != lease_token
+                or row.state != GateCommandState.LEASED
+                or not row.lease_expires_at
+                or row.lease_expires_at <= now
+            ):
                 if row.state == GateCommandState.LEASED and row.lease_token == lease_token:
-                    self.mark_gate_command_uncertain(row, at=now, detail="Gate command response arrived after its lease expired.")
+                    self.mark_gate_command_uncertain(
+                        row, at=now, detail="Gate command response arrived after its lease expired."
+                    )
                     await session.commit()
                 raise GateCommandLeaseLost(row)
             row.accepted = accepted
@@ -349,8 +448,14 @@ class MovementLedgerRepository:
             row.requires_reconciliation = requires_reconciliation
             row.exception_class = exception_class
             if metadata:
-                row.command_metadata = {**(row.command_metadata or {}),
-                    **{key: value for key, value in metadata.items() if key != "no_attempt_evidence"}}
+                row.command_metadata = {
+                    **(row.command_metadata or {}),
+                    **{
+                        key: value
+                        for key, value in metadata.items()
+                        if key != "no_attempt_evidence"
+                    },
+                }
             row.completed_at = now
             row.lease_token = None
             row.lease_expires_at = None
@@ -368,7 +473,9 @@ class MovementLedgerRepository:
             await session.refresh(row)
             return row
 
-    def mark_gate_command_uncertain(self, row: GateCommandRecord, *, at: datetime, detail: str) -> None:
+    def mark_gate_command_uncertain(
+        self, row: GateCommandRecord, *, at: datetime, detail: str
+    ) -> None:
         """Hold an expired/ambiguous attempt; expiry is not evidence of rejection."""
         row.state = GateCommandState.RECONCILIATION_REQUIRED
         row.accepted = None
@@ -411,8 +518,13 @@ class MovementLedgerRepository:
             "started_at": row.started_at.isoformat() if row.started_at else None,
             "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         }
-        if (row.access_event_id and row.movement_saga_id and unattempted_access_gate_evidence(
-                row, event_id=row.access_event_id, saga_id=row.movement_saga_id)):
+        if (
+            row.access_event_id
+            and row.movement_saga_id
+            and unattempted_access_gate_evidence(
+                row, event_id=row.access_event_id, saga_id=row.movement_saga_id
+            )
+        ):
             payload.update(delivery="not_sent", admission_verified=False, target_receipts=[])
         return payload
 
@@ -563,8 +675,11 @@ class MovementLedgerRepository:
     def _new_gate_command_record(self, intent: Any, *, idempotency_key: str) -> GateCommandRecord:
         event_id = self._uuid_or_none(getattr(intent, "event_id", None))
         movement_saga_id = self._uuid_or_none(getattr(intent, "movement_saga_id", None))
-        metadata = {key: value for key, value in (getattr(intent, "metadata", None) or {}).items()
-                    if key != "no_attempt_evidence"}
+        metadata = {
+            key: value
+            for key, value in (getattr(intent, "metadata", None) or {}).items()
+            if key != "no_attempt_evidence"
+        }
         return GateCommandRecord(
             idempotency_key=idempotency_key,
             movement_saga_id=movement_saga_id,
@@ -577,11 +692,17 @@ class MovementLedgerRepository:
             actor=getattr(intent, "actor", None),
             registration_number=getattr(intent, "registration_number", None),
             bypass_schedule=bool(getattr(intent, "bypass_schedule", False)),
-            command_metadata={**metadata, "recovery_version": 2,
-                              "target_plan": getattr(intent, "target_plan", None),
-                              "expires_at": (getattr(intent, "expires_at", None).isoformat()
-                                             if getattr(intent, "expires_at", None) else None),
-                              "intent_id": str(getattr(intent, "intent_id", "") or "")},
+            command_metadata={
+                **metadata,
+                "recovery_version": 2,
+                "target_plan": getattr(intent, "target_plan", None),
+                "expires_at": (
+                    getattr(intent, "expires_at", None).isoformat()
+                    if getattr(intent, "expires_at", None)
+                    else None
+                ),
+                "intent_id": str(getattr(intent, "intent_id", "") or ""),
+            },
         )
 
     def _history_item(

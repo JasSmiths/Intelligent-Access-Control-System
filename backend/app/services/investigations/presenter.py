@@ -19,7 +19,6 @@ from app.models import (
 from app.services.investigations.outcomes import EpisodeAssessment, assess_episode
 from app.services.telemetry import sanitize_payload
 
-
 ROUTINE_TRACE_CATEGORIES = {"dependency_updates"}
 ROUTINE_AUDIT_ACTIONS = {
     "access_event.reconciliation_checked",
@@ -466,10 +465,16 @@ def _trace_timeline(raw: Mapping[str, Any], episode: Mapping[str, Any]) -> list[
                 _evidence(
                     evidence_id=f"movement-saga:{saga_id}:state:{index}",
                     timestamp=state.get("at") or state.get("timestamp") or saga.get("occurred_at"),
-                    timestamp_precision="exact" if state.get("at") or state.get("timestamp") else "episode",
+                    timestamp_precision="exact"
+                    if state.get("at") or state.get("timestamp")
+                    else "episode",
                     kind="decision",
                     title=f"Movement: {_humanize(str(state.get('state') or 'state changed'))}",
-                    description=str(state.get("detail") or state.get("reason") or "The movement workflow advanced."),
+                    description=str(
+                        state.get("detail")
+                        or state.get("reason")
+                        or "The movement workflow advanced."
+                    ),
                     source=saga.get("source"),
                     raw=state,
                 )
@@ -496,16 +501,24 @@ def _trace_timeline(raw: Mapping[str, Any], episode: Mapping[str, Any]) -> list[
                 timestamp=audit.get("timestamp"),
                 kind="audit",
                 title=_humanize(str(audit.get("action") or "Audit record")),
-                description=str(audit.get("target_label") or audit.get("target_entity") or episode.get("summary")),
+                description=str(
+                    audit.get("target_label")
+                    or audit.get("target_entity")
+                    or episode.get("summary")
+                ),
                 source=_audit_source(audit),
                 raw=audit,
             )
         )
 
-    return sorted(timeline, key=lambda item: (_sort_timestamp(item.get("timestamp")), str(item.get("id"))))
+    return sorted(
+        timeline, key=lambda item: (_sort_timestamp(item.get("timestamp")), str(item.get("id")))
+    )
 
 
-def _configuration_context(raw: Mapping[str, Any], current_schedule: Schedule | None) -> list[dict[str, Any]]:
+def _configuration_context(
+    raw: Mapping[str, Any], current_schedule: Schedule | None
+) -> list[dict[str, Any]]:
     contexts: list[dict[str, Any]] = []
     event = _mapping(raw.get("access_event"))
     event_raw = _mapping(event.get("raw_payload"))
@@ -670,7 +683,9 @@ def _condition_description(condition: Mapping[str, Any], passed: bool) -> str:
     if not detail:
         details = _mapping(condition.get("details"))
         detail = _first_text(details, ("reason", "detail", "message", "state"))
-    return detail or ("The recorded condition passed." if passed else "The recorded condition did not pass.")
+    return detail or (
+        "The recorded condition passed." if passed else "The recorded condition did not pass."
+    )
 
 
 def _action_description(action: Mapping[str, Any]) -> str:
@@ -683,7 +698,10 @@ def _command_description(command: Mapping[str, Any]) -> str:
     if command.get("mechanically_confirmed") is True:
         return "The command was accepted and the resulting device state was confirmed."
     if command.get("accepted") is True:
-        return str(command.get("detail") or "The command was accepted but the resulting state was not confirmed.")
+        return str(
+            command.get("detail")
+            or "The command was accepted but the resulting state was not confirmed."
+        )
     return str(command.get("detail") or "The command was not accepted.")
 
 
@@ -745,7 +763,7 @@ def _sort_timestamp(value: Any) -> datetime:
         return value if value.tzinfo else value.replace(tzinfo=UTC)
     if isinstance(value, str):
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
             return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
         except ValueError:
             pass
