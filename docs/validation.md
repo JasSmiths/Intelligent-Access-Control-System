@@ -45,6 +45,13 @@ screenshots use the same output directory. Browser emulation does not establish
 physical-device keyboard, zoom, hinge or safe-area behavior. Report unavailable
 device checks as limits.
 
+The [search palette suite](../frontend/e2e/search-palette.spec.ts) covers phone
+result scrolling with a synthetic keyboard viewport, direct tap/Enter navigation,
+desktop previews, tablet/landscape resizing, animated dismissal and focus
+restoration, and reduced motion.
+It retains light/dark phone and desktop screenshots. Verify keyboard opening and
+closing on a physical iPhone before claiming device-specific keyboard coverage.
+
 ## Isolated harness
 
 [validate.py](../scripts/validation/validate.py) copies and hashes the current source,

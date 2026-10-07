@@ -30,10 +30,11 @@ export function SearchPalette({ currentUser, initialQuery, open, onClose: finish
   const items: SearchPaletteItem[] = trimmedQuery ? results : shortcuts;
   const activeItem = items[Math.min(activeIndex, Math.max(0, items.length - 1))] ?? null;
   const completion = searchCompletion(query, results);
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (!open) return;
     setQuery(initialQuery); setResults([]); setError(""); setLoading(false); setActiveIndex(0); setPreviewItem(null);
-    window.requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.select(); });
+    inputRef.current?.focus({ preventScroll: true });
+    inputRef.current?.select();
   }, [initialQuery, open]);
 
   React.useEffect(() => {
@@ -52,24 +53,28 @@ export function SearchPalette({ currentUser, initialQuery, open, onClose: finish
   React.useEffect(() => { if (activeIndex >= items.length) setActiveIndex(Math.max(0, items.length - 1)); }, [activeIndex, items.length]);
   if (!open) return null;
   const moveActive = (delta: number) => { if (!items.length) return; setActiveIndex((current) => (current + delta + items.length) % items.length); setPreviewItem(null); };
+  const selectItem = (item: SearchPaletteItem) => {
+    if (window.matchMedia("(max-width: 720px)").matches) onOpenResult(item);
+    else setPreviewItem(item);
+  };
   const handleInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); moveActive(event.key === "ArrowDown" ? 1 : -1); return; }
     if (event.key === "Tab" && completion) { event.preventDefault(); setQuery(completion); return; }
-    if (event.key === "Enter") { event.preventDefault(); if (!activeItem) return; event.metaKey || event.ctrlKey ? onOpenResult(activeItem) : setPreviewItem(activeItem); }
+    if (event.key === "Enter") { event.preventDefault(); if (!activeItem) return; event.metaKey || event.ctrlKey ? onOpenResult(activeItem) : selectItem(activeItem); }
   };
   return createPortal(
     <div className="search-palette-backdrop" onMouseDown={onClose} role="presentation">
       <section ref={modalRef} aria-label="Global search" aria-modal="true" className="search-palette" onMouseDown={(event) => event.stopPropagation()} role="dialog">
         <div className="search-palette-input-shell">
           <Search size={20} />
-          <div className="search-palette-input-stack"><input aria-activedescendant={activeItem ? `global-search-result-${activeItem.type}-${activeItem.id}` : undefined} aria-autocomplete="list" aria-controls="global-search-results" autoComplete="off" onChange={(event) => setQuery(event.target.value)} onKeyDown={handleInputKeyDown} placeholder="Search Anything..." ref={inputRef} role="combobox" spellCheck={false} value={query} />{completion ? <span className="search-palette-completion">{completion}</span> : null}</div>
+          <div className="search-palette-input-stack"><input aria-label="Search anything" aria-expanded="true" aria-activedescendant={activeItem ? `global-search-result-${activeItem.type}-${activeItem.id}` : undefined} aria-autocomplete="list" aria-controls="global-search-results" autoComplete="off" onChange={(event) => setQuery(event.target.value)} onKeyDown={handleInputKeyDown} placeholder="Search anything…" ref={inputRef} role="combobox" spellCheck={false} value={query} />{completion ? <span className="search-palette-completion">{completion}</span> : null}</div>
           {loading ? <Loader2 className="spin" size={18} /> : null}
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close search"><X size={16} /></button>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close search"><X size={18} /></button>
         </div>
         <div className="search-palette-body">
-          <div className="search-palette-results" id="global-search-results" role="listbox">
+          <div className="search-palette-results" id="global-search-results" aria-label="Search results" role="listbox">
             {error ? <div className="search-palette-state">{error}</div> : null}
-            {!error && items.length ? items.map((item, index) => <SearchPaletteRow active={index === activeIndex} item={item} key={`${item.type}-${item.id}`} onClick={() => { setActiveIndex(index); setPreviewItem(item); }} onMouseEnter={() => setActiveIndex(index)} />) : null}
+            {!error && items.length ? items.map((item, index) => <SearchPaletteRow active={index === activeIndex} item={item} key={`${item.type}-${item.id}`} onClick={() => { setActiveIndex(index); selectItem(item); }} onMouseEnter={() => setActiveIndex(index)} />) : null}
             {!error && !items.length && !loading ? <div className="search-palette-state">No results</div> : null}
           </div>
           <SearchPalettePreview item={previewItem ?? activeItem} onOpen={onOpenResult} />
@@ -81,7 +86,7 @@ export function SearchPalette({ currentUser, initialQuery, open, onClose: finish
 
 function SearchPaletteRow({ active, item, onClick, onMouseEnter }: { active: boolean; item: SearchPaletteItem; onClick: () => void; onMouseEnter: () => void }) {
   const Icon = searchMeta[item.type]?.icon ?? Search;
-  return <button aria-selected={active} className={active ? "search-palette-row active" : "search-palette-row"} id={`global-search-result-${item.type}-${item.id}`} onClick={onClick} onMouseEnter={onMouseEnter} role="option" type="button"><span className={`search-palette-row-icon ${item.type}`}><Icon size={17} /></span><span className="search-palette-row-main"><strong>{item.label}</strong><small>{item.subtitle}</small></span><span className="search-palette-row-type">{searchMeta[item.type]?.label ?? "Search"}</span></button>;
+  return <button aria-selected={active} className={active ? "search-palette-row active" : "search-palette-row"} id={`global-search-result-${item.type}-${item.id}`} onClick={onClick} onMouseEnter={onMouseEnter} role="option" type="button"><span className={`search-palette-row-icon ${item.type}`}><Icon size={17} /></span><span className="search-palette-row-main"><strong>{item.label}</strong><small>{item.subtitle}</small></span><span className="search-palette-row-type">{searchMeta[item.type]?.label ?? "Search"}</span><ArrowRight aria-hidden="true" className="search-palette-row-arrow" size={16} /></button>;
 }
 
 function SearchPalettePreview({ item, onOpen }: { item: SearchPaletteItem | null; onOpen: (item: SearchPaletteItem) => void }) {
