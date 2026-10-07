@@ -3,6 +3,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -857,6 +858,8 @@ class Presence(Base, TimestampMixin):
 class AccessEvent(Base, TimestampMixin):
     __tablename__ = "access_events"
 
+    resource_revision: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     vehicle_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("vehicles.id", ondelete="SET NULL"), index=True
@@ -1003,6 +1006,16 @@ class LprIngestEvent(Base, TimestampMixin):
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )
+    observation_state: Mapped[str] = mapped_column(String(32), server_default="legacy_terminal", nullable=False)
+    original_observation: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    observation_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    capture_token: Mapped[uuid.UUID | None] = mapped_column()
+    capture_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ready_ordinal: Mapped[int | None] = mapped_column(BigInteger, unique=True)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column()
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    window_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("lpr_debounce_windows.id", ondelete="RESTRICT", use_alter=True, name="fk_lpr_ingest_window"))
+    terminal_reason: Mapped[str | None] = mapped_column(String(120))
     normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="pending", nullable=False, index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -1629,3 +1642,7 @@ class MissedExitRecoveryAttempt(Base, TimestampMixin):
     timeline: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
     notification: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     duration_ms: Mapped[float | None] = mapped_column(Float)
+
+Index("ix_lpr_ingest_observing", LprIngestEvent.observation_state, LprIngestEvent.capture_until, LprIngestEvent.id)
+Index("ix_lpr_ingest_ready_order", LprIngestEvent.status, LprIngestEvent.ready_ordinal)
+Index("ix_lpr_ingest_window", LprIngestEvent.window_id, LprIngestEvent.id)

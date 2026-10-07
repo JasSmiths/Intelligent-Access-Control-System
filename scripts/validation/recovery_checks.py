@@ -9,6 +9,7 @@ import re
 
 
 PERSISTENCE_TESTS = [
+    "scripts/validation/test_access_pipeline_persistence.py",
     "scripts/validation/test_provider_binding_persistence.py",
     "scripts/validation/test_vehicle_information.py",
     "scripts/validation/test_plate_lookup_index.py",

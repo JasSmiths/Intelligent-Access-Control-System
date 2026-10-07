@@ -24,6 +24,8 @@ class VehicleInformationJob(Base):
     vehicle_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vehicles.id", ondelete="SET NULL"))
     registration_number: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    origin_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    readiness: Mapped[str] = mapped_column(String(40), server_default="legacy", nullable=False)
     deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False)
     lease_token: Mapped[uuid.UUID | None] = mapped_column()

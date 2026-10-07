@@ -24,6 +24,7 @@ PROTECTED_PACKAGES = (
 )
 TYPE_OWNERS = (
     TypeOwner('tools/report_pdf_smoke.py', 'strict'),
+    TypeOwner('app/models/access_pipeline.py', 'strict'),
     TypeOwner('app/modules/access_devices/binding_policies.py', 'strict'),
     TypeOwner('app/services/notification_runs.py', 'checked'),
     TypeOwner('app/services/notification_dispatch.py', 'strict'),
@@ -65,6 +66,8 @@ TYPE_OWNERS = (
     TypeOwner('app/services/automation_scheduling.py', 'strict'),
     TypeOwner('app/services/directory', 'strict'),
     TypeOwner('app/services/access', 'checked', (
+        ('pipeline_contracts.py', 'strict'),
+        ('pipeline_store.py', 'strict'),
         ('__init__.py', 'legacy'),
         ('authorization.py', 'legacy'),
         ('delivery.py', 'legacy'),

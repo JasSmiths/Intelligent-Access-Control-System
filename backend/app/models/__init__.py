@@ -1,5 +1,20 @@
 """SQLAlchemy models."""
 
+from app.models.access_pipeline import (
+    AccessChartDirtyState,
+    AccessCompletionWork,
+    HaPresenceCoordinator,
+    HaPresenceDesired,
+    HaPresenceEffect,
+    HaPresenceResolution,
+    HaPresenceTarget,
+    HistoricalAccessCandidate,
+    LprCoordinatorState,
+    LprDebounceWindow,
+    LprObservationToken,
+    LprWindowMember,
+    MovementSessionObservation,
+)
 from app.models.core import (
     AccessDevice,
     AccessDeviceCommandRecord,
@@ -49,6 +64,8 @@ from app.models.core import (
 from app.models.vehicle_information import VehicleInformationJob, VehicleInformationSnapshot
 
 __all__ = [
+    "AccessChartDirtyState",
+    "AccessCompletionWork",
     "AccessDevice",
     "AccessDeviceCommandRecord",
     "AccessDeviceProviderBinding",
@@ -66,14 +83,25 @@ __all__ = [
     "GateMalfunctionTimelineEvent",
     "GateStateObservation",
     "Group",
+    "HaPresenceCoordinator",
+    "HaPresenceDesired",
+    "HaPresenceEffect",
+    "HaPresenceResolution",
+    "HaPresenceTarget",
+    "HistoricalAccessCandidate",
     "ICloudCalendarAccount",
     "ICloudCalendarSyncRun",
     "LeaderboardState",
+    "LprCoordinatorState",
+    "LprDebounceWindow",
     "LprIngestEvent",
+    "LprObservationToken",
+    "LprWindowMember",
     "LprZoneShadowObservation",
     "MaintenanceModeState",
     "MissedExitRecoveryAttempt",
     "MovementSagaRecord",
+    "MovementSessionObservation",
     "MovementSessionRecord",
     "NotificationActionContext",
     "NotificationRule",
