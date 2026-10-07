@@ -90,6 +90,16 @@ Vite serves port 5173 and proxies API requests and WebSockets to backend port
 clients use relative `/api/v1` URLs and the existing
 [typed API modules](../frontend/src/api/).
 
+Integration editor changes belong to the complete keyed provider owner under
+[features/integrations](../frontend/src/features/integrations/), with draft/busy
+protection supplied by the shared dialog frame. Classify each catalog entry as
+managed or scalar and keep managed component coverage exact. A new access-device
+provider extends the ordered [binding descriptors](../frontend/src/features/settings/accessDeviceProviders.ts)
+and its checked backend policy/adapter contract; do not add provider branches to
+the shared editor. Run the inert third-descriptor, confirmation/account lifetime
+and affected browser fixtures described in [validation](validation.md).
+
+
 Install the exact reviewed dependency sets: Python packages come from
 [`uv.lock`](../backend/uv.lock), and frontend packages from
 [`package-lock.json`](../frontend/package-lock.json). The backend image pins uv

@@ -18,7 +18,10 @@ for (const scenario of ["settings", "apprise", "calendar", "rejected-settings"] 
       let body: unknown;
       switch (path) {
         case "/api/v1/auth/status": body = { setup_required: false, authenticated: true, user: { id: "fixture-admin", first_name: "Alex", last_name: "Operator", full_name: "Alex Operator", role: "admin", is_active: true, preferences: { sidebarCollapsed: false } } }; break;
-        case "/api/v1/settings": case "/api/v1/alerts": body = []; break;
+        case "/api/v1/settings":
+          if (accepted) { await route.fulfill({ status: 503, json: { detail: "Settings read offline" } }); return; }
+          body = []; break;
+        case "/api/v1/alerts": body = []; break;
         case "/api/v1/maintenance/status": body = { is_active: false }; break;
         case "/api/v1/integrations/gate/status": case "/api/v1/integrations/home-assistant/status": body = { configured: false, connected: false }; break;
         case "/api/v1/integrations/unifi-protect/status":
@@ -27,7 +30,9 @@ for (const scenario of ["settings", "apprise", "calendar", "rejected-settings"] 
         case "/api/v1/integrations/icloud-calendar/accounts":
           if (accepted) { await route.fulfill({ status: 503, json: { detail: "Calendar read offline" } }); return; }
           body = { accounts: [{ id: "cloud", apple_id: "synthetic@example.invalid", display_name: "Synthetic calendar", status: "connected", is_active: true }], recent_sync_runs: [] }; break;
-        case "/api/v1/integrations/apprise/urls": body = { urls: accepted ? [] : [{ index: 0, type: "Pushover", scheme: "pover", preview: "Synthetic preview" }] }; break;
+        case "/api/v1/integrations/apprise/urls":
+          if (accepted) { await route.fulfill({ status: 503, json: { detail: "Apprise read offline" } }); return; }
+          body = { urls: [{ index: 0, type: "Pushover", scheme: "pover", preview: "Synthetic preview" }] }; break;
         default: unexpected.push(`GET ${path}`); await route.abort("blockedbyclient"); return;
       }
       await route.fulfill({ json: body });
@@ -40,13 +45,13 @@ for (const scenario of ["settings", "apprise", "calendar", "rejected-settings"] 
       await modal.getByRole("textbox", { name: /Test VRN/ }).fill("SYN123");
       await modal.getByRole("button", { name: "Save", exact: true }).click();
       if (scenario === "rejected-settings") { await expect(modal.getByText("Unable to save settings", { exact: true })).toBeVisible(); await expect(modal.getByText(/Settings rejected/)).toBeVisible(); }
-      else { await expect(modal).toHaveCount(0); await expect(page.getByText(/Protect read offline/)).toBeVisible(); }
+      else { await expect(modal).toHaveCount(0); await expect(page.getByText(/Settings read offline/)).toBeVisible(); }
     } else if (scenario === "apprise") {
       await page.getByRole("button", { name: /Apprise/ }).click();
       await page.getByRole("button", { name: "Remove Pushover URL" }).click();
       await expect(page.getByText("No notification URLs configured", { exact: true })).toBeVisible();
       await expect(page.getByText("Apprise URL update failed", { exact: true })).toHaveCount(0);
-      await expect(page.getByText(/Protect read offline/)).toBeVisible();
+      await expect(page.getByText(/Apprise read offline/)).toBeVisible();
     } else {
       await page.getByRole("button", { name: /iCloud Calendar/ }).click();
       await page.getByRole("button", { name: "Sync Calendars Now" }).click();

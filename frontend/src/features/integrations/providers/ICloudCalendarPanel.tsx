@@ -7,17 +7,18 @@ import { ICloudCalendarAccount, ICloudCalendarPayload, ICloudCalendarSyncRun, in
 import { IntegrationFeedback } from "../catalog";
 import { IntegrationFeedbackPanel } from "../components";
 
-export function ICloudCalendarModal({
-  payload,
-  loading,
-  error,
-  onChanged
-}: {
-  payload: ICloudCalendarPayload;
-  loading: boolean;
-  error: string;
-  onChanged: () => Promise<void>;
-}) {
+import { EditorDialog } from "../../../ui/EditorDialog";
+import { useEditorLifetime } from "../../../ui/useEditorLifetime";
+import { useCoordinatedRead } from "../../../lib/useCoordinatedRead";
+import type { ProviderEditorProps } from "../editorTypes";
+import { integrationEventMatches } from "../invalidation";
+
+export function ICloudCalendarEditor(props: ProviderEditorProps) {
+  const lifetime = useEditorLifetime();
+  const canManage = props.currentUser.role === "admin";
+  const [payload, setPayload] = React.useState<ICloudCalendarPayload>({ accounts: [], recent_sync_runs: [] });
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState("");
   const [adding, setAdding] = React.useState(false);
   const [step, setStep] = React.useState<"credentials" | "verify">("credentials");
   const [appleId, setAppleId] = React.useState("");
@@ -25,167 +26,107 @@ export function ICloudCalendarModal({
   const [code, setCode] = React.useState("");
   const [handshakeId, setHandshakeId] = React.useState("");
   const [handshakeAppleId, setHandshakeAppleId] = React.useState("");
-  const [submitting, setSubmitting] = React.useState(false);
-  const [syncing, setSyncing] = React.useState(false);
+  const [operation, setOperation] = React.useState<"auth" | "verify" | "sync" | "remove" | null>(null);
   const [removingId, setRemovingId] = React.useState<string | null>(null);
   const [reconnectingAccountId, setReconnectingAccountId] = React.useState<string | null>(null);
   const [feedback, setFeedback] = React.useState<IntegrationFeedback | null>(null);
+  const pending = React.useRef(false);
+  const busy = operation !== null;
+  const submitting = operation === "auth" || operation === "verify";
+  const syncing = operation === "sync";
+  // An outstanding Apple handshake remains a draft after its password is cleared.
+  const dirty = Boolean(appleId || password || code || handshakeId || reconnectingAccountId);
   const activeAccounts = payload.accounts.filter((account) => account.is_active);
   const latestRun = payload.recent_sync_runs[0] ?? null;
   const hasAttention = activeAccounts.some((account) => ["error", "requires_reauth"].includes(account.status));
   const isReconnectFlow = Boolean(reconnectingAccountId);
+  const read = React.useCallback(async (signal: AbortSignal) => {
+    setLoading(true); setError("");
+    try { const next = await integrationsApi.getICloudCalendar({ signal }); if (!signal.aborted) setPayload(next); }
+    catch (error) { if (!signal.aborted) setError(error instanceof Error ? error.message : "Unable to load iCloud Calendar accounts."); throw error; }
+    finally { if (!signal.aborted) setLoading(false); }
+  }, []);
+  const reload = useCoordinatedRead(read, integrationEventMatches);
+  const refreshAccepted = () => { void reload().catch(() => undefined); void props.onChanged().catch(() => undefined); };
   const resetAddFlow = () => {
-    setAdding(false);
-    setStep("credentials");
-    setAppleId("");
-    setPassword("");
-    setCode("");
-    setHandshakeId("");
-    setHandshakeAppleId("");
-    setReconnectingAccountId(null);
-    setFeedback(null);
+    setAdding(false); setStep("credentials"); setAppleId(""); setPassword(""); setCode(""); setHandshakeId(""); setHandshakeAppleId(""); setReconnectingAccountId(null); setFeedback(null);
   };
+  const discardDraft = () => !pending.current && (!dirty || window.confirm("Discard unsaved iCloud Calendar connection?"));
+  const cancelFlow = () => { if (discardDraft()) resetAddFlow(); };
   const startAddFlow = () => {
-    if (adding && !isReconnectFlow) {
-      resetAddFlow();
-      return;
-    }
-    setAdding(true);
-    setStep("credentials");
-    setAppleId("");
-    setPassword("");
-    setCode("");
-    setHandshakeId("");
-    setHandshakeAppleId("");
-    setReconnectingAccountId(null);
-    setFeedback(null);
+    if (!canManage || !lifetime.isCurrent() || !discardDraft()) return;
+    const close = adding && !isReconnectFlow;
+    resetAddFlow(); if (!close) setAdding(true);
   };
   const startReconnectFlow = (account: ICloudCalendarAccount) => {
-    setAdding(true);
-    setStep("credentials");
-    setAppleId(account.apple_id);
-    setPassword("");
-    setCode("");
-    setHandshakeId("");
-    setHandshakeAppleId("");
-    setReconnectingAccountId(account.id);
-    setFeedback({
-      tone: "info",
-      title: "Reconnect iCloud Calendar",
-      detail: `Enter the Apple ID details for ${account.display_name} to refresh the trusted session.`
-    });
+    if (!canManage || !lifetime.isCurrent() || !discardDraft()) return;
+    resetAddFlow(); setAdding(true); setAppleId(account.apple_id); setReconnectingAccountId(account.id);
+    setFeedback({ tone: "info", title: "Reconnect iCloud Calendar", detail: `Enter the Apple ID details for ${account.display_name} to refresh the trusted session.` });
+  };
+  const begin = (next: NonNullable<typeof operation>) => {
+    if (!canManage || pending.current || loading || error || !lifetime.isCurrent()) return false;
+    pending.current = true; setOperation(next); setFeedback(null); return true;
+  };
+  const finish = () => { pending.current = false; if (lifetime.isCurrent()) { setOperation(null); setRemovingId(null); } };
+  const acceptedAccount = (account: ICloudCalendarAccount | undefined) => {
+    if (account) setPayload((current) => ({ ...current, accounts: [...current.accounts.filter((item) => item.id !== account.id), account] }));
   };
   const startAuth = async (event: React.FormEvent) => {
     event.preventDefault();
-    const submittedAppleId = appleId.trim();
-    const reconnecting = isReconnectFlow;
-    setSubmitting(true);
-    setFeedback(null);
+    if (!appleId.trim() || !password || !begin("auth")) return;
+    const submittedAppleId = appleId.trim(); const reconnecting = isReconnectFlow;
     try {
       const result = await integrationsApi.startICloudAuth(submittedAppleId, password);
+      if (!lifetime.isCurrent()) return;
       setPassword("");
       if (result.status === "requires_2fa" && result.handshake_id) {
-        setHandshakeId(result.handshake_id);
-        setHandshakeAppleId(result.apple_id || submittedAppleId);
-        setStep("verify");
-        setFeedback({
-          tone: "info",
-          title: "Verification code required",
-          detail: result.detail || "Enter the six-digit Apple verification code to finish connecting this account."
-        });
+        setHandshakeId(result.handshake_id); setHandshakeAppleId(result.apple_id || submittedAppleId); setStep("verify");
+        setFeedback({ tone: "info", title: "Verification code required", detail: result.detail || "Enter the six-digit Apple verification code to finish connecting this account." });
       } else {
-        resetAddFlow();
-        await onChanged();
-        setFeedback({
-          tone: "success",
-          title: reconnecting ? "iCloud Calendar reconnected" : "iCloud Calendar connected",
-          detail: `${result.account?.display_name || submittedAppleId} is ready for calendar sync.`
-        });
+        resetAddFlow(); acceptedAccount(result.account);
+        setFeedback({ tone: "success", title: reconnecting ? "iCloud Calendar reconnected" : "iCloud Calendar connected", detail: `${result.account?.display_name || submittedAppleId} is ready for calendar sync.` });
+        refreshAccepted();
       }
-    } catch (authError) {
-      setFeedback({
-        tone: "error",
-        title: reconnecting ? "Unable to reconnect iCloud Calendar" : "Unable to connect iCloud Calendar",
-        detail: authError instanceof Error ? authError.message : "Unable to connect iCloud Calendar."
-      });
-    } finally {
-      setSubmitting(false);
-    }
+    } catch (error) { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: reconnecting ? "Unable to reconnect iCloud Calendar" : "Unable to connect iCloud Calendar", detail: error instanceof Error ? error.message : "Unable to connect iCloud Calendar." }); }
+    finally { finish(); }
   };
   const verifyCode = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!handshakeId) return;
+    if (!handshakeId || code.length !== 6 || !begin("verify")) return;
     const reconnecting = isReconnectFlow;
-    setSubmitting(true);
-    setFeedback(null);
     try {
       const result = await integrationsApi.verifyICloudAuth(handshakeId, code.trim());
-      resetAddFlow();
-      await onChanged();
-      setFeedback({
-        tone: "success",
-        title: reconnecting ? "iCloud Calendar reconnected" : "iCloud Calendar connected",
-        detail: `${result.account.display_name} is ready for calendar sync.`
-      });
-    } catch (verifyError) {
-      setFeedback({
-        tone: "error",
-        title: "Verification failed",
-        detail: verifyError instanceof Error ? verifyError.message : "Unable to verify that code."
-      });
-    } finally {
-      setSubmitting(false);
-    }
+      if (!lifetime.isCurrent()) return;
+      resetAddFlow(); acceptedAccount(result.account);
+      setFeedback({ tone: "success", title: reconnecting ? "iCloud Calendar reconnected" : "iCloud Calendar connected", detail: `${result.account.display_name} is ready for calendar sync.` });
+      refreshAccepted();
+    } catch (error) { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "Verification failed", detail: error instanceof Error ? error.message : "Unable to verify that code." }); }
+    finally { finish(); }
   };
   const syncNow = async () => {
-    setSyncing(true);
-    setFeedback({
-      tone: "progress",
-      title: "Syncing calendars",
-      detail: "Scanning connected accounts for Open Gate events.",
-      activeStep: 1
-    });
+    if (!begin("sync")) return;
+    setFeedback({ tone: "progress", title: "Syncing calendars", detail: "Scanning connected accounts for Open Gate events.", activeStep: 1 });
     try {
-      const run = await integrationsApi.syncICloudCalendar();
-      await onChanged();
-      setFeedback({
-        tone: run.status === "ok" ? "success" : "info",
-        title: run.status === "ok" ? "Calendar sync complete" : "Calendar sync complete with notes",
-        detail: icloudSyncRunSummary(run)
-      });
-    } catch (syncError) {
-      setFeedback({
-        tone: "error",
-        title: "Calendar sync failed",
-        detail: syncError instanceof Error ? syncError.message : "Unable to sync iCloud Calendars."
-      });
-    } finally {
-      setSyncing(false);
-    }
+      const run = await integrationsApi.syncICloudCalendar(); if (!lifetime.isCurrent()) return;
+      setPayload((current) => ({ ...current, recent_sync_runs: [run, ...current.recent_sync_runs.filter((item) => item.id !== run.id)].slice(0, 5) }));
+      setFeedback({ tone: run.status === "ok" ? "success" : "info", title: run.status === "ok" ? "Calendar sync complete" : "Calendar sync complete with notes", detail: icloudSyncRunSummary(run) });
+      refreshAccepted();
+    } catch (error) { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "Calendar sync failed", detail: error instanceof Error ? error.message : "Unable to sync iCloud Calendars." }); }
+    finally { finish(); }
   };
   const removeAccount = async (account: ICloudCalendarAccount) => {
-    if (!window.confirm(`Remove iCloud Calendar account ${account.display_name}? Future unused calendar passes from this account will be cancelled.`)) return;
+    if (pending.current || !canManage || !lifetime.isCurrent() || !window.confirm(`Remove iCloud Calendar account ${account.display_name}? Future unused calendar passes from this account will be cancelled.`) || !begin("remove")) return;
     setRemovingId(account.id);
-    setFeedback(null);
     try {
-      await integrationsApi.removeICloudAccount(account.id);
-      await onChanged();
-      setFeedback({
-        tone: "success",
-        title: "Account removed",
-        detail: `${account.display_name} is no longer connected.`
-      });
-    } catch (removeError) {
-      setFeedback({
-        tone: "error",
-        title: "Unable to remove account",
-        detail: removeError instanceof Error ? removeError.message : "Unable to remove that iCloud Calendar account."
-      });
-    } finally {
-      setRemovingId(null);
-    }
+      await integrationsApi.removeICloudAccount(account.id); if (!lifetime.isCurrent()) return;
+      setPayload((current) => ({ ...current, accounts: current.accounts.filter((item) => item.id !== account.id) }));
+      setFeedback({ tone: "success", title: "Account removed", detail: `${account.display_name} is no longer connected.` });
+      refreshAccepted();
+    } catch (error) { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "Unable to remove account", detail: error instanceof Error ? error.message : "Unable to remove that iCloud Calendar account." }); }
+    finally { finish(); }
   };
-  return (
+  return <EditorDialog title={props.definition.title} description={props.definition.description} dirty={dirty} busy={busy} onClose={props.onClose} onGuardChange={props.onGuardChange}>
+    {({ requestClose }) => <>
     <div className="icloud-calendar-panel">
       <section className="icloud-overview">
         <div className="icloud-overview-icon">
@@ -200,15 +141,15 @@ export function ICloudCalendarModal({
         </Badge>
       </section>
       <div className="icloud-actions">
-        <button className="primary-button" onClick={startAddFlow} disabled={submitting || syncing} type="button">
+        <button className="primary-button" onClick={startAddFlow} disabled={!canManage || busy || loading || Boolean(error)} type="button">
           <Plus size={15} /> {adding && !isReconnectFlow ? "Close Add Account" : "Add Account"}
         </button>
-        <button className="secondary-button" onClick={syncNow} disabled={loading || syncing || !activeAccounts.length} type="button">
+        <button className="secondary-button" onClick={syncNow} disabled={!canManage || loading || busy || Boolean(error) || !activeAccounts.length} type="button">
           {syncing ? <Loader2 className="spin" size={15} /> : <RefreshCcw size={15} />}
           {syncing ? "Syncing..." : "Sync Calendars Now"}
         </button>
       </div>
-      {error ? <div className="auth-error inline-error">{error}</div> : null}
+      {error ? <div className="auth-error inline-error">{error}<button className="secondary-button" onClick={() => void reload().catch(() => undefined)} type="button">Try again</button></div> : null}
       {feedback ? <IntegrationFeedbackPanel feedback={feedback} /> : null}
       {adding ? (
         step === "credentials" ? (
@@ -230,10 +171,11 @@ export function ICloudCalendarModal({
                 <div className="field-control">
                   <UserRound size={15} />
                   <input
+                    disabled={!canManage || busy}
                     autoComplete="username"
                     autoFocus
                     inputMode="email"
-                    onChange={(event) => setAppleId(event.target.value)}
+                    onChange={(event) => { if (!pending.current) setAppleId(event.target.value); }}
                     placeholder="name@example.com"
                     type="email"
                     value={appleId}
@@ -245,8 +187,9 @@ export function ICloudCalendarModal({
                 <div className="field-control">
                   <Lock size={15} />
                   <input
+                    disabled={!canManage || busy}
                     autoComplete="current-password"
-                    onChange={(event) => setPassword(event.target.value)}
+                    onChange={(event) => { if (!pending.current) setPassword(event.target.value); }}
                     placeholder="App-specific or account password"
                     type="password"
                     value={password}
@@ -255,8 +198,8 @@ export function ICloudCalendarModal({
               </label>
             </div>
             <div className="icloud-form-actions">
-              <button className="secondary-button" onClick={resetAddFlow} disabled={submitting} type="button">Cancel</button>
-              <button className="primary-button" disabled={submitting || !appleId.trim() || !password} type="submit">
+              <button className="secondary-button" onClick={cancelFlow} disabled={!canManage || busy} type="button">Cancel</button>
+              <button className="primary-button" disabled={!canManage || busy || !appleId.trim() || !password} type="submit">
                 {submitting
                   ? isReconnectFlow
                     ? "Reconnecting..."
@@ -281,11 +224,12 @@ export function ICloudCalendarModal({
               <div className="field-control">
                 <ShieldCheck size={15} />
                 <input
+                    disabled={!canManage || busy}
                   autoComplete="one-time-code"
                   autoFocus
                   inputMode="numeric"
                   maxLength={6}
-                  onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                  onChange={(event) => { if (!pending.current) setCode(event.target.value.replace(/\D/g, "").slice(0, 6)); }}
                   pattern="[0-9]{6}"
                   placeholder="123456"
                   type="text"
@@ -294,8 +238,8 @@ export function ICloudCalendarModal({
               </div>
             </label>
             <div className="icloud-form-actions">
-              <button className="secondary-button" onClick={resetAddFlow} disabled={submitting} type="button">Cancel</button>
-              <button className="primary-button" disabled={submitting || code.length !== 6} type="submit">
+              <button className="secondary-button" onClick={cancelFlow} disabled={!canManage || busy} type="button">Cancel</button>
+              <button className="primary-button" disabled={!canManage || busy || code.length !== 6} type="submit">
                 {submitting ? "Verifying..." : "Verify and Connect"}
               </button>
             </div>
@@ -327,7 +271,7 @@ export function ICloudCalendarModal({
                   {icloudAccountNeedsReconnect(account) ? (
                     <button
                       className="secondary-button compact"
-                      disabled={submitting || syncing || removingId === account.id}
+                      disabled={!canManage || busy || loading || Boolean(error)}
                       onClick={() => startReconnectFlow(account)}
                       type="button"
                     >
@@ -337,7 +281,7 @@ export function ICloudCalendarModal({
                   <button
                     aria-label={`Remove ${account.display_name}`}
                     className="icon-button danger"
-                    disabled={removingId === account.id}
+                    disabled={!canManage || busy || loading || Boolean(error)}
                     onClick={() => removeAccount(account)}
                     type="button"
                   >
@@ -369,7 +313,9 @@ export function ICloudCalendarModal({
         )}
       </section>
     </div>
-  );
+    <div className="modal-actions"><button className="primary-button" onClick={requestClose} type="button">Done</button></div>
+    </>}
+  </EditorDialog>;
 }
 
 function icloudAccountStatusLabel(status: string) {

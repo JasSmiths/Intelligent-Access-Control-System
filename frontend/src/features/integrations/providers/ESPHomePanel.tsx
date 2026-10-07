@@ -1,10 +1,16 @@
-import { Activity, Clock3, Key, Loader2, PlugZap, Plus, RefreshCw, Settings, SlidersHorizontal, Trash2, Zap } from "lucide-react";
+import { Activity, Clock3, Key, Loader2, PlugZap, Plus, RefreshCw, SlidersHorizontal, Trash2, Zap } from "lucide-react";
 import React from "react";
 import { formatDate } from "../../../lib/format";
-import { Badge } from "../../../ui/primitives";
+import { useCoordinatedRead } from "../../../lib/useCoordinatedRead";
+import { Badge, type BadgeTone } from "../../../ui/primitives";
+import { EditorDialog } from "../../../ui/EditorDialog";
+import { useEditorLifetime } from "../../../ui/useEditorLifetime";
 import type { AccessDeviceStreamDeviceStatus, IntegrationStatus } from "../../../api/types";
-import type { BadgeTone } from "../../../ui/primitives";
-import { addESPHomeDevice, ESPHomeDeviceSummary, integrationsApi, removeESPHomeDevice, testESPHomeDevice } from "../../../api/integrations";
+import { addESPHomeDevice, type ESPHomeDeviceSummary, integrationsApi, isMutationNotStarted, removeESPHomeDevice, testESPHomeDevice, testIntegrationSettings } from "../../../api/integrations";
+import type { ProviderEditorProps } from "../editorTypes";
+import type { IntegrationFeedback } from "../catalog";
+import { IntegrationFeedbackPanel } from "../components";
+import { integrationEventMatches } from "../invalidation";
 
 function streamStatusForDevice(
   device: ESPHomeDeviceSummary,
@@ -17,181 +23,111 @@ function streamStatusForDevice(
   }) ?? null;
 }
 
-export function ESPHomeSettingsFields({
-  accessStatus,
-  canManage,
-  loading,
-  devices,
-  onAccessStatusChanged,
-  onChanged,
-  onError
-}: {
-  accessStatus: IntegrationStatus | null;
-  canManage: boolean;
-  loading: boolean;
-  devices: ESPHomeDeviceSummary[];
-  onAccessStatusChanged?: (status: IntegrationStatus) => void;
-  onChanged: (devices: ESPHomeDeviceSummary[]) => Promise<void>;
-  onError: (error: string) => void;
-}) {
+const emptyForm = { name: "", host: "", port: "6053", encryption_key: "", timeout_seconds: "30" };
+export function ESPHomeEditor(props: ProviderEditorProps) {
+  const lifetime = useEditorLifetime();
+  const canManage = props.currentUser.role === "admin";
+  const [devices, setDevices] = React.useState<ESPHomeDeviceSummary[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [readError, setReadError] = React.useState("");
+  const [streamError, setStreamError] = React.useState("");
+  const [feedback, setFeedback] = React.useState<IntegrationFeedback | null>(null);
   const [adding, setAdding] = React.useState(false);
-  const [submitting, setSubmitting] = React.useState(false);
+  const [form, setForm] = React.useState(emptyForm);
+  const [operation, setOperation] = React.useState<"add" | "remove" | "test" | "verify" | "connection" | null>(null);
   const [testingId, setTestingId] = React.useState("");
   const [verifyingStreamDeviceId, setVerifyingStreamDeviceId] = React.useState("");
-  const [currentAccessStatus, setCurrentAccessStatus] = React.useState<IntegrationStatus | null>(accessStatus);
+  const [currentAccessStatus, setCurrentAccessStatus] = React.useState<IntegrationStatus | null>(null);
+  const statusRef = React.useRef<IntegrationStatus | null>(null);
   const [statusMessage, setStatusMessage] = React.useState("");
-  const onAccessStatusChangedRef = React.useRef(onAccessStatusChanged);
-  const onErrorRef = React.useRef(onError);
-  const [form, setForm] = React.useState({
-    name: "",
-    host: "",
-    port: "6053",
-    encryption_key: "",
-    timeout_seconds: "30"
-  });
-  React.useEffect(() => {
-    onAccessStatusChangedRef.current = onAccessStatusChanged;
-  }, [onAccessStatusChanged]);
-  React.useEffect(() => {
-    onErrorRef.current = onError;
-  }, [onError]);
-  React.useEffect(() => {
-    setCurrentAccessStatus(accessStatus);
-  }, [accessStatus]);
-  const streamStatus = currentAccessStatus?.state_stream_status?.esphome ?? null;
-  const streamDevices = streamStatus?.devices ?? [];
-  const liveStreamCount = devices.filter((device) => {
-    const deviceStatus = streamStatusForDevice(device, streamDevices);
-    return Boolean(streamStatus?.running && deviceStatus?.connected);
-  }).length;
-  const enabledDeviceCount = devices.filter((device) => device.enabled).length;
-  const streamSummary = enabledDeviceCount
-    ? `${liveStreamCount} of ${enabledDeviceCount} ESPHome device${enabledDeviceCount === 1 ? "" : "s"} streaming live.`
-    : "Add an ESPHome device to enable live native API streaming.";
-  const updateForm = (key: keyof typeof form, value: string) => setForm((current) => ({ ...current, [key]: value }));
-  const resetForm = () => {
-    setForm({
-      name: "",
-      host: "",
-      port: "6053",
-      encryption_key: "",
-      timeout_seconds: "30"
-    });
-  };
-  const refreshStreamStatus = React.useCallback(async (reportErrors = false): Promise<IntegrationStatus | null> => {
-    try {
-      const nextStatus = await integrationsApi.getAccessDeviceStatus();
-      setCurrentAccessStatus(nextStatus);
-      onAccessStatusChangedRef.current?.(nextStatus);
-      return nextStatus;
-    } catch (error) {
-      if (reportErrors) {
-        onErrorRef.current(error instanceof Error ? error.message : "Unable to verify ESPHome stream status.");
-      }
-      return null;
-    }
+  const pending = React.useRef(false);
+  const busy = operation !== null;
+  const submitting = operation === "add";
+  const dirty = JSON.stringify(form) !== JSON.stringify(emptyForm);
+  const discardDraft = () => !pending.current && (!dirty || window.confirm("Discard unsaved ESPHome device?"));
+  const resetForm = () => setForm(emptyForm);
+  const updateForm = (key: keyof typeof form, value: string) => { if (!pending.current) setForm((current) => ({ ...current, [key]: value })); };
+  const read = React.useCallback(async (signal: AbortSignal) => {
+    setLoading(true); setReadError("");
+    try { const next = await integrationsApi.getESPHomeDevices({ signal }); if (!signal.aborted) setDevices(next); }
+    catch (error) { if (!signal.aborted) setReadError(error instanceof Error ? error.message : "Unable to load ESPHome devices."); throw error; }
+    finally { if (!signal.aborted) setLoading(false); }
   }, []);
+  const reload = useCoordinatedRead(read, integrationEventMatches);
+  const readStream = React.useCallback(async (signal: AbortSignal) => {
+    setStreamError("");
+    try { const next = await integrationsApi.getAccessDeviceStatus({ signal }); if (!signal.aborted) { statusRef.current = next; setCurrentAccessStatus(next); } }
+    catch (error) { if (!signal.aborted) setStreamError(error instanceof Error ? error.message : "Unable to verify ESPHome stream status."); throw error; }
+  }, []);
+  const reloadStream = useCoordinatedRead(readStream, integrationEventMatches);
   const streamDeviceRefreshKey = devices.map((device) => `${device.id}:${device.enabled ? "1" : "0"}`).join("|");
   React.useEffect(() => {
     if (!devices.some((device) => device.enabled)) return;
-    let cancelled = false;
-    const refresh = () => {
-      if (cancelled) return;
-      refreshStreamStatus(false).catch(() => undefined);
-    };
-    const firstRefresh = window.setTimeout(refresh, 750);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(firstRefresh);
-    };
-  }, [refreshStreamStatus, streamDeviceRefreshKey]);
-  const verifyStream = async (device: ESPHomeDeviceSummary) => {
-    setVerifyingStreamDeviceId(device.id);
-    setStatusMessage("");
-    try {
-      const nextStatus = await refreshStreamStatus(true);
-      if (!nextStatus) return;
-      const nextStream = nextStatus.state_stream_status?.esphome;
-      const nextDeviceStatus = streamStatusForDevice(device, nextStream?.devices ?? []);
-      if (nextStream?.running && nextDeviceStatus?.connected) {
-        setStatusMessage(`${device.name} native stream is live.`);
-      } else {
-        setStatusMessage(
-          nextDeviceStatus?.last_error
-            || nextStream?.last_error
-            || `${device.name} is using polling mode; native stream is not confirmed live.`
-        );
-      }
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "Unable to verify ESPHome stream status.");
-    } finally {
-      setVerifyingStreamDeviceId("");
-    }
+    const timer = window.setTimeout(() => { void reloadStream().catch(() => undefined); }, 750);
+    return () => window.clearTimeout(timer);
+  }, [reloadStream, streamDeviceRefreshKey]);
+  const streamStatus = currentAccessStatus?.state_stream_status?.esphome ?? null;
+  const streamDevices = streamStatus?.devices ?? [];
+  const liveStreamCount = devices.filter((device) => Boolean(streamStatus?.running && streamStatusForDevice(device, streamDevices)?.connected)).length;
+  const enabledDeviceCount = devices.filter((device) => device.enabled).length;
+  const streamSummary = enabledDeviceCount ? `${liveStreamCount} of ${enabledDeviceCount} ESPHome device${enabledDeviceCount === 1 ? "" : "s"} streaming live.` : "Add an ESPHome device to enable live native API streaming.";
+  const refreshAccepted = () => { void reload().catch(() => undefined); void reloadStream().catch(() => undefined); void props.onChanged().catch(() => undefined); };
+  const begin = (next: NonNullable<typeof operation>) => {
+    if (!canManage || pending.current || loading || readError || !lifetime.isCurrent()) return false;
+    pending.current = true; setOperation(next); setStatusMessage(""); setFeedback(null); return true;
   };
+  const finish = () => { pending.current = false; if (lifetime.isCurrent()) { setOperation(null); setTestingId(""); setVerifyingStreamDeviceId(""); } };
+  const fail = (error: unknown, detail: string) => { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "ESPHome update failed", detail: error instanceof Error ? error.message : detail }); };
   const addDevice = async () => {
-    if (!canManage) {
-      onError("Administrator access is required to manage ESPHome devices.");
-      return;
-    }
-    setSubmitting(true);
-    setStatusMessage("");
+    if (!form.name.trim() || !form.host.trim() || !begin("add")) return;
     try {
-      const payload = {
-        name: form.name.trim(),
-        host: form.host.trim(),
-        port: Number(form.port || 6053),
-        encryption_key: form.encryption_key,
-        timeout_seconds: Number(form.timeout_seconds || 30),
-        enabled: true
-      };
-      const devices = await addESPHomeDevice(payload);
-      resetForm();
-      setAdding(false);
-      await onChanged(devices);
-      setStatusMessage("ESPHome device added. Waiting for native stream...");
-      refreshStreamStatus(false).catch(() => undefined);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "Unable to add ESPHome device.");
-    } finally {
-      setSubmitting(false);
-    }
+      const result = await addESPHomeDevice({ name: form.name.trim(), host: form.host.trim(), port: Number(form.port || 6053), encryption_key: form.encryption_key, timeout_seconds: Number(form.timeout_seconds || 30), enabled: true }, lifetime.isCurrent);
+      if (isMutationNotStarted(result) || !lifetime.isCurrent()) return;
+      setDevices(result); resetForm(); setAdding(false); setStatusMessage("ESPHome device added. Waiting for native stream..."); refreshAccepted();
+    } catch (error) { fail(error, "Unable to add ESPHome device."); } finally { finish(); }
   };
   const removeDevice = async (device: ESPHomeDeviceSummary) => {
-    if (!canManage) {
-      onError("Administrator access is required to manage ESPHome devices.");
-      return;
-    }
-    if (!window.confirm(`Remove ESPHome device ${device.name}?`)) return;
-    setSubmitting(true);
-    setStatusMessage("");
+    if (pending.current || !canManage || !lifetime.isCurrent() || !window.confirm(`Remove ESPHome device ${device.name}?`) || !begin("remove")) return;
     try {
-      await onChanged(await removeESPHomeDevice(device));
-      setStatusMessage("ESPHome device removed.");
-      refreshStreamStatus(false).catch(() => undefined);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : "Unable to remove ESPHome device.");
-    } finally {
-      setSubmitting(false);
-    }
+      const result = await removeESPHomeDevice(device, lifetime.isCurrent);
+      if (isMutationNotStarted(result) || !lifetime.isCurrent()) return;
+      setDevices(result); setStatusMessage("ESPHome device removed."); refreshAccepted();
+    } catch (error) { fail(error, "Unable to remove ESPHome device."); } finally { finish(); }
   };
   const testDevice = async (device: ESPHomeDeviceSummary) => {
-    if (!canManage) {
-      onError("Administrator access is required to test ESPHome devices.");
-      return;
-    }
+    if (!begin("test")) return;
     setTestingId(device.id);
-    setStatusMessage("");
     try {
-      const result = await testESPHomeDevice(device);
+      const result = await testESPHomeDevice(device, lifetime.isCurrent);
+      if (isMutationNotStarted(result) || !lifetime.isCurrent()) return;
       setStatusMessage(`${device.name} live stream verified. ${result.cover_count} cover${result.cover_count === 1 ? "" : "s"} available.`);
-      refreshStreamStatus(false).catch(() => undefined);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : `Unable to verify the live stream for ${device.name}.`);
-    } finally {
-      setTestingId("");
-    }
+      void reloadStream().catch(() => undefined);
+    } catch (error) { fail(error, `Unable to verify the live stream for ${device.name}.`); } finally { finish(); }
   };
-  return (
+  const verifyStream = async (device: ESPHomeDeviceSummary) => {
+    if (!begin("verify")) return;
+    setVerifyingStreamDeviceId(device.id);
+    try {
+      await reloadStream(); if (!lifetime.isCurrent()) return;
+      const nextStream = statusRef.current?.state_stream_status?.esphome;
+      const next = streamStatusForDevice(device, nextStream?.devices ?? []);
+      setStatusMessage(nextStream?.running && next?.connected ? `${device.name} native stream is live.` : next?.last_error || nextStream?.last_error || `${device.name} is using polling mode; native stream is not confirmed live.`);
+    } catch { /* The stream read owner reports the error separately. */ } finally { finish(); }
+  };
+  const testConnection = async () => {
+    if (!begin("connection")) return;
+    setFeedback({ tone: "progress", title: "Testing connection", detail: "Contacting ESPHome.", activeStep: 1 });
+    try {
+      const result = await testIntegrationSettings({ integration: props.definition.key, values: {} }, props.definition.title, lifetime.isCurrent);
+      if (isMutationNotStarted(result) || !lifetime.isCurrent()) return;
+      if (!result.ok) throw new Error(result.message);
+      setFeedback({ tone: "success", title: "Connection verified", detail: result.message });
+    } catch (error) { fail(error, "Connection test failed."); } finally { finish(); }
+  };
+  return <EditorDialog title={props.definition.title} description={props.definition.description} dirty={dirty} busy={busy} onClose={props.onClose} onGuardChange={props.onGuardChange}>
+    {({ requestClose }) => <>
+    {readError ? <div className="auth-error inline-error">{readError}<button className="secondary-button" onClick={() => void reload().catch(() => undefined)} type="button">Try again</button></div> : null}
+    {streamError ? <div className="auth-error inline-error">{streamError}</div> : null}
     <div className="apprise-manager esphome-manager">
       <div className="apprise-manager-header">
         <div>
@@ -199,7 +135,7 @@ export function ESPHomeSettingsFields({
           <span>Add one native API controller per gate or garage-door device. Cover mappings live under Settings Gates and Garage Doors.</span>
         </div>
         <div className="esphome-header-actions">
-          <button className="primary-button" disabled={!canManage} onClick={() => setAdding((current) => !current)} type="button">
+          <button className="primary-button" disabled={!canManage || busy || loading || Boolean(readError)} onClick={() => { if (!adding || discardDraft()) { resetForm(); setAdding((current) => !current); } }} type="button">
             <Plus size={15} /> Add New ESPHome Device
           </button>
         </div>
@@ -214,41 +150,41 @@ export function ESPHomeSettingsFields({
               <span>Name</span>
               <div className="field-control">
                 <Zap size={16} />
-                <input autoFocus value={form.name} onChange={(event) => updateForm("name", event.target.value)} placeholder="Top Gate" />
+                <input disabled={busy} autoFocus value={form.name} onChange={(event) => updateForm("name", event.target.value)} placeholder="Top Gate" />
               </div>
             </label>
             <label className="field">
               <span>Host or IP</span>
               <div className="field-control">
                 <PlugZap size={16} />
-                <input value={form.host} onChange={(event) => updateForm("host", event.target.value)} placeholder="10.0.107.22" />
+                <input disabled={busy} value={form.host} onChange={(event) => updateForm("host", event.target.value)} placeholder="10.0.107.22" />
               </div>
             </label>
             <label className="field">
               <span>Native API port</span>
               <div className="field-control">
                 <SlidersHorizontal size={16} />
-                <input min={1} max={65535} step={1} type="number" value={form.port} onChange={(event) => updateForm("port", event.target.value)} />
+                <input disabled={busy} min={1} max={65535} step={1} type="number" value={form.port} onChange={(event) => updateForm("port", event.target.value)} />
               </div>
             </label>
             <label className="field">
               <span>Timeout seconds</span>
               <div className="field-control">
                 <Clock3 size={16} />
-                <input min={5} step={1} type="number" value={form.timeout_seconds} onChange={(event) => updateForm("timeout_seconds", event.target.value)} />
+                <input disabled={busy} min={5} step={1} type="number" value={form.timeout_seconds} onChange={(event) => updateForm("timeout_seconds", event.target.value)} />
               </div>
             </label>
             <label className="field">
               <span>Encryption key</span>
               <div className="field-control">
                 <Key size={16} />
-                <input type="password" value={form.encryption_key} onChange={(event) => updateForm("encryption_key", event.target.value)} placeholder="Blank if encryption is disabled" />
+                <input disabled={busy} type="password" value={form.encryption_key} onChange={(event) => updateForm("encryption_key", event.target.value)} placeholder="Blank if encryption is disabled" />
               </div>
             </label>
           </div>
           <div className="apprise-add-actions">
-            <button className="secondary-button" onClick={() => setAdding(false)} type="button">Cancel</button>
-            <button className="primary-button" disabled={!canManage || submitting || !form.name.trim() || !form.host.trim()} onClick={addDevice} type="button">
+            <button className="secondary-button" disabled={busy} onClick={() => { if (discardDraft()) { resetForm(); setAdding(false); } }} type="button">Cancel</button>
+            <button className="primary-button" disabled={!canManage || busy || loading || Boolean(readError) || !form.name.trim() || !form.host.trim()} onClick={addDevice} type="button">
               {submitting ? "Adding..." : "Add Device"}
             </button>
           </div>
@@ -291,7 +227,7 @@ export function ESPHomeSettingsFields({
                 <div className="esphome-device-stream">
                   <button
                     className={deviceStreamLive ? "esphome-stream-pill live" : device.enabled ? "esphome-stream-pill polling" : "esphome-stream-pill"}
-                    disabled={!canManage || deviceStreamChecking}
+                    disabled={!canManage || busy}
                     onClick={() => verifyStream(device)}
                     title={deviceStreamDetail}
                     type="button"
@@ -305,11 +241,11 @@ export function ESPHomeSettingsFields({
                   <Badge tone={device.encryption_key_configured ? "green" : "gray"}>{device.encryption_key_configured ? "Key saved" : "No key"}</Badge>
                 </div>
                 <div className="esphome-device-actions">
-                  <button className="secondary-button" onClick={() => testDevice(device)} disabled={!canManage || Boolean(testingId) || submitting} type="button">
+                  <button className="secondary-button" onClick={() => testDevice(device)} disabled={!canManage || busy || loading || Boolean(readError)} type="button">
                     {testingId === device.id ? <Loader2 className="spin" size={14} /> : <Activity size={14} />}
                     {testingId === device.id ? "Testing" : "Test"}
                   </button>
-                  <button className="icon-button danger" onClick={() => removeDevice(device)} disabled={!canManage || submitting || testingId === device.id} type="button" aria-label={`Remove ${device.name}`}>
+                  <button className="icon-button danger" onClick={() => removeDevice(device)} disabled={!canManage || busy || loading || Boolean(readError)} type="button" aria-label={`Remove ${device.name}`}>
                     <Trash2 size={15} />
                   </button>
                 </div>
@@ -321,5 +257,8 @@ export function ESPHomeSettingsFields({
         )}
       </div>
     </div>
-  );
+    {feedback ? <IntegrationFeedbackPanel feedback={feedback} /> : null}
+    <div className="modal-actions"><button className="secondary-button" disabled={!canManage || busy || loading || Boolean(readError)} onClick={() => void testConnection()} type="button">{operation === "connection" ? "Testing..." : "Test Connection"}</button><button className="primary-button" onClick={requestClose} type="button">Done</button></div>
+    </>}
+  </EditorDialog>;
 }

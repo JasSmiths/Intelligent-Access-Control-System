@@ -11,8 +11,8 @@ function fixture() {
   const get = vi.spyOn(api, "get").mockImplementation(async (path) => {
     if (path.endsWith("/unifi-protect/status")) { if (changed) throw new Error("Protect read offline"); return { configured: false, connected: false }; }
     if (path.endsWith("/icloud-calendar/accounts")) { if (changed) throw new Error("Calendar read offline"); return { accounts: [{ id: "cloud", apple_id: "synthetic@example.invalid", display_name: "Synthetic calendar", status: "connected", is_active: true }], recent_sync_runs: [] }; }
-    if (path.endsWith("/apprise/urls")) return { urls: changed ? [] : [{ index: 0, type: "Pushover", scheme: "pover", preview: "Synthetic preview" }] };
-    if (path.includes("/settings")) return [];
+    if (path.endsWith("/apprise/urls")) { if (changed) throw new Error("Apprise read offline"); return { urls: [{ index: 0, type: "Pushover", scheme: "pover", preview: "Synthetic preview" }] }; }
+    if (path.includes("/settings")) { if (changed) throw new Error("Settings read offline"); return []; }
     return {};
   });
   const post = vi.spyOn(api, "post").mockImplementation(async (path) => {
@@ -27,26 +27,29 @@ function fixture() {
   return { get, post, patch, remove, signals };
 }
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
-it("closes an accepted settings save while retaining a later Protect read error", async () => {
-  const { patch } = fixture();
+it("closes an accepted settings save while retaining its own settings read error without unrelated provider refresh", async () => {
+  const { patch, get } = fixture();
   fireEvent.click(await screen.findByRole("button", { name: /DVLA Lookup/ }));
   const modal = screen.getByRole("dialog", { name: "DVLA Lookup" });
   fireEvent.change(within(modal).getByRole("textbox", { name: /Test VRN/ }), { target: { value: "SYN123" } });
   fireEvent.click(within(modal).getByRole("button", { name: /^Save$/ }));
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(patch).toHaveBeenCalledOnce();
-  expect(screen.getByText("Protect read offline")).toBeInTheDocument();
+  await screen.findByText(/Settings read offline/);
+  expect(get.mock.calls.filter(([path]) => path.endsWith("/unifi-protect/status"))).toHaveLength(1);
   expect(screen.queryByText("Unable to save settings")).not.toBeInTheDocument();
 });
-it("retains an accepted Apprise removal when unrelated provider reads fail", async () => {
-  const { remove, signals } = fixture();
+it("retains an accepted Apprise removal when its own metadata read fails and reserves fanout for manual refresh", async () => {
+  const { remove, signals, get } = fixture();
   fireEvent.click(await screen.findByRole("button", { name: /Apprise/ }));
   fireEvent.click(await screen.findByRole("button", { name: "Remove Pushover URL" }));
   await screen.findByText("No notification URLs configured");
   await waitFor(() => expect(screen.queryByText("Apprise URL update failed")).not.toBeInTheDocument());
   expect(remove).toHaveBeenCalledOnce();
-  await waitFor(() => expect(screen.getByText("Protect read offline")).toBeInTheDocument());
-  await expect(signals.publish({ type: "refresh", reason: "manual", resetHistory: false })).rejects.toThrow("Protect read offline");
+  await screen.findByText("Apprise read offline");
+  expect(get.mock.calls.filter(([path]) => path.endsWith("/unifi-protect/status"))).toHaveLength(1);
+  await expect(signals.publish({ type: "refresh", reason: "manual", resetHistory: false })).rejects.toThrow("Settings read offline");
+  expect(get.mock.calls.filter(([path]) => path.endsWith("/unifi-protect/status"))).toHaveLength(2);
 });
 it("shows accepted calendar sync independently of its failed metadata reload", async () => {
   const { post } = fixture();

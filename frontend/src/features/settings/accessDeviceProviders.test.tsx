@@ -2,6 +2,7 @@ import React from "react";
 import { CircleDot } from "lucide-react";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { createReadSignals, ReadSignalsContext } from "../../lib/readSignals";
 import { api } from "../../api/client";
 import type { AccessDevice, UserAccount } from "../../api/types";
 import { AccessDevicesSettingsView } from "../../views/AccessDevicesSettingsView";
@@ -133,4 +134,90 @@ it("fences scalar, binding and delete changes through the real view while confir
   expect(patch).toHaveBeenCalledWith("/api/v1/access-devices/device", expect.objectContaining({ name: "Synthetic gate", key: "synthetic_gate" }));
   expect(put.mock.calls[0][1]).toEqual(expect.objectContaining({ external_id: "", enabled: false }));
   expect(name).toHaveValue("Synthetic gate"); expect(key).toHaveValue("synthetic_gate");
+});
+
+it("fences save, edits and duplicate delete while the row deletion confirmation is blocked", async () => {
+  const { get, post, patch, put } = fixture(); const confirmation = deferred<{ confirmation_token: string }>();
+  get.mockImplementation(async (path) => path.startsWith("/api/v1/access-devices?") ? [device] : path.endsWith("/entities") ? { cover_entities: [] } : []);
+  post.mockReturnValueOnce(confirmation.promise);
+  const remove = vi.spyOn(api, "delete").mockImplementation(async () => { get.mockImplementation(async (path) => path.endsWith("/entities") ? { cover_entities: [] } : []); }); vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<AccessDevicesSettingsView kind="gate" title="Gates" icon={CircleDot} currentUser={{ id: "synthetic", role: "admin" } as UserAccount} />);
+  const name = await screen.findByLabelText("Display name");
+  fireEvent.click(screen.getByRole("button", { name: /^Remove$/ }));
+  await waitFor(() => expect(name).toBeDisabled());
+  expect(screen.getByRole("button", { name: "Save Device" })).toBeDisabled();
+  fireEvent.change(name, { target: { value: "Must not survive deleted row" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save Device" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Remove$/ }));
+  expect(post).toHaveBeenCalledOnce(); expect(patch).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+  await act(async () => confirmation.resolve({ confirmation_token: "inert-delete" }));
+  await screen.findByText("Device removed.");
+  expect(remove).toHaveBeenCalledOnce(); expect(screen.queryByLabelText("Display name")).not.toBeInTheDocument();
+  expect(post).toHaveBeenCalledOnce(); expect(patch).not.toHaveBeenCalled();
+});
+it("fences duplicate creates before confirmation and observes acceptance without stale account publication", async () => {
+  const { get, post } = fixture(); const confirmation = deferred<{ confirmation_token: string }>();
+  const create = deferred<AccessDevice>();
+  get.mockImplementation(async (path) => path.startsWith("/api/v1/access-devices?") ? [] : path.endsWith("/entities") ? { cover_entities: [] } : []);
+  post.mockImplementation((path) => path.endsWith("action-confirmations") ? confirmation.promise : create.promise);
+  const { rerender } = render(<AccessDevicesSettingsView kind="gate" title="Gates" icon={CircleDot} currentUser={{ id: "first", role: "admin" } as UserAccount} />);
+  const add = await screen.findByRole("button", { name: "Add Gate" }); await waitFor(() => expect(add).toBeEnabled());
+  fireEvent.click(add); fireEvent.click(add);
+  expect(post).toHaveBeenCalledOnce(); expect(add).toBeDisabled();
+  await act(async () => confirmation.resolve({ confirmation_token: "inert-create" }));
+  await waitFor(() => expect(post).toHaveBeenCalledTimes(2));
+  rerender(<AccessDevicesSettingsView kind="gate" title="Gates" icon={CircleDot} currentUser={{ id: "second", role: "admin" } as UserAccount} />);
+  await act(async () => create.resolve(device));
+  expect(screen.queryByText("Device added.")).not.toBeInTheDocument(); expect(screen.queryByLabelText("Display name")).not.toBeInTheDocument();
+  expect(post).toHaveBeenCalledTimes(2);
+});
+it("does not create a device when its account is replaced during confirmation", async () => {
+  const { get, post } = fixture(); const confirmation = deferred<{ confirmation_token: string }>();
+  get.mockImplementation(async (path) => path.startsWith("/api/v1/access-devices?") ? [] : path.endsWith("/entities") ? { cover_entities: [] } : []);
+  post.mockReturnValueOnce(confirmation.promise);
+  const { rerender } = render(<AccessDevicesSettingsView kind="gate" title="Gates" icon={CircleDot} currentUser={{ id: "first", role: "admin" } as UserAccount} />);
+  const add = await screen.findByRole("button", { name: "Add Gate" }); await waitFor(() => expect(add).toBeEnabled()); fireEvent.click(add);
+  rerender(<AccessDevicesSettingsView kind="gate" title="Gates" icon={CircleDot} currentUser={{ id: "second", role: "admin" } as UserAccount} />);
+  await act(async () => confirmation.resolve({ confirmation_token: "inert-old" }));
+  expect(post).toHaveBeenCalledOnce(); expect(screen.queryByText("Device added.")).not.toBeInTheDocument();
+});
+
+for (const operation of ["create", "delete"] as const) {
+  it(`fences a pre-${operation} read after acceptance and refreshes only its own device rows`, async () => {
+    const { get, post } = fixture(); const confirmation = deferred<{ confirmation_token: string }>(); const stale = deferred<AccessDevice[]>();
+    const signals = createReadSignals("inert-account"); let reads = 0; let accepted = false;
+    const initial = operation === "delete" ? [device] : [];
+    get.mockImplementation(async (path) => {
+      if (path.startsWith("/api/v1/access-devices?")) { reads += 1; if (reads === 2) return stale.promise; return accepted ? operation === "delete" ? [] : [device] : initial; }
+      return path.endsWith("/entities") ? { cover_entities: [] } : [];
+    });
+    post.mockImplementation(async (path) => { if (path.endsWith("action-confirmations")) return confirmation.promise; accepted = true; return device; });
+    vi.spyOn(api, "delete").mockImplementation(async () => { accepted = true; }); vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ReadSignalsContext.Provider value={signals}><AccessDevicesSettingsView kind="gate" title="Gates" icon={CircleDot} currentUser={{ id: "inert-account", role: "admin" } as UserAccount} /></ReadSignalsContext.Provider>);
+    const action = await screen.findByRole("button", { name: operation === "delete" ? /^Remove$/ : "Add Gate" }); await waitFor(() => expect(action).toBeEnabled()); fireEvent.click(action);
+    let readCompletion: Promise<void>;
+    act(() => { readCompletion = signals.publish({ type: "refresh", reason: "manual", resetHistory: true }); });
+    await waitFor(() => expect(reads).toBe(2)); const staleSignal = get.mock.calls.filter(([path]) => path.startsWith("/api/v1/access-devices?"))[1][1]?.signal;
+    await act(async () => confirmation.resolve({ confirmation_token: "inert" }));
+    await screen.findByText(operation === "delete" ? "Device removed." : "Device added."); expect(staleSignal?.aborted).toBe(true);
+    await act(async () => { stale.resolve(initial); await readCompletion!; }); await waitFor(() => expect(reads).toBe(3));
+    if (operation === "delete") expect(screen.queryByLabelText("Display name")).not.toBeInTheDocument(); else expect(await screen.findByLabelText("Display name")).toHaveValue("Synthetic gate");
+    expect(screen.getByText(operation === "delete" ? "Device removed." : "Device added.")).toBeInTheDocument();
+    expect(get.mock.calls.some(([path]) => path.includes("maintenance") || path.startsWith("/api/v1/alerts"))).toBe(false);
+  });
+}
+
+it.each(["create", "delete"] as const)("keeps an accepted device %s distinct from a failed following read", async (operation) => {
+  const { get, post } = fixture(); let accepted = false;
+  get.mockImplementation(async (path) => {
+    if (path.startsWith("/api/v1/access-devices?")) { if (accepted) throw new Error("Device read offline"); return operation === "delete" ? [device] : []; }
+    return path.endsWith("/entities") ? { cover_entities: [] } : [];
+  });
+  post.mockImplementation(async (path) => { if (path.endsWith("action-confirmations")) return { confirmation_token: "inert" }; accepted = true; return device; });
+  const remove = vi.spyOn(api, "delete").mockImplementation(async () => { accepted = true; }); vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<AccessDevicesSettingsView kind="gate" title="Gates" icon={CircleDot} currentUser={{ id: "inert", role: "admin" } as UserAccount} />);
+  const action = await screen.findByRole("button", { name: operation === "delete" ? /^Remove$/ : "Add Gate" }); await waitFor(() => expect(action).toBeEnabled()); fireEvent.click(action);
+  await screen.findByText(operation === "delete" ? "Device removed." : "Device added.");
+  await screen.findByText(`Device ${operation === "delete" ? "removed" : "added"}, but device data could not be refreshed. Refresh to retry the read.`);
+  expect(post).toHaveBeenCalledTimes(operation === "delete" ? 1 : 2); expect(remove).toHaveBeenCalledTimes(operation === "delete" ? 1 : 0);
 });

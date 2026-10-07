@@ -162,8 +162,42 @@ separately from empty results; background failures retain usable data with an
 explicit stale/error state. Accepted mutations remain accepted when a later read
 fails.
 
+[Integration composition](../frontend/src/features/integrations/IntegrationModal.tsx)
+resolves complete provider editors by the existing provider key. The
+[catalog](../frontend/src/features/integrations/catalog.tsx) explicitly distinguishes
+managed editors from scalar settings; exact managed registration coverage rejects
+missing or extra bindings. Each mounted editor owns its reads, draft, pending
+operations and feedback. Account/session, role and provider identity replace the
+editor; same-provider tabs and refreshed server settings preserve the draft.
+The shared [dialog frame](../frontend/src/ui/EditorDialog.tsx) guards Escape,
+backdrop, Close, Done and provider switching before a keyed editor is replaced.
+Pending iCloud handshakes remain meaningful drafts after passwords are cleared.
+
+The narrow [settings protocol owner](../frontend/src/features/integrations/useIntegrationSettingsEditor.ts)
+shares confirmed settings save/test mechanics; it does not select providers or
+render a generic form engine. Confirmation helpers check the captured editor
+lifetime before confirmation and immediately before the write. A stopped-before-write
+result is distinct from provider rejection or acceptance. Started writes are
+always observed and never aborted as reads; disposal only fences stale UI work
+and subsequent operations. Accepted receipts survive failed metadata refreshes,
+which remain read-owner errors. Initial metadata failure blocks dependent actions.
+
+The canonical ordered [frontend binding descriptors](../frontend/src/features/settings/accessDeviceProviders.ts)
+own discovery, selection/config conversion, labels and confirmed binding paths.
+HA then ESPHome enumeration/save order is independent of configured primary/failover
+priority. Missing saved bindings remain selectable, and a blank binding retains
+its deletion contract. The [save owner](../frontend/src/features/settings/accessDeviceSave.ts)
+records every accepted device/binding phase before later confirmation, write or
+read failure; retries obtain fresh confirmations. The generic editor and discovery
+owner also accept the inert third descriptor exercised by the extension fixture.
+Access-device create/save/delete operations fence duplicate submissions, draft
+changes and stale pre-mutation reads through their own lifetime and urgent refresh.
+
 Shared editor lifecycle helpers in [ui/](../frontend/src/ui/) protect dirty drafts,
-prevent duplicate submission or dismissal while saving, and restore focus.
+prevent duplicate submission or dismissal while busy, cancel owned reads and restore
+focus. OAuth placeholders and artificial integration-test progress waits have been
+retired; feedback follows actual pending work. The existing ESPHome 750 ms stream
+refresh retains its timing and now fences the in-flight read result on disposal.
 Global styles are composed by [styles.css](../frontend/src/styles.css); feature
 styles may load with lazy routes. The navigation drawer changes at 980px and
 compact editor layouts at 720px; validate both when layout changes.

@@ -125,6 +125,47 @@ Commit `aeedb724046c8d7a5b67ed0a7094eb8e21941745` preserves that exact tree.
 `p3-astra-approval.json` retains the verbatim approval and immutable frontend
 archive equivalence; the rebased source/docs mapping is retained separately.
 
+## P4 frontend evidence
+
+The separate frontend lane starts from integrated approved P3/P5 checkpoint
+`f9a162c0b995027b53e678abc85283c84e4b8fb2`. Canonical ordered access-device
+descriptors own discovery/configuration/rendering/save metadata, and the real
+owner fixture exercises an inert third descriptor through a confirmed binding
+write. Complete keyed provider editors replace the central integration modal's
+state/effects and own dirty/busy/read/mutation lifetimes. Managed/scalar catalog
+coverage is checked; OAuth placeholders, artificial progress waits and nested
+Apprise forms are retired. Accepted operations retain receipts through later read
+failures, with duplicate operations, account disposal and stale reads fenced.
+
+The corrected frozen frontend passed the locked Node 22 build and all 353 unit
+tests in 57 files, with dependency locks and source bytes verified in network-free
+containers (`p4-frontend-corrected-node22`). The original frozen Node run had two
+receipt fixtures still expecting the retired unrelated Protect refresh; that
+failed run remains retained as `p4-frontend-node22`. The corrected tests exercise
+the actual settings/Apprise owner failure, assert no unrelated Protect fetch, and
+preserve explicit global-refresh aggregate rejection. Runtime bytes did not change.
+
+Chromium and WebKit passed all 64 affected provider/receipt/route cases and the
+12-case dark tablet supplement, with no skipped, flaky or unexpected results.
+Evidence is retained in `p4-frontend-browser` and `p4-frontend-tablet-browser`;
+browser runtime was host Node 24.19.0, separate from the locked Node 22 build/unit
+gate. Desktop, phone, short landscape and dark tablet screenshots preserve drafts
+through actual realtime invalidation and verify bounded dialog/actions. The
+supplement adds only an e2e viewport fixture; exact carry-forward hashes and full
+stage identity are recorded in `p4-frontend-final-source-mapping.json` and
+`p4-frontend-final-candidate.json`. Progress fixture failures and the initial
+sandbox server-start failure remain retained. All fixtures are inert and the
+owned loopback server has no backend proxy.
+
+Astra Ultra approved the complete P4 frontend stage from `f9a162c0` through tree
+`8812a837141dab62e88d2ceb322b8b635ff9a17e`, patch SHA-256
+`35fd7946e70624b7b38dae352b0c91f20c4a0deea1aa438ac0361f6c770cdfd8`, including
+all 36 changed paths and the earlier descriptor checkpoint. Verbatim approval is
+retained in `p4-frontend-astra-approval.json`; the approval-wording-only ledger
+amendment is mapped separately in `p4-frontend-approval-docs-mapping.json` with
+runtime bytes unchanged. AM-04 is closed for this frontend stage. Backend P4
+approval and later programme stages remain unchanged.
+
 ## Findings
 
 | Finding | Owner and stages | Required closure evidence | Status / Astra approval |
@@ -132,7 +173,7 @@ archive equivalence; the rebased source/docs mapping is retained separately.
 | AM-01 workflow definitions | Workflow definitions, handlers and generated editor contracts; P2 | Exhaustive action/config/editor/handler parity, historical plan/recovery checks, E2 conformance | Closed / Astra approved P2 exact candidate |
 | AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Closed / Astra approved P3 exact candidate |
 | AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Closed backend / Astra approved P4 exact candidate |
-| AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Pending / pending |
+| AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Closed frontend / Astra approved P4 exact candidate |
 | AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Astra-approved schema/state design; restart/crash/deadline/late-linkage checks; E2/E4 conformance | Pending / pending |
 | AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | Pending / pending |
 | AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Overflow/counters/current evidence, nested publication, shutdown and 20/2,000-input probes | Pending / pending |

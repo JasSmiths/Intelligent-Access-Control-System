@@ -47,13 +47,13 @@ export type IntegrationDefinition = {
   key: string;
   title: string;
   description: string;
+  editor: "managed" | "scalar";
   category: "access" | "notifications" | "data" | "ai";
   icon: React.ElementType;
   fields: SettingFieldDefinition[];
   statusLabel: string;
   statusTone: BadgeTone;
   notificationChannels?: NotificationChannelId[];
-  oauth?: boolean;
 };
 export type ProtectIntegrationTab = "general" | "exposes";
 export type IntegrationFeedback = {
@@ -164,21 +164,21 @@ export function integrationDefinitions(
     protectStatus?.connected && (protectStatus.realtime_connected === false || protectStatus.realtime_error)
   );
   const base: IntegrationDefinition[] = [
-    { key: "home_assistant", title: "Home Assistant", description: "Gate control, mobile app notifications, TTS announcements, and state sync.", category: "access", icon: Home, fields: integrationFieldSets.home_assistant, statusLabel: status?.connected ? "Connected" : homeAssistantDegraded ? "Degraded" : homeAssistantConfigured ? "Configured" : "Not Configured", statusTone: status?.connected ? "green" : homeAssistantDegraded ? "red" : homeAssistantConfigured ? "blue" : "gray", notificationChannels: ["mobile", "voice"] },
-    { key: "esphome", title: "ESPHome", description: "Direct native API access for gate and garage-door covers.", category: "access", icon: Zap, fields: [], statusLabel: values.esphome_devices ? "Configured" : "Not Configured", statusTone: values.esphome_devices ? "blue" : "gray" },
-    { key: "icloud_calendar", title: "iCloud Calendar", description: "Create Visitor Passes from calendar events marked Open Gate.", category: "access", icon: CalendarDays, fields: [], statusLabel: icloudError ? "Error" : icloudNeedsAttention ? "Needs Attention" : activeIcloudAccounts.length ? `${activeIcloudAccounts.length} active accounts` : "Not Configured", statusTone: icloudError ? "red" : icloudNeedsAttention ? "amber" : activeIcloudAccounts.length ? "blue" : "gray" },
-    { key: "apprise", title: "Apprise", description: "Mobile and push notification fan-out.", category: "notifications", icon: Bell, fields: integrationFieldSets.apprise, statusLabel: values.apprise_urls ? "Configured" : "Not Configured", statusTone: values.apprise_urls ? "blue" : "gray", notificationChannels: ["mobile"] },
-    { key: "dvsa", title: "DVSA MOT History", description: "MOT tests, advisories and vehicle models.", category: "data", icon: Search, fields: integrationFieldSets.dvsa, statusLabel: (values.dvsa_enabled === true || values.dvsa_enabled === "true") ? "Enabled" : "Disabled", statusTone: (values.dvsa_enabled === true || values.dvsa_enabled === "true") ? "blue" : "gray" },
-    { key: "dvla", title: "DVLA Lookup", description: "Vehicle Enquiry Service API plate lookups.", category: "data", icon: Search, fields: integrationFieldSets.dvla, statusLabel: values.dvla_api_key ? "Configured" : "Not Configured", statusTone: values.dvla_api_key ? "blue" : "gray" },
-    { key: "unifi_protect", title: "UniFi Protect", description: "Camera snapshots, detection events, and AI image analysis.", category: "data", icon: Camera, fields: integrationFieldSets.unifi_protect, statusLabel: protectRealtimeDegraded ? "Realtime Degraded" : protectStatus?.connected ? "Connected" : protectStatus?.configured || values.unifi_protect_host ? "Configured" : "Not Configured", statusTone: protectRealtimeDegraded ? "red" : protectStatus?.connected ? "green" : protectStatus?.configured || values.unifi_protect_host ? "blue" : "gray" }
+    { key: "home_assistant", editor: "managed", title: "Home Assistant", description: "Gate control, mobile app notifications, TTS announcements, and state sync.", category: "access", icon: Home, fields: integrationFieldSets.home_assistant, statusLabel: status?.connected ? "Connected" : homeAssistantDegraded ? "Degraded" : homeAssistantConfigured ? "Configured" : "Not Configured", statusTone: status?.connected ? "green" : homeAssistantDegraded ? "red" : homeAssistantConfigured ? "blue" : "gray", notificationChannels: ["mobile", "voice"] },
+    { key: "esphome", editor: "managed", title: "ESPHome", description: "Direct native API access for gate and garage-door covers.", category: "access", icon: Zap, fields: [], statusLabel: values.esphome_devices ? "Configured" : "Not Configured", statusTone: values.esphome_devices ? "blue" : "gray" },
+    { key: "icloud_calendar", editor: "managed", title: "iCloud Calendar", description: "Create Visitor Passes from calendar events marked Open Gate.", category: "access", icon: CalendarDays, fields: [], statusLabel: icloudError ? "Error" : icloudNeedsAttention ? "Needs Attention" : activeIcloudAccounts.length ? `${activeIcloudAccounts.length} active accounts` : "Not Configured", statusTone: icloudError ? "red" : icloudNeedsAttention ? "amber" : activeIcloudAccounts.length ? "blue" : "gray" },
+    { key: "apprise", editor: "managed", title: "Apprise", description: "Mobile and push notification fan-out.", category: "notifications", icon: Bell, fields: integrationFieldSets.apprise, statusLabel: values.apprise_urls ? "Configured" : "Not Configured", statusTone: values.apprise_urls ? "blue" : "gray", notificationChannels: ["mobile"] },
+    { key: "dvsa", editor: "scalar", title: "DVSA MOT History", description: "MOT tests, advisories and vehicle models.", category: "data", icon: Search, fields: integrationFieldSets.dvsa, statusLabel: (values.dvsa_enabled === true || values.dvsa_enabled === "true") ? "Enabled" : "Disabled", statusTone: (values.dvsa_enabled === true || values.dvsa_enabled === "true") ? "blue" : "gray" },
+    { key: "dvla", editor: "scalar", title: "DVLA Lookup", description: "Vehicle Enquiry Service API plate lookups.", category: "data", icon: Search, fields: integrationFieldSets.dvla, statusLabel: values.dvla_api_key ? "Configured" : "Not Configured", statusTone: values.dvla_api_key ? "blue" : "gray" },
+    { key: "unifi_protect", editor: "managed", title: "UniFi Protect", description: "Camera snapshots, detection events, and AI image analysis.", category: "data", icon: Camera, fields: integrationFieldSets.unifi_protect, statusLabel: protectRealtimeDegraded ? "Realtime Degraded" : protectStatus?.connected ? "Connected" : protectStatus?.configured || values.unifi_protect_host ? "Configured" : "Not Configured", statusTone: protectRealtimeDegraded ? "red" : protectStatus?.connected ? "green" : protectStatus?.configured || values.unifi_protect_host ? "blue" : "gray" }
   ];
   return base.concat([
-    { key: "openai", title: "OpenAI", description: "OpenAI image analysis provider.", icon: Bot, secret: "openai_api_key", oauth: true },
-    { key: "gemini", title: "Gemini", description: "Google Gemini provider.", icon: CircleDot, secret: "gemini_api_key", oauth: true },
+    { key: "openai", title: "OpenAI", description: "OpenAI image analysis provider.", icon: Bot, secret: "openai_api_key" },
+    { key: "gemini", title: "Gemini", description: "Google Gemini provider.", icon: CircleDot, secret: "gemini_api_key" },
     { key: "anthropic", title: "Anthropic", description: "Claude provider.", icon: MessageCircle, secret: "anthropic_api_key" },
     { key: "ollama", title: "Ollama", description: "Local model endpoint.", icon: Database }
-  ].map(({ key, title, description, icon, secret, oauth }) => ({
-    key, title, description, icon, oauth, category: "ai", fields: integrationFieldSets[key], ...providerStatus(key, secret)
+  ].map(({ key, title, description, icon, secret }) => ({
+    key, title, description, icon, editor: "scalar", category: "ai", fields: integrationFieldSets[key], ...providerStatus(key, secret)
   } as IntegrationDefinition)));
 }
 export function integrationInitialValues(definition: IntegrationDefinition, values: SettingsMap) {
