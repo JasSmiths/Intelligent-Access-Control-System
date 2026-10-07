@@ -38,12 +38,12 @@ it("refreshes a dashboard-linked group by member UUID after resolving it", async
     throw new Error(`Unexpected URL: ${path}`);
   });
   vi.stubGlobal("fetch", fetcher);
-  const refreshDashboard = vi.fn().mockResolvedValue(undefined);
-  render(<AlertsView refreshDashboard={refreshDashboard} targetId={memberId} />);
+  const refreshAlerts = vi.fn().mockResolvedValue(undefined);
+  render(<AlertsView refreshAlerts={refreshAlerts} targetId={memberId} />);
   fireEvent.click(await screen.findByRole("button", { name: "Resolve" }));
   fireEvent.click(screen.getByRole("button", { name: "Resolve Alert" }));
   await screen.findByRole("button", { name: "Reopen" });
-  expect(refreshDashboard).toHaveBeenCalledOnce();
+  expect(refreshAlerts).toHaveBeenCalledOnce();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(fetcher.mock.calls.map(([path]) => path)).toContain(`/api/v1/alerts/${memberId}`);
   expect(fetcher.mock.calls.map(([path]) => path)).not.toContain(`/api/v1/alerts/${encodeURIComponent(group.id)}`);
@@ -64,7 +64,7 @@ it("loads a second older alert from same-route search navigation", async () => {
     throw new Error(`Unexpected URL: ${path}`);
   });
   vi.stubGlobal("fetch", fetcher);
-  const props = { refreshDashboard: async () => undefined };
+  const props = { refreshAlerts: async () => undefined };
   const { rerender } = render(<AlertsView {...props} targetId={null} />);
   await waitFor(() => expect(screen.getByText("No alerts recorded yet.")).toBeInTheDocument());
   rerender(<AlertsView {...props} targetId="id-1" />);
@@ -80,7 +80,7 @@ it("supports keyboard navigation through status tabs and associates the result p
     items: [], next_cursor: null, as_of: "2026-10-04T12:00:00Z",
   })));
   vi.stubGlobal("fetch", fetcher);
-  render(<AlertsView refreshDashboard={async () => undefined} targetId={null} />);
+  render(<AlertsView refreshAlerts={async () => undefined} targetId={null} />);
   await screen.findByText("No alerts recorded yet.");
 
   const open = screen.getByRole("tab", { name: "Open" });

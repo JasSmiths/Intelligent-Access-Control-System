@@ -27,7 +27,7 @@ export function VehiclePeoplePicker({
   onToggle: (personId: string) => void;
   selectedPersonIds: string[];
 }) {
-  const personOptions = useDirectoryOptions("people", [], selectedPersonIds);
+  const personOptions = useDirectoryOptions("people", selectedPersonIds);
   const people = personOptions.items;
   const selectedPersonIdSet = React.useMemo(() => new Set(selectedPersonIds), [selectedPersonIds]);
   const selectedPeople = React.useMemo(

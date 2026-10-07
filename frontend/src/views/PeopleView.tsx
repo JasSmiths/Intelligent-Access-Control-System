@@ -2,7 +2,6 @@ import { Plus, UserPlus, Users } from "lucide-react";
 import React from "react";
 import { useGroups } from "../features/directory/catalogs";
 import { useSchedules } from "../features/schedules/reads";
-import { ReadSignalsContext } from "../lib/readSignals";
 import { useDirectoryPage } from "../features/directory/reads";
 import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
@@ -16,13 +15,17 @@ import { DirectoryGroupAccordion, PersonAvatar } from "../features/directory/com
 import { PersonModal } from "../features/directory/PersonEditor";
 
 export function PeopleView({ garageDoors, query }: { garageDoors: HomeAssistantManagedCover[]; query: string }) {
-  const directoryPage = useDirectoryPage("people", [], { query });
+  const directoryPage = useDirectoryPage("people", { query });
   const groupCatalog = useGroups(); const scheduleCatalog = useSchedules();
   const groups = groupCatalog.items; const schedules = scheduleCatalog.items;
   const readError = directoryPage.error || groupCatalog.error || scheduleCatalog.error;
   const referencesReady = directoryPage.ready && groupCatalog.ready && scheduleCatalog.ready;
-  const signals = React.useContext(ReadSignalsContext);
-  const refresh = React.useCallback(() => signals?.publish({ type: "refresh", reason: "manual", resetHistory: false }) ?? Promise.resolve(directoryPage.refresh()), [signals, directoryPage.refresh]);
+  const refresh = directoryPage.refresh;
+  const retry = async () => {
+    const results = await Promise.allSettled([directoryPage.refresh(), groupCatalog.refresh(), scheduleCatalog.refresh()]);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  };
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedPerson, setSelectedPerson] = React.useState<Person | null>(null);
   const [error, setError] = React.useState("");
@@ -62,7 +65,7 @@ export function PeopleView({ garageDoors, query }: { garageDoors: HomeAssistantM
         </button>
       </div>
 
-      {readError ? <ErrorState title="People data unavailable" description={readError} onRetry={() => void refresh().catch(() => undefined)} retrying={directoryPage.loading} /> : null}
+      {readError ? <ErrorState title="People data unavailable" description={readError} onRetry={() => void retry().catch(() => undefined)} retrying={directoryPage.loading} /> : null}
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 

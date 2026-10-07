@@ -22,6 +22,7 @@ export function useHistoryPage<T>(path: string, filters: URLSearchParams) {
   const [newActivity, setNewActivity] = React.useState(false);
   const state = React.useRef({ pages, index }); state.current = { pages, index };
   const owner = React.useMemo(() => {
+    const noRead = Promise.resolve();
     let active: AbortController | null = null;
     let generation = 0;
     let navigationPending = false;
@@ -46,7 +47,7 @@ export function useHistoryPage<T>(path: string, filters: URLSearchParams) {
         });
       },
       latest(reset: boolean, realtime = false) {
-        if (!reset && (state.current.index > 0 || navigationPending && destination.index > 0)) { setNewActivity(true); return Promise.resolve(); }
+        if (!reset && (state.current.index > 0 || navigationPending && destination.index > 0)) { setNewActivity(true); return noRead; }
         if (reset) { navigationPending = false; active?.abort(); generation += 1; setPages([]); setIndex(0); setNewActivity(false); }
         destination = { cursor: null, index: 0 };
         return queue?.request(new Set(["read"]), realtime ? REALTIME_REFRESH_MIN_INTERVAL_MS : 0) ?? Promise.resolve();
@@ -73,6 +74,7 @@ export function useHistoryPage<T>(path: string, filters: URLSearchParams) {
       else void owner.next(page.next_cursor, index + 1).catch(() => undefined);
     },
     previous: () => { if (index > 0 && !loading) setIndex(index - 1); },
+    reload: () => owner.latest(true),
     refresh: () => { void owner.latest(true).catch(() => undefined); }
   };
 }

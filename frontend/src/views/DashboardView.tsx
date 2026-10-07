@@ -27,7 +27,7 @@ function DashboardSession({
   anomalies,
   integrationStatus,
   maintenanceStatus,
-  refresh,
+  refreshOverview,
   currentUser,
   navigateToView,
   onMaintenanceStatusChanged
@@ -35,15 +35,20 @@ function DashboardSession({
   anomalies: Anomaly[];
   integrationStatus: IntegrationStatus | null;
   maintenanceStatus: MaintenanceStatus | null;
-  refresh: () => Promise<void>;
+  refreshOverview: () => Promise<void>;
   currentUser: UserAccount;
   navigateToView: NavigateToView;
   onMaintenanceStatusChanged: (status: MaintenanceStatus) => void;
 }) {
-  const { presence, expectedPresence, events, error: readError } = useDashboardReads();
-  const { people, vehicles, activeVehicleCount, error: directoryError } = useDashboardDirectory({
+  const { presence, expectedPresence, events, error: readError, refresh: refreshData } = useDashboardReads();
+  const { people, vehicles, activeVehicleCount, error: directoryError, refresh: refreshDirectory } = useDashboardDirectory({
     presence, expectedPresence, events
   });
+  const refresh = async () => {
+    const results = await Promise.allSettled([refreshData(), refreshDirectory(), refreshOverview()]);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  };
   const [now, setNow] = React.useState(() => new Date());
   const [pendingCommand, setPendingCommand] = React.useState<DashboardCommand | null>(null);
   const [maintenanceDisableOpen, setMaintenanceDisableOpen] = React.useState(false);
@@ -134,7 +139,7 @@ function DashboardSession({
       });
       onMaintenanceStatusChanged(status);
       void closeMaintenance();
-      await refresh();
+      void refresh().catch(() => setMaintenanceError("Maintenance Mode disabled, but overview data could not be refreshed."));
     } catch (error) {
       setMaintenanceError(error instanceof Error ? error.message : "Unable to disable Maintenance Mode.");
     } finally {

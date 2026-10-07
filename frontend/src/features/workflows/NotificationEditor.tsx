@@ -20,7 +20,6 @@ export function NotificationWorkflowEditor({
   feedback,
   gateMalfunctionStageOptions,
   integrations,
-  people,
   previewActions,
   rule,
   saving,
@@ -42,7 +41,6 @@ export function NotificationWorkflowEditor({
   feedback: { tone: "success" | "error" | "info"; text: string } | null;
   gateMalfunctionStageOptions: NotificationGateMalfunctionStageOption[];
   integrations: NotificationIntegration[];
-  people: Person[];
   previewActions: PreviewAction[];
   rule: NotificationRule;
   saving: boolean;
@@ -112,7 +110,7 @@ export function NotificationWorkflowEditor({
                   <NotificationConditionCard
                     condition={condition}
                     key={condition.id}
-                    people={people}
+
                     schedules={schedules}
                     onChange={(nextCondition) => onUpdate((current) => ({ ...current, conditions: current.conditions.map((item) => item.id === condition.id ? nextCondition : item) }))}
                     onRemove={() => onUpdate((current) => ({ ...current, conditions: current.conditions.filter((item) => item.id !== condition.id) }))}
@@ -168,18 +166,16 @@ export function NotificationWorkflowEditor({
 
 function NotificationConditionCard({
   condition,
-  people,
   schedules,
   onChange,
   onRemove
 }: {
   condition: NotificationCondition;
-  people: Person[];
   schedules: Schedule[];
   onChange: (condition: NotificationCondition) => void;
   onRemove: () => void;
 }) {
-  const personOptions = useDirectoryOptions("people", people, condition.person_id ? [condition.person_id] : [], condition.type === "presence" && condition.mode === "person_home");
+  const personOptions = useDirectoryOptions("people", condition.person_id ? [condition.person_id] : [], condition.type === "presence" && condition.mode === "person_home");
   return (
     <article className="workflow-condition-card">
       <div className="workflow-card-title">

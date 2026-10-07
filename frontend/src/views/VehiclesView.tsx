@@ -2,7 +2,6 @@ import { Car, Plus, Trash2 } from "lucide-react";
 import React from "react";
 import { useGroups } from "../features/directory/catalogs";
 import { useSchedules } from "../features/schedules/reads";
-import { ReadSignalsContext } from "../lib/readSignals";
 import { useDirectoryIdentities, useDirectoryPage } from "../features/directory/reads";
 import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
@@ -17,14 +16,18 @@ import { DirectoryGroupAccordion, VehiclePhoto } from "../features/directory/com
 import { VehicleModal } from "../features/directory/VehicleEditor";
 
 export function VehiclesView({ canRefreshInformation, query }: { canRefreshInformation: boolean; query: string }) {
-  const directoryPage = useDirectoryPage("vehicles", [], { query });
-  const ownerOptions = useDirectoryIdentities("people", [], directoryPage.items.flatMap((vehicle) => vehicle.person_ids ?? (vehicle.person_id ? [vehicle.person_id] : [])));
+  const directoryPage = useDirectoryPage("vehicles", { query });
+  const ownerOptions = useDirectoryIdentities("people", directoryPage.items.flatMap((vehicle) => vehicle.person_ids ?? (vehicle.person_id ? [vehicle.person_id] : [])));
   const groupCatalog = useGroups(); const scheduleCatalog = useSchedules();
   const groups = groupCatalog.items; const schedules = scheduleCatalog.items;
   const readError = directoryPage.error || ownerOptions.error || groupCatalog.error || scheduleCatalog.error;
   const referencesReady = directoryPage.ready && groupCatalog.ready && scheduleCatalog.ready && ownerOptions.ready;
-  const signals = React.useContext(ReadSignalsContext);
-  const refresh = React.useCallback(() => signals?.publish({ type: "refresh", reason: "manual", resetHistory: false }) ?? Promise.resolve(directoryPage.refresh()), [signals, directoryPage.refresh]);
+  const refresh = directoryPage.refresh;
+  const retry = async () => {
+    const results = await Promise.allSettled([directoryPage.refresh(), groupCatalog.refresh(), scheduleCatalog.refresh(), ownerOptions.refresh()]);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  };
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedVehicle, setSelectedVehicle] = React.useState<Vehicle | null>(null);
   const [error, setError] = React.useState("");
@@ -68,10 +71,14 @@ export function VehiclesView({ canRefreshInformation, query }: { canRefreshInfor
       await api.delete(`/api/v1/vehicles/${vehicle.id}`, {
         confirmation_token: confirmation.confirmation_token
       });
-      await refresh();
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete vehicle");
+      return;
     }
+    directoryPage.removeAccepted(vehicle.id);
+    setSaved("Vehicle deleted.");
+    try { await refresh(); }
+    catch { setError("Vehicle deleted, but the list could not be refreshed. Try again to reload the list."); }
   };
 
   return (
@@ -87,7 +94,7 @@ export function VehiclesView({ canRefreshInformation, query }: { canRefreshInfor
         </button>
       </div>
 
-      {readError ? <ErrorState title="Vehicles data unavailable" description={readError} onRetry={() => void refresh().catch(() => undefined)} retrying={directoryPage.loading} /> : null}
+      {readError ? <ErrorState title="Vehicles data unavailable" description={readError} onRetry={() => void retry().catch(() => undefined)} retrying={directoryPage.loading} /> : null}
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 

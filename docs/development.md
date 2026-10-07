@@ -140,7 +140,9 @@ requirements and fix concrete issues found:
    records do not hide unbounded reads, lazy loads or per-row queries. Relevant
    performance evidence preserves equivalent results and states its limits.
 4. Frontend selection, invalidation, cancellation, permissions and dirty drafts
-   remain correct, including selected records outside the current page.
+   remain correct, including selected records outside the current page. Feature
+   mutation/retry refreshes await their own read owners; unrelated operational
+   failures must not relabel an accepted save or deletion as a failed mutation.
 5. Callers, tests, registrations, migrations and affected guides change together.
    Run the [required checks](validation.md#choose-the-checks); fix failures and
    rerun checks affected by the repair. Do not substitute DB-free checks for full

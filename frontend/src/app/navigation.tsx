@@ -1,59 +1,6 @@
 import { BarChart3, Bell, CalendarDays, Car, ClipboardPaste, Clock3, DoorOpen, FileText, Gauge, GitBranch, History, Home, Lock, MapPinned, MoveHorizontal, PlugZap, Settings, SlidersHorizontal, Trophy, UserRound, Users, Warehouse } from "lucide-react";
 import type React from "react";
 import type { UserAccount, ViewKey } from "../api/types";
-export type ShellDataKey =
-  | "presence"
-  | "expectedPresence"
-  | "events"
-  | "anomalies"
-  | "people"
-  | "vehicles"
-  | "groups"
-  | "schedules"
-  | "integrationStatus"
-  | "maintenanceStatus";
-const UNIVERSAL_SHELL_DATA_KEYS: ShellDataKey[] = ["anomalies", "maintenanceStatus"];
-const ROUTE_SHELL_DATA_KEYS: Record<ViewKey, ShellDataKey[]> = {
-  dashboard: ["integrationStatus"],
-  people: ["integrationStatus"],
-  groups: [],
-  schedules: [],
-  passes: [],
-  vehicles: [],
-  top_charts: [],
-  events: [],
-  movements: [],
-  alerts: [],
-  reports: [],
-  integrations: ["integrationStatus"],
-  logs: [],
-  settings: [],
-  settings_general: [],
-  settings_gates: [],
-  settings_garage_doors: [],
-  settings_command_history: [],
-  settings_missed_exit_recovery: [],
-  settings_auth: [],
-  settings_automations: ["people", "vehicles"],
-  settings_notifications: ["people", "schedules"],
-  settings_lpr: [],
-  settings_zones: [],
-  users: []
-};
-export function shellDataKeysForView(view: ViewKey, currentUser: UserAccount | null) {
-  const keys = new Set<ShellDataKey>(UNIVERSAL_SHELL_DATA_KEYS);
-  (ROUTE_SHELL_DATA_KEYS[view] ?? ROUTE_SHELL_DATA_KEYS.dashboard).forEach((key) => keys.add(key));
-  if (view === "users" && currentUser?.role !== "admin") {
-    ROUTE_SHELL_DATA_KEYS.settings.forEach((key) => keys.add(key));
-  }
-  return keys;
-}
-export function criticalShellDataKeysForView(view: ViewKey): ShellDataKey[] {
-  if (["people", "groups", "vehicles", "schedules", "settings_gates", "settings_garage_doors", "settings_automations", "settings_notifications"].includes(view)) {
-    return ROUTE_SHELL_DATA_KEYS[view];
-  }
-  return [];
-}
 export type NavigationItem = { key: ViewKey; label: string; icon: React.ElementType; group: "Operations" | "Access" | "Insights" | "Settings"; adminOnly?: boolean };
 export const primaryNavItems: NavigationItem[] = [
   { key: "dashboard", label: "Dashboard", icon: Home, group: "Operations" },

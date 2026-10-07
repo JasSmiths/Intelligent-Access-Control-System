@@ -38,8 +38,8 @@ function useOperationalRead<Key extends OperationalDataKey>(key: Key, enabled: b
     }
   }, [identity, key]);
   const matches = React.useCallback((event: RealtimeMessage) => eventMatches(key, event), [key]);
-  useCoordinatedRead(read, matches, enabled, 0, signals);
-  return enabled ? state?.identity === identity ? state : { pending: true, loaded: false, failed: false } : { pending: false, loaded: false, failed: false };
+  const refresh = useCoordinatedRead(read, matches, enabled, 0, signals);
+  return { ...(enabled ? state?.identity === identity ? state : { pending: true, loaded: false, failed: false } : { pending: false, loaded: false, failed: false }), refresh };
 }
 export function useOperationalReads(view: ViewKey, user: UserAccount | null, signals: ReadSignals, setters: Setters) {
   const authenticated = Boolean(user);
@@ -52,6 +52,12 @@ export function useOperationalReads(view: ViewKey, user: UserAccount | null, sig
   if (gate.failed) failedKeys.push("integrationStatus");
   const criticalGate = view === "people";
   return {
+    refreshAlerts: alerts.refresh,
+    refreshOverview: async () => {
+      const results = await Promise.allSettled([alerts.refresh(), maintenance.refresh(), gate.refresh()]);
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+    },
     loading: criticalGate && gate.pending && !gate.loaded,
     readState: criticalGate && gate.failed && !gate.loaded ? "unavailable" as const : failedKeys.length ? "stale" as const : "ready" as const,
     failedKeys

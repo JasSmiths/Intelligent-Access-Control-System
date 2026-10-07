@@ -1,6 +1,6 @@
 const testReads = vi.hoisted(() => ({ presence: [] as Presence[], expectedPresence: null as ExpectedPresenceSummary | null, events: [] as AccessEvent[], people: [] as Person[], vehicles: [] as Vehicle[] }));
-vi.mock("../features/dashboard/reads", () => ({ useDashboardReads: () => ({ ...testReads, error: "" }) }));
-vi.mock("../features/dashboard/useDashboardDirectory", () => ({ useDashboardDirectory: () => ({ people: testReads.people, vehicles: testReads.vehicles, activeVehicleCount: testReads.vehicles.length, error: "" }) }));
+vi.mock("../features/dashboard/reads", () => ({ useDashboardReads: () => ({ ...testReads, error: "", refresh: vi.fn().mockResolvedValue(undefined) }) }));
+vi.mock("../features/dashboard/useDashboardDirectory", () => ({ useDashboardDirectory: () => ({ people: testReads.people, vehicles: testReads.vehicles, activeVehicleCount: testReads.vehicles.length, error: "", refresh: vi.fn().mockResolvedValue(undefined) }) }));
 import * as directoryApi from "../api/directory";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -23,7 +23,7 @@ const integrationStatus: IntegrationStatus = {
 };
 const receipt = (name: string) => contract.cases.find((item) => item.name === name)!.outcome as GateCommandReceipt;
 const props = { presence: [], expectedPresence: null, events: [], anomalies: [], integrationStatus,
-  maintenanceStatus: null, people: [], vehicles: [], refresh: vi.fn().mockResolvedValue(undefined), currentUser: admin, navigateToView: vi.fn(), onMaintenanceStatusChanged: vi.fn() };
+  maintenanceStatus: null, people: [], vehicles: [], refreshOverview: vi.fn().mockResolvedValue(undefined), currentUser: admin, navigateToView: vi.fn(), onMaintenanceStatusChanged: vi.fn() };
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -42,7 +42,7 @@ beforeEach(() => {
   vi.spyOn(directoryApi, "lookupPeople").mockResolvedValue([]);
   vi.useFakeTimers();
   sessionStorage.clear();
-  props.refresh.mockClear();
+  props.refreshOverview.mockClear();
   vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.spyOn(integrationsApi, "confirmGateOpen").mockResolvedValue(confirmation);
   vi.spyOn(integrationsApi, "getGateCommandByIntent").mockResolvedValue(receipt("accepted_unverified"));
@@ -154,7 +154,7 @@ it("retains a sent intent and cancels response handling and delayed refresh when
   view.unmount();
   expect(signal.aborted).toBe(true);
   await act(async () => { pending.resolve(receipt("selected_open_verified")); vi.advanceTimersByTime(5000); });
-  expect(props.refresh).not.toHaveBeenCalled();
+  expect(props.refreshOverview).not.toHaveBeenCalled();
   expect(sessionStorage.getItem(storageKey)).toContain("synthetic-intent");
 });
 it.each(contract.cases)("renders the paired $name physical/admission distinction", ({ outcome }) => {

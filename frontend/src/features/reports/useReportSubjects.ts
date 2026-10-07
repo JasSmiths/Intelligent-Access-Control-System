@@ -6,8 +6,8 @@ import { useDirectoryIdentities, useDirectoryPage } from "../directory/reads";
 import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
 import { reportsEventMatches } from "./invalidation";
 export function useReportSubjects(query: string, open: boolean, personId: string, visitorPassId: string) {
-  const peoplePage = useDirectoryPage("people", [], { query, active: true, enabled: open });
-  const selectedPeople = useDirectoryIdentities("people", [], personId ? [personId] : []);
+  const peoplePage = useDirectoryPage("people", { query, active: true, enabled: open });
+  const selectedPeople = useDirectoryIdentities("people", personId ? [personId] : []);
   const [passes, setPasses] = React.useState<VisitorPass[]>([]);
   const [searchError, setSearchError] = React.useState("");
   const [selectedError, setSelectedError] = React.useState<{ id: string; message: string } | null>(null);

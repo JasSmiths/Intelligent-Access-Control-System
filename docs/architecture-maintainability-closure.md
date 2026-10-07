@@ -53,12 +53,56 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   merely because its design was approved.
 - Deployment, production migrations and live provider/hardware tests are excluded.
 
+## P3 frontend evidence
+
+The separate frontend branch was implemented from approved P2 commit
+`834daa7f2a59707dd5788de6caf4fa71aae8e4f8` and rebased onto approved backend P4
+commit `3416d577169943e1c9a7f4db240c051e525cc7da`. Feature-owned actual-HTTP reads replace
+shell collections, seed props, numeric invalidation tokens and central feature
+route/event mappings. Directory/history/report/dashboard and remaining settings,
+integration, recovery, log, pass, chart and workflow readers subscribe locally.
+Local save/delete/retry refreshes use the required feature owners; global manual
+and connection signals remain explicit shell composition. Accepted mutations keep
+their receipts when a subsequent read fails; local retry reads remain feature-owned.
+
+The corrected frozen frontend passed the locked Node 22 build and 311 unit tests
+in 54 files. Browser coverage consists of the earlier 140-case Chromium/WebKit
+run, 78 passing affected cases after the receipt correction, and eight passing
+new integration receipt cases after correcting their HTTP-status-prefixed error
+selectors. The initial eight selector failures remain retained. Hash mappings
+carry forward the 62 unchanged browser cases; the final coverage is 148 distinct
+cases, not the sum of repeated runs. The Node snapshot differs from the final
+frontend only in four selectors in that browser fixture.
+
+Equivalent-output production assets, built with the same locked Node 22 image,
+passed the identical inert 12/2,000-record workflow against baseline `03f56bed`
+and the corrected candidate in Chromium. Initial/mutation/navigation/100-event
+burst GET counts changed from 10/10/9/8 to 8/3/5/4 at both sizes. All requested
+GETs completed, with no aborted, failed or pending requests. At 2,000 records,
+loaded UTF-8 JSON bytes changed from 92,219/122,105/121,891/243,328 to
+31,299/61,030/60,934/121,656. These synthetic response-body bytes do not establish
+database work or production latency. The development server comparison remains
+separate, including its initial 12-to-13 request increase under StrictMode.
+Beyond-500 subject search is separate correctness evidence. Existing unpaged
+group/schedule catalog contracts remain unchanged; full Dashboard presence awaits
+P7.
+
+Evidence under the retained programme root: `p3-corrected-node22/`,
+`p3-corrected-browser.json`, `p3-corrected-receipt-browser.json`,
+`p3-corrected-receipt-source.json`, `p3-production-comparison/` and the final
+candidate/coverage mapping receipts. Astra Ultra approved the complete 100-path
+P3 delta, tree `13e9fb2c51313b8b2e24567491a22e5f0b9b1093`, patch
+`e9244ce6dd986e41229d9f4f2c88585e1b15736be876f9679d4dc3627ded51dc`.
+Commit `aeedb724046c8d7a5b67ed0a7094eb8e21941745` preserves that exact tree.
+`p3-astra-approval.json` retains the verbatim approval and immutable frontend
+archive equivalence; the rebased source/docs mapping is retained separately.
+
 ## Findings
 
 | Finding | Owner and stages | Required closure evidence | Status / Astra approval |
 | --- | --- | --- | --- |
 | AM-01 workflow definitions | Workflow definitions, handlers and generated editor contracts; P2 | Exhaustive action/config/editor/handler parity, historical plan/recovery checks, E2 conformance | Closed / Astra approved P2 exact candidate |
-| AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Pending / pending |
+| AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Closed / Astra approved P3 exact candidate |
 | AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Implemented, final validation/review pending / pending |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Pending / pending |
 | AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Astra-approved schema/state design; restart/crash/deadline/late-linkage checks; E2/E4 conformance | Pending / pending |

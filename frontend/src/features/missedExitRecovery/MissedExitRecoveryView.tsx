@@ -14,14 +14,14 @@ import { Badge, Toolbar } from "../../ui/primitives";
 import { RecoveryConfiguration } from "./RecoveryConfiguration";
 import { filterDate, recoveryLabel, recoveryMethods, safeDiagnosticRows } from "./model";
 
-type Props = { targetId?: string | null; currentUser: UserAccount; refresh: () => Promise<void> };
+type Props = { targetId?: string | null; currentUser: UserAccount };
 export function MissedExitRecoveryView(props: Props) {
   if (props.currentUser.role !== "admin") return <section className="view-stack"><div className="permission-state" role="alert">Administrator access required for Missed Exit Recovery.</div></section>;
   return <RecoveryAdminView {...props} />;
 }
-function RecoveryAdminView({ refresh, targetId }: Props) {
+function RecoveryAdminView({ targetId }: Props) {
   const [draft, setDraft] = React.useState({ owner_id: "", registration_number: "", outcome: "", method: "", from_at: "", to_at: "" });
-  const owners = useDirectoryOptions("people", [], draft.owner_id ? [draft.owner_id] : []);
+  const owners = useDirectoryOptions("people", draft.owner_id ? [draft.owner_id] : []);
   const [filters, setFilters] = React.useState<RecoveryAttemptFilters>({ offset: 0, limit: 25 });
   const [page, setPage] = React.useState<RecoveryAttemptPage | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -55,7 +55,7 @@ function RecoveryAdminView({ refresh, targetId }: Props) {
   return <section className="view-stack settings-page recovery-page">
     <Toolbar title="Missed Exit Recovery" icon={History} />
     <p className="muted">Testing / debug · Recovery requires global enablement and an owner opt-in. Decisions and verified physical commands are recorded separately.</p>
-    <RecoveryConfiguration refresh={refresh} />
+    <RecoveryConfiguration />
     <section className="card"><div className="toolbar"><h2>Recovery attempts</h2><button className="secondary-button" type="button" disabled={loading} onClick={() => setReload((value) => value + 1)}><RefreshCw size={15} /> Refresh attempts</button></div>
       <form onSubmit={applyFilters}><div className="recovery-fields">
         <label className="field"><span>Owner filter</span><input aria-label="Search owner filter" value={owners.query} onChange={(event) => owners.setQuery(event.target.value)} placeholder="Search directory people" /><DirectoryPagination page={owners} /><select value={draft.owner_id} onChange={(event) => setDraft({ ...draft, owner_id: event.target.value })}><option value="">All owners</option>{owners.items.map((person) => <option key={person.id} value={person.id}>{person.display_name}</option>)}</select></label>

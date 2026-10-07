@@ -107,7 +107,7 @@ export function PersonModal({
   const [submitting, setSubmitting] = React.useState(false);
   const submittingRef = React.useRef(false);
   const [dirty, setDirty] = React.useState(false);
-  const vehicleOptions = useDirectoryOptions("vehicles", [], form.vehicle_ids);
+  const vehicleOptions = useDirectoryOptions("vehicles", form.vehicle_ids);
   const vehicleQuery = vehicleOptions.query;
   const setVehicleQuery = vehicleOptions.setQuery;
   const requestClose = useEditorDismiss(onClose, dirty, submitting, "person changes");

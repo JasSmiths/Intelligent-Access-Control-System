@@ -5,12 +5,12 @@ import { Bell, ChevronDown, Loader2, LogOut, Menu, RefreshCcw, Search, ShieldChe
 import React from "react";
 import { api } from "../api/client";
 import type { SearchPaletteItem } from "../api/search";
-import type { AccessEvent, Anomaly, ExpectedPresenceSummary, Group, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, RealtimeMessage, Schedule, Vehicle, ViewKey } from "../api/types";
+import type { Anomaly, IntegrationStatus, MaintenanceStatus, NavigateToView, RealtimeMessage, ViewKey } from "../api/types";
 import { displayUserName } from "../lib/format";
 import { UserAvatar } from "../lib/media";
 import { AlertTray, isBellAlert } from "./alerts";
 import { AuthLoading, LoginPage, SetupPage, type AuthStatus } from "./auth";
-import { canAccessView, initialViewFromLocation, primaryNavItems, settingsNavItems, settingsNavViewKeys, viewFromPath, viewPaths, type ShellDataKey } from "./navigation";
+import { canAccessView, initialViewFromLocation, primaryNavItems, settingsNavItems, settingsNavViewKeys, viewFromPath, viewPaths } from "./navigation";
 import { useProfilePreferences } from "./profile";
 import {
   applyIntegrationRealtimeEvent,
@@ -26,7 +26,7 @@ import { View } from "./routes";
 import { SearchPalette } from "./searchPalette";
 import { ThemeControl, useTheme } from "./theme";
 import { NotificationToastStack } from "./toasts";
-import { useShellRefresh } from "./useShellRefresh";
+import { useOperationalReads, type OperationalDataKey } from "./operationalReads";
 import { useRealtimeConnection } from "./useRealtimeConnection";
 export function App() {
   const [view, setView] = React.useState<ViewKey>(() => initialViewFromLocation());
@@ -38,16 +38,10 @@ export function App() {
   const activeSignals = React.useRef(readSignals);
   React.useLayoutEffect(() => { activeSignals.current = readSignals; return () => readSignals.dispose(); }, [readSignals]);
   const [profilePreferences, setProfilePreferences] = useProfilePreferences(currentUser);
-  const [presence, setPresence] = React.useState<Presence[]>([]);
-  const [expectedPresence, setExpectedPresence] = React.useState<ExpectedPresenceSummary | null>(null);
-  const [events, setEvents] = React.useState<AccessEvent[]>([]);
   const [anomalies, setAnomalies] = React.useState<Anomaly[]>([]);
-  const [people, setPeople] = React.useState<Person[]>([]);
-  const [vehicles, setVehicles] = React.useState<Vehicle[]>([]);
-  const [groups, setGroups] = React.useState<Group[]>([]);
-  const [schedules, setSchedules] = React.useState<Schedule[]>([]);
   const [integrationStatus, setIntegrationStatus] = React.useState<IntegrationStatus | null>(null);
   const [maintenanceStatus, setMaintenanceStatus] = React.useState<MaintenanceStatus | null>(null);
+  React.useLayoutEffect(() => { setAnomalies([]); setIntegrationStatus(null); setMaintenanceStatus(null); setDashboardRefreshing(false); }, [readSignals]);
   const [notificationToasts, setNotificationToasts] = React.useState<NotificationToast[]>([]);
   const [dashboardRefreshing, setDashboardRefreshing] = React.useState(false);
   const [realtimeConnection, setRealtimeConnection] = React.useState<RealtimeConnectionState>(() =>
@@ -79,7 +73,7 @@ export function App() {
     }
   });
   const setRealtimeStatus = React.useCallback((status: RealtimeConnectionStatus, detail: string) => {
-    setRealtimeConnection(realtimeStatus(status, detail));
+    setRealtimeConnection((current) => current.status === status && current.detail === detail ? current : realtimeStatus(status, detail));
   }, []);
   const navigateToView = React.useCallback<NavigateToView>((nextView, options) => {
     setRouteSearch(null);
@@ -118,47 +112,32 @@ export function App() {
   React.useEffect(() => {
     refreshAuth().catch(() => setAuthStatus({ setup_required: false, authenticated: false, user: null }));
   }, [refreshAuth]);
-  const { loading, readState, failedKeys, dataRefreshToken, refresh, initialRefresh, refreshRealtime, selectionForEvent, resetRefresh } = useShellRefresh(view, currentUser, {
-    presence: setPresence, expectedPresence: setExpectedPresence, events: setEvents, anomalies: setAnomalies,
-    people: setPeople, vehicles: setVehicles, groups: setGroups, schedules: setSchedules,
-    integrationStatus: setIntegrationStatus, maintenanceStatus: setMaintenanceStatus
+  const { loading, readState, failedKeys, refreshAlerts, refreshOverview } = useOperationalReads(view, currentUser, readSignals, {
+    anomalies: setAnomalies, integrationStatus: setIntegrationStatus, maintenanceStatus: setMaintenanceStatus
   });
-  const failedLabels: Record<ShellDataKey, string> = { presence: "presence", expectedPresence: "expected arrivals", events: "events", anomalies: "alerts", people: "people", vehicles: "vehicles", groups: "groups", schedules: "schedules", integrationStatus: "integration status", maintenanceStatus: "maintenance status" };
+  const refresh = React.useCallback(() => readSignals.publish({ type: "refresh", reason: "manual", resetHistory: false }), [readSignals]);
+  const failedLabels: Record<OperationalDataKey, string> = { anomalies: "alerts", integrationStatus: "integration status", maintenanceStatus: "maintenance status" };
   const failedDescription = failedKeys.map((key) => failedLabels[key]).join(", ");
   const refreshDashboard = React.useCallback(async () => {
     setDashboardRefreshing(true);
     try {
-      const results = await Promise.allSettled([refresh(), readSignals.publish({ type: "refresh", reason: "manual", resetHistory: true })]);
-      const failure = results.find((result) => result.status === "rejected");
-      if (failure?.status === "rejected") throw failure.reason;
+      await readSignals.publish({ type: "refresh", reason: "manual", resetHistory: true });
     } finally {
-      setDashboardRefreshing(false);
+      if (activeSignals.current === readSignals) setDashboardRefreshing(false);
     }
-  }, [refresh, readSignals]);
+  }, [readSignals]);
   const handleNotificationAction = React.useCallback(async (notificationId: string, action: NotificationToastAction) => {
     if (action.method !== "POST") return;
     await api.post(action.path);
     setNotificationToasts((current) => current.filter((item) => item.id !== notificationId));
     refresh().catch(() => undefined);
   }, [refresh]);
-  const refreshFromRealtime = React.useCallback((event: RealtimeMessage) => {
-    const selection = selectionForEvent(event);
-    if (!selection.keys.size && !selection.route) return;
-    setRealtimeStatus("refreshing", "Applying live update");
-    refreshRealtime(selection)
-      .then(() => { if (activeSignals.current === readSignals) setRealtimeStatus("live", "Live update applied"); })
-      .catch(() => { if (activeSignals.current === readSignals) setRealtimeStatus("reconnecting", "Refresh failed; waiting for the stream"); });
-  }, [refreshRealtime, selectionForEvent, readSignals, setRealtimeStatus]);
   const refreshFromRealtimeLifecycle = React.useCallback(() => {
     setRealtimeStatus("refreshing", "Pulling current site state");
-    Promise.all([refreshRealtime(), readSignals.publish({ type: "refresh", reason: "connection", resetHistory: false })])
+    readSignals.publish({ type: "refresh", reason: "connection", resetHistory: false })
       .then(() => { if (activeSignals.current === readSignals) setRealtimeStatus("live", "Data refreshed just now"); })
       .catch(() => { if (activeSignals.current === readSignals) setRealtimeStatus("reconnecting", "Refresh failed; retrying with the stream"); });
-  }, [refreshRealtime, readSignals, setRealtimeStatus]);
-  React.useEffect(() => {
-    if (!authStatus?.authenticated) return;
-    initialRefresh().catch(() => undefined);
-  }, [authStatus?.authenticated, initialRefresh]);
+  }, [readSignals, setRealtimeStatus]);
   const realtimeSessionKey = authStatus?.authenticated && currentUser
     ? `${currentUser.id}:${currentUser.role}`
     : null;
@@ -166,7 +145,8 @@ export function App() {
     setNotificationToasts([]);
   }, [realtimeSessionKey]);
   const handleRealtimeMessage = React.useCallback((parsed: RealtimeMessage) => {
-    void readSignals.publish({ type: "realtime", message: parsed }).catch(() => undefined);
+    readSignals.publish({ type: "realtime", message: parsed });
+    setRealtimeStatus("live", "Live event received");
     const notificationToast = notificationToastFromRealtime(parsed);
     if (notificationToast) {
       setNotificationToasts((current) => [notificationToast, ...current].slice(0, 4));
@@ -175,8 +155,7 @@ export function App() {
     if (applyMaintenanceRealtimeEvent(parsed, setMaintenanceStatus)) return;
     if (applyIntegrationRealtimeEvent(parsed, setIntegrationStatus)) return;
     if (parsed.type.startsWith("telemetry.")) return;
-    refreshFromRealtime(parsed);
-  }, [refreshFromRealtime, readSignals]);
+  }, [readSignals, setRealtimeStatus]);
   useRealtimeConnection({
     sessionKey: realtimeSessionKey,
     onMessage: handleRealtimeMessage,
@@ -245,18 +224,10 @@ export function App() {
     try {
       await api.post<{ status: string }>("/api/v1/auth/logout");
       setAuthStatus({ setup_required: false, authenticated: false, user: null });
-      setPresence([]);
-      setExpectedPresence(null);
-      setEvents([]);
       setAnomalies([]);
-      setPeople([]);
-      setVehicles([]);
-      setGroups([]);
-      setSchedules([]);
       setIntegrationStatus(null);
       setMaintenanceStatus(null);
-      resetRefresh();
-        setNotificationToasts([]);
+      setNotificationToasts([]);
       setRouteSearch(null);
       setSettingsExpanded(false);
       setView("dashboard");
@@ -524,7 +495,7 @@ export function App() {
               {alertsOpen ? (
                 <AlertTray
                   anomalies={bellAlerts}
-                  onRefresh={refresh}
+                  onRefresh={refreshAlerts}
                   onViewAll={() => {
                     setAlertsOpen(false);
                     navigateToView("alerts");
@@ -563,18 +534,11 @@ export function App() {
             view={view}
             locationSearch={locationSearch}
             search={routeSearch?.view === view ? routeSearch.value : ""}
-            presence={presence}
-            expectedPresence={expectedPresence}
-            events={events}
             anomalies={anomalies}
-            people={people}
-            vehicles={vehicles}
-            groups={groups}
-            schedules={schedules}
             integrationStatus={integrationStatus}
             maintenanceStatus={maintenanceStatus}
-            dataRefreshToken={dataRefreshToken}
-            refresh={refresh}
+            refreshAlerts={refreshAlerts}
+            refreshOverview={refreshOverview}
             currentUser={currentUser}
             navigateToView={navigateToView}
             onCurrentUserUpdated={(user) =>

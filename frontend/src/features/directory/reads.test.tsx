@@ -15,7 +15,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 it("uses bounded cursor pages and resets pagination when search changes", async () => {
   const read = vi.spyOn(directory, "readDirectory").mockResolvedValueOnce(page([ash], "page-two")).mockResolvedValueOnce(page([zoe])).mockResolvedValue(page([zoe]));
-  const { result, rerender } = renderHook(({ query }) => useDirectoryPage("people", [], { query }), { initialProps: { query: "" } });
+  const { result, rerender } = renderHook(({ query }) => useDirectoryPage("people", { query }), { initialProps: { query: "" } });
   await waitFor(() => expect(result.current.items).toEqual([ash]));
   act(() => result.current.next());
   await waitFor(() => expect(result.current.items).toEqual([zoe]));
@@ -29,7 +29,7 @@ it("uses bounded cursor pages and resets pagination when search changes", async 
 it("ignores an old search response after the user selects a different query", async () => {
   const pending = deferred<directory.DirectoryPage<Person>>();
   const read = vi.spyOn(directory, "readDirectory").mockReturnValueOnce(pending.promise).mockResolvedValue(page([zoe]));
-  const { result, rerender } = renderHook(({ query }) => useDirectoryPage("people", [], { query }), { initialProps: { query: "" } });
+  const { result, rerender } = renderHook(({ query }) => useDirectoryPage("people", { query }), { initialProps: { query: "" } });
   await waitFor(() => expect(read).toHaveBeenCalledOnce());
   const signal = read.mock.calls[0][2]?.signal;
   rerender({ query: "Zoe" });
@@ -42,9 +42,9 @@ it("ignores an old search response after the user selects a different query", as
 it("retains selected identities outside the result page and reports refresh failure with retained rows", async () => {
   vi.mocked(directory.lookupDirectory).mockResolvedValue([zoe]);
   vi.spyOn(directory, "readDirectory").mockResolvedValueOnce(page([ash])).mockRejectedValue(new Error("Synthetic offline"));
-  const { result } = renderHook(() => useDirectoryOptions("people", [], ["zoe"]));
+  const { result } = renderHook(() => useDirectoryOptions("people", ["zoe"]));
   await waitFor(() => expect(result.current.items.map((item) => item.id).sort()).toEqual(["ash", "zoe"]));
-  act(() => result.current.refresh());
+  await act(async () => { await expect(result.current.refresh()).rejects.toThrow("Synthetic offline"); });
   await waitFor(() => expect(result.current.error).toBe("Synthetic offline"));
   expect(result.current.items.map((item) => item.id).sort()).toEqual(["ash", "zoe"]);
 });
@@ -54,9 +54,9 @@ it("refreshes outside-page selected metadata and gives the selected read precede
   const current = { ...zoe, is_active: false };
   vi.spyOn(directory, "readDirectory").mockResolvedValue(page([{ ...zoe, is_active: true }]));
   vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([{ ...zoe, is_active: true }]).mockResolvedValue([current]);
-  const { result, rerender } = renderHook(({ refreshToken }) => useDirectoryOptions("people", [], ["zoe"], true, refreshToken), { initialProps: { refreshToken: 0 } });
+  const { result } = renderHook(() => useDirectoryOptions("people", ["zoe"]));
   await waitFor(() => expect(result.current.items[0]?.is_active).toBe(true));
-  rerender({ refreshToken: 1 });
+  await act(async () => { await result.current.refresh(); });
   await waitFor(() => expect(result.current.items[0]?.is_active).toBe(false));
   expect(directory.lookupDirectory).toHaveBeenCalledTimes(2);
 });
@@ -66,7 +66,7 @@ it("cancels selected identity reads when disabled and rejects a late result", as
   const pending = deferred<Person[]>();
   vi.mocked(directory.lookupDirectory).mockReturnValueOnce(pending.promise);
   vi.spyOn(directory, "readDirectory").mockResolvedValue(page([ash]));
-  const { result, rerender } = renderHook(({ enabled }) => useDirectoryOptions("people", [], ["zoe"], enabled), { initialProps: { enabled: true } });
+  const { result, rerender } = renderHook(({ enabled }) => useDirectoryOptions("people", ["zoe"], enabled), { initialProps: { enabled: true } });
   await waitFor(() => expect(directory.lookupDirectory).toHaveBeenCalledOnce());
   const signal = vi.mocked(directory.lookupDirectory).mock.calls[0][2]?.signal;
   rerender({ enabled: false });
@@ -81,8 +81,7 @@ it("refreshes a nested selector from route invalidation while retaining its quer
   vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([{ ...zoe, is_active: true }]).mockResolvedValue([changed]);
   const signals = createReadSignals("synthetic");
   const wrapper = ({ children }: { children: React.ReactNode }) => <ReadSignalsContext.Provider value={signals}>{children}</ReadSignalsContext.Provider>;
-  const seed = [ash];
-  const { result } = renderHook(() => useDirectoryOptions("people", seed, ["zoe"]), { wrapper });
+  const { result } = renderHook(() => useDirectoryOptions("people", ["zoe"]), { wrapper });
   await waitFor(() => expect(result.current.items.some((item) => item.display_name === "Zoe Smith")).toBe(true));
   act(() => result.current.setQuery("synthetic plate"));
   await waitFor(() => expect(read.mock.calls.at(-1)?.[1]?.q).toBe("synthetic plate"));
@@ -99,7 +98,7 @@ it("treats selected deletion as authoritative even when an old page still contai
   const wrapper = ({ children }: { children: React.ReactNode }) => <ReadSignalsContext.Provider value={signals}>{children}</ReadSignalsContext.Provider>;
   vi.spyOn(directory, "readDirectory").mockResolvedValue(page([zoe]));
   vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([zoe]).mockResolvedValue([]);
-  const { result } = renderHook(() => useDirectoryOptions("people", [], ["zoe"]), { wrapper });
+  const { result } = renderHook(() => useDirectoryOptions("people", ["zoe"]), { wrapper });
   await waitFor(() => expect(result.current.items).toEqual([zoe]));
   await act(async () => { await signals.publish({ type: "refresh", reason: "manual", resetHistory: false }); });
   expect(result.current.items).toEqual([]); expect(result.current.pageItems).toEqual([]);

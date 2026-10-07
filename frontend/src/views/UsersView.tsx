@@ -86,7 +86,7 @@ export function UsersView({
       });
       await api.delete(`/api/v1/users/${user.id}`, { confirmation_token: confirmation.confirmation_token });
       setUsers((current) => current.filter((item) => item.id !== user.id));
-      await loadUsers();
+      try { await loadUsers(); } catch { setError("User deleted, but the list could not be refreshed. Refresh to retry the read."); }
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete user");
     }
@@ -109,7 +109,7 @@ export function UsersView({
         onCurrentUserUpdated(savedUser);
       }
       setUsers((current) => current.map((item) => item.id === savedUser.id ? savedUser : item));
-      await loadUsers();
+      try { await loadUsers(); } catch { setError("User updated, but the list could not be refreshed. Refresh to retry the read."); }
     } catch (updateError) {
       setError(updateError instanceof Error ? updateError.message : "Unable to update user");
     } finally { endUserAction(user.id); }
@@ -246,7 +246,7 @@ function UserModal({
     generate_password: mode === "create"
   });
   const existingProfilePhotoSource = mediaSource(user?.profile_photo_url, user?.profile_photo_data_url);
-  const personOptions = useDirectoryOptions("people", [], form.person_id ? [form.person_id] : []);
+  const personOptions = useDirectoryOptions("people", form.person_id ? [form.person_id] : []);
   const [profilePhotoChanged, setProfilePhotoChanged] = React.useState(false);
   const profilePhotoPreview = form.profile_photo_data_url || (!profilePhotoChanged ? existingProfilePhotoSource : "");
   const [error, setError] = React.useState("");

@@ -6,7 +6,7 @@ import { createReadSignals, ReadSignalsContext } from "./readSignals";
 import { useCoordinatedRead } from "./useCoordinatedRead";
 function deferred() { let resolve!: () => void; const promise = new Promise<void>((yes) => { resolve = yes; }); return { promise, resolve }; }
 const event = { type: "vehicle_information.updated", payload: {} } as RealtimeMessage;
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 it("retains a blocked HTTP read across predicate identity changes and coalesces 100 signals into one trailing read", async () => {
   vi.useFakeTimers();
   const bus = createReadSignals("account"); const blocked = deferred();
@@ -17,11 +17,13 @@ it("retains a blocked HTTP read across predicate identity changes and coalesces 
   const originalSignal = read.mock.calls[0][0] as AbortSignal;
   rerender({ matches: () => true });
   expect(originalSignal.aborted).toBe(false);
-  let pending!: Promise<void>[];
-  act(() => { pending = Array.from({ length: 100 }, () => bus.publish({ type: "realtime", message: event })); });
+  const catches = vi.spyOn(Promise.prototype, "catch");
+  act(() => { for (let i = 0; i < 1000; i++) expect(bus.publish({ type: "realtime", message: event })).toBeUndefined(); });
+  expect(catches).toHaveBeenCalledOnce(); // One observer for the shared trailing HTTP batch.
+  catches.mockRestore();
   await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
   expect(read).toHaveBeenCalledOnce();
-  await act(async () => { blocked.resolve(); await Promise.all(pending); });
+  await act(async () => { blocked.resolve(); });
   expect(read).toHaveBeenCalledTimes(2);
 });
 it("keeps independent owners progressing when a different HTTP owner stalls or fails", async () => {
@@ -44,9 +46,33 @@ it("aborts old account work and discards pending invalidations after replacement
   function Probe() { useCoordinatedRead(read, matches); return null; }
   const { rerender } = render(<ReadSignalsContext.Provider value={old}><Probe /></ReadSignalsContext.Provider>);
   const oldSignal = read.mock.calls[0][0] as AbortSignal;
-  let pending!: Promise<void>; act(() => { pending = old.publish({ type: "realtime", message: event }); });
+  act(() => { old.publish({ type: "realtime", message: event }); });
   rerender(<ReadSignalsContext.Provider value={next}><Probe /></ReadSignalsContext.Provider>);
   expect(oldSignal.aborted).toBe(true);
-  await act(async () => { blocked.resolve(); await pending; await vi.advanceTimersByTimeAsync(10000); });
+  await act(async () => { blocked.resolve(); await vi.advanceTimersByTimeAsync(10000); });
   expect(read).toHaveBeenCalledTimes(2);
+});
+it("isolates a rejected realtime batch and drops its trailing work on disposal with bounded observers", async () => {
+  vi.useFakeTimers();
+  const bus = createReadSignals("account"), blocked = deferred();
+  const slow = vi.fn().mockReturnValueOnce(blocked.promise).mockRejectedValue(new Error("Read offline"));
+  const fast = vi.fn().mockResolvedValue(undefined);
+  const wrapper = ({ children }: { children: React.ReactNode }) => <ReadSignalsContext.Provider value={bus}>{children}</ReadSignalsContext.Provider>;
+  const { unmount } = renderHook(() => { useCoordinatedRead(slow, () => true); useCoordinatedRead(fast, () => true); }, { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  const catches = vi.spyOn(Promise.prototype, "catch");
+  act(() => { for (let i = 0; i < 1000; i++) bus.publish({ type: "realtime", message: event }); });
+  expect(catches.mock.calls.length).toBeLessThanOrEqual(3); // Current/trailing fast reads plus one slow trailing batch.
+  catches.mockRestore();
+  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  expect(fast.mock.calls.length).toBeGreaterThan(1);
+  expect(slow).toHaveBeenCalledOnce();
+  await act(async () => { blocked.resolve(); });
+  expect(slow).toHaveBeenCalledTimes(2); // Rejection is observed once; it cannot block the fast owner.
+  const count = fast.mock.calls.length;
+  act(() => { bus.publish({ type: "realtime", message: event }); });
+  unmount(); bus.dispose();
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+  expect(fast).toHaveBeenCalledTimes(count);
+  expect(slow).toHaveBeenCalledTimes(2);
 });

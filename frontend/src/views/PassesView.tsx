@@ -71,10 +71,10 @@ export function PassesView({ query }: { query: string }) {
     setModalPass(null);
   };
 
-  const handlePassUpdated = React.useCallback(async (visitorPass: VisitorPass) => {
+  const handlePassUpdated = React.useCallback(async (visitorPass: VisitorPass, receipt = "Pass saved") => {
     setPasses((current) => [visitorPass, ...current.filter((item) => item.id !== visitorPass.id)]);
     setDetailPass(visitorPass);
-    await loadPasses();
+    try { await loadPasses(); } catch { setError(`${receipt}, but the list could not be refreshed. Refresh to retry the read.`); }
   }, [loadPasses]);
 
   const cancelPass = async (visitorPass: VisitorPass): Promise<VisitorPass | null> => {
@@ -91,7 +91,7 @@ export function PassesView({ query }: { query: string }) {
         ...payload,
         confirmation_token: confirmation.confirmation_token
       });
-      await handlePassUpdated(cancelled);
+      await handlePassUpdated(cancelled, "Pass cancelled");
       return cancelled;
     } catch (cancelError) {
       setError(cancelError instanceof Error ? cancelError.message : "Unable to cancel Visitor Pass");
@@ -113,7 +113,7 @@ export function PassesView({ query }: { query: string }) {
         confirmation_token: confirmation.confirmation_token
       });
       setPasses((current) => current.filter((item) => item.id !== visitorPass.id));
-      await loadPasses();
+      try { await loadPasses(); } catch { setError("Pass deleted, but the list could not be refreshed. Refresh to retry the read."); }
       return true;
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete Visitor Pass");
@@ -148,12 +148,12 @@ export function PassesView({ query }: { query: string }) {
 
       <div className="passes-toolbar card">
         <PassFilterBar counts={counts} filters={filters} onChange={setFilters} />
-        <button className="secondary-button" onClick={() => loadPasses()} disabled={loading} type="button">
+        <button className="secondary-button" onClick={() => void loadPasses().catch(() => undefined)} disabled={loading} type="button">
           <RefreshCw size={15} /> Refresh
         </button>
       </div>
 
-      {error ? <ErrorState title="Visitor passes need attention" description={error} onRetry={() => void loadPasses()} retrying={loading} /> : null}
+      {error ? <ErrorState title="Visitor passes need attention" description={error} onRetry={() => void loadPasses().catch(() => undefined)} retrying={loading} /> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
       {loading ? (

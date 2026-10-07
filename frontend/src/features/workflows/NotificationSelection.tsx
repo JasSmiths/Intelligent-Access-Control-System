@@ -103,12 +103,10 @@ export function NotificationTriggerModal({
 }
 
 export function NotificationConditionModal({
-  people,
   schedules,
   onClose: finishClose,
   onSelect: finishSelect
 }: {
-  people: Person[];
   schedules: Schedule[];
   onClose: () => void;
   onSelect: (condition: NotificationCondition) => void;
@@ -132,7 +130,7 @@ export function NotificationConditionModal({
             <span><strong>Schedule</strong><small>Only continue when the event time falls inside a selected schedule.</small></span>
             <Clock3 size={18} />
           </button>
-          <button className="two-pane-item-card" onClick={() => onSelect({ id: draftId("condition"), type: "presence", mode: "someone_home", person_id: people[0]?.id ?? "" })} type="button">
+          <button className="two-pane-item-card" onClick={() => onSelect({ id: draftId("condition"), type: "presence", mode: "someone_home", person_id: "" })} type="button">
             <span><strong>Presence</strong><small>Check whether nobody, somebody, or a specific person is home.</small></span>
             <Users size={18} />
           </button>
@@ -146,7 +144,6 @@ export function NotificationActionModal({
   embedded = false,
   currentUser,
   integrations,
-  people,
   onClose,
   onDirtyChange,
   onSelect
@@ -154,7 +151,6 @@ export function NotificationActionModal({
   embedded?: boolean;
   currentUser: UserAccount;
   integrations: NotificationIntegration[];
-  people: Person[];
   onClose: () => void;
   onDirtyChange?: (dirty: boolean) => void;
   onSelect: (action: NotificationAction) => void;
@@ -168,7 +164,7 @@ export function NotificationActionModal({
   React.useEffect(() => { onDirtyChange?.(Boolean(selectedMethodId)); return () => onDirtyChange?.(false); }, [onDirtyChange, selectedMethodId]);
   const requestClose = useEditorDismiss(onClose, Boolean(selectedMethodId), false, "notification action selection");
   const query = searchQuery.trim().toLowerCase();
-  const personOptions = useDirectoryOptions("people", people, currentUser.person_id ? [currentUser.person_id] : []);
+  const personOptions = useDirectoryOptions("people", currentUser.person_id ? [currentUser.person_id] : []);
   const currentUserPerson = React.useMemo(() => findCurrentUserPerson(personOptions.items, currentUser), [currentUser, personOptions.items]);
   const methodsByCategory = React.useMemo(
     () => buildNotificationActionMethods(integrations, currentUserPerson),

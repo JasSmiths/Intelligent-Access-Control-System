@@ -4,7 +4,6 @@ import { useEditorDismiss } from "../ui/useEditorDismiss";
 import { Check, CircleDot, Plus, Users, X } from "lucide-react";
 import React from "react";
 import { useGroups } from "../features/directory/catalogs";
-import { ReadSignalsContext } from "../lib/readSignals";
 import { useDirectoryPage } from "../features/directory/reads";
 import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
@@ -25,8 +24,7 @@ export const groupCategoryOptions = [
 
 export function GroupsView({ query }: { query: string }) {
   const catalog = useGroups(); const groups = catalog.items;
-  const signals = React.useContext(ReadSignalsContext);
-  const refresh = React.useCallback(() => signals?.publish({ type: "refresh", reason: "manual", resetHistory: false }) ?? catalog.refresh(), [signals, catalog.refresh]);
+  const refresh = catalog.refresh;
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedGroup, setSelectedGroup] = React.useState<Group | null>(null);
   const [error, setError] = React.useState("");
@@ -131,7 +129,7 @@ export function GroupModal({
   onSaved: () => Promise<void>;
   setPageError: (message: string) => void;
 }) {
-  const memberPage = useDirectoryPage("people", [], { groupId: group?.id, enabled: Boolean(group) });
+  const memberPage = useDirectoryPage("people", { groupId: group?.id, enabled: Boolean(group) });
   const members = memberPage.items;
   const modalRef = React.useRef<HTMLFormElement>(null);
   const onClose = useModalClose(modalRef, finishClose);
