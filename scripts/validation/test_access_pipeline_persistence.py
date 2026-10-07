@@ -71,7 +71,9 @@ async def test_empty_upgrade_downgrade_and_complete_metadata_parity():
             await connection.run_sync(lambda sync: migrate(sync, 'downgrade'))
             tables = await connection.run_sync(lambda sync: set(inspect(sync).get_table_names()))
             assert not tables.intersection(NEW_TABLES)
+            assert await connection.scalar(text("SELECT to_regclass('lpr_ready_ordinal_seq')")) is None
             await connection.run_sync(lambda sync: migrate(sync, 'upgrade'))
+            assert await connection.scalar(text("SELECT to_regclass('lpr_ready_ordinal_seq')")) == 'lpr_ready_ordinal_seq'
             differences = await connection.run_sync(lambda sync: compare_metadata(
                 MigrationContext.configure(sync, opts={'include_object': include_schema_object}), Base.metadata))
             assert differences == [], differences
@@ -153,7 +155,7 @@ async def test_populated_downgrade_refuses_before_ddl(populated):
         transaction = await connection.begin()
         try:
             if populated == 'coordinator':
-                await connection.execute(text('INSERT INTO lpr_coordinator_state (id,epoch,next_ready_ordinal,next_open_ordinal,handled_ready_ordinal) VALUES (1,0,1,1,0)'))
+                await connection.execute(text('INSERT INTO lpr_coordinator_state (id,epoch,next_open_ordinal,handled_ready_ordinal) VALUES (1,0,1,0)'))
             elif populated == 'revision':
                 await connection.execute(text("""INSERT INTO access_events
                     (id,registration_number,direction,decision,confidence,source,occurred_at,timing_classification,created_at,updated_at,resource_revision)

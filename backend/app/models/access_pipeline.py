@@ -15,6 +15,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    Sequence,
     String,
     UniqueConstraint,
     Uuid,
@@ -24,6 +25,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+
+# Publication takes its own short transaction advisory lock; the worker's
+# coordinator row may remain locked by a later domain transaction.
+LPR_READY_ORDINAL_SEQUENCE = Sequence("lpr_ready_ordinal_seq", data_type=BigInteger(), metadata=Base.metadata)
 
 
 class LprDebounceWindow(Base):
@@ -133,7 +138,6 @@ class LprCoordinatorState(Base):
     epoch: Mapped[int] = mapped_column(BigInteger(), nullable=False)
     lease_token: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    next_ready_ordinal: Mapped[int] = mapped_column(BigInteger(), nullable=False)
     next_open_ordinal: Mapped[int] = mapped_column(BigInteger(), nullable=False)
     handled_ready_ordinal: Mapped[int] = mapped_column(BigInteger(), nullable=False)
     boundary_ingest_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)

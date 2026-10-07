@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.models import AccessEvent, LprIngestEvent, MovementSessionRecord
+from app.models import AccessEvent, MovementSessionRecord
 from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification
 from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.gate.base import GateState
@@ -44,13 +44,11 @@ from app.services.access.reads import (
     PROCESSING_ATTEMPT_PAYLOAD_KEY,
     VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY,
     _webhook_trace_for_window,
-    lpr_ingest_id_from_read,
 )
 from app.services.access.snapshots import capture_access_event_snapshot
 from app.services.access_events import AccessEventService
 from app.services.dvla import NormalizedDvlaVehicle
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
-from app.services.lpr_ingest import LPR_INGEST_STATUS_PENDING, LPR_INGEST_STATUS_SUCCEEDED
 from app.services.movement import sessions as movement_sessions_module
 from app.services.snapshots import access_event_snapshot_relative_path
 
@@ -126,93 +124,9 @@ class FakeMovementLedger:
         row.suppressed_reads = [*(row.suppressed_reads or []), suppressed_read_payload]
 
 
-class FakeLprIngestSession:
-    def __init__(self, existing: LprIngestEvent | None = None) -> None:
-        self.existing = existing
-        self.added: list[LprIngestEvent] = []
-        self.commits = 0
-        self.rollbacks = 0
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_args):
-        return None
-
-    async def scalar(self, _query):
-        return self.existing
-
-    def add(self, row) -> None:
-        self.added.append(row)
-
-    async def commit(self) -> None:
-        self.commits += 1
-
-    async def rollback(self) -> None:
-        self.rollbacks += 1
-
-
-@pytest.mark.asyncio
-async def test_lpr_ingest_read_persists_pending_row_before_processing(monkeypatch) -> None:
-    service = AccessEventService()
-    captured_at = datetime(2026, 5, 31, 8, 0, tzinfo=UTC)
-    received_at = captured_at + timedelta(seconds=2)
-    read = PlateRead(
-        registration_number="ING123",
-        confidence=0.91,
-        source="ubiquiti",
-        captured_at=captured_at,
-        raw_payload={"event_id": "protect-event"},
-        candidate_registration_numbers=("ING123", "1NG123"),
-    )
-    fake_session = FakeLprIngestSession()
-    monkeypatch.setattr(access_events_module, "AsyncSessionLocal", lambda: fake_session)
-
-    row, should_wake_worker = await service._persist_lpr_ingest_read(read, received_at=received_at)
-
-    assert should_wake_worker is True
-    assert fake_session.added == [row]
-    assert fake_session.commits == 1
-    assert row.status == LPR_INGEST_STATUS_PENDING
-    assert row.idempotency_key.startswith("lpr-ingest:")
-    assert row.normalized_payload["raw_payload"] == {"event_id": "protect-event"}
-    wrapped = service._read_with_lpr_ingest_event(read, row)
-    assert lpr_ingest_id_from_read(wrapped) == row.id
-
-
-
-@pytest.mark.asyncio
-async def test_lpr_ingest_duplicate_does_not_wake_worker(monkeypatch) -> None:
-    service = AccessEventService()
-    captured_at = datetime(2026, 5, 31, 8, 0, tzinfo=UTC)
-    existing = LprIngestEvent(
-        id=uuid.uuid4(),
-        idempotency_key="lpr-ingest:existing",
-        source="ubiquiti",
-        registration_number="ING123",
-        captured_at=captured_at,
-        received_at=captured_at,
-        normalized_payload={},
-        status=LPR_INGEST_STATUS_SUCCEEDED,
-    )
-    fake_session = FakeLprIngestSession(existing=existing)
-    monkeypatch.setattr(access_events_module, "AsyncSessionLocal", lambda: fake_session)
-
-    row, should_wake_worker = await service._persist_lpr_ingest_read(
-        PlateRead(
-            registration_number="ING123",
-            confidence=0.91,
-            source="ubiquiti",
-            captured_at=captured_at,
-            raw_payload={},
-        ),
-        received_at=captured_at,
-    )
-
-    assert row is existing
-    assert should_wake_worker is False
-    assert fake_session.added == []
-
+# Durable intake/capture contracts execute against real PostgreSQL in
+# scripts/validation/test_access_intake_persistence.py. An in-memory session
+# substitute cannot exercise unique insert ownership, leases or ready ordering.
 
 
 @pytest.mark.asyncio

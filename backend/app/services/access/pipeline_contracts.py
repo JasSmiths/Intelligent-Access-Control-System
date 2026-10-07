@@ -5,7 +5,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
+
+from app.modules.gate.base import GateState
 
 
 class PipelineLeaseLost(RuntimeError):
@@ -81,3 +83,22 @@ class CompletionClaim:
     token: uuid.UUID
     origin_at: datetime | None
     deadline: datetime | None
+
+
+@dataclass(frozen=True)
+class TrustedGateObservation:
+    """Code-owned synthetic/internal input; never constructed from webhook fields."""
+
+    state: GateState
+    observed_at: datetime
+    controller: str = "synthetic"
+    entity_id: str | None = None
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, GateState) or not isinstance(self.observed_at, datetime) or self.observed_at.tzinfo is None:
+            raise ValueError("Trusted gate observation requires canonical state and aware original time")
+
+    def as_payload(self) -> dict[str, Any]:
+        return {"state": self.state.value, "observed_at": self.observed_at.isoformat(),
+                "controller": self.controller, "entity_id": self.entity_id, "detail": self.detail}

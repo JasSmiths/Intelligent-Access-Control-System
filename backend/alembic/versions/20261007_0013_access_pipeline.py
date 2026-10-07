@@ -16,6 +16,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.execute("CREATE SEQUENCE lpr_ready_ordinal_seq AS bigint START 1")
     op.create_table(
         "lpr_debounce_windows",
         sa.Column("id", sa.Uuid(), primary_key=True, nullable=False),
@@ -144,7 +145,6 @@ def upgrade() -> None:
         sa.Column("epoch", sa.BigInteger(), nullable=False),
         sa.Column("lease_token", sa.Uuid(), nullable=True),
         sa.Column("lease_until", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("next_ready_ordinal", sa.BigInteger(), nullable=False),
         sa.Column("next_open_ordinal", sa.BigInteger(), nullable=False),
         sa.Column("handled_ready_ordinal", sa.BigInteger(), nullable=False),
         sa.Column("boundary_ingest_id", sa.Uuid(), nullable=True),
@@ -412,6 +412,7 @@ def downgrade() -> None:
         raise RuntimeError(
             "Populated access pipeline requires a verified matching backup/source restore"
         )
+    op.execute("DROP SEQUENCE lpr_ready_ordinal_seq")
     op.drop_column("vehicle_information_jobs", "readiness")
     op.drop_column("vehicle_information_jobs", "origin_at")
     op.drop_constraint("fk_lpr_ingest_window", "lpr_ingest_events", type_="foreignkey")

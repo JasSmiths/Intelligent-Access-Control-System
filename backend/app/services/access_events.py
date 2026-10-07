@@ -29,6 +29,7 @@ from app.modules.notifications.base import NotificationContext
 from app.services.access.enrichment import AccessEnrichment, independently
 from app.services.access.execution import AccessExecution
 from app.services.access.payloads import access_event_realtime_payload, notification_facts
+from app.services.access.pipeline_contracts import TrustedGateObservation
 from app.services.access.plate_matching import add_debounce_read, match_candidates
 from app.services.access.reads import (
     EXTERNAL_ADMISSION_PAYLOAD_KEY,
@@ -65,6 +66,7 @@ from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_controller import UnsupportedModuleError, get_gate_controller
 from app.services.gate_malfunctions import active_stuck_open_malfunction_at
 from app.services.lpr_ingest import (
+    LPR_GATE_CAPTURE_TIMEOUT_SECONDS,
     LPR_INGEST_STATUS_FAILED,
     LPR_INGEST_STATUS_SKIPPED,
     LprIngestRepository,
@@ -217,15 +219,15 @@ class AccessEventService:
             "stalled": stalled,
         }
 
-    async def enqueue_plate_read(self, read: PlateRead) -> None:
-        if await is_maintenance_mode_active():
-            return
+    async def enqueue_plate_read(
+        self, read: PlateRead, *, observation: TrustedGateObservation | None = None
+    ) -> None:
         received_at = datetime.now(tz=UTC)
         read = self._read_with_webhook_trace(read, received_at)
         ingest_row, should_wake_worker = await self._persist_lpr_ingest_read(
             read, received_at=received_at
         )
-        read = self._read_with_lpr_ingest_event(read, ingest_row)
+        read = self._read_from_lpr_ingest_event(ingest_row)
         if not should_wake_worker:
             logger.info(
                 "plate_read_ingest_duplicate_ignored",
@@ -238,8 +240,18 @@ class AccessEventService:
                 },
             )
             return
-        read = await self._read_with_gate_observation(read)
+        capture_token = ingest_row.capture_token
+        if capture_token is None:
+            return
+        if await is_maintenance_mode_active():
+            await self._lpr_ingest_repo().suppress_capture(ingest_row.id, capture_token, "maintenance_mode_active")
+            return
+        read = await self._read_with_gate_observation(read, observation=observation)
         gate_observation = gate_observation_from_read(read)
+        observed_row = await self._lpr_ingest_repo().complete_observation(ingest_row.id, capture_token, gate_observation)
+        if observed_row is None:
+            return
+        read = self._read_from_lpr_ingest_event(observed_row)
         logger.info(
             "plate_read_received",
             extra={
@@ -380,13 +392,21 @@ class AccessEventService:
     def _read_from_lpr_ingest_event(self, row: LprIngestEvent) -> PlateRead:
         payload = dict(row.normalized_payload or {})
         captured_at = row.captured_at
-        raw_payload = payload.get("raw_payload")
+        original = payload.get("raw_payload")
+        # Preserve input in normalized_payload; only owners can establish these
+        # operational fields. Keep unrelated vendor evidence/server correlation.
+        reserved = {GATE_OBSERVATION_PAYLOAD_KEY, PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY,
+            KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY, GATE_MALFUNCTION_PAYLOAD_KEY,
+            VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY, EXTERNAL_ADMISSION_PAYLOAD_KEY,
+            PROCESSING_ATTEMPT_PAYLOAD_KEY, LPR_INGEST_EVENT_PAYLOAD_KEY}
+        raw_payload = {key: value for key, value in original.items() if key not in reserved} if isinstance(original, dict) else {}
         read = PlateRead(
             registration_number=str(payload.get("registration_number") or row.registration_number),
             confidence=float(payload.get("confidence") or 0.0),
             source=str(payload.get("source") or row.source),
             captured_at=captured_at,
-            raw_payload=raw_payload if isinstance(raw_payload, dict) else {},
+            raw_payload={**raw_payload,
+                GATE_OBSERVATION_PAYLOAD_KEY: dict(row.original_observation or {})},
             candidate_registration_numbers=tuple(
                 str(candidate)
                 for candidate in payload.get("candidate_registration_numbers", [])
@@ -395,15 +415,21 @@ class AccessEventService:
         )
         return self._read_with_lpr_ingest_event(read, row)
 
-    async def _read_with_gate_observation(self, read: PlateRead) -> PlateRead:
-        if self._should_preserve_supplied_gate_observation(read):
-            return read
+    async def _read_with_gate_observation(
+        self, read: PlateRead, *, observation: TrustedGateObservation | None = None
+    ) -> PlateRead:
+        if observation is not None:
+            if not isinstance(observation, TrustedGateObservation):
+                raise ValueError("An explicit typed trusted gate observation is required")
+            return _plate_read_with_payload(read, {**(read.raw_payload or {}),
+                GATE_OBSERVATION_PAYLOAD_KEY: observation.as_payload()})
 
         observed_at = datetime.now(tz=UTC)
         detail: str | None = None
         try:
             gate = get_gate_controller("configured")
-            state = coerce_gate_state(await gate.current_state()) or GateState.UNKNOWN
+            async with asyncio.timeout(LPR_GATE_CAPTURE_TIMEOUT_SECONDS):
+                state = coerce_gate_state(await gate.current_state()) or GateState.UNKNOWN
         except UnsupportedModuleError as exc:
             state = GateState.UNKNOWN
             detail = str(exc)
@@ -427,16 +453,6 @@ class AccessEventService:
             "detail": detail,
         }
         return _plate_read_with_payload(read, raw_payload)
-
-    def _should_preserve_supplied_gate_observation(self, read: PlateRead) -> bool:
-        raw_payload = read.raw_payload or {}
-        if isinstance(raw_payload.get(GATE_OBSERVATION_PAYLOAD_KEY), dict):
-            return True
-        return bool(
-            read.source in {"simulator", "simulation_e2e"}
-            and raw_payload.get(PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY) is True
-            and isinstance(raw_payload.get(GATE_OBSERVATION_PAYLOAD_KEY), dict)
-        )
 
     async def _process_queue(self) -> None:
         while not self._stop_event.is_set():
@@ -468,7 +484,7 @@ class AccessEventService:
                         )
                         read_for_retry = None
                         continue
-                    read = await self._read_with_gate_observation(read)
+                    # Recovery always decodes the persisted first observation.
                     read_for_retry = read
                     await self._handle_queued_read(read)
                     self._last_processed_at = datetime.now(tz=UTC)

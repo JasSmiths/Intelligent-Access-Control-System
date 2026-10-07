@@ -41,7 +41,6 @@ async def _coordinator_row(session: AsyncSession) -> LprCoordinatorState:
         .values(
             id=1,
             epoch=0,
-            next_ready_ordinal=1,
             next_open_ordinal=1,
             handled_ready_ordinal=0,
         )
