@@ -16,6 +16,11 @@ from app.modules.access_devices.base import (
     binding_is_commandable,
     validate_gate_admission_device_key,
 )
+from app.modules.access_devices.binding_policies import (
+    affected_provider_names,
+    configured_setting_keys,
+    target_setting_keys,
+)
 from app.modules.home_assistant.covers import normalize_cover_entities
 from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.mutation_context import load_active_admin
@@ -500,7 +505,12 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
     for record in records:
         values[record.key] = decrypted_value(record)
 
-    config = RuntimeConfig(
+    return runtime_config_from_values(values)
+
+
+def runtime_config_from_values(values: dict[str, Any]) -> RuntimeConfig:
+    """Apply the settings owner's conversions to a complete candidate snapshot."""
+    return RuntimeConfig(
         missed_exit_recovery_enabled=bool(values["missed_exit_recovery_enabled"]),
         missed_exit_recovery_gate_latitude=values["missed_exit_recovery_gate_latitude"],
         missed_exit_recovery_gate_longitude=values["missed_exit_recovery_gate_longitude"],
@@ -588,7 +598,6 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
         ollama_base_url=str(values["ollama_base_url"]),
         ollama_model=str(values["ollama_model"]),
     )
-    return config
 
 
 async def list_settings(
@@ -630,16 +639,9 @@ async def update_settings(
             if user
             else None
         )
-        target_config_keys = {
-            "gate_admission_device_key",
-            "gate_control_provider",
-            "gate_failover_provider",
-            "home_assistant_url",
-            "home_assistant_token",
-            "home_assistant_gate_open_service",
-            "esphome_devices",
-            "schedule_default_policy",
-            "site_timezone",
+        target_config_keys = target_setting_keys() | {
+            "gate_admission_device_key", "gate_control_provider", "gate_failover_provider",
+            "schedule_default_policy", "site_timezone",
         }
         if set(updates) & target_config_keys:
             query = select(AccessDevice.id)
@@ -651,11 +653,7 @@ async def update_settings(
             }:
                 pass  # Provider order applies to every gate and garage.
             else:
-                providers = []
-                if "esphome_devices" in updates:
-                    providers.append("esphome")
-                if any(key.startswith("home_assistant_") for key in updates):
-                    providers.append("home_assistant")
+                providers = affected_provider_names(set(updates))
                 affected = [
                     AccessDevice.provider_bindings.any(
                         AccessDeviceProviderBinding.provider.in_(providers)
@@ -686,12 +684,7 @@ async def update_settings(
         }
         before = {key: public_value(row) for key, row in records.items() if key in updates}
         changed_keys = []
-        if set(updates) & {
-            "gate_admission_device_key",
-            "home_assistant_url",
-            "home_assistant_token",
-            "esphome_devices",
-        }:
+        if set(updates) & ({"gate_admission_device_key"} | configured_setting_keys()):
             candidate = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
             candidate.update({key: decrypted_value(row) for key, row in records.items()})
             candidate.update(
@@ -794,6 +787,7 @@ async def _validate_admission_setting(session: AsyncSession, candidate: dict[str
     )
     facts = []
     if device is not None:
+        config = runtime_config_from_values(candidate)
         facts.append(
             {
                 "key": device.key,
@@ -808,9 +802,7 @@ async def _validate_admission_setting(session: AsyncSession, candidate: dict[str
                             binding.enabled,
                             binding.config or {},
                         ),
-                        home_assistant_url=str(candidate["home_assistant_url"] or ""),
-                        home_assistant_token=str(candidate["home_assistant_token"] or ""),
-                        esphome_devices=normalize_esphome_devices(candidate["esphome_devices"]),
+                        settings=config,
                     )
                     for binding in device.provider_bindings
                 ),

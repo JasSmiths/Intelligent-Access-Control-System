@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.modules.access_devices.base import AccessDeviceProvider
+from app.modules.access_devices.binding_policies import validate_policy_runtime_coverage
 from app.modules.access_devices.esphome import ESPHomeAccessDeviceProvider
 from app.modules.access_devices.home_assistant import HomeAssistantAccessDeviceProvider
 
@@ -16,6 +17,7 @@ _PROVIDERS: dict[str, AccessDeviceProvider] = {
 
 
 def get_access_device_provider(name: str) -> AccessDeviceProvider:
+    validate_policy_runtime_coverage(_PROVIDERS)
     try:
         return _PROVIDERS[name]
     except KeyError as exc:
@@ -23,4 +25,5 @@ def get_access_device_provider(name: str) -> AccessDeviceProvider:
 
 
 def access_device_provider_keys() -> list[str]:
-    return ["home_assistant", "esphome"]
+    validate_policy_runtime_coverage(_PROVIDERS)
+    return list(_PROVIDERS)

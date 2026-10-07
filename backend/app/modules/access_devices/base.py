@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from app.services.settings import RuntimeConfig
 
+from app.modules.access_devices.binding_policies import BindingSettings, binding_policy
 from app.modules.gate.base import CommandDelivery, GateState
 
 ACCESS_DEVICE_KIND_GATE = "gate"
 ACCESS_DEVICE_KIND_GARAGE_DOOR = "garage_door"
 ACCESS_DEVICE_KINDS = {ACCESS_DEVICE_KIND_GATE, ACCESS_DEVICE_KIND_GARAGE_DOOR}
-ACCESS_DEVICE_PROVIDERS = {"home_assistant", "esphome"}
 
 
 class AccessDeviceProviderError(RuntimeError):
@@ -49,27 +49,12 @@ class AccessDeviceEntity:
     device_id: str | None = None
 
 
-def binding_is_commandable(
-    binding: AccessDeviceBinding,
-    *,
-    home_assistant_url: str,
-    home_assistant_token: str,
-    esphome_devices: list[dict[str, Any]],
-) -> bool:
-    """Static configuration check shared by settings and execution planning."""
-    if not binding.enabled or not binding.external_id.strip():
-        return False
-    if binding.provider == "home_assistant":
-        return bool(home_assistant_url and home_assistant_token)
-    if binding.provider != "esphome":
-        return False
-    devices = [item for item in esphome_devices if item.get("enabled", True) and item.get("host")]
-    device_id = str(binding.config.get("device_id") or "").strip()
-    if not device_id and ":" in binding.external_id:
-        device_id = binding.external_id.split(":", 1)[0]
-    if device_id:
-        return any(str(item.get("id")) == device_id for item in devices)
-    return len(devices) == 1
+def binding_is_commandable(binding: AccessDeviceBinding, *, settings: BindingSettings) -> bool:
+    """Static configuration check using the caller's complete settings snapshot."""
+    policy = binding_policy(binding.provider)
+    return bool(policy and policy.configured(
+        binding.external_id, binding.config, enabled=binding.enabled, settings=settings,
+    ))
 
 
 def validate_gate_admission_device_key(

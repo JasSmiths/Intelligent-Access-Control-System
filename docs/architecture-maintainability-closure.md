@@ -25,9 +25,19 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   integrated as `03f56bed97551fe6c97f093c789f905683c7fdc7`. Astra Ultra approved
   Node 22 build, 291 tests and 42 Chromium/WebKit cases. The integration receipt
   verifies all approved frontend blobs and all unaffected backend source hashes.
-- Current checkpoint: P2 implementation and conformance fixtures prepared;
-  required candidate validation and Astra sign-off pending. P3 frontend feature
-  reads are developed separately and integrate after the approved P2 checkpoint.
+- Approved P2 checkpoint: `834daa7f2a59707dd5788de6caf4fa71aae8e4f8`,
+  tree `5dfaf6c64324920f0b430185bd6b8b6e11cec19e`. Astra Ultra approved
+  source `f954355add93145443c846bddf6df174e6e1b906e070ff52d34f09717492b524`
+  and patch `bb43b4ce7955f1dea7d1fba0828f5e3d9a0c4a6b059feaca7f059ad0a0e044dd`.
+  All 145 corrected full-harness entries passed, including 1,225 backend and 294
+  frontend tests, recovery 38, E2 transaction conformance 6 and automation recovery
+  30; checked/strict coverage is 60/43 with unchanged flags. Four affected browser
+  cases carried forward by all 225 frontend hashes; source integrity, cleanup and
+  operational snapshots are clean. Earlier failed P2 candidates are superseded.
+- Current checkpoint: P4 backend policy extraction and E1 fixture implemented;
+  final required validation and Astra patch sign-off pending. P3 frontend reads
+  develop separately from approved P2, with sequential workflow-file ownership.
+  P4 integration editor lifetime remains a separate frontend slice.
   The brief initial shared-checkout editing period was separated before the first
   validation checkpoint; integration remains sequential.
 - Retained evidence: `p0-p1-validation/iacs-validation-smbqtetg`,
@@ -35,22 +45,28 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   `p0-p1-astra-approval.json` and `p0-p1-integration.json`, relative to the
   evidence root. Runtime PDF: non-root final image, no network/overlays,
   142,385-byte PDF; source, image, hash, size and timing identities retained.
+- P2 retained evidence: `p2-corrected-validation/iacs-validation-wpnrjmou`,
+  `p2-candidate-corrected.json`, `p2-correction-source-mapping.json`,
+  `p2-evidence-summary.json`, `p2-astra-approval.json` and
+  `p2-commit-equivalence.json`, relative to the evidence root. The original audit
+  remains byte-identical. P4 evidence is retained separately and is not approved
+  merely because its design was approved.
 - Deployment, production migrations and live provider/hardware tests are excluded.
 
 ## Findings
 
 | Finding | Owner and stages | Required closure evidence | Status / Astra approval |
 | --- | --- | --- | --- |
-| AM-01 workflow definitions | Workflow definitions, handlers and generated editor contracts; P2 | Exhaustive action/config/editor/handler parity, historical plan/recovery checks, E2 conformance | Implemented, validation/review pending / pending |
+| AM-01 workflow definitions | Workflow definitions, handlers and generated editor contracts; P2 | Exhaustive action/config/editor/handler parity, historical plan/recovery checks, E2 conformance | Closed / Astra approved P2 exact candidate |
 | AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Pending / pending |
-| AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Pending / pending |
+| AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Implemented, final validation/review pending / pending |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Pending / pending |
 | AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Astra-approved schema/state design; restart/crash/deadline/late-linkage checks; E2/E4 conformance | Pending / pending |
 | AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | Pending / pending |
 | AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Overflow/counters/current evidence, nested publication, shutdown and 20/2,000-input probes | Pending / pending |
 | AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Pending / pending |
 | AM-09 runtime PDF support | Shared backend image ancestry and final-image smoke; P1 | Runtime-user PDF from installed actual template with no network/overlays; image identity/size/build time | Closed / Astra approved P1 runtime packaging |
-| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original coverage/flags preserved; package inheritance and negative guards; successful JSON/complete-plan retention and full harness | P0 safeguards approved; continuous P2–P9 checks pending / Astra approved P0 |
+| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original coverage/flags preserved; package inheritance and negative guards; successful JSON/complete-plan retention and full harness | P0 safeguards and P2 coverage/evidence approved; continuous P3–P9 checks pending / Astra approved P0/P2 |
 | AM-11 obsolete authority/bridges | Pure access plan, execution result and durable workflow intake; P5 | Whole-repository consumer trace; authoritative journals retained; no duplicate realtime intake | Pending / pending |
 | AM-12 compact presence/forecast | Presence/predictor reads; P7 | Equivalent output and compact unloaded columns; bounded internal reads; 20/2,000-person density evidence; public-list exception disclosed | Pending / pending |
 | AM-13 provider-information reset | Vehicle information store in-session invalidation; P5 | Plate-change aggregate, stale completion and user-field preservation; E4 conformance | Pending / pending |
@@ -78,15 +94,15 @@ an explicit disposition requiring approval, not a claim that code was fixed.
 | Prototype and screenshots | Retain; P5 | Separate fixture/design evidence; no production import; no evidence-retirement request | Planned retention / pending |
 | scripts/backend-pytest and scripts/load-test.mjs | Retain; P5 | External operational use unknown; neither used for this programme's isolated validation | Planned retention / pending |
 | V2 privacy CI workflow | Retain; P5 | External candidate-bundle process; process retirement not established | Planned retention / pending |
-| Empty retired catalog group | Removed early by definition-derived catalog; P2/AM-11 | Catalog omits empty groups; historical names and upgrade fixtures retained | Implemented, validation/review pending / pending |
+| Empty retired catalog group | Removed early by definition-derived catalog; P2/AM-11 | Catalog omits empty groups; historical names and upgrade fixtures retained | Closed / Astra approved P2 |
 | Speculative runtime dependency deletion | Retain locked dependencies; P5 | No package proven unused; preserve supported migrations and relevant security fixes | Planned retention / pending |
 
 ## Extension conformance and final gate
 
 | Exercise | Stage and acceptance | Status / Astra approval |
 | --- | --- | --- |
-| E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | Pending / pending |
-| E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | Pending / pending |
+| E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | Backend fixture implemented, final validation/review pending / pending |
+| E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | P2 conformance approved; P6/P9 integration pending / Astra approved P2 |
 | E3 calendar schedule exception | P2/P8/P9: schedule ownership, current authority and generated configuration contracts | Pending / pending |
 | E4 last recorded mileage summary | P5/P6/P9: feature store owns new summary/reset and optional completion | Pending / pending |
 | E5 MOT freshness in dashboard activity | P3/P7/P9: bounded summaries, typed updates and no provider I/O | Pending / pending |
@@ -132,5 +148,6 @@ have explicit adapters; stores remain separate.
 
 The generated TypeScript contract freshness check is part of the harness/CI.
 Negative schema, binding, historical and editor fixtures, plus a test-only
-transactional action through real intake/reservation/completion/audit, await the
-P2 candidate gate and Astra review. No new production action is shipped.
+transactional action through real intake/reservation/completion/audit, passed the
+corrected P2 gate and received Astra approval on the exact checkpoint recorded
+above. No new production action is shipped.

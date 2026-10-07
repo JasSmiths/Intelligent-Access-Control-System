@@ -207,6 +207,30 @@ stream projected timeline inputs and account separately for output/PDF cost.
 Performance changes must preserve authorization freshness, transaction ordering
 and recovery behavior. Do not trade those guarantees for a cache or a shorter path.
 
+### Access-device binding policies
+
+[Binding policies](../backend/app/modules/access_devices/binding_policies.py)
+own provider-specific configuration validation, commandability, physical identity
+inputs, frozen runtime inputs and affected setting keys. They receive the caller's
+complete typed settings snapshot and perform no I/O. HA and ESPHome preserve their
+existing configuration coercion and vendor metadata. Configuration settings that
+affect commandability are distinct from the broader keys that lock frozen targets.
+
+The [runtime registry](../backend/app/modules/access_devices/registry.py) requires
+exact policy/adapter coverage. A new provider adds a policy and inert adapter;
+new typed settings remain in the [settings owner](../backend/app/services/settings.py).
+The [configuration owner](../backend/app/services/access_device_configuration.py)
+retains provider order, duplicate-target decisions and outer fingerprints. The
+device journal and settings services retain target locks, setting locks,
+authorization and transaction boundaries; provider policy cannot authorize I/O.
+Blank existing bindings are removed before nonblank configuration validation.
+
+The inert [extension fixture](../scripts/validation/test_provider_binding_persistence.py)
+exercises discovery, provider-owned validation, persistence/rollback, canonical
+typed admission settings and unchanged frozen-plan composition. It invokes no
+hardware transport. Golden identity/hash fixtures preserve exact HA URL/token
+and whole ordered ESPHome-list inputs, including unrelated device/secret changes.
+
 ### Workflow contracts
 
 [Action definitions](../backend/app/services/workflows/action_definitions.py) own

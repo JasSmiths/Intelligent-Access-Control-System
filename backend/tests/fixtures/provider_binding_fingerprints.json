@@ -1,0 +1,771 @@
+{
+  "baseline_source_sha256": "3e4f8c719f96780f0e8c5d9feeb3991b6a5919fa5820edf0bf61d2b78322ca21",
+  "cases": [
+    {
+      "name": "baseline_ordered_esphome_then_ha",
+      "settings": {
+        "home_assistant_url": "https://synthetic.invalid///",
+        "home_assistant_token": "synthetic-golden-token",
+        "esphome_devices": [
+          {
+            "id": "esp-a",
+            "host": "synthetic-a.invalid",
+            "port": 6053,
+            "password": "synthetic-secret-a",
+            "enabled": true
+          },
+          {
+            "id": "esp-b",
+            "host": "synthetic-b.invalid",
+            "port": 6054,
+            "password": "synthetic-secret-b",
+            "enabled": true
+          }
+        ],
+        "gate_control_provider": "esphome",
+        "gate_failover_provider": "home_assistant"
+      },
+      "bindings": {
+        "home_assistant": {
+          "provider": "home_assistant",
+          "external_id": "cover.gate",
+          "enabled": true,
+          "config": {
+            "discovery_metadata": {
+              "retained": [
+                "z",
+                "a"
+              ]
+            }
+          }
+        },
+        "esphome": {
+          "provider": "esphome",
+          "external_id": "esp-a:gate",
+          "enabled": true,
+          "config": {
+            "device_id": "esp-a",
+            "key": "gate",
+            "metadata": "retained"
+          }
+        }
+      },
+      "order": [
+        "esphome",
+        "home_assistant"
+      ],
+      "physical_identities": {
+        "home_assistant": [
+          "home_assistant",
+          "b35f19a949156c2d96b6ea15260f1487d2feccf939fc72acc886a6b8732afe4d"
+        ],
+        "esphome": [
+          "esphome",
+          "2464b9634ced0ebeb5d5495830960cd87682e566ad73c24ac1e127f296756499"
+        ]
+      },
+      "target": {
+        "target_device_id": "00000000-0000-0000-0000-000000000001",
+        "device_key": "synthetic_gate",
+        "kind": "gate",
+        "binding_snapshot": {
+          "providers": [
+            {
+              "provider": "esphome",
+              "external_id": "esp-a:gate",
+              "config_fingerprint": "d000de5dd7d4c5bcfe761c0b7056d2073c2f79f64ea22d05e4efb5b44841cd70"
+            },
+            {
+              "provider": "home_assistant",
+              "external_id": "cover.gate",
+              "config_fingerprint": "e1df73c476c9bb01312a2c07986b4201ad353e681fb3273f91ef2e0d6712de58"
+            }
+          ],
+          "schedule_id": null,
+          "enabled": true,
+          "open_for_access": true
+        },
+        "binding_fingerprint": "f70963d7832760c798a0d9c80fd64042ed772b287a92f412f5d6103308c2127a"
+      }
+    },
+    {
+      "name": "ha_url_trailing_slash_removed",
+      "settings": {
+        "home_assistant_url": "https://synthetic.invalid",
+        "home_assistant_token": "synthetic-golden-token",
+        "esphome_devices": [
+          {
+            "id": "esp-a",
+            "host": "synthetic-a.invalid",
+            "port": 6053,
+            "password": "synthetic-secret-a",
+            "enabled": true
+          },
+          {
+            "id": "esp-b",
+            "host": "synthetic-b.invalid",
+            "port": 6054,
+            "password": "synthetic-secret-b",
+            "enabled": true
+          }
+        ],
+        "gate_control_provider": "esphome",
+        "gate_failover_provider": "home_assistant"
+      },
+      "bindings": {
+        "home_assistant": {
+          "provider": "home_assistant",
+          "external_id": "cover.gate",
+          "enabled": true,
+          "config": {
+            "discovery_metadata": {
+              "retained": [
+                "z",
+                "a"
+              ]
+            }
+          }
+        },
+        "esphome": {
+          "provider": "esphome",
+          "external_id": "esp-a:gate",
+          "enabled": true,
+          "config": {
+            "device_id": "esp-a",
+            "key": "gate",
+            "metadata": "retained"
+          }
+        }
+      },
+      "order": [
+        "esphome",
+        "home_assistant"
+      ],
+      "physical_identities": {
+        "home_assistant": [
+          "home_assistant",
+          "b35f19a949156c2d96b6ea15260f1487d2feccf939fc72acc886a6b8732afe4d"
+        ],
+        "esphome": [
+          "esphome",
+          "2464b9634ced0ebeb5d5495830960cd87682e566ad73c24ac1e127f296756499"
+        ]
+      },
+      "target": {
+        "target_device_id": "00000000-0000-0000-0000-000000000001",
+        "device_key": "synthetic_gate",
+        "kind": "gate",
+        "binding_snapshot": {
+          "providers": [
+            {
+              "provider": "esphome",
+              "external_id": "esp-a:gate",
+              "config_fingerprint": "d000de5dd7d4c5bcfe761c0b7056d2073c2f79f64ea22d05e4efb5b44841cd70"
+            },
+            {
+              "provider": "home_assistant",
+              "external_id": "cover.gate",
+              "config_fingerprint": "65536d348a9ed1d70d44e5bfabff3bc05266325f068daf5a174993925feb7f95"
+            }
+          ],
+          "schedule_id": null,
+          "enabled": true,
+          "open_for_access": true
+        },
+        "binding_fingerprint": "1d5f953e1742700485b12a0ce634bda422c217cb02b66b1a15bb4206351d1670"
+      }
+    },
+    {
+      "name": "ha_token_changed",
+      "settings": {
+        "home_assistant_url": "https://synthetic.invalid///",
+        "home_assistant_token": "synthetic-other-token",
+        "esphome_devices": [
+          {
+            "id": "esp-a",
+            "host": "synthetic-a.invalid",
+            "port": 6053,
+            "password": "synthetic-secret-a",
+            "enabled": true
+          },
+          {
+            "id": "esp-b",
+            "host": "synthetic-b.invalid",
+            "port": 6054,
+            "password": "synthetic-secret-b",
+            "enabled": true
+          }
+        ],
+        "gate_control_provider": "esphome",
+        "gate_failover_provider": "home_assistant"
+      },
+      "bindings": {
+        "home_assistant": {
+          "provider": "home_assistant",
+          "external_id": "cover.gate",
+          "enabled": true,
+          "config": {
+            "discovery_metadata": {
+              "retained": [
+                "z",
+                "a"
+              ]
+            }
+          }
+        },
+        "esphome": {
+          "provider": "esphome",
+          "external_id": "esp-a:gate",
+          "enabled": true,
+          "config": {
+            "device_id": "esp-a",
+            "key": "gate",
+            "metadata": "retained"
+          }
+        }
+      },
+      "order": [
+        "esphome",
+        "home_assistant"
+      ],
+      "physical_identities": {
+        "home_assistant": [
+          "home_assistant",
+          "b35f19a949156c2d96b6ea15260f1487d2feccf939fc72acc886a6b8732afe4d"
+        ],
+        "esphome": [
+          "esphome",
+          "2464b9634ced0ebeb5d5495830960cd87682e566ad73c24ac1e127f296756499"
+        ]
+      },
+      "target": {
+        "target_device_id": "00000000-0000-0000-0000-000000000001",
+        "device_key": "synthetic_gate",
+        "kind": "gate",
+        "binding_snapshot": {
+          "providers": [
+            {
+              "provider": "esphome",
+              "external_id": "esp-a:gate",
+              "config_fingerprint": "d000de5dd7d4c5bcfe761c0b7056d2073c2f79f64ea22d05e4efb5b44841cd70"
+            },
+            {
+              "provider": "home_assistant",
+              "external_id": "cover.gate",
+              "config_fingerprint": "43b73e5c246b9944966137952e10d81add8aaf47b74cdc4562123c50bd1974da"
+            }
+          ],
+          "schedule_id": null,
+          "enabled": true,
+          "open_for_access": true
+        },
+        "binding_fingerprint": "55d47443feec2c9d3163f62e71fab4b443bb878dd0b113476640cbf9f1ac853e"
+      }
+    },
+    {
+      "name": "esphome_unrelated_secret_changed",
+      "settings": {
+        "home_assistant_url": "https://synthetic.invalid///",
+        "home_assistant_token": "synthetic-golden-token",
+        "esphome_devices": [
+          {
+            "id": "esp-a",
+            "host": "synthetic-a.invalid",
+            "port": 6053,
+            "password": "synthetic-secret-a",
+            "enabled": true
+          },
+          {
+            "id": "esp-b",
+            "host": "synthetic-b.invalid",
+            "port": 6054,
+            "password": "synthetic-other-secret",
+            "enabled": true
+          }
+        ],
+        "gate_control_provider": "esphome",
+        "gate_failover_provider": "home_assistant"
+      },
+      "bindings": {
+        "home_assistant": {
+          "provider": "home_assistant",
+          "external_id": "cover.gate",
+          "enabled": true,
+          "config": {
+            "discovery_metadata": {
+              "retained": [
+                "z",
+                "a"
+              ]
+            }
+          }
+        },
+        "esphome": {
+          "provider": "esphome",
+          "external_id": "esp-a:gate",
+          "enabled": true,
+          "config": {
+            "device_id": "esp-a",
+            "key": "gate",
+            "metadata": "retained"
+          }
+        }
+      },
+      "order": [
+        "esphome",
+        "home_assistant"
+      ],
+      "physical_identities": {
+        "home_assistant": [
+          "home_assistant",
+          "b35f19a949156c2d96b6ea15260f1487d2feccf939fc72acc886a6b8732afe4d"
+        ],
+        "esphome": [
+          "esphome",
+          "2464b9634ced0ebeb5d5495830960cd87682e566ad73c24ac1e127f296756499"
+        ]
+      },
+      "target": {
+        "target_device_id": "00000000-0000-0000-0000-000000000001",
+        "device_key": "synthetic_gate",
+        "kind": "gate",
+        "binding_snapshot": {
+          "providers": [
+            {
+              "provider": "esphome",
+              "external_id": "esp-a:gate",
+              "config_fingerprint": "6f4ef413501f560b2f937c1601b78fc9e3d5d9a6562d9068474e4b1031c02854"
+            },
+            {
+              "provider": "home_assistant",
+              "external_id": "cover.gate",
+              "config_fingerprint": "e1df73c476c9bb01312a2c07986b4201ad353e681fb3273f91ef2e0d6712de58"
+            }
+          ],
+          "schedule_id": null,
+          "enabled": true,
+          "open_for_access": true
+        },
+        "binding_fingerprint": "efadc2bff1ef2207571e41d08a90f59d2806b316424121ec9e89401f794baae4"
+      }
+    },
+    {
+      "name": "esphome_order_reversed",
+      "settings": {
+        "home_assistant_url": "https://synthetic.invalid///",
+        "home_assistant_token": "synthetic-golden-token",
+        "esphome_devices": [
+          {
+            "id": "esp-b",
+            "host": "synthetic-b.invalid",
+            "port": 6054,
+            "password": "synthetic-secret-b",
+            "enabled": true
+          },
+          {
+            "id": "esp-a",
+            "host": "synthetic-a.invalid",
+            "port": 6053,
+            "password": "synthetic-secret-a",
+            "enabled": true
+          }
+        ],
+        "gate_control_provider": "esphome",
+        "gate_failover_provider": "home_assistant"
+      },
+      "bindings": {
+        "home_assistant": {
+          "provider": "home_assistant",
+          "external_id": "cover.gate",
+          "enabled": true,
+          "config": {
+            "discovery_metadata": {
+              "retained": [
+                "z",
+                "a"
+              ]
+            }
+          }
+        },
+        "esphome": {
+          "provider": "esphome",
+          "external_id": "esp-a:gate",
+          "enabled": true,
+          "config": {
+            "device_id": "esp-a",
+            "key": "gate",
+            "metadata": "retained"
+          }
+        }
+      },
+      "order": [
+        "esphome",
+        "home_assistant"
+      ],
+      "physical_identities": {
+        "home_assistant": [
+          "home_assistant",
+          "b35f19a949156c2d96b6ea15260f1487d2feccf939fc72acc886a6b8732afe4d"
+        ],
+        "esphome": [
+          "esphome",
+          "2464b9634ced0ebeb5d5495830960cd87682e566ad73c24ac1e127f296756499"
+        ]
+      },
+      "target": {
+        "target_device_id": "00000000-0000-0000-0000-000000000001",
+        "device_key": "synthetic_gate",
+        "kind": "gate",
+        "binding_snapshot": {
+          "providers": [
+            {
+              "provider": "esphome",
+              "external_id": "esp-a:gate",
+              "config_fingerprint": "f88e7844781062a1a2345327dc28f6a1bb2e7d874ef0f125ac47ca63700f2347"
+            },
+            {
+              "provider": "home_assistant",
+              "external_id": "cover.gate",
+              "config_fingerprint": "e1df73c476c9bb01312a2c07986b4201ad353e681fb3273f91ef2e0d6712de58"
+            }
+          ],
+          "schedule_id": null,
+          "enabled": true,
+          "open_for_access": true
+        },
+        "binding_fingerprint": "5397e25967fad55f694a023f97edf7a948734594ffe5c16ad0855a1b022bc371"
+      }
+    },
+    {
+      "name": "provider_order_reversed",
+      "settings": {
+        "home_assistant_url": "https://synthetic.invalid///",
+        "home_assistant_token": "synthetic-golden-token",
+        "esphome_devices": [
+          {
+            "id": "esp-a",
+            "host": "synthetic-a.invalid",
+            "port": 6053,
+            "password": "synthetic-secret-a",
+            "enabled": true
+          },
+          {
+            "id": "esp-b",
+            "host": "synthetic-b.invalid",
+            "port": 6054,
+            "password": "synthetic-secret-b",
+            "enabled": true
+          }
+        ],
+        "gate_control_provider": "home_assistant",
+        "gate_failover_provider": "esphome"
+      },
+      "bindings": {
+        "home_assistant": {
+          "provider": "home_assistant",
+          "external_id": "cover.gate",
+          "enabled": true,
+          "config": {
+            "discovery_metadata": {
+              "retained": [
+                "z",
+                "a"
+              ]
+            }
+          }
+        },
+        "esphome": {
+          "provider": "esphome",
+          "external_id": "esp-a:gate",
+          "enabled": true,
+          "config": {
+            "device_id": "esp-a",
+            "key": "gate",
+            "metadata": "retained"
+          }
+        }
+      },
+      "order": [
+        "home_assistant",
+        "esphome"
+      ],
+      "physical_identities": {
+        "home_assistant": [
+          "home_assistant",
+          "b35f19a949156c2d96b6ea15260f1487d2feccf939fc72acc886a6b8732afe4d"
+        ],
+        "esphome": [
+          "esphome",
+          "2464b9634ced0ebeb5d5495830960cd87682e566ad73c24ac1e127f296756499"
+        ]
+      },
+      "target": {
+        "target_device_id": "00000000-0000-0000-0000-000000000001",
+        "device_key": "synthetic_gate",
+        "kind": "gate",
+        "binding_snapshot": {
+          "providers": [
+            {
+              "provider": "home_assistant",
+              "external_id": "cover.gate",
+              "config_fingerprint": "e1df73c476c9bb01312a2c07986b4201ad353e681fb3273f91ef2e0d6712de58"
+            },
+            {
+              "provider": "esphome",
+              "external_id": "esp-a:gate",
+              "config_fingerprint": "d000de5dd7d4c5bcfe761c0b7056d2073c2f79f64ea22d05e4efb5b44841cd70"
+            }
+          ],
+          "schedule_id": null,
+          "enabled": true,
+          "open_for_access": true
+        },
+        "binding_fingerprint": "0bbdf120f4e466e95d8c7f6d9ef105347439134d916b1801607d7b7d1657b859"
+      }
+    },
+    {
+      "name": "esphome_external_id_derived",
+      "settings": {
+        "home_assistant_url": "https://synthetic.invalid///",
+        "home_assistant_token": "synthetic-golden-token",
+        "esphome_devices": [
+          {
+            "id": "esp-a",
+            "host": "synthetic-a.invalid",
+            "port": 6053,
+            "password": "synthetic-secret-a",
+            "enabled": true
+          },
+          {
+            "id": "esp-b",
+            "host": "synthetic-b.invalid",
+            "port": 6054,
+            "password": "synthetic-secret-b",
+            "enabled": true
+          }
+        ],
+        "gate_control_provider": "esphome",
+        "gate_failover_provider": "home_assistant"
+      },
+      "bindings": {
+        "home_assistant": {
+          "provider": "home_assistant",
+          "external_id": "cover.gate",
+          "enabled": true,
+          "config": {
+            "discovery_metadata": {
+              "retained": [
+                "z",
+                "a"
+              ]
+            }
+          }
+        },
+        "esphome": {
+          "provider": "esphome",
+          "external_id": "esp-a:gate",
+          "enabled": true,
+          "config": {
+            "metadata": "retained"
+          }
+        }
+      },
+      "order": [
+        "esphome",
+        "home_assistant"
+      ],
+      "physical_identities": {
+        "home_assistant": [
+          "home_assistant",
+          "b35f19a949156c2d96b6ea15260f1487d2feccf939fc72acc886a6b8732afe4d"
+        ],
+        "esphome": [
+          "esphome",
+          "2464b9634ced0ebeb5d5495830960cd87682e566ad73c24ac1e127f296756499"
+        ]
+      },
+      "target": {
+        "target_device_id": "00000000-0000-0000-0000-000000000001",
+        "device_key": "synthetic_gate",
+        "kind": "gate",
+        "binding_snapshot": {
+          "providers": [
+            {
+              "provider": "esphome",
+              "external_id": "esp-a:gate",
+              "config_fingerprint": "a07fa09157be79ef32cfd18bf56a244f98526b8f01d9768508a982e177162378"
+            },
+            {
+              "provider": "home_assistant",
+              "external_id": "cover.gate",
+              "config_fingerprint": "e1df73c476c9bb01312a2c07986b4201ad353e681fb3273f91ef2e0d6712de58"
+            }
+          ],
+          "schedule_id": null,
+          "enabled": true,
+          "open_for_access": true
+        },
+        "binding_fingerprint": "5e720ba1b52fc7bcbf916297ac4682d7572d4121d8d8c8d7adf26efe7320406b"
+      }
+    },
+    {
+      "name": "esphome_unmatched_single_endpoint_fallback",
+      "settings": {
+        "home_assistant_url": "https://synthetic.invalid///",
+        "home_assistant_token": "synthetic-golden-token",
+        "esphome_devices": [
+          {
+            "id": "esp-a",
+            "host": "synthetic-a.invalid",
+            "port": 6053,
+            "password": "synthetic-secret-a",
+            "enabled": true
+          }
+        ],
+        "gate_control_provider": "esphome",
+        "gate_failover_provider": "home_assistant"
+      },
+      "bindings": {
+        "home_assistant": {
+          "provider": "home_assistant",
+          "external_id": "cover.gate",
+          "enabled": true,
+          "config": {
+            "discovery_metadata": {
+              "retained": [
+                "z",
+                "a"
+              ]
+            }
+          }
+        },
+        "esphome": {
+          "provider": "esphome",
+          "external_id": "unmatched:gate",
+          "enabled": true,
+          "config": {}
+        }
+      },
+      "order": [
+        "esphome",
+        "home_assistant"
+      ],
+      "physical_identities": {
+        "home_assistant": [
+          "home_assistant",
+          "b35f19a949156c2d96b6ea15260f1487d2feccf939fc72acc886a6b8732afe4d"
+        ],
+        "esphome": [
+          "esphome",
+          "2464b9634ced0ebeb5d5495830960cd87682e566ad73c24ac1e127f296756499"
+        ]
+      },
+      "target": {
+        "target_device_id": "00000000-0000-0000-0000-000000000001",
+        "device_key": "synthetic_gate",
+        "kind": "gate",
+        "binding_snapshot": {
+          "providers": [
+            {
+              "provider": "esphome",
+              "external_id": "unmatched:gate",
+              "config_fingerprint": "cd1ba1cc8ad174a27cab8ed1e5a725ada9cf0e8ced86af15425e37d9bf7ae466"
+            },
+            {
+              "provider": "home_assistant",
+              "external_id": "cover.gate",
+              "config_fingerprint": "e1df73c476c9bb01312a2c07986b4201ad353e681fb3273f91ef2e0d6712de58"
+            }
+          ],
+          "schedule_id": null,
+          "enabled": true,
+          "open_for_access": true
+        },
+        "binding_fingerprint": "7456db806b6b54a68625ab42166b4b2a5e95c2943a2c706567225c2338a2d212"
+      }
+    },
+    {
+      "name": "esphome_unmatched_multi_endpoint",
+      "settings": {
+        "home_assistant_url": "https://synthetic.invalid///",
+        "home_assistant_token": "synthetic-golden-token",
+        "esphome_devices": [
+          {
+            "id": "esp-a",
+            "host": "synthetic-a.invalid",
+            "port": 6053,
+            "password": "synthetic-secret-a",
+            "enabled": true
+          },
+          {
+            "id": "esp-b",
+            "host": "synthetic-b.invalid",
+            "port": 6054,
+            "password": "synthetic-secret-b",
+            "enabled": true
+          }
+        ],
+        "gate_control_provider": "esphome",
+        "gate_failover_provider": "home_assistant"
+      },
+      "bindings": {
+        "home_assistant": {
+          "provider": "home_assistant",
+          "external_id": "cover.gate",
+          "enabled": true,
+          "config": {
+            "discovery_metadata": {
+              "retained": [
+                "z",
+                "a"
+              ]
+            }
+          }
+        },
+        "esphome": {
+          "provider": "esphome",
+          "external_id": "unmatched:gate",
+          "enabled": true,
+          "config": {}
+        }
+      },
+      "order": [
+        "esphome",
+        "home_assistant"
+      ],
+      "physical_identities": {
+        "home_assistant": [
+          "home_assistant",
+          "b35f19a949156c2d96b6ea15260f1487d2feccf939fc72acc886a6b8732afe4d"
+        ],
+        "esphome": [
+          "esphome",
+          "5ba0193f80f003d3497fe49f1cd040fe329b69b45beedc616f72f7d275b33729"
+        ]
+      },
+      "target": {
+        "target_device_id": "00000000-0000-0000-0000-000000000001",
+        "device_key": "synthetic_gate",
+        "kind": "gate",
+        "binding_snapshot": {
+          "providers": [
+            {
+              "provider": "esphome",
+              "external_id": "unmatched:gate",
+              "config_fingerprint": "4ede16c42a0d0a5cffbd11bec3cff45a9bcd1507a321516a82cf6ec3a86df29e"
+            },
+            {
+              "provider": "home_assistant",
+              "external_id": "cover.gate",
+              "config_fingerprint": "e1df73c476c9bb01312a2c07986b4201ad353e681fb3273f91ef2e0d6712de58"
+            }
+          ],
+          "schedule_id": null,
+          "enabled": true,
+          "open_for_access": true
+        },
+        "binding_fingerprint": "5927ddbffe860b2abec8d6443bc6bd110b6d32097039ddacb929f7414cb1f665"
+      }
+    }
+  ]
+}

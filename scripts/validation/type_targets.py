@@ -24,6 +24,7 @@ PROTECTED_PACKAGES = (
 )
 TYPE_OWNERS = (
     TypeOwner('tools/report_pdf_smoke.py', 'strict'),
+    TypeOwner('app/modules/access_devices/binding_policies.py', 'strict'),
     TypeOwner('app/services/notification_runs.py', 'checked'),
     TypeOwner('app/services/notification_dispatch.py', 'strict'),
     TypeOwner('app/services/notification_rules.py', 'checked'),

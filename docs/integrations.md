@@ -48,6 +48,19 @@ must not be rebuilt from changed settings during dispatch. Provider discovery is
 not permission to make a discovered device commandable or an automatic admission
 target.
 
+[Binding policies](../backend/app/modules/access_devices/binding_policies.py)
+validate provider configuration and supply identity/frozen-setting inputs without
+I/O. The runtime registry must cover exactly the same providers. Configuration
+and setting changes still acquire the existing target journal locks before setting
+locks and rows; unresolved commands block mutation. Secret null/empty updates
+retain stored values except clearable `apprise_urls`.
+
+Admission-setting validation uses the same complete typed candidate conversion as
+execution planning. If unrelated retained data is malformed, a configured
+admission update can now fail during that conversion; repair it in the same update
+or explicitly unset the admission key. The unset-key path returns before conversion
+and leaves automatic admission disabled.
+
 ## LPR ingress
 
 UniFi webhook input enters at `POST /api/v1/webhooks/ubiquiti/lpr`.

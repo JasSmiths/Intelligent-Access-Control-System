@@ -34,6 +34,7 @@ from app.modules.access_devices.base import (
     AccessDeviceEntity,
     AccessDeviceProviderUnavailable,
 )
+from app.modules.access_devices.binding_policies import require_binding_policy
 from app.modules.access_devices.registry import (
     access_device_provider_keys,
     get_access_device_provider,
@@ -256,6 +257,10 @@ class AccessDeviceService:
     async def upsert_binding(
         self, device_id: str, provider: str, payload: dict[str, Any]
     ) -> AccessDeviceEntity:
+        # Pure policy alone cannot enable a provider: composition must include
+        # both its policy and inert runtime adapter before a supported write.
+        get_access_device_provider(provider)
+        policy = require_binding_policy(provider)
         async with AsyncSessionLocal() as session:
             row = await self._device_row(session, device_id)
             await self._journal.assert_configurable(session, row.id)
@@ -270,6 +275,7 @@ class AccessDeviceService:
                     await session.refresh(row, ["provider_bindings"])
                     return self._configuration.entity_from_row(row)
                 raise ValueError("Provider external ID is required.")
+            config = policy.validate_config(payload.get("config"))
             if binding is None:
                 binding = AccessDeviceProviderBinding(
                     access_device_id=row.id,
@@ -279,7 +285,7 @@ class AccessDeviceService:
                 session.add(binding)
             binding.external_id = external_id
             binding.enabled = bool(payload.get("enabled", True))
-            binding.config = dict(payload.get("config") or {})
+            binding.config = config
             await session.commit()
             await session.refresh(row, ["provider_bindings"])
             return self._configuration.entity_from_row(row)

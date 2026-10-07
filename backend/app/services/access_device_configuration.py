@@ -22,6 +22,7 @@ from app.modules.access_devices.base import (
     binding_is_commandable,
     validate_gate_admission_device_key,
 )
+from app.modules.access_devices.binding_policies import require_binding_policy
 from app.services.settings import RuntimeConfig, get_runtime_config_for_session
 
 
@@ -71,9 +72,7 @@ class AccessDeviceConfiguration:
             and any(
                 binding_is_commandable(
                     binding,
-                    home_assistant_url=config.home_assistant_url,
-                    home_assistant_token=config.home_assistant_token,
-                    esphome_devices=config.esphome_devices,
+                    settings=config,
                 )
                 for binding in device.bindings.values()
             )
@@ -226,25 +225,9 @@ class AccessDeviceConfiguration:
         ).hexdigest()
 
     def binding_identity(self, binding: AccessDeviceBinding, config: Any) -> tuple[str, str]:
-        if binding.provider == "home_assistant":
-            identity = [config.home_assistant_url.rstrip("/"), binding.external_id]
-        else:
-            device_id = binding.config.get("device_id") or binding.external_id.split(":", 1)[0]
-            configured = [
-                item
-                for item in config.esphome_devices
-                if item.get("enabled", True) and item.get("host")
-            ]
-            endpoint = next(
-                (item for item in configured if str(item.get("id")) == str(device_id)), None
-            )
-            if endpoint is None and len(configured) == 1:
-                endpoint = configured[0]
-            identity = [
-                endpoint.get("host") if endpoint else device_id,
-                endpoint.get("port", 6053) if endpoint else 6053,
-                binding.config.get("key") or binding.external_id.split(":", 1)[-1],
-            ]
+        identity = require_binding_policy(binding.provider).physical_identity_input(
+            binding.external_id, binding.config, config,
+        )
         return binding.provider, self.fingerprint(identity)
 
     def target_snapshot(self, device: AccessDeviceEntity, config: Any) -> dict[str, Any]:
@@ -253,11 +236,7 @@ class AccessDeviceConfiguration:
         providers = []
         for name in self.provider_order(device, config):
             binding = device.bindings[name]
-            runtime = (
-                {"url": config.home_assistant_url, "token": config.home_assistant_token}
-                if name == "home_assistant"
-                else config.esphome_devices
-            )
+            runtime = require_binding_policy(name).frozen_runtime_input(config)
             providers.append(
                 {
                     "provider": name,
