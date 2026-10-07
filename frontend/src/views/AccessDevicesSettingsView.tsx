@@ -3,7 +3,7 @@ import { auditResource } from "../lib/realtime";
 import type { RealtimeMessage } from "../api/types";
 const devicesEventMatches = (event: RealtimeMessage) => ["access_device", "esphome", "home_assistant", "settings", "schedule"].includes(auditResource(event));
 import { useSchedules } from "../features/schedules/reads";
-import { CircleDot, Home, Plus, SlidersHorizontal, Zap } from "lucide-react";
+import { CircleDot, Plus, SlidersHorizontal } from "lucide-react";
 import React from "react";
 
 import { api, createActionConfirmation } from "../api/client";
@@ -11,8 +11,11 @@ import { integrationsApi } from "../api/integrations";
 import { stringifySetting, useSettings } from "../lib/settings";
 import { Badge } from "../ui/primitives";
 import type { AccessDevice, UserAccount } from "../api/types";
-import { coverMatchesKind, deviceHasProviderBinding, deviceHasAnyProviderBinding, providerLabel, bindingConfigForDiscovery } from "../features/settings/accessDeviceModel";
-import type { AccessDeviceKind, AccessDeviceDiscoveryItem } from "../features/settings/accessDeviceModel";
+import { deviceHasProviderBinding, deviceHasAnyProviderBinding } from "../features/settings/accessDeviceModel";
+import { accessDeviceProviders, accessDeviceProviderLabel } from "../features/settings/accessDeviceProviders";
+import { useAccessDeviceBindings } from "../features/settings/useAccessDeviceBindings";
+import { ReadSignalsContext } from "../lib/readSignals";
+import type { AccessDeviceKind } from "../features/settings/accessDeviceModel";
 import { AccessDeviceEditor } from "../features/settings/AccessDeviceEditor";
 
 export function AccessDevicesSettingsView({
@@ -30,13 +33,14 @@ export function AccessDevicesSettingsView({
   const [devices, setDevices] = React.useState<AccessDevice[]>([]);
   const [admissionChoices, setAdmissionChoices] = React.useState<Array<{ key: string; name: string }>>([]);
   const [devicesLoading, setDevicesLoading] = React.useState(true);
-  const [discoveryLoading, setDiscoveryLoading] = React.useState(false);
   const [savingKey, setSavingKey] = React.useState("");
   const [providerSavingKey, setProviderSavingKey] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
-  const [homeAssistantCovers, setHomeAssistantCovers] = React.useState<AccessDeviceDiscoveryItem[]>([]);
-  const [esphomeCovers, setEsphomeCovers] = React.useState<AccessDeviceDiscoveryItem[]>([]);
+  const signals = React.useContext(ReadSignalsContext);
+  const identity = React.useMemo(() => ({ kind, signals, user: currentUser.id, role: currentUser.role }), [kind, signals, currentUser.id, currentUser.role]);
+  const bindings = useAccessDeviceBindings(kind, devicesEventMatches, identity);
+  const lifetime = bindings.lifetime;
   const accessSettings = useSettings("access", devicesEventMatches);
   const dirtyDeviceIds = React.useRef(new Set<string>());
   const savingKeyRef = React.useRef("");
@@ -59,27 +63,13 @@ export function AccessDevicesSettingsView({
     }
   }, [kind]);
 
-  const readDiscovery = React.useCallback(async (signal: AbortSignal) => {
-    setDiscoveryLoading(true);
-    try {
-      const [haDiscovery, esphomeDiscovery] = await Promise.all([
-        api.get<{ cover_entities: AccessDeviceDiscoveryItem[] }>("/api/v1/integrations/home-assistant/entities", { signal }).catch(() => ({ cover_entities: [] })),
-        api.get<{ cover_entities: AccessDeviceDiscoveryItem[] }>("/api/v1/integrations/esphome/entities", { signal }).catch(() => ({ cover_entities: [] }))
-      ]);
-      if (signal.aborted) return;
-      setHomeAssistantCovers((haDiscovery.cover_entities ?? []).filter((cover) => coverMatchesKind(cover, kind)));
-      setEsphomeCovers((esphomeDiscovery.cover_entities ?? []).filter((cover) => coverMatchesKind(cover, kind)));
-    } finally {
-      if (!signal.aborted) setDiscoveryLoading(false);
-    }
-  }, [kind]);
-
   const loadDevices = useCoordinatedRead(readDevices, devicesEventMatches);
-  useCoordinatedRead(readDiscovery, devicesEventMatches);
+  React.useLayoutEffect(() => {
+    savingKeyRef.current = ""; dirtyDeviceIds.current.clear();
+    setSavingKey(""); setProviderSavingKey(""); setDevices([]); setMessage(""); setError("");
+  }, [lifetime]);
 
   const enabledCount = React.useMemo(() => devices.filter((device) => device.enabled).length, [devices]);
-  const haMappedCount = React.useMemo(() => devices.filter((device) => deviceHasProviderBinding(device, "home_assistant")).length, [devices]);
-  const esphomeMappedCount = React.useMemo(() => devices.filter((device) => deviceHasProviderBinding(device, "esphome")).length, [devices]);
   const mappedCount = React.useMemo(() => devices.filter(deviceHasAnyProviderBinding).length, [devices]);
   const accessOpenCount = React.useMemo(() => devices.filter((device) => device.open_for_access).length, [devices]);
   const scheduleNameById = React.useMemo(() => new Map(schedules.map((schedule) => [schedule.id, schedule.name])), [schedules]);
@@ -90,30 +80,15 @@ export function AccessDevicesSettingsView({
   const deviceNounPlural = kind === "gate" ? "gates" : "garage doors";
 
   const updateDevice = (deviceId: string, patch: Partial<AccessDevice>) => {
+    if (savingKeyRef.current === deviceId) return;
     dirtyDeviceIds.current.add(deviceId);
     setDevices((current) => current.map((device) => device.id === deviceId ? { ...device, ...patch } : device));
   };
 
-  const updateBinding = (deviceId: string, provider: string, selection: string) => {
+  const updateBinding = (deviceId: string, providerKey: string, selection: string) => {
+    if (savingKeyRef.current === deviceId) return;
     dirtyDeviceIds.current.add(deviceId);
-    setDevices((current) => current.map((device) => {
-      if (device.id !== deviceId) return device;
-      const options = provider === "esphome" ? esphomeCovers : homeAssistantCovers;
-      const match = options.find((option) => option.entity_id === selection);
-      const externalId = String(match?.metadata?.external_id ?? selection);
-      return {
-        ...device,
-        bindings: [
-          ...device.bindings.filter((binding) => binding.provider !== provider),
-          {
-            provider,
-            external_id: externalId,
-            enabled: Boolean(externalId),
-            config: bindingConfigForDiscovery(provider, selection, options)
-          }
-        ]
-      };
-    }));
+    setDevices((current) => current.map((device) => device.id === deviceId ? bindings.update(device, providerKey, selection) : device));
   };
 
   const addDevice = async () => {
@@ -140,13 +115,16 @@ export function AccessDevicesSettingsView({
         target_label: payload.name,
         reason: "Create access device"
       });
+      if (!lifetime.isCurrent()) return;
       const created = await api.post<AccessDevice>("/api/v1/access-devices", {
         ...payload,
         confirmation_token: confirmation.confirmation_token
       });
+      if (!lifetime.isCurrent()) return;
       setDevices((current) => [...current, created]);
       setMessage("Device added.");
     } catch (addError) {
+      if (!lifetime.isCurrent()) return;
       setError(addError instanceof Error ? addError.message : "Unable to add access device.");
     }
   };
@@ -162,58 +140,23 @@ export function AccessDevicesSettingsView({
     setMessage("");
     setError("");
     try {
-      const payload = {
-        key: device.key,
-        kind: device.kind,
-        name: device.name,
-        enabled: device.enabled,
-        // An empty string explicitly clears the assignment and remains bound
-        // to confirmation; null is omitted by the existing confirmation protocol.
-        schedule_id: device.schedule_id || "",
-        open_for_access: device.open_for_access,
-        sort_order: device.sort_order
-      };
-      const confirmation = await createActionConfirmation("access_device.update", { device_id: device.id, ...payload }, {
-        target_entity: "AccessDevice",
-        target_id: device.id,
-        target_label: device.name,
-        reason: "Update access device"
+      const receipt = await bindings.save(device, (accepted) => {
+        setDevices((current) => current.map((item) => item.id === accepted.id ? { ...accepted, bindings: item.bindings } : item));
       });
-      let saved = await api.patch<AccessDevice>(`/api/v1/access-devices/${encodeURIComponent(device.id)}`, {
-        ...payload,
-        confirmation_token: confirmation.confirmation_token
-      });
-      for (const provider of ["home_assistant", "esphome"]) {
-        const binding = device.bindings.find((item) => item.provider === provider);
-        const bindingPayload = {
-          external_id: binding?.external_id ?? "",
-          enabled: Boolean(binding?.external_id),
-          config: binding?.config ?? {}
-        };
-        const bindingConfirmation = await createActionConfirmation("access_device.binding.update", {
-          device_id: saved.id,
-          provider,
-          ...bindingPayload
-        }, {
-          target_entity: "AccessDevice",
-          target_id: saved.id,
-          target_label: saved.name,
-          reason: `Update ${providerLabel(provider)} binding`
-        });
-        saved = await api.put<AccessDevice>(`/api/v1/access-devices/${encodeURIComponent(saved.id)}/bindings/${provider}`, {
-          ...bindingPayload,
-          confirmation_token: bindingConfirmation.confirmation_token
-        });
+      if (!lifetime.isCurrent()) return;
+      if (receipt.accepted.length) setMessage(`${receipt.accepted.join(", ")} saved.`);
+      if (receipt.failedPhase) {
+        setError(`${receipt.failedPhase} could not be saved: ${receipt.error}`);
+        return;
       }
+      if (receipt.stopped || !receipt.saved) return;
+      const saved = receipt.saved;
       setDevices((current) => current.map((item) => item.id === saved.id ? saved : item));
       dirtyDeviceIds.current.delete(saved.id);
       setMessage("Device saved.");
-      try { await loadDevices(); } catch { setError("Device saved, but device data could not be refreshed. Refresh to retry the read."); }
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Unable to save access device.");
+      try { await loadDevices(); } catch { if (lifetime.isCurrent()) setError(`Device saved, but device data could not be refreshed. Refresh to retry the read. Accepted: ${receipt.accepted.join("; ")}.`); }
     } finally {
-      savingKeyRef.current = "";
-      setSavingKey("");
+      if (lifetime.isCurrent()) { savingKeyRef.current = ""; setSavingKey(""); }
     }
   };
 
@@ -231,19 +174,23 @@ export function AccessDevicesSettingsView({
       const confirmation = await createActionConfirmation("settings.update", { values: updates }, {
         target_entity: "SystemSetting",
         target_id: key,
-        target_label: isAdmissionSelection ? admissionChoices.find((device) => device.key === value)?.name || "No entry gate selected" : providerLabel(value),
+        target_label: isAdmissionSelection ? admissionChoices.find((device) => device.key === value)?.name || "No entry gate selected" : accessDeviceProviderLabel(value),
         reason: isAdmissionSelection ? "Designate the automatic-admission entry gate" : "Update access-device provider preference"
       });
+      if (!lifetime.isCurrent()) return;
       await accessSettings.save(updates, { confirmationToken: confirmation.confirmation_token });
+      if (!lifetime.isCurrent()) return;
       setMessage(isAdmissionSelection ? "Entry gate selection saved." : "Provider preference saved.");
     } catch (providerError) {
+      if (!lifetime.isCurrent()) return;
       setError(providerError instanceof Error ? providerError.message : isAdmissionSelection ? "Unable to save entry gate selection." : "Unable to save provider preference.");
     } finally {
-      setProviderSavingKey("");
+      if (lifetime.isCurrent()) setProviderSavingKey("");
     }
   };
 
   const deleteDevice = async (device: AccessDevice) => {
+    if (savingKeyRef.current === device.id) return;
     if (!isAdmin) {
       setError("Administrator access is required to remove access devices.");
       return;
@@ -258,12 +205,15 @@ export function AccessDevicesSettingsView({
         target_label: device.name,
         reason: "Remove access device"
       });
+      if (!lifetime.isCurrent()) return;
       await api.delete(`/api/v1/access-devices/${encodeURIComponent(device.id)}`, {
         confirmation_token: confirmation.confirmation_token
       });
+      if (!lifetime.isCurrent()) return;
       setDevices((current) => current.filter((item) => item.id !== device.id));
       setMessage("Device removed.");
     } catch (deleteError) {
+      if (!lifetime.isCurrent()) return;
       setError(deleteError instanceof Error ? deleteError.message : "Unable to remove access device.");
     }
   };
@@ -288,8 +238,7 @@ export function AccessDevicesSettingsView({
             </>
           ) : (
             <>
-              <AccessDeviceSummaryStat label="HA mapped" value={`${haMappedCount}/${devices.length || 0}`} />
-              <AccessDeviceSummaryStat label="ESPHome mapped" value={`${esphomeMappedCount}/${devices.length || 0}`} />
+              {accessDeviceProviders.map((provider) => <AccessDeviceSummaryStat key={provider.key} label={provider.metricLabel} value={`${devices.filter((device) => deviceHasProviderBinding(device, provider.key)).length}/${devices.length || 0}`} />)}
             </>
           )}
         </div>
@@ -302,7 +251,7 @@ export function AccessDevicesSettingsView({
               <span className="access-section-icon"><SlidersHorizontal size={17} /></span>
               <div>
                 <h2>Command route</h2>
-                <p>{providerLabel(primaryProvider)} sends {deviceNoun} commands first{failoverProvider === "none" ? "." : `, then ${providerLabel(failoverProvider)} only before a command may have been sent.`}</p>
+                <p>{accessDeviceProviderLabel(primaryProvider)} sends {deviceNoun} commands first{failoverProvider === "none" ? "." : `, then ${accessDeviceProviderLabel(failoverProvider)} only before a command may have been sent.`}</p>
               </div>
             </div>
             <Badge tone={accessSettings.loading || providerSavingKey ? "gray" : "blue"}>{providerSavingKey ? "Saving" : "Global"}</Badge>
@@ -361,7 +310,7 @@ export function AccessDevicesSettingsView({
               <button className="secondary-button" onClick={addDevice} disabled={devicesLoading || !scheduleCatalog.ready} type="button"><Plus size={15} /> Add {kind === "gate" ? "Gate" : "Door"}</button>
             ) : null}
           </div>
-          {(devicesLoading || discoveryLoading) ? <AccessDeviceLoadingBar label={devicesLoading ? "Loading access devices" : "Refreshing provider discovery"} /> : null}
+          {(devicesLoading || bindings.loading) ? <AccessDeviceLoadingBar label={devicesLoading ? "Loading access devices" : "Refreshing provider discovery"} /> : null}
           {scheduleCatalog.error ? <p role="alert">{scheduleCatalog.error}</p> : null}
       {error ? <div className="auth-error inline-error">{error}</div> : null}
           {accessSettings.error ? <div className="auth-error inline-error">{accessSettings.error}</div> : null}
@@ -371,13 +320,12 @@ export function AccessDevicesSettingsView({
               <AccessDeviceEditor
                 device={device}
                 deviceIcon={Icon}
-                homeAssistantCovers={homeAssistantCovers}
-                esphomeCovers={esphomeCovers}
+                discovery={bindings.state}
                 key={device.id}
                 schedules={schedules}
                 scheduleLabel={device.schedule_id ? scheduleNameById.get(device.schedule_id) ?? "Custom schedule" : "Default policy"}
                 saving={savingKey === device.id}
-                disabled={!isAdmin}
+                disabled={!isAdmin || savingKey === device.id}
                 onDelete={() => deleteDevice(device)}
                 onSave={() => saveDevice(device)}
                 onUpdate={(patch) => updateDevice(device.id, patch)}
@@ -417,7 +365,7 @@ function AccessProviderChoice({
   value: string;
   onChange: (value: string) => void;
 }) {
-  const Icon = value === "esphome" ? Zap : value === "home_assistant" ? Home : CircleDot;
+  const Icon = accessDeviceProviders.find((provider) => provider.key === value)?.icon ?? CircleDot;
   return (
     <label className="access-provider-choice">
       <span className="access-provider-choice-label">{label}</span>
@@ -425,8 +373,7 @@ function AccessProviderChoice({
         <Icon size={16} />
         <select disabled={disabled} value={value} onChange={(event) => onChange(event.target.value)}>
           {allowNone ? <option value="none">None</option> : null}
-          <option value="home_assistant">Home Assistant</option>
-          <option value="esphome">ESPHome</option>
+          {accessDeviceProviders.map((provider) => <option key={provider.key} value={provider.key}>{provider.label}</option>)}
         </select>
       </span>
       <small>{helper}</small>

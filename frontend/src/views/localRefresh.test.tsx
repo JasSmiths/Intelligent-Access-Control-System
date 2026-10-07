@@ -173,7 +173,7 @@ it("keeps the device save receipt after its authoritative read fails", async () 
   const bindings = vi.spyOn(api, "put").mockResolvedValue(device);
   compose(<AccessDevicesSettingsView kind="gate" title="Gates" icon={CircleDot} currentUser={admin} />);
   fireEvent.click(await screen.findByRole("button", { name: "Save Device" }));
-  await screen.findByText("Device saved, but device data could not be refreshed. Refresh to retry the read.");
+  await screen.findByText(/Device saved, but device data could not be refreshed.*Accepted: Device settings; Home Assistant binding; ESPHome binding/);
   expect(screen.getByText("Device saved.")).toBeInTheDocument();
   expect(save).toHaveBeenCalledOnce();
   expect(bindings).toHaveBeenCalledTimes(2); // The two confirmed provider bindings.

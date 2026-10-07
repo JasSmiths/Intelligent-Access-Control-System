@@ -1,18 +1,19 @@
-import { CalendarDays, Home, Key, PlugZap, Trash2, Zap } from "lucide-react";
+import { CalendarDays, Key, PlugZap, Trash2 } from "lucide-react";
 import React from "react";
 
 import { SettingField } from "../../lib/settings";
 import { Badge } from "../../ui/primitives";
 import type { AccessDevice, Schedule } from "../../api/types";
-import { bindingSelectionValue } from "./accessDeviceModel";
+import { accessDeviceProviders, type AccessDeviceProviderDescriptor } from "./accessDeviceProviders";
+import type { AccessDeviceDiscovery } from "./useAccessDeviceDiscovery";
 import type { AccessDeviceDiscoveryItem } from "./accessDeviceModel";
 
 export function AccessDeviceEditor({
   device,
   deviceIcon: DeviceIcon,
   disabled,
-  homeAssistantCovers,
-  esphomeCovers,
+  discovery,
+  providers = accessDeviceProviders,
   scheduleLabel,
   schedules,
   saving,
@@ -24,8 +25,8 @@ export function AccessDeviceEditor({
   device: AccessDevice;
   deviceIcon: React.ElementType;
   disabled: boolean;
-  homeAssistantCovers: AccessDeviceDiscoveryItem[];
-  esphomeCovers: AccessDeviceDiscoveryItem[];
+  discovery: AccessDeviceDiscovery;
+  providers?: readonly AccessDeviceProviderDescriptor[];
   scheduleLabel: string;
   schedules: Schedule[];
   saving: boolean;
@@ -34,10 +35,7 @@ export function AccessDeviceEditor({
   onUpdate: (patch: Partial<AccessDevice>) => void;
   onUpdateBinding: (provider: string, externalId: string) => void;
 }) {
-  const haBinding = device.bindings.find((binding) => binding.provider === "home_assistant");
-  const esphomeBinding = device.bindings.find((binding) => binding.provider === "esphome");
-  const haMapped = Boolean(haBinding?.external_id);
-  const esphomeMapped = Boolean(esphomeBinding?.external_id);
+  const mapped = device.bindings.some((binding) => Boolean(binding.external_id));
   return (
     <article className={device.enabled ? "access-device-editor" : "access-device-editor disabled"}>
       <header className="access-device-editor-head">
@@ -52,7 +50,7 @@ export function AccessDeviceEditor({
           <Badge tone={device.enabled ? "green" : "gray"}>{device.enabled ? "Enabled" : "Disabled"}</Badge>
           <Badge tone="gray">{scheduleLabel}</Badge>
           {device.kind === "gate" ? <Badge tone={device.open_for_access ? "blue" : "gray"}>{device.open_for_access ? "Access opens" : "Manual only"}</Badge> : null}
-          <Badge tone={haMapped || esphomeMapped ? "blue" : "amber"}>{haMapped || esphomeMapped ? "Mapped" : "Needs mapping"}</Badge>
+          <Badge tone={mapped ? "blue" : "amber"}>{mapped ? "Mapped" : "Needs mapping"}</Badge>
         </div>
       </header>
       <div className="access-device-editor-body">
@@ -62,8 +60,8 @@ export function AccessDeviceEditor({
             <h4>Identity</h4>
           </div>
           <div className="settings-form-grid access-device-fields">
-            <SettingField field={{ key: "name", label: "Display name" }} value={device.name} onChange={(value) => onUpdate({ name: value })} />
-            <details className="access-device-technical"><summary>Edit technical identifier</summary><SettingField field={{ key: "key", label: "Internal key" }} value={device.key} onChange={(value) => onUpdate({ key: value })} /></details>
+            <SettingField disabled={disabled || saving} field={{ key: "name", label: "Display name" }} value={device.name} onChange={(value) => onUpdate({ name: value })} />
+            <details className="access-device-technical"><summary>Edit technical identifier</summary><SettingField disabled={disabled || saving} field={{ key: "key", label: "Internal key" }} value={device.key} onChange={(value) => onUpdate({ key: value })} /></details>
           </div>
         </div>
 
@@ -93,8 +91,11 @@ export function AccessDeviceEditor({
             <h4>Provider bindings</h4>
           </div>
           <div className="settings-form-grid access-device-fields">
-            <ProviderBindingField disabled={disabled} provider="home_assistant" label="Home Assistant cover" options={homeAssistantCovers} value={haBinding?.external_id ?? ""} onChange={(value) => onUpdateBinding("home_assistant", value)} />
-            <ProviderBindingField disabled={disabled} provider="esphome" label="ESPHome cover" options={esphomeCovers} value={bindingSelectionValue(esphomeBinding, esphomeCovers)} onChange={(value) => onUpdateBinding("esphome", value)} />
+            {providers.map((provider) => {
+              const binding = device.bindings.find((item) => item.provider === provider.key);
+              const state = discovery[provider.key] ?? { options: [], error: "" };
+              return <ProviderBindingField key={provider.key} disabled={disabled} label={provider.bindingLabel} icon={provider.icon} options={state.options} error={state.error} value={provider.selection(binding, state.options)} onChange={(value) => onUpdateBinding(provider.key, value)} />;
+            })}
           </div>
         </div>
       </div>
@@ -116,10 +117,9 @@ function AccessDeviceSwitch({ checked, disabled, label, onChange }: { checked: b
   );
 }
 
-function ProviderBindingField({ disabled, label, options, provider, value, onChange }: { disabled?: boolean; label: string; options: AccessDeviceDiscoveryItem[]; provider: "home_assistant" | "esphome"; value: string; onChange: (value: string) => void }) {
+function ProviderBindingField({ disabled, label, options, icon: Icon, error, value, onChange }: { disabled?: boolean; label: string; options: AccessDeviceDiscoveryItem[]; icon: React.ElementType; error: string; value: string; onChange: (value: string) => void }) {
   const listId = React.useId();
   const mapped = Boolean(value.trim());
-  const Icon = provider === "esphome" ? Zap : Home;
   return (
     <label className={mapped ? "field access-binding-field mapped" : "field access-binding-field"}>
       <span className="field-label-row">
@@ -133,6 +133,7 @@ function ProviderBindingField({ disabled, label, options, provider, value, onCha
       <datalist id={listId}>
         {options.map((option) => <option key={option.entity_id} value={option.entity_id}>{option.name || option.entity_id}</option>)}
       </datalist>
+      {error ? <small className="field-hint" role="alert">{error}</small> : null}
       <small className="field-hint">{options.length ? `${options.length} discovered ${options.length === 1 ? "cover" : "covers"}` : "No discovered covers for this provider."}</small>
     </label>
   );
