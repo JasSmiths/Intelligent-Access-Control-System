@@ -1,3 +1,4 @@
+import { ACTION_METADATA, defaultActionConfig, isAutomationActionType } from "../../api/generated/workflows";
 import { Bell, CalendarDays, Car, Clock3, Construction, DoorOpen, GitBranch, MessageCircle, PlugZap, UserPlus, UserRound, Warehouse } from "lucide-react";
 import React from "react";
 import type { AutomationAction, AutomationCatalogGroup, AutomationCatalogItem, AutomationNode, AutomationRule, AutomationVariableGroup } from "../../api/workflows";
@@ -28,29 +29,22 @@ export function createAutomationDraft(): AutomationRule {
 }
 
 export function createAutomationNode(kind: "trigger" | "condition" | "action", type: string, meta?: AutomationCatalogItem): AutomationNode | AutomationAction {
+  if (kind === "action" && isAutomationActionType(type)) {
+    return {id: draftId(kind), type, config: defaultActionConfig(type),
+      reason_template: ACTION_METADATA[type].default_reason};
+  }
   const base = { id: draftId(kind), type, config: defaultAutomationConfig(type, meta) };
-  if (kind === "action") return { ...base, reason_template: defaultAutomationReason(type) };
+  if (kind === "action") return { ...base, reason_template: "Automation action from @EventType." };
   return base;
 }
 
 function defaultAutomationConfig(type: string, meta?: AutomationCatalogItem): Record<string, unknown> {
-  if (meta?.default_config) return { ...meta.default_config };
+  if (meta?.default_config) return structuredClone(meta.default_config);
   if (type === "time.every_x") return { interval: 5, unit: "minutes" };
   if (type === "time.specific_datetime") return { run_at: "", recurrence: "none", single_use: true, end_at: "" };
   if (type === "time.cron") return { cron_expression: "0 9 * * *", timezone: "Europe/London", end_at: "" };
   if (type.startsWith("webhook.")) return { webhook_key: `webhook-${Math.random().toString(16).slice(2)}${Date.now().toString(16)}` };
-  if (type.startsWith("garage_door.")) return { target_entity_ids: [] };
-  if (type.startsWith("notification.")) return { notification_rule_id: "" };
-  if (type === "integration.icloud_calendar.sync") return { provider: "icloud_calendar", action: "sync_calendars" };
   return {};
-}
-
-function defaultAutomationReason(type: string) {
-  if (type === "gate.open") return "Automation opened the gate for @DisplayName.";
-  if (type.startsWith("garage_door.")) return "Automation ran @EventType for @DisplayName.";
-  if (type.startsWith("maintenance_mode.")) return "Automation changed Maintenance Mode: @Subject.";
-  if (type.startsWith("integration.")) return "Automation ran integration action from @EventType.";
-  return "Automation action from @EventType.";
 }
 
 export function automationRulePayload(rule: AutomationRule) {

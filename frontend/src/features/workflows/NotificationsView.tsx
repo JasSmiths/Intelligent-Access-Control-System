@@ -7,14 +7,13 @@ import type { Person, Schedule, UserAccount } from "../../api/types";
 import type { NotificationRule, NotificationTriggerGroup } from "../../api/workflows";
 import { workflowApi } from "../../api/workflows";
 import { notificationEventLabel } from "../../lib/format";
-import { notificationChannelMeta } from "../../lib/notifications";
 import { ErrorState, LoadingState, Toolbar } from "../../ui/primitives";
 import { NotificationConfigChip, WorkflowRuleList, WorkflowStatusFilters } from "./components";
 import { useNotificationCameras, usePendingWorkflowIds, useTransientRuleStatusFeedback, useWorkflowData, useWorkflowRuleFilters } from "./hooks";
 import type { NotificationStatusFilter, WorkflowFeedback, WorkflowRuleStatusFeedback } from "./model";
 import { draftId } from "./model";
 import { NotificationWorkflowEditor } from "./NotificationEditor";
-import { cloneNotificationRule, createWorkflowDraft, groupNotificationRulesByTriggerCategory, notificationActionWithSupportedActionable, renderWorkflowPreview, workflowRulePayload } from "./notificationModel";
+import { notificationActionLabel, cloneNotificationRule, createWorkflowDraft, groupNotificationRulesByTriggerCategory, notificationActionWithSupportedActionable, renderWorkflowPreview, workflowRulePayload } from "./notificationModel";
 import { NotificationActionModal, NotificationConditionModal, NotificationTriggerModal } from "./NotificationSelection";
 
 export function NotificationsView({ currentUser, people, refreshToken, schedules }: { currentUser: UserAccount; people: Person[]; refreshToken: number; schedules: Schedule[] }) {
@@ -348,7 +347,7 @@ function NotificationWorkflowList({
       ariaLabel="Notification workflows"
       groupedRules={groupedRules}
       kind="notification"
-      renderConfigChips={(rule) => (<><span className="workflow-flow-summary">When {notificationEventLabel(rule.trigger_event)} → {rule.actions.map((action) => notificationChannelMeta[action.type]?.label ?? action.type).join(", ") || "no action"}</span><NotificationConfigChip count={rule.conditions.length} icon={Split} label="Conditions" /></>)}
+      renderConfigChips={(rule) => (<><span className="workflow-flow-summary">When {notificationEventLabel(rule.trigger_event)} → {rule.actions.map((action) => notificationActionLabel(action.type)).join(", ") || "no action"}</span><NotificationConfigChip count={rule.conditions.length} icon={Split} label="Conditions" /></>)}
       ruleStatusFeedback={ruleStatusFeedback}
       statusFilter={statusFilter}
       summaryAriaLabel="Workflow summary"

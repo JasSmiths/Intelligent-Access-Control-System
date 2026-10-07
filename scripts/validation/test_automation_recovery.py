@@ -327,3 +327,21 @@ async def test_malformed_v1_plan_is_reviewed_without_dispatch(corruption):
     held = await store.get(identity)
     assert held.status == "review_required" and held.review_reason == "execution_snapshot_unavailable"
     assert held.action_plan == plan and held.claim_count == 0
+
+
+@pytest.mark.parametrize("configured", [
+    {"id": "unknown", "type": "retired.action", "config": {"frozen": [" old ", "target"]}},
+    {"id": "malformed", "type": "garage_door.open", "config": {"target_entity_ids": "cover.legacy"}},
+    {"id": "typo", "type": "notification.enable", "config": {"notification_rul_id": "retained"}},
+])
+async def test_unsupported_unfinished_configuration_is_held_without_rewriting_or_attempting(configured):
+    store = AutomationRunStore()
+    identity = await reserve(store, await rule(), planned=[{"action": configured}])
+    before = (await store.get(identity)).action_plan
+    assert await store.claim(identity) is None
+    held = await store.get(identity)
+    assert held.status == "review_required"
+    assert held.review_reason == "unsupported_action_configuration"
+    assert held.action_plan == before and held.claim_count == 0
+    assert "attempted_at" not in held.action_plan[0]
+    assert await store.claim(identity) is None

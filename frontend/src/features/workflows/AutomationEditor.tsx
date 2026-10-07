@@ -8,7 +8,8 @@ import { fromDateTimeLocal, titleCase, toDateTimeLocal } from "../../lib/format"
 import { Badge } from "../../ui/primitives";
 import { automationCategoryIcon, automationNodeIcon, createAutomationNode } from "./automationModel";
 import { TwoPaneSelectionModal } from "./components";
-import { matchesSearchText, pluralize, stringifyTemplateValue, toggleStringList } from "./model";
+import { matchesSearchText, pluralize, stringifyTemplateValue } from "./model";
+import { AutomationActionConfigEditor } from "./AutomationActionConfigEditor";
 import { PlainTemplateEditor } from "./TemplateEditor";
 
 export function AutomationNodeStack({
@@ -165,29 +166,9 @@ function AutomationNodeCard({
         </label>
       ) : null}
 
-      {node.type.startsWith("notification.") ? (
-        <label className="field compact-field">
-          <span>Notification rule</span>
-          <select value={String(node.config.notification_rule_id ?? "")} onChange={(event) => updateConfig({ notification_rule_id: event.target.value })}>
-            <option value="">Select notification</option>
-            {notificationRules.map((rule) => <option key={rule.id} value={rule.id}>{rule.name}</option>)}
-          </select>
-        </label>
-      ) : null}
-
-
-
-      {node.type.startsWith("garage_door.") ? (
-        <div className="workflow-target-chips">
-          {garageDoors.map((door) => {
-            const selected = Array.isArray(node.config.target_entity_ids) && (node.config.target_entity_ids as unknown[]).includes(door.entity_id);
-            return (
-              <button className={selected ? "workflow-target-chip selected" : "workflow-target-chip"} key={door.entity_id} onClick={() => updateConfig({ target_entity_ids: toggleStringList(node.config.target_entity_ids, door.entity_id) })} type="button">
-                <strong>Garage</strong>{door.name}
-              </button>
-            );
-          })}
-        </div>
+      {kind === "action" ? (
+        <AutomationActionConfigEditor action={node} notificationRules={notificationRules}
+          garageDoors={garageDoors} onChange={updateConfig} />
       ) : null}
 
       {kind === "action" ? (

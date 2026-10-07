@@ -1,3 +1,4 @@
+import { isNotificationChannelType } from "../../api/generated/workflows";
 import { Camera, CircleDot, Clock3, DoorOpen, Plus, Save, Send, Trash2, Volume2 } from "lucide-react";
 import React from "react";
 import { useDirectoryOptions } from "../directory/reads";
@@ -130,7 +131,7 @@ export function NotificationWorkflowEditor({
                     action={action}
                     actionableOptions={actionableOptions}
                     cameras={cameras}
-                    integration={integrationById.get(action.type)}
+                    integration={isNotificationChannelType(action.type) ? integrationById.get(action.type) : undefined}
                     isGateMalfunctionWorkflow={isGateMalfunctionWorkflow}
                     key={action.id}
                     stageOptions={gateMalfunctionStageOptions}
@@ -242,7 +243,9 @@ function NotificationLivePreviewPanel({
       {actions.length ? (
         <div className="notification-preview-stack">
           {actions.map((action) => {
-            const meta = notificationChannelMeta[action.type];
+            const meta = isNotificationChannelType(action.type)
+              ? notificationChannelMeta[action.type]
+              : {...notificationChannelMeta.in_app, label: action.type};
             const Icon = meta.icon;
             const content = action.recipient_previews?.[previewRecipients[action.id]] ?? action;
             return (

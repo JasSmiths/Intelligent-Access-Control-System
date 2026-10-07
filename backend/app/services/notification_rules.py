@@ -14,6 +14,8 @@ from app.services.telemetry import (
     audit_diff,
     write_audit_log,
 )
+from app.services.workflows.action_definitions import WorkflowConfigurationError
+from app.services.workflows.channel_definitions import validate_notification_actions
 from app.services.workflows.notification_payloads import normalize_rule_payload
 from app.services.workflows.template_recipients import TemplateRecipientError
 
@@ -23,7 +25,12 @@ def rule_values(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 160:
         raise MutationError("invalid_rule", "Workflow name must contain 1–160 characters.")
     try:
-        normalized = normalize_rule_payload({**payload, "name": name.strip()})
+        normalized = normalize_rule_payload({
+            **payload, "name": name.strip(),
+            "actions": validate_notification_actions(payload.get("actions")),
+        })
+    except WorkflowConfigurationError as exc:
+        raise MutationError("invalid_actions", str(exc)) from exc
     except TemplateRecipientError as exc:
         raise MutationError("invalid_variable_recipients", str(exc)) from exc
     if not normalized["trigger_event"]:

@@ -179,7 +179,7 @@ introduce shared abstractions only for demonstrated shared behavior.
 | --- | --- |
 | Directory field or operation | Extend the [directory services](../backend/app/services/directory/), [schemas](../backend/app/schemas/directory.py) and [typed client](../frontend/src/api/directory.ts) as needed. Keep validation, assignment changes, audit and commit with the service owner; routes adapt HTTP and confirmation. Migrate every consumer of a changed contract together. |
 | Notification behavior | Use the [planner](../backend/app/services/notification_planning.py), [recipients](../backend/app/services/notification_recipients.py) or [authorization](../backend/app/services/notification_authorization.py) owner. Keep transport orchestration and durable delivery separate from policy. |
-| Automation action or trigger | Extend the supported catalog and the [action handler](../backend/app/services/automation_actions.py), [webhook intake](../backend/app/services/automation_webhooks.py) or [time intake](../backend/app/services/automation_time_intake.py) owner. Preserve checked execution identities, deadlines, idempotency and uncertain outcomes; reuse command and authorization owners. |
+| Automation action or trigger | Extend the [action definitions](../backend/app/services/workflows/action_definitions.py), generated contracts and explicit typed editor for actions, and the supported trigger catalog and [action handler](../backend/app/services/automation_actions.py), [webhook intake](../backend/app/services/automation_webhooks.py) or [time intake](../backend/app/services/automation_time_intake.py) owner. Preserve checked execution identities, deadlines, idempotency and uncertain outcomes; reuse command and authorization owners. |
 | Integration observation or effect | Keep vendor I/O in modules; bind narrow [effect ports](../backend/app/services/integration_effects.py) in [composition](../backend/app/composition.py). Binding must not start services or send requests. Business consumers do not become imports of vendor adapters. |
 | Report or dashboard behavior | Keep request, export and command lifetimes in [report](../frontend/src/features/reports/) or [dashboard](../frontend/src/features/dashboard/) hooks. Put rendering in focused components. Keep [duration policy](../backend/app/services/report_durations.py) pure with an explicit site timezone; the report service owns reads and export orchestration. |
 
@@ -206,6 +206,36 @@ bounded to necessary predecessor state, with strictly prior timestamp semantics;
 stream projected timeline inputs and account separately for output/PDF cost.
 Performance changes must preserve authorization freshness, transaction ordering
 and recovery behavior. Do not trade those guarantees for a cache or a shorter path.
+
+### Workflow contracts
+
+[Action definitions](../backend/app/services/workflows/action_definitions.py) own
+closed configuration models, defaults, execution mode, effect and maintenance
+classification, uncertainty continuation and editor identity.
+[Channel definitions](../backend/app/services/workflows/channel_definitions.py)
+own notification config, templates and channel capabilities. These pure owners
+import no ORM, context, provider, runtime configuration or authorization policy.
+
+The executor's action-type binding map and notification delivery map must cover
+their definitions exactly. Transactional handlers share the caller's session:
+mutation or domain reservation, action receipt and required audit commit together.
+Their checked operation identity comes from the currently owned pending action;
+it does not prove an external attempt. Durable effects retain the attempted
+checkpoint before independent work and their existing domain authorization.
+
+New writes and executable notification tests validate raw actions before display
+normalization. Preview remains a tolerant display operation. Historical serializers
+retain unknown records;
+unsupported or malformed pending work becomes an explicit review hold before
+attempt. Attempted payloads and frozen destinations remain unchanged on recovery.
+Keep automation and notification stores separate.
+
+[The exporter](../backend/app/services/workflows/export_contracts.py) derives
+[static frontend types and defaults](../frontend/src/api/generated/workflows.ts).
+Its supported schema subset is deliberate; unsupported constructs fail generation.
+Editor controls remain explicit and typed. Add a definition, its action-type
+handler binding, config/editor coverage and a domain reservation fixture; no
+action-specific branch belongs in a dispatcher, run store or facade.
 
 ## Retirement boundaries
 

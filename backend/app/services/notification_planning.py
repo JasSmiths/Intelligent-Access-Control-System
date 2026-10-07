@@ -24,13 +24,15 @@ from app.services.schedules import schedule_allows_at
 from app.services.settings import RuntimeConfig
 from app.services.workflow_session import SessionFactory
 from app.services.workflows import notification_payloads
+from app.services.workflows.action_definitions import WorkflowConfigurationError
 from app.services.workflows.catalog import GATE_MALFUNCTION_EVENT_TYPE
+from app.services.workflows.channel_definitions import validate_notification_actions
 from app.services.workflows.context import normalize_string_list, render_template
 from app.services.workflows.execution_contracts import (
     NotificationPlanItem,
     checked_notification_plan,
 )
-from app.services.workflows.template_recipients import recipient_content
+from app.services.workflows.template_recipients import TemplateRecipientError, recipient_content
 
 logger = get_logger(__name__)
 
@@ -48,12 +50,17 @@ class NotificationPlanner:
         rules = await self._rules_for_context(context, rules_override)
         plan: list[dict[str, Any]] = []
         for rule in rules:
-            origin = (
-                notification_rule_origin(rule)
-                if rules_override is None and isinstance(rule, NotificationRule)
-                else None
-            )
-            rendered = self.render_rule(rule, context)
+            raw_actions = rule.actions if isinstance(rule, NotificationRule) else rule.get("actions")
+            validate_notification_actions(raw_actions)
+            try:
+                origin = (
+                    notification_rule_origin(rule)
+                    if rules_override is None and isinstance(rule, NotificationRule)
+                    else None
+                )
+                rendered = self.render_rule(rule, context)
+            except TemplateRecipientError as exc:
+                raise WorkflowConfigurationError("Invalid notification variable recipients.") from exc
             if not await self.conditions_match(rule, context):
                 plan.append({"rule": rendered, "state": "skipped", "reason": "conditions_not_met"})
                 continue
@@ -88,7 +95,18 @@ class NotificationPlanner:
         rules_override: list[dict[str, Any]] | None,
     ) -> list[NotificationRule | dict[str, Any]]:
         if rules_override is not None:
-            return [notification_payloads.normalize_rule_payload(rule) for rule in rules_override]
+            # Executable overrides are raw durable inputs. The historical display
+            # normalizer may discard malformed fields, so validate before it.
+            if not isinstance(rules_override, list):
+                raise WorkflowConfigurationError("Notification overrides must be a list.")
+            for rule in rules_override:
+                if not isinstance(rule, dict):
+                    raise WorkflowConfigurationError("Notification override must be an object.")
+                validate_notification_actions(rule.get("actions"))
+            try:
+                return [notification_payloads.normalize_rule_payload(rule) for rule in rules_override]
+            except TemplateRecipientError as exc:
+                raise WorkflowConfigurationError("Invalid notification variable recipients.") from exc
         async with self.sessions() as session:
             return (
                 await session.scalars(

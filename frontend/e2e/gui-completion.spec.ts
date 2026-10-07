@@ -700,3 +700,42 @@ test("browses a thousand-person directory in bounded pages on desktop and mobile
   expect(reads).toContain(50);
   expect(unexpected).toEqual([]);
 });
+
+test("retains unsupported notification content through trigger change and allows explicit replacement", async ({ page }, testInfo) => {
+  const unexpected = await installFixtures(page);
+  await page.setViewportSize({ width: 390, height: 600 });
+  const historical = {id: "retained", type: "retired.channel", custom: {ordered: [2, 1]}, media: null};
+  await page.route("**/api/v1/notifications/rules", (route) => route.fulfill({json: [{
+    id: "retained-rule", name: "Retained notification", trigger_event: "authorized_entry",
+    is_active: false, conditions: [], actions: [historical],
+  }]}));
+  await page.route("**/api/v1/notifications/catalog", (route) => route.fulfill({json: {
+    triggers: [{id: "arrivals", label: "Arrivals", events: [
+      {value: "authorized_entry", label: "Authorized Entry", severity: "info", description: "Fixture arrival"},
+      {value: "gate_malfunction", label: "Gate Malfunction", severity: "warning", description: "Fixture malfunction"},
+    ]}],
+    variables: [], integrations: [{id: "in_app", name: "Dashboard", provider: "Dashboard", configured: true,
+      endpoints: [{id: "dashboard", provider: "Dashboard", label: "All signed-in dashboards", detail: "Fixture"}]}],
+    actionable_notifications: [], gate_malfunction_stages: [], mock_context: {},
+  }}));
+  await page.goto("/settings/notifications");
+  await page.getByRole("button", {name: "Retained notification", exact: true}).click();
+  const editor = page.getByRole("dialog", {name: "Edit Notification", exact: true});
+  await expect(editor.getByRole("alert")).toContainText("unsupported");
+  await editor.getByRole("button", {name: "Preview", exact: true}).click();
+  await expect(editor.getByLabel("Live notification preview")).toContainText("This retained action is unsupported.");
+  await editor.getByRole("button", {name: "Preview", exact: true}).click();
+  await editor.getByRole("button", {name: /Authorized Entry/}).click();
+  await page.getByRole("button", {name: /Gate Malfunction/}).click();
+  await expect(editor.getByRole("alert")).toContainText("unsupported");
+  await expect(editor.getByText("retired.channel", {exact: true}).first()).toBeVisible();
+  await editor.getByRole("button", {name: "Remove action", exact: true}).click();
+  await expect(editor.getByRole("alert")).toHaveCount(0);
+  await editor.getByRole("button", {name: "Add Action", exact: true}).click();
+  await page.getByRole("button", {name: "In-App Notification", exact: false}).click();
+  await page.getByRole("button", {name: /Dashboard/}).last().click();
+  await page.getByRole("button", {name: "Confirm Selection", exact: true}).click();
+  await expect(editor.locator(".workflow-action-card")).toContainText("In-App Notification");
+  await page.screenshot({path: testInfo.outputPath("workflow-retained-replaced.png"), fullPage: true});
+  expect(unexpected).toEqual([]);
+});

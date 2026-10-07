@@ -21,18 +21,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRun
+from app.services.workflows.action_definitions import ACTION_BY_TYPE, pending_action_error
 
 LEASE_SECONDS = 300
 MAX_CLAIM_SCAN = 50
 ACTIVE_STATUSES = ("queued", "processing")
 ACTION_TERMINAL_STATES = frozenset({"succeeded", "failed", "skipped", "unknown"})
-# These may continue after an uncertain earlier hardware action. Their own
-# attempting checkpoint still prevents an ambiguous delivery from being retried.
-NOTIFICATION_ACTION_TYPES = frozenset(
-    {
-        "notification.enable",
-        "notification.disable",
-    }
+# Continuation after uncertainty is an explicit contract, independent of execution mode.
+CONTINUE_AFTER_UNKNOWN = frozenset(
+    key for key, definition in ACTION_BY_TYPE.items() if definition.continue_after_unknown
 )
 
 
@@ -250,6 +247,12 @@ class AutomationRunStore:
                         return None
                     continue
                 self._recover_attempts(row, now)
+                if error := pending_action_error(row.action_plan):
+                    self._terminal(row, "review_required", now, error)
+                    await session.commit()
+                    if run_id is not None:
+                        return None
+                    continue
                 if not any(item["state"] == "pending" for item in row.action_plan):
                     self._finish(row, now)
                     await session.commit()
@@ -370,10 +373,10 @@ class AutomationRunStore:
             raise ValueError("Local actions cannot report uncertain external delivery.")
         row, now = await self.owned(session, run_id, token)
         item = self._next_pending(row.action_plan, index)
-        if state == "succeeded" and item["action"]["type"] not in {
-            "notification.enable",
-            "notification.disable",
-        }:
+        if state == "succeeded" and (
+            (definition := ACTION_BY_TYPE.get(item["action"]["type"])) is None
+            or definition.execution != "transactional"
+        ):
             raise ValueError(
                 "Only transactional notification activation or durable delivery handoff can complete without an external attempt."
             )
@@ -385,6 +388,13 @@ class AutomationRunStore:
             row = await self.finish_in_session(session, run_id, token)
             await session.commit()
             return row
+
+    async def finish_review_in_session(
+        self, session: AsyncSession, run_id: uuid.UUID, token: uuid.UUID, reason: str,
+    ) -> None:
+        row, now = await self.owned(session, run_id, token)
+        self._terminal(row, "review_required", now, reason)
+        await session.flush()
 
     async def finish_in_session(
         self, session: AsyncSession, run_id: uuid.UUID, token: uuid.UUID
@@ -538,7 +548,7 @@ class AutomationRunStore:
             elif (
                 uncertain
                 and item["state"] == "pending"
-                and item["action"]["type"] not in NOTIFICATION_ACTION_TYPES
+                and item["action"]["type"] not in CONTINUE_AFTER_UNKNOWN
             ):
                 cls._skip(item, now, "earlier_action_unknown")
         row.action_plan = plan

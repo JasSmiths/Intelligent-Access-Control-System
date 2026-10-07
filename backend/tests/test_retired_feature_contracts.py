@@ -83,7 +83,7 @@ def test_retired_settings_are_not_environment_fields_or_dynamic_settings():
         assert error.value.unknown_keys == [key]
 
 
-def test_workflow_catalogs_and_normalizers_exclude_retired_messaging_contracts():
+def test_workflow_catalogs_exclude_retired_execution_but_reads_retain_history():
     notification_triggers = {
         event["value"] for group in notification_trigger_catalog() for event in group["events"]
     }
@@ -113,11 +113,11 @@ def test_workflow_catalogs_and_normalizers_exclude_retired_messaging_contracts()
     notification_actions = notification_payloads.normalize_actions([
         {"type": action} for action in ("discord", "whatsapp", "mobile", "voice", "in_app")
     ])
-    assert [action["type"] for action in notification_actions] == ["mobile", "voice", "in_app"]
+    assert [action["type"] for action in notification_actions] == ["discord", "whatsapp", "mobile", "voice", "in_app"]
     automation_actions = automation_definition.normalize_actions([
         {"type": "integration.whatsapp.send_message"}, {"type": "notification.disable"},
     ])
-    assert [action["type"] for action in automation_actions] == ["notification.disable"]
+    assert [action["type"] for action in automation_actions] == ["integration.whatsapp.send_message", "notification.disable"]
     triggers = automation_definition.normalize_triggers([
         {"type": "ai.phrase_received"}, {"type": "time.ai_text"},
         {"type": "time.every_x", "config": {"interval": 5, "unit": "minutes"}},

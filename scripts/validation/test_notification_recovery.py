@@ -5,6 +5,7 @@ import importlib.util
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 import uuid
 
 import httpx
@@ -662,3 +663,87 @@ async def test_enriched_facts_and_plan_survive_reclaim(monkeypatch):
     assert recovered.context["facts"]["vehicle_colour"] == "BLUE"
     assert recovered.delivery_plan[0]["action"]["message"] == "BLUE FORD AB12CDE"
     lookup.assert_awaited_once()
+
+
+@pytest.mark.parametrize("malformed", [
+    {"state": "pending", "rule": {}, "action": {"id": "old", "type": "retired", "old": {"ordered": [2, 1]}}},
+    {"state": "pending", "rule": {}, "action": {"id": "typo", "type": "mobile", "target_mdoe": "selected"}},
+    {"state": "pending", "rule": {}, "action": {"type": "in_app"}},
+    {"rule": {}, "action": {"id": "state-missing", "type": "mobile"}},
+    {"state": [], "rule": {}, "action": {"id": "state-list", "type": "mobile"}},
+    {"state": {}, "rule": {}, "action": {"id": "state-object", "type": "mobile"}},
+    {"state": None, "rule": {}, "action": {"id": "state-null", "type": "mobile"}},
+])
+async def test_malformed_pending_plan_is_held_once_with_original_content(malformed):
+    import copy
+    store = NotificationRunStore()
+    identity = await queued(store)
+    before = copy.deepcopy([malformed])
+    async with AsyncSessionLocal() as session:
+        await session.execute(update(NotificationRun).where(NotificationRun.id == identity).values(delivery_plan=before))
+        await session.commit()
+    assert await store.claim(identity) is None
+    held = await store.get(identity)
+    assert held.status == "review_required"
+    assert held.review_reason in {"unsupported_action_configuration", "execution_snapshot_unavailable"}
+    assert held.delivery_plan == before and held.claim_count == 0
+    assert run_summary(held)["review_reason"] == held.review_reason
+    assert await store.claim(identity) is None
+
+
+@pytest.mark.parametrize("bad_action", [
+    {"id": "bad", "type": "mobile", "target_mdoe": "selected"},
+    {"id": "recipient", "type": "mobile", "title_template": "@FirstName",
+     "variable_recipients": {"title_template": [{"occurrence": 1, "name": "FirstName", "target_ids": ["apprise:0"]}]}},
+])
+@pytest.mark.parametrize("source", ["override", "saved_rule"])
+async def test_unsupported_saved_notification_configuration_holds_instead_of_requeueing(monkeypatch, bad_action, source):
+    service = NotificationService()
+    overrides = [{"id": "retained", "name": "Retained", "trigger_event": context().event_type,
+                  "actions": [bad_action]}]
+    from app.models import NotificationRule
+    saved_id = uuid.uuid4()
+    if source == "saved_rule":
+        async with AsyncSessionLocal() as session:
+            session.add(NotificationRule(id=saved_id, name="Malformed retained rule", trigger_event=context().event_type,
+                                         actions=[bad_action], conditions=[], is_active=True))
+            await session.commit()
+    try:
+        identity = await service.run_store.create(owner.notification_context_payload(context()),
+            rules_override=overrides if source == "override" else None)
+        delivery = AsyncMock(side_effect=AssertionError("Invalid configuration reached provider"))
+        monkeypatch.setattr(service, "deliver_planned_action", delivery)
+        assert await service.dispatcher.run_once(identity)
+        held = await service.run_store.get(identity)
+        assert held.status == "review_required" and held.review_reason == "unsupported_action_configuration"
+        assert held.claim_count == 1 and held.delivery_plan is None
+        assert held.rules_override == (overrides if source == "override" else None)
+        if source == "saved_rule":
+            async with AsyncSessionLocal() as session:
+                assert (await session.get(NotificationRule, saved_id)).actions == [bad_action]
+        assert not await service.dispatcher.run_once(identity)
+        delivery.assert_not_awaited()
+    finally:
+        if source == "saved_rule":
+            async with AsyncSessionLocal() as session:
+                await session.execute(delete(NotificationRule).where(NotificationRule.id == saved_id))
+                await session.commit()
+
+
+
+async def test_attempted_retired_notification_keeps_frozen_payload_during_recovery():
+    import copy
+    store = NotificationRunStore()
+    identity = await queued(store)
+    action = {"id": "retained", "type": "retired", "media": "legacy",
+              "frozen_mobile_targets": [" old target "], "frozen_apprise_indexes": [2, 0]}
+    original = [{"state": "attempting", "rule": {"id": "retained"}, "action": action}]
+    async with AsyncSessionLocal() as session:
+        await session.execute(update(NotificationRun).where(NotificationRun.id == identity).values(delivery_plan=original))
+        await session.commit()
+    assert await store.claim(identity) is None
+    held = await store.get(identity)
+    expected = copy.deepcopy(original)
+    expected[0]["state"] = "unknown"
+    assert held.status == "review_required" and held.delivery_plan == expected
+    assert held.review_reason == "provider_outcome_unknown"

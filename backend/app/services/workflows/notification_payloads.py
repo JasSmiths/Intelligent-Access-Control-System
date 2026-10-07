@@ -11,6 +11,7 @@ from typing import Any
 
 from app.modules.notifications.base import NotificationContext
 from app.services.workflows.catalog import notification_trigger_catalog
+from app.services.workflows.channel_definitions import CHANNEL_BY_TYPE
 from app.services.workflows.context import normalize_string_list
 from app.services.workflows.template_recipients import normalize_variable_recipients
 
@@ -123,7 +124,12 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         action_type = str(raw.get("type") or "")
-        if action_type not in {"mobile", "voice", "in_app"}:
+        if not action_type:
+            continue
+        if action_type not in CHANNEL_BY_TYPE:
+            # Retained rules remain inspectable. New writes and pending dispatch
+            # reject unsupported channels independently of this read adapter.
+            actions.append({**raw, "id": str(raw.get("id") or f"action-{index + 1}")})
             continue
         actions.append(
             {

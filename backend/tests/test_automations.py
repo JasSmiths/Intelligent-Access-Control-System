@@ -815,7 +815,9 @@ def test_hardware_admission_covers_every_registered_gate_or_garage_action():
 
 def test_runtime_integration_registry_matches_pure_action_schema():
     assert registered_integration_action_types() == set(INTEGRATION_ACTION_KEYS)
-    assert {definition.type: (definition.provider, definition.action)
+    from app.services.workflows.action_definitions import ACTION_BY_TYPE
+    assert {definition.type: (ACTION_BY_TYPE[definition.type].provider,
+                              ACTION_BY_TYPE[definition.type].integration_action)
             for definition in automation_integration_actions.INTEGRATION_ACTIONS} == INTEGRATION_ACTION_KEYS
 
 
@@ -824,7 +826,7 @@ def test_automation_definition_and_intake_do_not_import_execution_facades():
     from pathlib import Path
     base = Path(__file__).resolve().parents[1] / "app/services"
     definition = ast.parse((base / "workflows/automation_definition.py").read_text())
-    allowed = {"app.services.automation_policy", "app.services.type_helpers",
+    allowed = {"app.services.workflows.action_definitions", "app.services.automation_policy", "app.services.type_helpers",
                "app.services.workflows.catalog", "app.services.workflows.context"}
     assert {node.module for node in ast.walk(definition) if isinstance(node, ast.ImportFrom)
             and (node.module or "").startswith("app.")} <= allowed

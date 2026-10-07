@@ -25,6 +25,12 @@ class WorkflowAction(TypedDict):
 
 
 class AutomationExecution(TypedDict):
+    """Owned ordered action identity, not proof of a committed external attempt.
+
+    Transactional handlers receive identity while pending in the caller's
+    transaction. Durable effect handlers receive it after begin_action commits;
+    hardware additionally rechecks its domain authorization before provider I/O.
+    """
     run_id: str
     claim_token: str
     index: int

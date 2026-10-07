@@ -9,7 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRule, ICloudCalendarAccount
 from app.services.icloud_calendar import ICloudCalendarError, get_icloud_calendar_service
-from app.services.workflows.automation_definition import INTEGRATION_ACTION_KEYS, AutomationContext
+from app.services.workflows.action_definitions import (
+    ACTION_BY_TYPE,
+    action_definition,
+    require_exhaustive_bindings,
+)
+from app.services.workflows.automation_definition import AutomationContext
 
 IntegrationEnabledCheck = Callable[[], Awaitable[bool]]
 
@@ -30,36 +35,18 @@ class IntegrationActionHandler(Protocol):
 @dataclass(frozen=True)
 class IntegrationActionDefinition:
     type: str
-    provider: str
-    provider_label: str
-    provider_description: str
-    action: str
-    label: str
-    description: str
     is_enabled: IntegrationEnabledCheck
     execute: IntegrationActionHandler
     disabled_reason: str = "Integration is not configured."
-    default_config: dict[str, Any] | None = None
 
     def action_catalog(self, status: "IntegrationActionStatus | None" = None) -> dict[str, Any]:
         status = status or IntegrationActionStatus(enabled=True)
         return {
-            "type": self.type,
-            "label": self.label,
-            "description": self.description,
-            "enabled": status.enabled,
-            "disabled": not status.enabled,
+            **action_definition(self.type).catalog(),
+            "enabled": status.enabled, "disabled": not status.enabled,
             "disabled_reason": status.disabled_reason,
-            "integration_action": True,
-            "integration_provider": self.provider,
-            "integration_provider_label": self.provider_label,
-            "integration_action_key": self.action,
-            "default_config": self.default_config
-            or {
-                "provider": self.provider,
-                "action": self.action,
-            },
         }
+
 
 
 @dataclass(frozen=True)
@@ -85,12 +72,14 @@ async def integration_action_catalog() -> list[dict[str, Any]]:
 
     providers: dict[str, dict[str, Any]] = {}
     for action, status in action_statuses:
+        definition = action_definition(action.type)
+        assert definition.provider is not None
         provider = providers.setdefault(
-            action.provider,
+            definition.provider,
             {
-                "id": action.provider,
-                "label": action.provider_label,
-                "description": action.provider_description,
+                "id": definition.provider,
+                "label": definition.provider_label,
+                "description": definition.provider_description,
                 "enabled": False,
                 "disabled_reason": None,
                 "actions": [],
@@ -143,8 +132,8 @@ async def execute_integration_action(
             "type": action_type,
             "status": "skipped",
             "reason": "integration_disabled",
-            "integration_provider": definition.provider,
-            "integration_action": definition.action,
+            "integration_provider": action_definition(definition.type).provider,
+            "integration_action": action_definition(definition.type).integration_action,
             "disabled_reason": status.disabled_reason,
         }
     return await definition.execute(
@@ -222,12 +211,6 @@ def _coerce_uuid(value: Any) -> uuid.UUID | None:
 INTEGRATION_ACTIONS = [
     IntegrationActionDefinition(
         type="integration.icloud_calendar.sync",
-        provider=INTEGRATION_ACTION_KEYS["integration.icloud_calendar.sync"][0],
-        provider_label="iCloud Calendar",
-        provider_description="Create or update Visitor Passes from connected iCloud Calendar accounts.",
-        action=INTEGRATION_ACTION_KEYS["integration.icloud_calendar.sync"][1],
-        label="Sync Calendars Now",
-        description="Scan connected iCloud Calendars for Open Gate events.",
         is_enabled=_icloud_calendar_enabled,
         execute=_execute_icloud_calendar_sync,
         disabled_reason="No active connected iCloud Calendar account has a valid session.",
@@ -235,3 +218,9 @@ INTEGRATION_ACTIONS = [
 ]
 
 INTEGRATION_ACTION_BY_TYPE = {action.type: action for action in INTEGRATION_ACTIONS}
+
+require_exhaustive_bindings(
+    {key: definition for key, definition in ACTION_BY_TYPE.items() if definition.provider is not None},
+    INTEGRATION_ACTION_BY_TYPE,
+    owner="Integration actions",
+)

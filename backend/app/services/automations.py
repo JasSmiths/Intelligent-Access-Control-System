@@ -68,6 +68,10 @@ from app.services.telemetry import (
 from app.services.type_helpers import as_dict
 from app.services.visitor_passes import serialize_visitor_pass
 from app.services.workflow_dispatch_ports import PreparedAutomationAction
+from app.services.workflows.action_definitions import (
+    ACTION_BY_TYPE,
+    validate_action,
+)
 from app.services.workflows.automation_definition import (
     ACTION_CATALOG,
     CONDITION_CATALOG,
@@ -624,7 +628,17 @@ class AutomationService:
             )
             current, now = await self.run_store.owned(session, run.id, token)
             item = current.action_plan[index]
-            checked_action(item.get("action"))
+            try:
+                checked_action(item.get("action"))
+                validate_action(item["action"])
+            except (TypeError, ValueError):
+                current.review_reason = "unsupported_action_configuration"
+                await self.run_store.finish_review_in_session(
+                    session, current.id, token, "unsupported_action_configuration"
+                )
+                await self._account_completion(session, current, rule)
+                await session.commit()
+                return None
             deadlines: dict[str, Any] = {}
             denial = await self._preflight(
                 session, current, item, now=now, rule=rule, deadlines=deadlines
@@ -644,15 +658,22 @@ class AutomationService:
                     requires_review=True,
                 )
             action, context = item["action"], restored_automation_context(current.context)
-            if denial is not None or action["type"] in {
-                "notification.enable",
-                "notification.disable",
-            }:
+            if denial is not None or (
+                (definition := ACTION_BY_TYPE.get(action["type"])) is not None
+                and definition.execution == "transactional"
+            ):
                 outcome = (
                     denial
                     if denial is not None
                     else await self._execute_action(
-                        session, action, context, rule=rule, execution=None
+                        session, action, context, rule=rule,
+                        # Identity from the currently owned pending row. This
+                        # does not assert that an external attempt committed.
+                        execution=checked_execution({
+                            "run_id": str(current.id), "claim_token": str(token),
+                            "index": index, "operation_id": item["operation_id"],
+                            "idempotency_key": item["idempotency_key"],
+                        }),
                     )
                 )
                 if outcome.get("requires_review"):

@@ -23,6 +23,12 @@ from app.services.automation_policy import (
 from app.services.gate_commands import GateCommandIntent
 from app.services.mutation_context import MutationError
 from app.services.type_helpers import as_dict
+from app.services.workflows.action_definitions import (
+    ACTION_BY_TYPE,
+    WorkflowConfigurationError,
+    require_exhaustive_bindings,
+    validate_action,
+)
 from app.services.workflows.automation_definition import (
     AutomationContext,
     context_missing_references,
@@ -71,10 +77,8 @@ HardwareAuthorization = Callable[[AsyncSession, AutomationExecution], Awaitable[
 
 
 def action_paused_by_maintenance_mode(action_type: str) -> bool:
-    return (
-        action_type.startswith(("notification.", "gate.", "garage_door."))
-        or action_type == "maintenance_mode.enable"
-    )
+    definition = ACTION_BY_TYPE.get(action_type)
+    return definition.paused_by_maintenance if definition else False
 
 
 def render_action_reason(
@@ -101,7 +105,12 @@ class AutomationActionExecutor:
         self.maintenance_active, self.maintenance_change = maintenance_active, maintenance_change
         self.notification_activation, self.integrations = notification_activation, integrations
         self.authorize_hardware = authorize_hardware
-        self.handlers: dict[str, ActionHandler] = {
+        self.handlers = self._bind_handlers()
+        require_exhaustive_bindings(ACTION_BY_TYPE, self.handlers, owner="Automation executor")
+
+    def _bind_handlers(self) -> dict[str, ActionHandler]:
+        """The sole inert action-type binding composition."""
+        return {
             "notification.enable": self._notification_activation,
             "notification.disable": self._notification_activation,
             "gate.open": self._gate_open,
@@ -111,7 +120,6 @@ class AutomationActionExecutor:
             "maintenance_mode.disable": self._maintenance,
             **{key: self._integration for key in registered_integration_action_types()},
         }
-
     async def execute(
         self,
         session: AsyncSession,
@@ -137,6 +145,12 @@ class AutomationActionExecutor:
         execution: AutomationExecution | None,
     ) -> dict[str, Any]:
         action_type = str(action["type"])
+        try:
+            validate_action(action)
+        except WorkflowConfigurationError:
+            return workflow_action_result(
+                action, "skipped", reason="unsupported_action_configuration", requires_review=True,
+            )
         denial = hardware_action_denial(action_type, context.provenance)
         if denial:
             return workflow_action_result(
@@ -155,7 +169,6 @@ class AutomationActionExecutor:
             )
         if (
             await self.maintenance_active()
-            and action_type != "maintenance_mode.disable"
             and action_paused_by_maintenance_mode(action_type)
         ):
             return workflow_action_result(action, "skipped", reason="maintenance_mode")

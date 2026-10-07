@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.services.workflows.action_definitions import ACTION_DEFINITIONS
+
 GATE_MALFUNCTION_EVENT_TYPE = "gate_malfunction"
 INTEGRATION_DEGRADED_EVENT_TYPE = "integration_degraded"
 
@@ -172,21 +174,6 @@ AUTOMATION_CONDITION_DEFINITIONS = (
     ("maintenance_mode", "Maintenance Mode", (("maintenance_mode.enabled", "Maintenance Mode Enabled", ("maintenance",)), ("maintenance_mode.disabled", "Maintenance Mode Disabled", ("maintenance",)))),
 )
 
-AUTOMATION_ACTION_DEFINITIONS = (
-    ("notifications", "Notifications", (
-        ("notification.enable", "Enable Notification", "Enable an existing notification workflow."),
-        ("notification.disable", "Disable Notification", "Disable an existing notification workflow."),
-    )),
-    ("gate_actions", "Gate Actions", (("gate.open", "Open the Gate", "Open configured gate entities through the gate controller."),)),
-    ("garage_door_actions", "Garage Door Actions", (
-        ("garage_door.open", "Open Garage Door", "Open one or more configured garage door entities."),
-        ("garage_door.close", "Close Garage Door", "Close one or more configured garage door entities."),
-    )),
-    ("maintenance_mode", "Maintenance Mode", (
-        ("maintenance_mode.enable", "Enable Maintenance Mode", "Enable the global automation kill-switch."),
-        ("maintenance_mode.disable", "Disable Maintenance Mode", "Disable the global automation kill-switch."),
-    )),
-)
 
 
 def notification_variable_groups() -> list[dict[str, object]]:
@@ -270,14 +257,13 @@ def automation_condition_catalog() -> list[dict[str, Any]]:
 
 
 def automation_action_catalog() -> list[dict[str, Any]]:
-    return [
-        {
-            "id": group_id,
-            "label": group_label,
-            "actions": [
-                {"type": item_type, "label": label, "description": description}
-                for item_type, label, description in actions
-            ],
-        }
-        for group_id, group_label, actions in AUTOMATION_ACTION_DEFINITIONS
-    ]
+    groups: dict[str, dict[str, Any]] = {}
+    for definition in ACTION_DEFINITIONS:
+        if definition.provider is not None:
+            continue  # Runtime integration status is composed by its owner.
+        group = groups.setdefault(
+            definition.group,
+            {"id": definition.group, "label": definition.group_label, "actions": []},
+        )
+        group["actions"].append(definition.catalog())
+    return list(groups.values())

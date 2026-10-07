@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.services.workflows.channel_definitions import CHANNEL_BY_TYPE
 from app.services.workflows.context import (
     AT_TOKEN_PATTERN,
     canonical_key,
@@ -18,8 +19,8 @@ class TemplateRecipientError(ValueError):
 
 FIELDS = ("title_template", "message_template")
 PREFIXES = {
-    "mobile": ("home_assistant_mobile:", "apprise:"),
-    "voice": ("home_assistant_tts:",),
+    key: definition.recipient_prefixes for key, definition in CHANNEL_BY_TYPE.items()
+    if definition.recipient_prefixes
 }
 
 

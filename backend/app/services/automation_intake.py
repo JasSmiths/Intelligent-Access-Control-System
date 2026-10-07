@@ -22,6 +22,11 @@ from app.services.automation_execution import AutomationRunStore, occurrence_key
 from app.services.automation_policy import HARDWARE_ACTION_TYPES, hardware_action_denial
 from app.services.telemetry import sanitize_payload
 from app.services.type_helpers import as_dict
+from app.services.workflows.action_definitions import (
+    WorkflowConfigurationError,
+    execution_actions,
+    validate_action,
+)
 from app.services.workflows.automation_definition import (
     AutomationContext,
     captured_automation_context,
@@ -98,8 +103,13 @@ async def reserve_occurrence(
 ) -> uuid.UUID:
     identity = uuid.uuid4()
     planned = []
-    for action in normalize_actions(rule.actions):
+    for action in execution_actions(rule.actions):
         item = {"action": action}
+        try:
+            validate_action(action)
+        except WorkflowConfigurationError:
+            planned.append(item)
+            continue
         denial = hardware_action_denial(action["type"], context.provenance)
         if not denial and action["type"] in HARDWARE_ACTION_TYPES:
             try:

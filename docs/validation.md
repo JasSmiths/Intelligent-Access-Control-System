@@ -138,7 +138,7 @@ samples are not performance acceptance checks.
 Full mode runs host source/configuration tests, architecture and Python checks,
 backend tests, full-source Ruff checks, undefined-name checks for backend and
 isolated validation fixtures, checked-body mypy checks, strict typed
-contract checks, frontend tests/build and Compose configuration
+contract checks, generated workflow contract freshness, frontend tests/build and Compose configuration
 validation. It then migrates disposable PostgreSQL, checks Alembic state and
 drift, runs persistence suites with separate database/Redis state, required
 schema and recovery diagnostics, and a synthetic `pg_dump`/`pg_restore` rehearsal.
@@ -306,3 +306,20 @@ directory pages before and after adding 25 tests per stored snapshot, including
 query count, returned rows, payload size, Python allocation peaks and the indexed
 snapshot-read plan. Nullable NI/commercial fields are inert fixtures, never live
 provider calls.
+
+### Generated workflow contract freshness
+
+The full and db-free harness run
+`python -m app.services.workflows.export_contracts --check` inside the locked
+backend dependency environment. CI uses the same harness. After changing pure
+action/channel config or defaults, run
+`python -m app.services.workflows.export_contracts` from `backend/` with those
+locked dependencies to regenerate `frontend/src/api/generated/workflows.ts`.
+Unsupported schema constructs fail explicitly; do not hand-edit generated output.
+
+Workflow conformance covers exhaustive bindings/config/editor defaults, rejected
+new writes, historical display, unsupported pending review holds and unchanged
+attempted identities. The disposable PostgreSQL notification-activation suite
+also proves a test-only new transactional action reserves domain work with its
+mutation, receipt and audit in one commit, rolls them all back on audit failure,
+preserves retry identity and forbids expired claims and external ports.

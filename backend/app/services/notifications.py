@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -70,6 +71,7 @@ from app.services.unifi_protect import get_unifi_protect_service
 from app.services.vehicle_information import get_vehicle_information_service
 from app.services.workflow_dispatch_ports import NotificationPolicy
 from app.services.workflows import notification_payloads
+from app.services.workflows.action_definitions import require_exhaustive_bindings
 from app.services.workflows.catalog import (
     GATE_MALFUNCTION_EVENT_TYPE,
     INTEGRATION_DEGRADED_EVENT_TYPE,
@@ -77,6 +79,7 @@ from app.services.workflows.catalog import (
     notification_trigger_catalog,
     notification_variable_groups,
 )
+from app.services.workflows.channel_definitions import CHANNEL_BY_TYPE
 from app.services.workflows.execution_contracts import (
     NotificationActionOutcome,
     NotificationPlanItem,
@@ -219,6 +222,15 @@ class NotificationService:
         self.recipients = NotificationRecipients(
             sessions=lambda: AsyncSessionLocal(), clients=lambda: _home_assistant_client()
         )
+        self.delivery_handlers: dict[
+            str, Callable[[dict[str, Any], NotificationContext, RuntimeConfig, dict[str, Any]],
+                          Awaitable[NotificationActionOutcome]]
+        ] = {
+            "mobile": self._deliver_mobile,
+            "voice": self._deliver_voice,
+            "in_app": self._deliver_in_app,
+        }
+        require_exhaustive_bindings(CHANNEL_BY_TYPE, self.delivery_handlers, owner="Notification delivery")
         self.dispatcher = NotificationDispatcher(self, self.run_store)
 
     async def start(self) -> None:
@@ -885,24 +897,36 @@ class NotificationService:
         rendered_rule: dict[str, Any],
     ) -> NotificationActionOutcome:
         action_type = str(action.get("type") or "")
-        if action_type == "mobile":
-            return await self._send_mobile(action, context, config)
-        if action_type == "in_app":
-            await event_bus.publish(
-                "notification.in_app",
-                {
-                    "rule_id": rendered_rule["id"],
-                    "title": action.get("title") or rendered_rule["name"],
-                    "body": action.get("message") or "",
-                    "event_type": context.event_type,
-                    "severity": context.severity,
-                    "snapshot": action.get("snapshot") or None,
-                },
-            )
-            return NotificationActionOutcome(delivered=True)
-        if action_type == "voice":
-            return await self._send_voice(action, config)
-        raise NotificationDeliveryError(f"Unsupported notification action: {action_type}")
+        handler = self.delivery_handlers.get(action_type)
+        if handler is None:
+            raise NotificationDeliveryError(f"Unsupported notification action: {action_type}")
+        return await handler(action, context, config, rendered_rule)
+
+    async def _deliver_mobile(
+        self, action: dict[str, Any], context: NotificationContext, config: RuntimeConfig, _rendered_rule: dict[str, Any],
+    ) -> NotificationActionOutcome:
+        return await self._send_mobile(action, context, config)
+
+    async def _deliver_voice(
+        self, action: dict[str, Any], _context: NotificationContext, config: RuntimeConfig, _rendered_rule: dict[str, Any],
+    ) -> NotificationActionOutcome:
+        return await self._send_voice(action, config)
+
+    async def _deliver_in_app(
+        self, action: dict[str, Any], context: NotificationContext, _config: RuntimeConfig, rendered_rule: dict[str, Any],
+    ) -> NotificationActionOutcome:
+        await event_bus.publish(
+            "notification.in_app",
+            {
+                "rule_id": rendered_rule["id"],
+                "title": action.get("title") or rendered_rule["name"],
+                "body": action.get("message") or "",
+                "event_type": context.event_type,
+                "severity": context.severity,
+                "snapshot": action.get("snapshot") or None,
+            },
+        )
+        return NotificationActionOutcome(delivered=True)
 
     async def _send_mobile(
         self,

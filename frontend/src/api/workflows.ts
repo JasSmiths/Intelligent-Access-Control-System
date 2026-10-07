@@ -1,7 +1,9 @@
 import { api, createActionConfirmation, type ApiRequestOptions } from "./client";
 import type { NotificationChannelId, NotificationTriggerOption, UnifiProtectCamera } from "./types";
+import type { NotificationActionConfig, NotificationChannelType } from "./generated/workflows";
+export type { ActionConfigByType, AutomationActionType, KnownAutomationAction } from "./generated/workflows";
 
-export type NotificationActionType = NotificationChannelId;
+export type NotificationActionType = NotificationChannelType;
 export type NotificationConditionType = "schedule" | "presence";
 export type PresenceConditionMode = "no_one_home" | "someone_home" | "person_home";
 export type NotificationTargetMode = "all" | "many" | "selected";
@@ -11,7 +13,8 @@ export type NotificationIntegration = { id: NotificationChannelId; name: string;
 export type NotificationCondition = { id: string; type: NotificationConditionType; schedule_id?: string; mode?: PresenceConditionMode; person_id?: string };
 export type VariableRecipientRestriction = { occurrence: number; name: string; target_ids: string[] };
 export type NotificationVariableRecipients = Partial<Record<"title_template" | "message_template", VariableRecipientRestriction[]>>;
-export type NotificationAction = { id: string; type: NotificationActionType; target_mode: NotificationTargetMode; target_ids: string[]; title_template: string; message_template: string; variable_recipients?: NotificationVariableRecipients; gate_malfunction_stages: NotificationGateMalfunctionStage[]; media: { attach_camera_snapshot: boolean; camera_id: string }; actionable: { enabled: boolean; action: string } };
+// Retained unknown types stay visible; new actions use the generated closed contract.
+export type NotificationAction = NotificationActionConfig & { id: string; type: string };
 export type NotificationRule = { id: string; name: string; trigger_event: string; conditions: NotificationCondition[]; actions: NotificationAction[]; is_active: boolean; last_fired_at?: string | null; created_at?: string; updated_at?: string };
 export type NotificationVariable = { name: string; token: string; label: string };
 export type NotificationVariableGroup = { group: string; items: NotificationVariable[] };
@@ -22,6 +25,8 @@ export type NotificationGateMalfunctionStageOption = { value: NotificationGateMa
 export type NotificationCatalogResponse = { triggers: NotificationTriggerGroup[]; variables: NotificationVariableGroup[]; integrations: NotificationIntegration[]; actionable_notifications?: NotificationActionableGroup[]; gate_malfunction_stages?: NotificationGateMalfunctionStageOption[]; mock_context: Record<string, string> };
 
 export type AutomationNode = { id: string; type: string; config: Record<string, unknown> };
+// Existing rules can retain unknown action types. Typed write/editor paths use
+// KnownAutomationAction while this read shape preserves their original content.
 export type AutomationAction = AutomationNode & { reason_template?: string };
 // Historical checkpoint values may be malformed. Presentation must explicitly
 // show unavailable fields instead of treating them as a successful action.

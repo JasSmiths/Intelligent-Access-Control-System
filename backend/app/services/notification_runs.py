@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 from app.db.session import AsyncSessionLocal
 from app.models import NotificationRun
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, write_audit_log
+from app.services.workflows.channel_definitions import pending_notification_error
 
 LEASE_SECONDS = 300
 MAX_DISPATCH_AGE_SECONDS = 900
@@ -232,12 +233,17 @@ class NotificationRunStore:
             if row is None:
                 return None
             plan = copy.deepcopy(row.delivery_plan)
-            if plan and any(item["state"] == "attempting" for item in plan):
+            error = pending_notification_error(plan) if plan is not None else None
+            if error == "execution_snapshot_unavailable":
+                self._review(row, error, now)
+            elif plan and any(item["state"] == "attempting" for item in plan):
                 for item in plan:
                     if item["state"] == "attempting":
                         item["state"] = "unknown"
                 row.delivery_plan = plan
                 self._review(row, "provider_outcome_unknown", now)
+            elif error:
+                self._review(row, error, now)
             elif (now - row.queued_at).total_seconds() > MAX_DISPATCH_AGE_SECONDS:
                 self._review(row, "dispatch_age_exceeded", now)
             elif row.delivery_plan is None and row.claim_count >= MAX_PREPARATION_ATTEMPTS:
@@ -281,7 +287,21 @@ class NotificationRunStore:
             row.delivery_plan = copy.deepcopy(plan)
             if facts is not None:
                 row.context = {**row.context, "facts": copy.deepcopy(facts)}
+            if error := pending_notification_error(plan):
+                self._review(row, error, now)
+                self._counts(row)
+                await self._audit_checkpoint(session, row, "review", reason=error)
+                await session.commit()
+                raise ClaimLost("Notification configuration needs review.")
             row.lease_expires_at = now + timedelta(seconds=LEASE_SECONDS)
+            await session.commit()
+
+    async def hold(self, run_id, token, reason: str) -> None:
+        async with self.sessions() as session:
+            row, now = await self._owned(session, run_id, token)
+            self._review(row, reason, now)
+            self._counts(row)
+            await self._audit_checkpoint(session, row, "review", reason=reason)
             await session.commit()
 
     async def begin_action(
@@ -350,6 +370,11 @@ class NotificationRunStore:
             plan = copy.deepcopy(row.delivery_plan)
             if plan[index]["state"] != "pending":
                 raise ClaimLost("Action was already attempted")
+            if error := pending_notification_error([plan[index]]):
+                self._review(row, error, now)
+                await self._audit_checkpoint(session, row, "review", reason=error)
+                await session.commit()
+                raise ClaimLost("Notification configuration needs review.")
             if action_skip:
                 plan[index].update(state="skipped", reason=action_skip)
                 row.delivery_plan = plan
@@ -419,12 +444,17 @@ class NotificationRunStore:
             except ClaimLost:
                 return
             plan = copy.deepcopy(row.delivery_plan)
-            if plan and any(item["state"] == "attempting" for item in plan):
+            error = pending_notification_error(plan) if plan is not None else None
+            if error == "execution_snapshot_unavailable":
+                self._review(row, error, now)
+            elif plan and any(item["state"] == "attempting" for item in plan):
                 for item in plan:
                     if item["state"] == "attempting":
                         item["state"] = "unknown"
                 row.delivery_plan = plan
                 self._review(row, "provider_outcome_unknown", now)
+            elif error:
+                self._review(row, error, now)
             else:
                 row.status = "queued"
                 row.claim_token = None
@@ -486,16 +516,17 @@ class NotificationRunStore:
 
     @staticmethod
     def _counts(row):
-        plan = row.delivery_plan or []
-        row.delivered_count = sum(x["state"] == "accepted" for x in plan)
+        raw = row.delivery_plan
+        plan = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+        row.delivered_count = sum(x.get("state") == "accepted" for x in plan)
         row.failed_count = sum(_item_failure_count(item) for item in plan)
-        row.skipped_count = sum(x["state"] == "skipped" for x in plan)
+        row.skipped_count = sum(x.get("state") == "skipped" for x in plan)
         row.failures = [
             _failure_reason(item)
             for item in plan
             if _item_failure_count(item) or item.get("review_required")
         ]
-        row.skipped_reasons = [x.get("reason", "skipped") for x in plan if x["state"] == "skipped"]
+        row.skipped_reasons = [x.get("reason", "skipped") for x in plan if x.get("state") == "skipped"]
 
 
 def review_filter():
@@ -527,9 +558,9 @@ def run_summary(row: NotificationRun) -> dict[str, Any]:
         "actions": [
             {
                 "index": index,
-                "state": item["state"],
-                "rule_id": item.get("rule", {}).get("id"),
-                "action_id": item.get("action", {}).get("id"),
+                "state": item.get("state") if isinstance(item.get("state"), str) else None,
+                "rule_id": item["rule"].get("id") if isinstance(item.get("rule"), dict) else None,
+                "action_id": item["action"].get("id") if isinstance(item.get("action"), dict) else None,
                 "partial_failure": item.get("partial_failure", False),
                 "failure_count": _item_failure_count(item),
                 "review_required": bool(item.get("review_required")),
@@ -541,7 +572,8 @@ def run_summary(row: NotificationRun) -> dict[str, Any]:
                 ),
                 "destination_outcomes": safe_destination_outcomes(item.get("destination_outcomes")),
             }
-            for index, item in enumerate(row.delivery_plan or [])
+            for index, raw in enumerate(row.delivery_plan if isinstance(row.delivery_plan, list) else [])
+            for item in [raw if isinstance(raw, dict) else {}]
         ],
     }
 
@@ -553,7 +585,7 @@ def _authorization_parts(value: Any) -> tuple[str | None, str | None]:
 
 
 def _item_failure_count(item: dict[str, Any]) -> int:
-    if item.get("state") not in {"accepted", "failed", "unknown"}:
+    if not isinstance(item.get("state"), str) or item["state"] not in {"accepted", "failed", "unknown"}:
         return 0
     try:
         recorded = max(0, int(item.get("failure_count", 0)))
@@ -570,7 +602,7 @@ def _failure_reason(item: dict[str, Any]) -> str:
     if raw_uncertain or item.get("state") == "unknown" or item.get("review_required"):
         return "provider_outcome_unknown"
     reason = item.get("reason")
-    if reason in {"provider_rejected", "provider_not_sent"}:
+    if isinstance(reason, str) and reason in {"provider_rejected", "provider_not_sent"}:
         return reason
     outcomes = safe_destination_outcomes(item.get("destination_outcomes"))
     if any(outcome["delivery"] == "rejected" for outcome in outcomes):

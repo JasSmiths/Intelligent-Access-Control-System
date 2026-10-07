@@ -1,9 +1,10 @@
+import { CHANNEL_METADATA, isNotificationChannelType } from "../../api/generated/workflows";
 import { useModalClose } from "../../ui/useModalClose";
 import { AlertTriangle, Check, Plus, Search, Smartphone, Sparkles, Trash2, Users, X } from "lucide-react";
 import React from "react";
 import { createPortal } from "react-dom";
 import type { UnifiProtectCamera } from "../../api/types";
-import type { NotificationAction, NotificationActionableOption, NotificationEndpoint, NotificationGateMalfunctionStage, NotificationGateMalfunctionStageOption, NotificationIntegration, NotificationVariable } from "../../api/workflows";
+import type { NotificationAction, NotificationActionableOption, NotificationEndpoint, NotificationGateMalfunctionStage, NotificationGateMalfunctionStageOption, NotificationIntegration, NotificationVariable, NotificationVariableRecipients } from "../../api/workflows";
 import { notificationChannelMeta } from "../../lib/notifications";
 import { matchesSearchText } from "./model";
 import { concreteNotificationEndpoints, normalizeGateMalfunctionStages, normalizeNotificationActionable, normalizeNotificationMedia, notificationActionTargetChips, variableRecipientChoices } from "./notificationModel";
@@ -30,15 +31,23 @@ export function NotificationActionCard({
   onChange: (action: NotificationAction) => void;
   onRemove: () => void;
 }) {
+  const [addingRecipients, setAddingRecipients] = React.useState(false);
+  if (!isNotificationChannelType(action.type)) {
+    return <article className="workflow-action-card">
+      <strong>{action.type}</strong>
+      <p role="alert">This retained action is unsupported. Replace it before saving or enabling the workflow.</p>
+      <button className="icon-button danger" onClick={onRemove} type="button" aria-label="Remove action"><Trash2 size={14} /></button>
+    </article>;
+  }
   const meta = notificationChannelMeta[action.type];
   const Icon = meta.icon;
-  const supportsTitle = action.type !== "voice" && !isGateMalfunctionWorkflow;
+  const supportsTitle = CHANNEL_METADATA[action.type].supports_title && !isGateMalfunctionWorkflow;
   const supportsMessageTemplate = !isGateMalfunctionWorkflow;
-  const supportsMedia = action.type === "mobile" || action.type === "in_app";
-  const supportsActionable = action.type === "mobile" && actionableOptions.length > 0;
+  const supportsMedia = CHANNEL_METADATA[action.type].supports_media;
+  const supportsActionable = CHANNEL_METADATA[action.type].supports_actionable && actionableOptions.length > 0;
   const variableRecipients = action.type === "in_app" ? undefined : variableRecipientChoices(action, integration);
   const updateTemplate = (field: "title_template" | "message_template", value: string, restrictions?: import("../../api/workflows").VariableRecipientRestriction[]) => {
-    const visibility = {...action.variable_recipients};
+    const visibility: NotificationVariableRecipients = {...action.variable_recipients};
     if (restrictions !== undefined) {
       if (restrictions.length) visibility[field] = restrictions;
       else delete visibility[field];
@@ -52,7 +61,6 @@ export function NotificationActionCard({
   const cameraSnapshotUrl = selectedCamera
     ? `/api/v1/integrations/unifi-protect/cameras/${selectedCamera.id}/snapshot?width=320&height=180`
     : "";
-  const [addingRecipients, setAddingRecipients] = React.useState(false);
   const mobileEndpoints = concreteNotificationEndpoints(integration?.endpoints ?? []);
   const editableTargetIds = action.target_mode === "all"
     ? mobileEndpoints.map((endpoint) => endpoint.id)
@@ -231,10 +239,10 @@ export function NotificationActionCard({
                   checked={actionActionable.enabled}
                   onChange={(event) => onChange({
                     ...action,
-                    actionable: {
+                    actionable: normalizeNotificationActionable({
                       enabled: event.target.checked,
                       action: event.target.checked ? selectedActionable.value : actionActionable.action,
-                    },
+                    }),
                   })}
                   type="checkbox"
                 />
@@ -243,7 +251,7 @@ export function NotificationActionCard({
               {actionActionable.enabled ? (
                 <select
                   value={selectedActionable.value}
-                  onChange={(event) => onChange({ ...action, actionable: { enabled: true, action: event.target.value } })}
+                  onChange={(event) => onChange({ ...action, actionable: normalizeNotificationActionable({ enabled: true, action: event.target.value }) })}
                   aria-label="Actionable notification action"
                 >
                   {actionableOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}

@@ -19,6 +19,8 @@ from app.services.notifications import (
     notification_context_from_payload,
     sample_notification_context,
 )
+from app.services.workflows.action_definitions import WorkflowConfigurationError
+from app.services.workflows.channel_definitions import validate_notification_actions
 from app.services.workflows.notification_payloads import (
     normalize_rule_payload,
 )
@@ -272,8 +274,9 @@ async def test_notification_rule_payload(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
     try:
+        validate_notification_actions(request.rule.get("actions"))
         rule = normalize_rule_payload(request.rule)
-    except TemplateRecipientError as exc:
+    except (TemplateRecipientError, WorkflowConfigurationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not rule["trigger_event"]:
         raise HTTPException(status_code=400, detail="A trigger is required before sending a test.")
@@ -315,7 +318,11 @@ async def test_notification_rule(
     request: StoredNotificationRuleTestRequest | None = None,
 ) -> dict[str, Any]:
     rule = await get_rule_or_404(session, rule_id)
-    serialized = serialize_rule(rule)
+    try:
+        validate_notification_actions(rule.actions)
+        serialized = serialize_rule(rule)
+    except (TemplateRecipientError, WorkflowConfigurationError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     context = sample_notification_context(serialized["trigger_event"])
     result = await send_confirmed_notification(
         session,

@@ -1,3 +1,4 @@
+import { defaultNotificationConfig, isNotificationChannelType, NOTIFICATION_CHANNELS } from "../../api/generated/workflows";
 import { AlertTriangle, Bell, Car, Construction, DoorOpen, Home, MessageCircle, Monitor, PlugZap, ShieldCheck, Smartphone, Trophy, UserPlus, Volume2 } from "lucide-react";
 import React from "react";
 import type { Person, UserAccount } from "../../api/types";
@@ -29,21 +30,6 @@ export type NotificationActionMethod = {
   requiresTarget: boolean;
   defaultTargetIds: string[];
   unavailableReason?: string;
-};
-
-const defaultWorkflowActionTemplates: Record<NotificationActionType, Pick<NotificationAction, "title_template" | "message_template">> = {
-  mobile: {
-    title_template: "@FirstName arrived at the gate",
-    message_template: "@FirstName arrived in the @VehicleName. Gate status: @GateStatus."
-  },
-  in_app: {
-    title_template: "@FirstName arrived at the gate",
-    message_template: "@FirstName arrived in the @VehicleName."
-  },
-  voice: {
-    title_template: "",
-    message_template: "@FirstName has arrived at the gate."
-  },
 };
 
 const vehicleTtsPhonetics: Record<string, string> = {
@@ -92,7 +78,7 @@ export function notificationTriggerGroupIcon(groupId: string) {
 }
 
 export function notificationActionCategories(): TwoPaneCategory[] {
-  return (["mobile", "voice", "in_app"] as NotificationActionType[])
+  return NOTIFICATION_CHANNELS
     .map((id) => {
       const meta = notificationChannelMeta[id];
       return { id, label: meta.label, count: 0, icon: meta.icon };
@@ -238,7 +224,7 @@ export function notificationActionTargetChips(action: NotificationAction, integr
     return [
       {
         id: `${action.id}:all`,
-        provider: aggregate?.provider ?? notificationChannelMeta[action.type].label,
+        provider: aggregate?.provider ?? notificationActionLabel(action.type),
         label: aggregate?.label ?? (action.type === "in_app" ? "All signed-in dashboards" : "All configured endpoints"),
         unavailable: !integration?.configured && action.type !== "in_app",
       },
@@ -249,7 +235,7 @@ export function notificationActionTargetChips(action: NotificationAction, integr
     return [
       {
         id: `${action.id}:none`,
-        provider: notificationChannelMeta[action.type].label,
+        provider: notificationActionLabel(action.type),
         label: "No targets selected",
         unavailable: true,
       },
@@ -297,17 +283,9 @@ export function createWorkflowAction(
   type: NotificationActionType,
   overrides: Partial<Pick<NotificationAction, "target_mode" | "target_ids">> = {}
 ): NotificationAction {
-  const templates = defaultWorkflowActionTemplates[type];
   return {
-    id: draftId("action"),
-    type,
-    target_mode: overrides.target_mode ?? "all",
-    target_ids: overrides.target_ids ?? [],
-    title_template: templates.title_template,
-    message_template: templates.message_template,
-    gate_malfunction_stages: [],
-    media: { attach_camera_snapshot: false, camera_id: "" },
-    actionable: { enabled: false, action: "" }
+    id: draftId("action"), type, ...defaultNotificationConfig(type),
+    ...structuredClone(overrides),
   };
 }
 
@@ -375,8 +353,14 @@ function isGateMalfunctionStage(value: string): value is NotificationGateMalfunc
 
 function normalizeNotificationAction(action: Partial<NotificationAction>): NotificationAction {
   const rawType = stringifyTemplateValue(action.type);
-  const type = isNotificationActionType(rawType) ? rawType : "in_app";
-  const templates = defaultWorkflowActionTemplates[type];
+  if (rawType && !isNotificationChannelType(rawType)) {
+    // Preserve unknown historical content for display/removal; never turn it
+    // into a supported delivery channel while cloning or saving a rule.
+    return {...action, id: stringifyTemplateValue(action.id) || draftId("action"), type: rawType} as NotificationAction;
+  }
+  const type = rawType || "in_app";
+  const templates = isNotificationChannelType(type)
+    ? defaultNotificationConfig(type) : {title_template: "", message_template: ""};
   const variableRecipients = normalizeVariableRecipients(action.variable_recipients);
   return {
     id: stringifyTemplateValue(action.id) || draftId("action"),
@@ -392,8 +376,8 @@ function normalizeNotificationAction(action: Partial<NotificationAction>): Notif
   };
 }
 
-function isNotificationActionType(value: string): value is NotificationActionType {
-  return value === "mobile" || value === "in_app" || value === "voice";
+export function notificationActionLabel(type: string): string {
+  return isNotificationChannelType(type) ? notificationChannelMeta[type].label : type;
 }
 
 function normalizeNotificationTargetMode(value: unknown): NotificationTargetMode {
@@ -418,8 +402,9 @@ export function normalizeNotificationActionable(actionable: unknown): Notificati
   };
 }
 
-export function notificationActionWithSupportedActionable(action: NotificationAction, options: NotificationActionableOption[]) {
+export function notificationActionWithSupportedActionable(action: NotificationAction, options: NotificationActionableOption[]): NotificationAction {
   const normalized = normalizeNotificationAction(action);
+  if (!isNotificationChannelType(normalized.type)) return normalized;
   if (!normalized.actionable.enabled) return normalized;
   if (options.some((option) => option.value === normalized.actionable.action)) return normalized;
   return { ...normalized, actionable: { enabled: false, action: "" } };
@@ -439,6 +424,13 @@ export function notificationSeverityTone(value: string): BadgeTone {
 
 export function renderWorkflowPreview(actions: NotificationAction[], context: Record<string, string>, triggerEvent = "", stageOptions: NotificationGateMalfunctionStageOption[] = []) {
   return actions.map(normalizeNotificationAction).map((action) => {
+    if (!isNotificationChannelType(action.type)) {
+      // A display-only projection cannot let malformed retained fields replace
+      // safe preview values. The underlying action remains byte-for-byte data.
+      return {...defaultNotificationConfig("in_app"), id: action.id, type: action.type,
+        title: action.type, message: "This retained action is unsupported.",
+        phoneticsApplied: false};
+    }
     const generated = triggerEvent === "gate_malfunction"
       ? gateMalfunctionPreviewContent(action.type, context, stageOptions)
       : null;

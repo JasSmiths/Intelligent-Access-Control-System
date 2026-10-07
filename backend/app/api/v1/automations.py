@@ -12,6 +12,7 @@ from app.models import AutomationRule, User
 from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services.automation_errors import AutomationError
 from app.services.automation_execution import AutomationRunStore
+from app.services.automation_rules import validated_actions
 from app.services.automation_serialization import serialize_rule, serialize_run
 from app.services.automations import (
     WEBHOOK_NONCE_HEADER,
@@ -21,7 +22,6 @@ from app.services.automations import (
 )
 from app.services.mutation_context import MutationError, load_active_admin
 from app.services.workflows.automation_definition import (
-    normalize_actions,
     normalize_conditions,
     normalize_triggers,
 )
@@ -190,11 +190,15 @@ async def dry_run_automation_rule(rule_id: uuid.UUID, _: Annotated[User, Depends
 
 @router.post("/dry-run")
 async def dry_run_unsaved_automation_rule(request: dict[str, Any], _: Annotated[User, Depends(admin_user)]) -> dict[str, Any]:
+    try:
+        actions = validated_actions(request.get("actions"))
+    except AutomationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     rule = {
         "name": request.get("name") or "Unsaved Automation",
         "triggers": normalize_triggers(request.get("triggers")),
         "conditions": normalize_conditions(request.get("conditions")),
-        "actions": normalize_actions(request.get("actions")),
+        "actions": actions,
         "is_active": request.get("is_active", True),
     }
     trigger_key = str(request.get("trigger_key") or "") or None

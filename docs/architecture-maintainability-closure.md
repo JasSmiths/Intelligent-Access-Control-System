@@ -15,19 +15,33 @@ an explicit disposition requiring approval, not a claim that code was fixed.
 - Sol Ultra implements; Astra Ultra advises and reviews each immutable candidate.
 - Evidence root: `/private/tmp/iacs-maintainability-programme`; final candidate
   source/patch identities and review records are added after validation.
-- Current checkpoint: P0 changes prepared; required full validation and candidate
-  sign-off pending. P1 frontend work may proceed in disjoint files but does not
-  alter the P0 completion gate. The brief initial shared-checkout editing period
-  was separated before the first validation checkpoint: frontend work moved
-  byte-for-byte to `/Users/jas/.codex/worktrees/iacs-maintainability-frontend/Intelligent Access System`
-  on `codex/iacs-maintainability-frontend`; integration is sequential. No stage is complete at this checkpoint.
+- Approved P0/P1 backend checkpoint: `0483c6df0433b29371d5718fb2e86ac370bca993`.
+  Astra Ultra approved P0 and P1 runtime packaging separately on source
+  `de379a8e8be9c91b8008266204b3a37219c24c473a8f408b6831f48cbbb166c2`
+  and patch `3e1cdab5cc4790a6ea5d871cff1e2e408411457ce9aef99388320f40519ce0f8`.
+  All 141 full-harness checks passed; the final host-only fixture amendment
+  passed 29 configuration and 22 source tests, with unchanged runtime hashes.
+- Approved P1 frontend checkpoint: original `382e80de08e59241a5b25b4f63dbee583725f426`,
+  integrated as `03f56bed97551fe6c97f093c789f905683c7fdc7`. Astra Ultra approved
+  Node 22 build, 291 tests and 42 Chromium/WebKit cases. The integration receipt
+  verifies all approved frontend blobs and all unaffected backend source hashes.
+- Current checkpoint: P2 implementation and conformance fixtures prepared;
+  required candidate validation and Astra sign-off pending. P3 frontend feature
+  reads are developed separately and integrate after the approved P2 checkpoint.
+  The brief initial shared-checkout editing period was separated before the first
+  validation checkpoint; integration remains sequential.
+- Retained evidence: `p0-p1-validation/iacs-validation-smbqtetg`,
+  `runtime-pdf/iacs-runtime-pdf-ssq2ubtb`, `p0-p1-snapshot-to-candidate.json`,
+  `p0-p1-astra-approval.json` and `p0-p1-integration.json`, relative to the
+  evidence root. Runtime PDF: non-root final image, no network/overlays,
+  142,385-byte PDF; source, image, hash, size and timing identities retained.
 - Deployment, production migrations and live provider/hardware tests are excluded.
 
 ## Findings
 
 | Finding | Owner and stages | Required closure evidence | Status / Astra approval |
 | --- | --- | --- | --- |
-| AM-01 workflow definitions | Workflow definitions, handlers and generated editor contracts; P2 | Exhaustive action/config/editor/handler parity, historical plan/recovery checks, E2 conformance | Pending / pending |
+| AM-01 workflow definitions | Workflow definitions, handlers and generated editor contracts; P2 | Exhaustive action/config/editor/handler parity, historical plan/recovery checks, E2 conformance | Implemented, validation/review pending / pending |
 | AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Pending / pending |
 | AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Pending / pending |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Pending / pending |
@@ -35,8 +49,8 @@ an explicit disposition requiring approval, not a claim that code was fixed.
 | AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | Pending / pending |
 | AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Overflow/counters/current evidence, nested publication, shutdown and 20/2,000-input probes | Pending / pending |
 | AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Pending / pending |
-| AM-09 runtime PDF support | Shared backend image ancestry and final-image smoke; P1 | Runtime-user PDF from installed actual template with no network/overlays; image identity/size/build time | Pending / pending |
-| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original coverage/flags preserved; package inheritance and negative guards; successful JSON/complete-plan retention and full harness | Implemented, validation/review pending / pending |
+| AM-09 runtime PDF support | Shared backend image ancestry and final-image smoke; P1 | Runtime-user PDF from installed actual template with no network/overlays; image identity/size/build time | Closed / Astra approved P1 runtime packaging |
+| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original coverage/flags preserved; package inheritance and negative guards; successful JSON/complete-plan retention and full harness | P0 safeguards approved; continuous P2–P9 checks pending / Astra approved P0 |
 | AM-11 obsolete authority/bridges | Pure access plan, execution result and durable workflow intake; P5 | Whole-repository consumer trace; authoritative journals retained; no duplicate realtime intake | Pending / pending |
 | AM-12 compact presence/forecast | Presence/predictor reads; P7 | Equivalent output and compact unloaded columns; bounded internal reads; 20/2,000-person density evidence; public-list exception disclosed | Pending / pending |
 | AM-13 provider-information reset | Vehicle information store in-session invalidation; P5 | Plate-change aggregate, stale completion and user-field preservation; E4 conformance | Pending / pending |
@@ -64,7 +78,7 @@ an explicit disposition requiring approval, not a claim that code was fixed.
 | Prototype and screenshots | Retain; P5 | Separate fixture/design evidence; no production import; no evidence-retirement request | Planned retention / pending |
 | scripts/backend-pytest and scripts/load-test.mjs | Retain; P5 | External operational use unknown; neither used for this programme's isolated validation | Planned retention / pending |
 | V2 privacy CI workflow | Retain; P5 | External candidate-bundle process; process retirement not established | Planned retention / pending |
-| Empty retired catalog group | Remove; P5/AM-11 | Retired runtime catalog cleanup with historical upgrade fixtures retained | Pending / pending |
+| Empty retired catalog group | Removed early by definition-derived catalog; P2/AM-11 | Catalog omits empty groups; historical names and upgrade fixtures retained | Implemented, validation/review pending / pending |
 | Speculative runtime dependency deletion | Retain locked dependencies; P5 | No package proven unused; preserve supported migrations and relevant security fixes | Planned retention / pending |
 
 ## Extension conformance and final gate
@@ -100,3 +114,23 @@ the same durable latest-state/physical-target ordering as normal enrichment. Kee
 the separate hardware authority deadline at the earlier of event occurrence and
 earliest linked receipt plus 60 seconds; the optional five-minute deadline cannot
 extend hardware authority.
+
+## P2 implementation candidate
+
+The pure action and channel definitions own configuration, defaults and metadata.
+One action-type binding map composes handlers; runtime integration enabled checks
+remain outside definitions. Transactional actions use their caller's session and
+owned pending operation identity. That identity is not proof of an external
+attempt; durable effects still use the existing attempted checkpoint and domain
+authorization.
+
+New/edited writes reject unsupported types and malformed config. Retained unknown
+records stay readable, and malformed unfinished work is held for review before
+attempt. Recovery never re-normalizes attempted config, ordered operation IDs or
+frozen targets. Rendered notification fields and observed literal producer shapes
+have explicit adapters; stores remain separate.
+
+The generated TypeScript contract freshness check is part of the harness/CI.
+Negative schema, binding, historical and editor fixtures, plus a test-only
+transactional action through real intake/reservation/completion/audit, await the
+P2 candidate gate and Astra review. No new production action is shipped.

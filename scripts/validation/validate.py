@@ -340,6 +340,8 @@ class Harness:
         backend_check('architecture-boundaries', ['/workspace/scripts/architecture/check_boundaries.py'],
                       classification='static')
         backend_check('compile', ['-c', "import pathlib; files=list(pathlib.Path('app').rglob('*.py'))+list(pathlib.Path('tests').rglob('*.py')); [compile(p.read_bytes(),str(p),'exec') for p in files]; print(len(files),'files compiled')"])
+        backend_check('workflow-contracts', ['-m', 'app.services.workflows.export_contracts', '--check'],
+                      classification='static')
         backend_check('backend-tests', pytest_arguments('backend-tests'))
         for name, command in LINT_COMMANDS.items():
             backend_check(name, command)

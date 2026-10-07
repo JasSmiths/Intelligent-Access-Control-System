@@ -663,7 +663,7 @@ async def test_notification_catalog_exposes_single_gate_malfunction_trigger_and_
     ]
 
 
-def test_normalizers_keep_workflow_shape_strict() -> None:
+def test_normalizers_keep_known_shape_and_retained_unknown_actions() -> None:
     actions = normalize_actions(
         [
             {
@@ -685,7 +685,8 @@ def test_normalizers_keep_workflow_shape_strict() -> None:
         ]
     )
 
-    assert len(actions) == 1
+    assert len(actions) == 2
+    assert actions[1] == {"id": "action-2", "type": "unsupported"}
     assert actions[0]["media"]["attach_camera_snapshot"] is True
     assert actions[0]["actionable"] == {"enabled": True, "action": "gate.open"}
     assert len(conditions) == 1

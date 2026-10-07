@@ -15,6 +15,7 @@ from typing import Any
 
 from app.services.automation_policy import TriggerProvenance
 from app.services.type_helpers import as_dict
+from app.services.workflows.action_definitions import ACTION_BY_TYPE, historical_action_config
 from app.services.workflows.catalog import (
     automation_action_catalog,
     automation_condition_catalog,
@@ -43,7 +44,8 @@ TRIGGER_SCOPES = {
 }
 TIME_TRIGGER_KEYS = {"time.specific_datetime", "time.every_x", "time.cron"}
 INTEGRATION_ACTION_KEYS = {
-    "integration.icloud_calendar.sync": ("icloud_calendar", "sync_calendars"),
+    key: (definition.provider, definition.integration_action)
+    for key, definition in ACTION_BY_TYPE.items() if definition.provider is not None
 }
 
 
@@ -215,15 +217,12 @@ def normalize_conditions(value: Any) -> list[dict[str, Any]]:
 def normalize_actions(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    allowed = {action["type"] for group in ACTION_CATALOG for action in group["actions"]} | set(
-        INTEGRATION_ACTION_KEYS
-    )
     actions = []
     for index, raw in enumerate(value):
         if not isinstance(raw, dict):
             continue
         action_type = str(raw.get("type") or "").strip()
-        if action_type not in allowed:
+        if not action_type:
             continue
         config = as_dict(raw.get("config"))
         actions.append(
@@ -238,17 +237,7 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
 
 
 def normalize_action_config(action_type: str, config: dict[str, Any]) -> dict[str, Any]:
-    if action_type.startswith("notification."):
-        return {
-            "notification_rule_id": optional_text(config.get("notification_rule_id")),
-            "notification_rule_name": optional_text(config.get("notification_rule_name")),
-        }
-    if action_type.startswith("garage_door."):
-        return {"target_entity_ids": normalize_string_list(config.get("target_entity_ids"))}
-    if action_type in INTEGRATION_ACTION_KEYS:
-        return integration_action_config(action_type, config)
-    return {}
-
+    return historical_action_config(action_type, config)
 
 def generate_automation_webhook_key() -> str:
     return f"{WEBHOOK_KEY_PREFIX}{secrets.token_urlsafe(WEBHOOK_KEY_RANDOM_BYTES)}"
@@ -532,13 +521,7 @@ def restored_automation_context(snapshot: dict[str, Any]) -> AutomationContext:
 
 
 def integration_action_config(action_type: str, config: dict[str, Any]) -> dict[str, Any]:
-    action = INTEGRATION_ACTION_KEYS.get(action_type)
-    if not action:
-        return {}
-    return {
-        "provider": str(config.get("provider") or action[0]),
-        "action": str(config.get("action") or action[1]),
-    }
+    return historical_action_config(action_type, config)
 
 
 AUTOMATION_BRIDGE_IGNORED_EVENT_TYPES = {

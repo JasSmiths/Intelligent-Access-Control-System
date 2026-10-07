@@ -16,6 +16,7 @@ from app.services.automation_serialization import serialize_rule
 from app.services.automation_webhooks import harden_webhook_triggers_for_actions
 from app.services.mutation_context import require_active_admin
 from app.services.telemetry import TELEMETRY_CATEGORY_CRUD, actor_from_user, audit_diff
+from app.services.workflows.action_definitions import WorkflowConfigurationError, validate_actions
 from app.services.workflows.automation_definition import (
     normalize_actions,
     normalize_conditions,
@@ -56,7 +57,7 @@ class AutomationRuleService:
         created_by = require_active_admin(created_by)
         name = validated_rule_name(name)
         normalized_triggers = normalize_triggers(triggers, generate_webhook_keys=True)
-        normalized_actions = normalize_actions(actions)
+        normalized_actions = validated_actions(actions)
         if error := hardware_configuration_error(
             (trigger["type"] for trigger in normalized_triggers),
             (action["type"] for action in normalized_actions),
@@ -116,7 +117,7 @@ class AutomationRuleService:
             else normalize_triggers(rule.triggers)
         )
         normalized_actions = (
-            normalize_actions(actions) if actions is not None else normalize_actions(rule.actions)
+            validated_actions(actions) if actions is not None else normalize_actions(rule.actions)
         )
         error = hardware_configuration_error(
             (trigger["type"] for trigger in normalized_triggers),
@@ -192,3 +193,10 @@ def validated_rule_name(name: str) -> str:
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 160:
         raise AutomationError("Automation name must contain 1–160 characters.")
     return name.strip()
+
+
+def validated_actions(value: object) -> list[dict[str, Any]]:
+    try:
+        return validate_actions(value)
+    except WorkflowConfigurationError as exc:
+        raise AutomationError(str(exc)) from exc

@@ -6,6 +6,7 @@ from typing import Any
 
 from app.modules.notifications.base import ComposedNotification, NotificationContext
 from app.services.workflows import notification_payloads
+from app.services.workflows.channel_definitions import CHANNEL_BY_TYPE
 from app.services.workflows.context import canonical_key
 from app.services.workflows.notification_payloads import _duration_label_from_seconds
 from app.services.workflows.vehicle_away import vehicle_time_away_label
@@ -281,7 +282,7 @@ def postprocess_gate_malfunction_body(
     text = strip_gate_malfunction_prefixes(text)
     if previous_notification:
         text = f"{GATE_MALFUNCTION_UPDATE_PREFIX} {text}".strip()
-    if channel == "voice":
+    if (definition := CHANNEL_BY_TYPE.get(channel)) is not None and definition.spoken:
         text = f"{GATE_MALFUNCTION_VOICE_PREFIX} {strip_attention_prefix(text)}".strip()
     return text[:500]
 

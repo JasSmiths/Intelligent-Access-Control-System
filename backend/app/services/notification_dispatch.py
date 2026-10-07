@@ -21,6 +21,7 @@ from app.services.notification_runs import (
 )
 from app.services.settings import RuntimeConfig
 from app.services.workflow_dispatch_ports import NotificationDispatchOwner, NotificationPolicy
+from app.services.workflows.action_definitions import WorkflowConfigurationError
 from app.services.workflows.execution_contracts import (
     NotificationActionOutcome,
     NotificationPlanItem,
@@ -255,6 +256,8 @@ class NotificationDispatcher:
                 await self.service.publish_plan_completion(completed)
             except Exception:
                 logger.exception("notification_completion_enrichment_failed")
+        except WorkflowConfigurationError:
+            await self.store.hold(row.id, token, "unsupported_action_configuration")
         except ClaimLost:
             pass
         except BaseException:
