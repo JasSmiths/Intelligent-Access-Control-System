@@ -3,9 +3,9 @@ import { listPeople, listVehicles } from "../api/directory";
 import { api } from "../api/client";
 import type { AccessEvent, Anomaly, ExpectedPresenceSummary, Group, IntegrationStatus, MaintenanceStatus, Person, Presence, RealtimeMessage, Schedule, UserAccount, Vehicle, ViewKey } from "../api/types";
 import { criticalShellDataKeysForView, shellDataKeysForView, type ShellDataKey } from "./navigation";
-import { REALTIME_REFRESH_MIN_INTERVAL_MS } from "./realtimeEvents";
-import { refreshSelectionForEvent } from "./realtimeRefresh";
-import { createRefreshCoordinator, type RefreshSelection } from "./refreshCoordinator";
+import { REALTIME_REFRESH_MIN_INTERVAL_MS } from "../lib/readSignals";
+import { refreshSelectionForEvent, type RefreshSelection } from "./realtimeRefresh";
+import { createRefreshCoordinator } from "../lib/refreshCoordinator";
 
 type ShellData = {
   presence: Presence[]; expectedPresence: ExpectedPresenceSummary | null;
@@ -36,7 +36,9 @@ export function useShellRefresh(view: ViewKey, user: UserAccount | null, setters
       const controller = new AbortController();
       const loaded = new Set<ShellDataKey>();
       const failures = new Set<ShellDataKey>();
-      const coordinator = createRefreshCoordinator(async ({ keys, route }) => {
+      const coordinator = createRefreshCoordinator<ShellDataKey | "route">(async (selection) => {
+        const route = selection.has("route");
+        const keys = new Set([...selection].filter((key): key is ShellDataKey => key !== "route"));
         if ([...keys].some((key) => !loaded.has(key))) setLoading(true);
         async function fetchKey<Key extends ShellDataKey>(key: Key) {
           const options = { signal: controller.signal };
@@ -68,9 +70,12 @@ export function useShellRefresh(view: ViewKey, user: UserAccount | null, setters
     return {
       activate() { session = createSession(); setLoading(true); setReadState("ready"); setFailedKeys([]); },
       selection(event: RealtimeMessage) { return refreshSelectionForEvent(event, view, required); },
-      refresh: () => session?.coordinator.request({ keys: required, route: true }) ?? Promise.resolve(),
-      initial: () => session?.coordinator.request({ keys: required, route: false }) ?? Promise.resolve(),
-      realtime: (selection?: RefreshSelection) => session?.coordinator.request(selection ?? { keys: required, route: true }, REALTIME_REFRESH_MIN_INTERVAL_MS) ?? Promise.resolve(),
+      refresh: () => session?.coordinator.request(new Set<ShellDataKey | "route">([...required, "route"])) ?? Promise.resolve(),
+      initial: () => session?.coordinator.request(required) ?? Promise.resolve(),
+      realtime: (selection?: RefreshSelection) => {
+        const selected = selection ?? { keys: required, route: true };
+        return session?.coordinator.request(new Set<ShellDataKey | "route">([...selected.keys, ...(selected.route ? ["route" as const] : [])]), REALTIME_REFRESH_MIN_INTERVAL_MS) ?? Promise.resolve();
+      },
       dispose() { session?.controller.abort(); session?.coordinator.dispose(); session = null; }
     };
   }, [view, user?.id, user?.role]);

@@ -1,37 +1,27 @@
 import { Plus, UserPlus, Users } from "lucide-react";
 import React from "react";
+import { useGroups } from "../features/directory/catalogs";
+import { useSchedules } from "../features/schedules/reads";
+import { ReadSignalsContext } from "../lib/readSignals";
 import { useDirectoryPage } from "../features/directory/reads";
 import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
 import { activeManagedCovers, titleCase, useScheduleDefaultPolicyOptionLabel } from "../lib/format";
 import { Badge, EmptyState } from "../ui/primitives";
-import type { Group, HomeAssistantManagedCover, Person, Schedule, Vehicle } from "../api/types";
+import type { HomeAssistantManagedCover, Person } from "../api/types";
 
 import { directoryGroupDefaultOpen, groupPeopleByDirectoryGroup } from "../features/directory/model";
 import { useDirectoryGroupOpenState } from "../features/directory/hooks";
 import { DirectoryGroupAccordion, PersonAvatar } from "../features/directory/components";
 import { PersonModal } from "../features/directory/PersonEditor";
 
-export function PeopleView({
-  garageDoors,
-  groups,
-  people,
-  query,
-  refresh,
-  refreshToken = 0,
-  schedules,
-  vehicles
-}: {
-  garageDoors: HomeAssistantManagedCover[];
-  groups: Group[];
-  people: Person[];
-  query: string;
-  refresh: () => Promise<void>;
-  refreshToken?: number;
-  schedules: Schedule[];
-  vehicles: Vehicle[];
-}) {
-  const directoryPage = useDirectoryPage("people", people, { query, refreshToken });
+export function PeopleView({ garageDoors, query }: { garageDoors: HomeAssistantManagedCover[]; query: string }) {
+  const directoryPage = useDirectoryPage("people", [], { query });
+  const groupCatalog = useGroups(); const scheduleCatalog = useSchedules();
+  const groups = groupCatalog.items; const schedules = scheduleCatalog.items;
+  const referencesReady = groupCatalog.ready && scheduleCatalog.ready;
+  const signals = React.useContext(ReadSignalsContext);
+  const refresh = React.useCallback(() => signals?.publish({ type: "refresh", reason: "manual", resetHistory: false }) ?? Promise.resolve(directoryPage.refresh()), [signals, directoryPage.refresh]);
   const [modalOpen, setModalOpen] = React.useState(false);
   const [selectedPerson, setSelectedPerson] = React.useState<Person | null>(null);
   const [error, setError] = React.useState("");
@@ -66,11 +56,12 @@ export function PeopleView({
           <h1>People</h1>
           <p>Manage profiles, access groups, and vehicle assignments.</p>
         </div>
-        <button className="primary-button" onClick={openCreate} type="button">
+        <button className="primary-button" onClick={openCreate} disabled={!referencesReady} type="button">
           <UserPlus size={17} /> Add Person
         </button>
       </div>
 
+      {groupCatalog.error || scheduleCatalog.error ? <div role="alert">{groupCatalog.error || scheduleCatalog.error}</div> : null}
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
@@ -92,7 +83,7 @@ export function PeopleView({
                     <button
                       className="user-row person-row directory-row-button"
                       key={person.id}
-                      onClick={() => openEdit(person)}
+                      disabled={!referencesReady} onClick={() => openEdit(person)}
                       aria-label={`Edit person ${person.display_name}`}
                       type="button"
                     >
@@ -124,7 +115,7 @@ export function PeopleView({
             ))}
           </div>
         ) : (
-          <EmptyState icon={Users} label="No people match this view" description={query ? "Try another name, group, or registration in search." : "Add people to connect their vehicles, schedules, and access preferences."} action={!query ? <button className="secondary-button" onClick={openCreate} type="button"><Plus size={15} /> Create person</button> : undefined} />
+          <EmptyState icon={Users} label="No people match this view" description={query ? "Try another name, group, or registration in search." : "Add people to connect their vehicles, schedules, and access preferences."} action={!query ? <button className="secondary-button" onClick={openCreate} disabled={!referencesReady} type="button"><Plus size={15} /> Create person</button> : undefined} />
         )}
       </div>
 
@@ -138,12 +129,12 @@ export function PeopleView({
           onSaved={async () => {
             closeModal();
             setSaved("Person saved.");
-            try { await refresh(); directoryPage.refresh(); } catch { setError("Person saved, but the list could not be refreshed. Refresh to see the latest data."); }
+            try { await refresh(); } catch { setError("Person saved, but the list could not be refreshed. Refresh to see the latest data."); }
           }}
           person={selectedPerson}
           schedules={schedules}
           setPageError={setError}
-          vehicles={vehicles}
+          vehicles={[]}
         />
       ) : null}
     </section>

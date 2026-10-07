@@ -1,3 +1,4 @@
+import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
 import { useModalFocus } from "../../ui/useModalFocus";
 import { useModalClose } from "../../ui/useModalClose";
 import { Activity, ArrowRight, CalendarDays, Car, Clock3, Loader2, Pencil, Trash2, UserRound, X } from "lucide-react";
@@ -16,14 +17,12 @@ import { isVisitorPassAuditLogEvent, visitorPassLogsEqual, visitorPassWindowLabe
 
 export function VisitorPassDetailsModal({
   visitorPass,
-  latestRealtime,
   onClose: finishClose,
   onEdit: finishEdit,
   onCancel,
   onDelete,
 }: {
   visitorPass: VisitorPass;
-  latestRealtime: RealtimeMessage | null;
   onClose: () => void;
   onEdit: (visitorPass: VisitorPass) => void;
   onCancel: (visitorPass: VisitorPass) => Promise<VisitorPass | null>;
@@ -60,34 +59,40 @@ export function VisitorPassDetailsModal({
         : "No visit telemetry";
   const telemetryLinked = Boolean(visitorPass.arrival_event_id || visitorPass.departure_event_id);
 
-  const loadLogs = React.useCallback(async (showLoading = false) => {
+  const readLogs = React.useCallback(async (signal: AbortSignal) => {
+    const showLoading = true;
     const sequence = logsLoadSequenceRef.current + 1;
     logsLoadSequenceRef.current = sequence;
     logsLoadAbortRef.current?.abort();
     const controller = new AbortController();
     logsLoadAbortRef.current = controller;
+    const abort = () => controller.abort();
+    signal.addEventListener("abort", abort, { once: true });
     if (showLoading) setLogsLoading(true);
     setLogsError("");
     try {
       const rows = await api.get<VisitorPassLogEntry[]>(`/api/v1/visitor-passes/${visitorPass.id}/logs`, {
         signal: controller.signal
       });
-      if (logsLoadSequenceRef.current !== sequence) return;
+      if (controller.signal.aborted || logsLoadSequenceRef.current !== sequence) return;
       setLogs((current) => visitorPassLogsEqual(current, rows) ? current : rows);
       setLogsLoaded(true);
     } catch (logError) {
       if (isAbortError(logError)) return;
-      if (logsLoadSequenceRef.current !== sequence) return;
+      if (controller.signal.aborted || logsLoadSequenceRef.current !== sequence) return;
       setLogsError(logError instanceof Error ? logError.message : "Unable to load Visitor Pass log");
     } finally {
-      if (logsLoadSequenceRef.current === sequence) {
+      signal.removeEventListener("abort", abort);
+      if (!controller.signal.aborted && logsLoadSequenceRef.current === sequence) {
         if (showLoading) setLogsLoading(false);
         if (logsLoadAbortRef.current === controller) {
           logsLoadAbortRef.current = null;
         }
       }
     }
-  }, [visitorPass.id]);
+  }, [visitorPass.id, visitorPass.updated_at]);
+  const eventMatches = React.useCallback((event: RealtimeMessage) => isVisitorPassAuditLogEvent(event, visitorPass.id), [visitorPass.id]);
+  const loadLogs = useCoordinatedRead(readLogs, eventMatches, activeTab === "log");
 
   React.useEffect(() => {
     logsLoadSequenceRef.current += 1;
@@ -102,24 +107,6 @@ export function VisitorPassDetailsModal({
     logsLoadSequenceRef.current += 1;
     logsLoadAbortRef.current?.abort();
   }, []);
-
-
-
-  React.useEffect(() => {
-    if (activeTab !== "log") return undefined;
-    loadLogs(!logsLoaded).catch(() => undefined);
-  }, [activeTab, loadLogs, logsLoaded, visitorPass.updated_at]);
-
-
-
-  React.useEffect(() => {
-    const latest = latestRealtime;
-    if (!latest || activeTab !== "log") return;
-    if (!isVisitorPassAuditLogEvent(latest, visitorPass.id)) return;
-    loadLogs(false).catch(() => undefined);
-  }, [activeTab, latestRealtime, loadLogs, visitorPass.id]);
-
-
 
 
 

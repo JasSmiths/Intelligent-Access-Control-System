@@ -1,3 +1,5 @@
+import { useCoordinatedRead } from "../lib/useCoordinatedRead";
+import { settingsEventMatches } from "../features/settings/invalidation";
 import { Loader2, RefreshCw } from "lucide-react";
 import React from "react";
 
@@ -36,11 +38,9 @@ export type LprZoneShadowObservation = {
 
 export function ZonesSettingsView({
   icon: Icon,
-  refreshToken,
   currentUser
 }: {
   icon: React.ElementType;
-  refreshToken: number;
   currentUser: UserAccount;
 }) {
   const [observations, setObservations] = React.useState<LprZoneShadowObservation[]>([]);
@@ -49,37 +49,29 @@ export function ZonesSettingsView({
   const [modeMessage, setModeMessage] = React.useState("");
   const [modeError, setModeError] = React.useState("");
   const [savingMode, setSavingMode] = React.useState(false);
-  const lprSettings = useSettings("lpr");
+  const lprSettings = useSettings("lpr", settingsEventMatches);
   const isAdmin = currentUser?.role === "admin";
   const zoneFilterMode = normalizeZoneFilterMode(stringifySetting(lprSettings.values.lpr_zone_filter_mode || "shadow"));
-  const lastRefreshTokenRef = React.useRef(refreshToken);
 
-  const loadObservations = React.useCallback(async (showLoading = true) => {
-    if (showLoading) setLoading(true);
+  const readObservations = React.useCallback(async (signal: AbortSignal) => {
+    setLoading(true);
     setError("");
     try {
-      const payload = await api.get<{ observations: LprZoneShadowObservation[] }>("/api/v1/diagnostics/lpr-zone-shadow?limit=300");
-      setObservations(payload.observations ?? []);
+      const payload = await api.get<{ observations: LprZoneShadowObservation[] }>("/api/v1/diagnostics/lpr-zone-shadow?limit=300", { signal });
+      if (!signal.aborted) setObservations(payload.observations ?? []);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Unable to load zone shadow observations.");
+      if (!signal.aborted) setError(loadError instanceof Error ? loadError.message : "Unable to load zone shadow observations.");
+      throw loadError;
     } finally {
-      if (showLoading) setLoading(false);
+      if (!signal.aborted) setLoading(false);
     }
   }, []);
 
+  const loadObservations = useCoordinatedRead(readObservations, settingsEventMatches);
   React.useEffect(() => {
-    loadObservations().catch(() => undefined);
-    const interval = window.setInterval(() => {
-      loadObservations(false).catch(() => undefined);
-    }, 15000);
+    const interval = window.setInterval(() => { void loadObservations().catch(() => undefined); }, 15000);
     return () => window.clearInterval(interval);
   }, [loadObservations]);
-
-  React.useEffect(() => {
-    if (lastRefreshTokenRef.current === refreshToken) return;
-    lastRefreshTokenRef.current = refreshToken;
-    loadObservations(false).catch(() => undefined);
-  }, [loadObservations, refreshToken]);
 
   const saveMode = async (mode: "shadow" | "live") => {
     if (!isAdmin || mode === zoneFilterMode || savingMode) return;

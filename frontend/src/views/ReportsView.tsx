@@ -1,94 +1,41 @@
 import { AlertTriangle, BarChart3, Camera, CheckCircle2, Clock3, Download, HelpCircle, LogIn, LogOut, Search, UserRound } from "lucide-react";
 import React from "react";
-import { useDirectoryOptions } from "../features/directory/reads";
+import { useReportSubjects } from "../features/reports/useReportSubjects";
 import { useReportActions } from "../features/reports/useReportActions";
 import { useReportRange, useReportPreview } from "../features/reports/useReportPreview";
 import { ReportPreview } from "../features/reports/ReportPreview";
 import { ReportsDateTimePicker } from "../features/reports/ReportsDateTimePicker";
 import { quickRanges, defaultOptions, siteCivilInput, reportInitials, vehicleLabel, personMetaLabel, visitorPassMetaLabel, visitorPassVehicleLabel, type QuickRange, type ReportOptions, type ReportSearchResult } from "../features/reports/model";
-import { api } from "../api/client";
 import { type ReportPreviewRequest } from "../api/reports";
-import { matches } from "../lib/format";
 import { mediaSource } from "../lib/media";
 
-import type { AccessEvent, Person, Presence } from "../api/types";
+import type { Person } from "../api/types";
 import type { VisitorPass } from "../features/passes/types";
 
-export function ReportsView({
-  events, people, presence, refreshToken = 0
-}: {
-  events: AccessEvent[];
-  people: Person[];
-  presence: Presence[];
-  refreshToken?: number;
-}) {
+export function ReportsView() {
   const personSearchLabelId = React.useId();
   const personSearchListId = React.useId();
   const [selectedPersonId, setSelectedPersonId] = React.useState("");
   const [selectedVisitorPassId, setSelectedVisitorPassId] = React.useState("");
   const [personQuery, setPersonQuery] = React.useState("");
   const [isPersonSearchOpen, setIsPersonSearchOpen] = React.useState(false);
-  const directoryPeople = useDirectoryOptions("people", people, selectedPersonId ? [selectedPersonId] : [], true, refreshToken);
-  React.useEffect(() => { directoryPeople.setQuery(isPersonSearchOpen ? personQuery : ""); }, [personQuery, isPersonSearchOpen]);
-  const reportablePeople = React.useMemo(
-    () => directoryPeople.items.filter((person) => person.is_active).sort((a, b) => a.display_name.localeCompare(b.display_name)),
-    [directoryPeople.items]
-  );
+  const subjects = useReportSubjects(personQuery, isPersonSearchOpen, selectedPersonId, selectedVisitorPassId);
+  const reportablePeople = subjects.people;
+  const visitorPasses = subjects.visitorPasses;
   React.useEffect(() => {
-    const selected = directoryPeople.items.find((person) => person.id === selectedPersonId);
-    if (selected?.is_active === false) { setSelectedPersonId(""); setPersonQuery(""); }
-  }, [directoryPeople.items, selectedPersonId]);
+    if (subjects.missingPersonIds.includes(selectedPersonId) || subjects.selectedPeople.some((person) => person.id === selectedPersonId && !person.is_active)) { setSelectedPersonId(""); setPersonQuery(""); }
+    if (subjects.missingPassId === selectedVisitorPassId && selectedVisitorPassId) { setSelectedVisitorPassId(""); setPersonQuery(""); }
+  }, [subjects.missingPersonIds.join("|"), subjects.selectedPeople, subjects.missingPassId, selectedPersonId, selectedVisitorPassId]);
   const [highlightedPersonIndex, setHighlightedPersonIndex] = React.useState(0);
   const { range, setRange, endInput, setEndInput, startInput, setStartInput, siteTimezone, setSiteTimezone,
     setRangeRevision, isLoadingContext, setIsLoadingContext, contextError, folds, setFolds } = useReportRange();
   const [options, setOptions] = React.useState<ReportOptions>(defaultOptions);
-  const [visitorPasses, setVisitorPasses] = React.useState<VisitorPass[]>([]);
   const { loadedReport, setLoadedReport, isExportingReport, isLoadingReportId, reportActionError, setReportActionError,
     cancelReportAction, downloadReportPdf, loadSavedReport, exportReport } = useReportActions();
   const [helpOpen, setHelpOpen] = React.useState(false);
-  const visitorPassesLoadedRef = React.useRef(false);
-  React.useEffect(() => {
-    if (selectedVisitorPassId && visitorPasses.some((visitorPass) => visitorPass.id === selectedVisitorPassId)) return;
-    if (selectedVisitorPassId) {
-      setSelectedVisitorPassId("");
-      setPersonQuery("");
-    }
-  }, [selectedVisitorPassId, visitorPasses]);
-
-  React.useEffect(() => {
-    const shouldLoadVisitorPasses = isPersonSearchOpen || Boolean(personQuery.trim()) || Boolean(selectedVisitorPassId);
-    if (!shouldLoadVisitorPasses || visitorPassesLoadedRef.current) return undefined;
-    const controller = new AbortController();
-    api.get<VisitorPass[]>("/api/v1/visitor-passes?limit=500", { signal: controller.signal })
-      .then((nextVisitorPasses) => {
-        if (controller.signal.aborted) return;
-        visitorPassesLoadedRef.current = true;
-        setVisitorPasses(nextVisitorPasses);
-      })
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, [isPersonSearchOpen, personQuery, selectedVisitorPassId]);
-
-  const reportableVisitorPasses = React.useMemo(
-    () => [...visitorPasses].sort((a, b) => a.visitor_name.localeCompare(b.visitor_name)),
-    [visitorPasses]
-  );
-  const filteredPeople = React.useMemo(
-    () => reportablePeople.filter((person) =>
-      matches(person.display_name, personQuery) ||
-      person.vehicles.some((vehicle) => matches(vehicle.registration_number, personQuery))
-    ),
-    [personQuery, reportablePeople]
-  );
-  const filteredVisitorPasses = React.useMemo(
-    () => reportableVisitorPasses.filter((visitorPass) =>
-      matches(visitorPass.visitor_name, personQuery) ||
-      matches(visitorPass.number_plate || "", personQuery) ||
-      matches(visitorPass.vehicle_make || "", personQuery) ||
-      matches(visitorPass.vehicle_colour || "", personQuery)
-    ),
-    [personQuery, reportableVisitorPasses]
-  );
+  const reportableVisitorPasses = visitorPasses;
+  const filteredPeople = reportablePeople;
+  const filteredVisitorPasses = reportableVisitorPasses;
   const reportIdCandidate = React.useMemo(() => {
     const trimmed = personQuery.trim();
     return /^\d{4,12}$/.test(trimmed) ? trimmed : "";
@@ -120,7 +67,7 @@ export function ReportsView({
       include_confidence: options.includeConfidence, ...folds
     };
   }, [selectedPersonId, selectedVisitorPassId, startInput, endInput, options, folds, loadedReport,
-    isLoadingContext, contextError, events, people, presence]);
+    isLoadingContext, contextError]);
   const { currentPreview, currentPreviewError, previewPending } = useReportPreview(previewRequest);
   const activeReport = loadedReport?.report ?? (currentPreview?.status === "ready" ? currentPreview.report : null);
   const previewPerson = activeReport?.person ?? null;
@@ -156,11 +103,9 @@ export function ReportsView({
     setRange("custom");
     const response = await loadSavedReport(reportId);
     if (!response) return;
-    const matchingVisitorPass = response.report.subject_type === "visitor_pass"
-      ? visitorPasses.find((visitorPass) => visitorPass.id === response.report.person.id) : null;
     setSiteTimezone(response.report.period.timezone); setFolds({});
     setSelectedPersonId(response.report.subject_type === "visitor_pass" ? "" : response.report.person.id);
-    setSelectedVisitorPassId(matchingVisitorPass?.id ?? "");
+    setSelectedVisitorPassId(response.report.subject_type === "visitor_pass" ? response.report.person.id : "");
     setPersonQuery(`Report #${response.report_id} - ${response.report.person.display_name}`);
     setStartInput(response.report.period.start); setEndInput(response.report.period.end);
     setOptions({ includeDenied: response.report.options.include_denied,
@@ -468,8 +413,8 @@ export function ReportsView({
             </select>
           </label>
         )) : null}
-        {reportActionError || currentPreviewError || contextError || directoryPeople.error ? (
-          <div className="report-action-error" role="alert">{reportActionError || currentPreviewError || contextError || directoryPeople.error}</div>
+        {reportActionError || currentPreviewError || contextError || subjects.error ? (
+          <div className="report-action-error" role="alert">{reportActionError || currentPreviewError || contextError || subjects.error}</div>
         ) : null}
       </div>
 

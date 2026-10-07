@@ -1,3 +1,6 @@
+const testReads = vi.hoisted(() => ({ presence: [] as Presence[], expectedPresence: null as ExpectedPresenceSummary | null, events: [] as AccessEvent[], people: [] as Person[], vehicles: [] as Vehicle[] }));
+vi.mock("../features/dashboard/reads", () => ({ useDashboardReads: () => ({ ...testReads, error: "" }) }));
+vi.mock("../features/dashboard/useDashboardDirectory", () => ({ useDashboardDirectory: () => ({ people: testReads.people, vehicles: testReads.vehicles, activeVehicleCount: testReads.vehicles.length, error: "" }) }));
 import * as directoryApi from "../api/directory";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -33,6 +36,7 @@ async function clickGate(name: string) {
   await act(async () => fireEvent.click(screen.getByRole("button", { name: `Open ${name}` })));
 }
 beforeEach(() => {
+  Object.assign(testReads, { presence: [], expectedPresence: null, events: [], people: [], vehicles: [] });
   vi.spyOn(directoryApi, "listVehicles").mockResolvedValue({ items: [], total: 0, next_cursor: null });
   vi.spyOn(directoryApi, "lookupVehicleRegistrations").mockResolvedValue([]);
   vi.spyOn(directoryApi, "lookupPeople").mockResolvedValue([]);
@@ -216,19 +220,22 @@ function accessEvent(overrides: Partial<AccessEvent> & Pick<AccessEvent, "id" | 
 
 it("keeps an activated snapshot through viewport changes and supports keyboard access at every width", () => {
   const event = accessEvent({ id: "snapshot-event", direction: "entry", occurred_at: "2026-09-23T12:00:00Z", registration_number: "TEST123", snapshot_url: "/test-snapshot.jpg" });
-  const view = render(<Dashboard {...props} events={[event]} />);
+  testReads.events = [event];
+  const view = render(<Dashboard {...props} />);
   const row = screen.getByRole("button", { name: /Toggle .*snapshot/i });
   fireEvent.click(row);
   expect(row).toHaveAttribute("aria-expanded", "true");
   fireEvent(window, new Event("resize"));
-  view.rerender(<Dashboard {...props} events={[{ ...event }]} />);
+  testReads.events = [{ ...event }];
+  view.rerender(<Dashboard {...props} />);
   expect(row).toHaveAttribute("aria-expanded", "true");
   expect(row.querySelector("img")).toHaveAttribute("src", "/test-snapshot.jpg");
   fireEvent.keyDown(row, { key: "Escape" });
   expect(row).toHaveAttribute("aria-expanded", "false");
   fireEvent.keyDown(row, { key: "Enter" });
   expect(row).toHaveAttribute("aria-expanded", "true");
-  view.rerender(<Dashboard {...props} events={[]} />);
+  testReads.events = [];
+  view.rerender(<Dashboard {...props} />);
   expect(screen.queryByRole("button", { name: /Toggle .*snapshot/i })).not.toBeInTheDocument();
 });
 
@@ -294,7 +301,8 @@ it("lists the people inside now and who exited today in the presence hover popov
       typical_departure: null
     }]
   };
-  render(<Dashboard {...props} events={events} expectedPresence={expectedPresence} people={people} presence={presence} vehicles={vehicles} />);
+  Object.assign(testReads, { events, expectedPresence, people, presence, vehicles });
+  render(<Dashboard {...props} />);
 
   const inside = screen.getByLabelText("People inside now");
   expect(inside).toHaveClass("has-tooltip");
@@ -348,7 +356,8 @@ it("keeps the inside popover to the first six people", () => {
     state: "present",
     last_changed_at: at(23, 8 + index, 0)
   }));
-  render(<Dashboard {...props} people={people} presence={presence} />);
+  Object.assign(testReads, { people, presence });
+  render(<Dashboard {...props} />);
   const inside = screen.getByLabelText("People inside now");
   expect(within(inside).getByText("7 people")).toBeInTheDocument();
   expect(within(inside).getByText("Person 6")).toBeInTheDocument();

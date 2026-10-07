@@ -13,7 +13,7 @@ it("keeps unavailable charts distinct from an empty result and recovers on retry
     })));
   vi.stubGlobal("fetch", fetcher);
 
-  render(<TopChartsView query="" latestRealtime={null} refreshToken={0} />);
+  render(<TopChartsView query="" />);
   expect(screen.getByRole("status", { name: "Loading Top Charts" })).toBeInTheDocument();
   expect(await screen.findByRole("alert")).toHaveTextContent("Connection interrupted");
   expect(screen.queryByText("No known vehicle entries recorded")).not.toBeInTheDocument();

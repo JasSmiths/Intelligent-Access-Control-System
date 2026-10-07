@@ -1,3 +1,6 @@
+import { useCoordinatedRead } from "../lib/useCoordinatedRead";
+import { ReadSignalsContext } from "../lib/readSignals";
+import { auditResource } from "../lib/realtime";
 import { ClipboardPaste, Plus, RefreshCw } from "lucide-react";
 import React from "react";
 
@@ -14,7 +17,7 @@ import { PassFilterBar, VisitorPassCard } from "../features/passes/components";
 import { VisitorPassDetailsModal } from "../features/passes/PassDetails";
 import { VisitorPassModal } from "../features/passes/PassEditor";
 
-export function PassesView({ query, latestRealtime, refreshToken }: { query: string; latestRealtime: RealtimeMessage | null; refreshToken: number }) {
+export function PassesView({ query }: { query: string }) {
   const [passes, setPasses] = React.useState<VisitorPass[]>([]);
   const [filters, setFilters] = React.useState<Set<VisitorPassStatus>>(() => new Set(defaultVisitorPassFilters));
   const [modalPass, setModalPass] = React.useState<VisitorPass | null>(null);
@@ -24,84 +27,30 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
   const [error, setError] = React.useState("");
   const [saved, setSaved] = React.useState("");
   const deferredQuery = React.useDeferredValue(query);
-  const lastRefreshTokenRef = React.useRef(refreshToken);
-  const loadSequenceRef = React.useRef(0);
-  const loadAbortRef = React.useRef<AbortController | null>(null);
-
-  const loadPasses = React.useCallback(async (options?: { showLoading?: boolean }) => {
-    const sequence = loadSequenceRef.current + 1;
-    loadSequenceRef.current = sequence;
-    loadAbortRef.current?.abort();
-    const controller = new AbortController();
-    loadAbortRef.current = controller;
-    const showLoading = options?.showLoading !== false;
+  const signals = React.useContext(ReadSignalsContext);
+  const read = React.useCallback(async (signal: AbortSignal) => {
     const params = new URLSearchParams();
-    if (filters.size && filters.size < visitorPassStatuses.length) {
-      filters.forEach((status) => params.append("status", status));
-    }
+    if (filters.size && filters.size < visitorPassStatuses.length) filters.forEach((status) => params.append("status", status));
     if (deferredQuery.trim()) params.set("q", deferredQuery.trim());
-    const suffix = params.toString() ? `?${params.toString()}` : "";
-    if (showLoading) setLoading(true);
-    setError("");
-    try {
-      const rows = await api.get<VisitorPass[]>(`/api/v1/visitor-passes${suffix}`, { signal: controller.signal });
-      if (loadSequenceRef.current !== sequence) return;
-      setPasses(rows);
-    } catch (loadError) {
-      if (isAbortError(loadError)) return;
-      if (loadSequenceRef.current !== sequence) return;
-      setError(loadError instanceof Error ? loadError.message : "Unable to load Visitor Passes");
-    } finally {
-      if (loadSequenceRef.current === sequence) {
-        if (showLoading) setLoading(false);
-        if (loadAbortRef.current === controller) {
-          loadAbortRef.current = null;
-        }
-      }
-    }
+    const suffix = params.toString() ? `?${params}` : "";
+    setLoading(true); setError("");
+    try { const rows = await api.get<VisitorPass[]>(`/api/v1/visitor-passes${suffix}`, { signal }); if (!signal.aborted) setPasses(rows); }
+    catch (failure) { if (!signal.aborted && !isAbortError(failure)) setError(failure instanceof Error ? failure.message : "Unable to load Visitor Passes"); throw failure; }
+    finally { if (!signal.aborted) setLoading(false); }
   }, [deferredQuery, filters]);
-
-  React.useEffect(() => () => {
-    loadSequenceRef.current += 1;
-    loadAbortRef.current?.abort();
-  }, []);
-
-  React.useEffect(() => {
-    loadPasses().catch(() => undefined);
-  }, [loadPasses]);
-
-  React.useEffect(() => {
-    if (lastRefreshTokenRef.current === refreshToken) return;
-    lastRefreshTokenRef.current = refreshToken;
-    loadPasses({ showLoading: false }).catch(() => undefined);
-  }, [loadPasses, refreshToken]);
-
-  React.useEffect(() => {
-    const latest = latestRealtime;
-    if (!latest) return;
-    if (isVisitorPassRealtimeEvent(latest)) {
-      if (latest.type === "visitor_pass.deleted") {
-        const deletedId = isRecord(latest.payload.visitor_pass) ? stringPayload(latest.payload.visitor_pass.id) : "";
-        if (deletedId) {
-          setPasses((current) => current.filter((item) => item.id !== deletedId));
-          setDetailPass((current) => current?.id === deletedId ? null : current);
-          setModalPass((current) => current?.id === deletedId ? null : current);
-        }
-        loadPasses({ showLoading: false }).catch(() => undefined);
-        return;
-      }
+  const eventMatches = React.useCallback((event: RealtimeMessage) => event.type === "access_event.finalized" || auditResource(event) === "person" || isVisitorPassRealtimeEvent(event) && (event.type === "visitor_pass.deleted" || !visitorPassFromRealtime(event)), []);
+  const loadPasses = useCoordinatedRead(read, eventMatches);
+  React.useLayoutEffect(() => signals?.subscribe((signal) => {
+    if (signal.type !== "realtime" || !isVisitorPassRealtimeEvent(signal.message)) return;
+    const latest = signal.message;
+    if (latest.type === "visitor_pass.deleted") {
+      const id = isRecord(latest.payload.visitor_pass) ? stringPayload(latest.payload.visitor_pass.id) : "";
+      if (id) { setPasses((current) => current.filter((item) => item.id !== id)); setDetailPass((current) => current?.id === id ? null : current); setModalPass((current) => current?.id === id ? null : current); }
+    } else {
       const livePass = visitorPassFromRealtime(latest);
-      if (livePass) {
-        setPasses((current) => [livePass, ...current.filter((item) => item.id !== livePass.id)]);
-        setDetailPass((current) => current?.id === livePass.id ? livePass : current);
-        setModalPass((current) => current?.id === livePass.id ? livePass : current);
-        return;
-      }
-      loadPasses({ showLoading: false }).catch(() => undefined);
-    } else if (latest.type === "access_event.finalized") {
-      loadPasses({ showLoading: false }).catch(() => undefined);
+      if (livePass) { setPasses((current) => [livePass, ...current.filter((item) => item.id !== livePass.id)]); setDetailPass((current) => current?.id === livePass.id ? livePass : current); setModalPass((current) => current?.id === livePass.id ? livePass : current); }
     }
-  }, [latestRealtime, loadPasses]);
+  }), [signals]);
 
   const openCreate = () => {
     setModalPass(null);
@@ -249,7 +198,6 @@ export function PassesView({ query, latestRealtime, refreshToken }: { query: str
             setDetailPass(null);
             openEdit(visitorPass);
           }}
-          latestRealtime={latestRealtime}
           visitorPass={detailPass}
         />
       ) : null}

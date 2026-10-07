@@ -1,9 +1,13 @@
+import { useCoordinatedRead } from "../lib/useCoordinatedRead";
+import { auditResource } from "../lib/realtime";
+import type { RealtimeMessage } from "../api/types";
+const usersEventMatches = (event: RealtimeMessage) => ["user", "person"].includes(auditResource(event));
 import { useModalFocus } from "../ui/useModalFocus";
 import { useModalClose } from "../ui/useModalClose";
 import { useEditorDismiss } from "../ui/useEditorDismiss";
 import { Camera, Key, MessageCircle, Smartphone, Trash2, UserPlus, UserRound, X } from "lucide-react";
 import React from "react";
-import { listPeople, lookupPeople } from "../api/directory";
+import { lookupPeople } from "../api/directory";
 import { useDirectoryOptions } from "../features/directory/reads";
 import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
@@ -15,12 +19,10 @@ import type { Person, UserAccount, UserRole } from "../api/types";
 
 export function UsersView({
   currentUser,
-  onCurrentUserUpdated,
-  refreshToken
+  onCurrentUserUpdated
 }: {
   currentUser: UserAccount;
   onCurrentUserUpdated: (user: UserAccount) => void;
-  refreshToken: number;
 }) {
   const [users, setUsers] = React.useState<UserAccount[]>([]);
   const [people, setPeople] = React.useState<Person[]>([]);
@@ -30,35 +32,16 @@ export function UsersView({
   const [selectedUser, setSelectedUser] = React.useState<UserAccount | null>(null);
   const [temporaryPassword, setTemporaryPassword] = React.useState<string | null>(null);
   const isAdmin = currentUser.role === "admin";
-  const lastRefreshTokenRef = React.useRef(refreshToken);
-
-  const loadUsers = React.useCallback(async () => {
+  const readUsers = React.useCallback(async (signal: AbortSignal) => {
     setError("");
     try {
-      const [nextUsers, nextPeople] = await Promise.all([
-        api.get<UserAccount[]>("/api/v1/users"),
-        listPeople()
-      ]);
-      setUsers(nextUsers);
-      const linked = await lookupPeople(nextUsers.flatMap((item) => item.person_id ? [item.person_id] : []));
-      setPeople([...new Map([...nextPeople.items, ...linked].map((item) => [item.id, item])).values()]);
-    } catch (userError) {
-      setError(userError instanceof Error ? userError.message : "Unable to load users");
-    } finally {
-      setLoading(false);
-    }
+      const nextUsers = await api.get<UserAccount[]>("/api/v1/users", { signal });
+      const linked = await lookupPeople(nextUsers.flatMap((item) => item.person_id ? [item.person_id] : []), { signal });
+      if (!signal.aborted) { setUsers(nextUsers); setPeople(linked); }
+    } catch (userError) { if (!signal.aborted) setError(userError instanceof Error ? userError.message : "Unable to load users"); throw userError; }
+    finally { if (!signal.aborted) setLoading(false); }
   }, []);
-
-  React.useEffect(() => {
-    loadUsers().catch(() => undefined);
-  }, [loadUsers]);
-
-  React.useEffect(() => {
-    if (lastRefreshTokenRef.current === refreshToken) return;
-    lastRefreshTokenRef.current = refreshToken;
-    loadUsers().catch(() => undefined);
-  }, [loadUsers, refreshToken]);
-
+  const loadUsers = useCoordinatedRead(readUsers, usersEventMatches, isAdmin);
   const openCreate = () => {
     setTemporaryPassword(null);
     setSelectedUser(null);
@@ -220,7 +203,6 @@ export function UsersView({
       {modal ? (
         <UserModal
           mode={modal}
-          people={people}
           user={selectedUser}
           onClose={closeModal}
           onSaved={async (password, savedUser) => {
@@ -239,13 +221,11 @@ export function UsersView({
 
 function UserModal({
   mode,
-  people,
   user,
   onClose: finishClose,
   onSaved
 }: {
   mode: "create" | "edit";
-  people: Person[];
   user: UserAccount | null;
   onClose: (savedUser?: UserAccount) => void;
   onSaved: (temporaryPassword: string | null, savedUser?: UserAccount) => Promise<void>;
@@ -266,7 +246,7 @@ function UserModal({
     generate_password: mode === "create"
   });
   const existingProfilePhotoSource = mediaSource(user?.profile_photo_url, user?.profile_photo_data_url);
-  const personOptions = useDirectoryOptions("people", people, form.person_id ? [form.person_id] : []);
+  const personOptions = useDirectoryOptions("people", [], form.person_id ? [form.person_id] : []);
   const [profilePhotoChanged, setProfilePhotoChanged] = React.useState(false);
   const profilePhotoPreview = form.profile_photo_data_url || (!profilePhotoChanged ? existingProfilePhotoSource : "");
   const [error, setError] = React.useState("");

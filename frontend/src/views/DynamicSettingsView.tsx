@@ -1,3 +1,4 @@
+import { settingsEventMatches } from "../features/settings/invalidation";
 import React from "react";
 
 import { createActionConfirmation } from "../api/client";
@@ -15,8 +16,7 @@ export function DynamicSettingsView({
   icon: Icon,
   currentUser,
   maintenanceStatus,
-  onMaintenanceStatusChanged,
-  refreshToken
+  onMaintenanceStatusChanged
 }: {
   category: "general" | "auth" | "lpr";
   title: string;
@@ -24,9 +24,8 @@ export function DynamicSettingsView({
   currentUser?: UserAccount;
   maintenanceStatus?: MaintenanceStatus | null;
   onMaintenanceStatusChanged?: (status: MaintenanceStatus) => void;
-  refreshToken: number;
 }) {
-  const { rows, values, loading, error, save, reload } = useSettings(category);
+  const { rows, values, loading, error, save } = useSettings(category, settingsEventMatches);
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [saved, setSaved] = React.useState("");
   const [submitError, setSubmitError] = React.useState("");
@@ -36,7 +35,6 @@ export function DynamicSettingsView({
   const fields = settingsFields(category);
   const isAdmin = currentUser?.role === "admin";
   const gateLprSmartZones = useGateLprSmartZones(category === "lpr");
-  const lastRefreshTokenRef = React.useRef(refreshToken);
   const configuredSecretKeys = React.useMemo(
     () => new Set(rows.filter((row) => row.is_secret && Boolean(row.value)).map((row) => row.key)),
     [rows]
@@ -53,12 +51,6 @@ export function DynamicSettingsView({
     }
     setForm((current) => ({ ...next, ...Object.fromEntries([...dirtyFields.current].map((key) => [key, current[key] ?? ""])) }));
   }, [values, category, secretKeys]);
-
-  React.useEffect(() => {
-    if (lastRefreshTokenRef.current === refreshToken) return;
-    lastRefreshTokenRef.current = refreshToken;
-    reload().catch(() => undefined);
-  }, [refreshToken, reload]);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -135,7 +127,7 @@ export function DynamicSettingsView({
             <button className="primary-button" disabled={!isAdmin || saving || loading || Boolean(error) || !rows.length} type="submit">{saving ? "Saving…" : "Save Settings"}</button>
           </div>
         </div>
-        {category === "auth" && isAdmin ? <AuthSecretSecurityPanel refreshToken={refreshToken} /> : null}
+        {category === "auth" && isAdmin ? <AuthSecretSecurityPanel /> : null}
       </form>
     </section>
   );

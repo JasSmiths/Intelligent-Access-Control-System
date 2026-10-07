@@ -7,9 +7,9 @@ import { useEpisodeDetails, useInvestigationData, useInvestigationQueryState } f
 import { activeFilterCount } from "./query";
 import { EMPTY_FILTER_CATALOG } from "./types";
 
-export function InvestigationsWorkspace({ refreshToken }: { refreshToken: number }) {
+export function InvestigationsWorkspace() {
   const { query, committedQuery, updateQuery, resetQuery } = useInvestigationQueryState();
-  const data = useInvestigationData(committedQuery, refreshToken);
+  const data = useInvestigationData(committedQuery);
   const timezone = data.page?.site_timezone || data.overview?.site_timezone || data.filters?.site_timezone || "UTC";
   const episodeDetails = useEpisodeDetails();
   const [selectedEpisodeId, setSelectedEpisodeId] = React.useState<string>();

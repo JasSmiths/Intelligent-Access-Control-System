@@ -1,3 +1,5 @@
+import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
+import { reportsEventMatches } from "./invalidation";
 import React from "react";
 import { reportsApi, type ReportPreviewRequest, type ReportPreviewResponse } from "../../api/reports";
 import { quickRanges, type QuickRange } from "./model";
@@ -36,20 +38,24 @@ export function useReportRange() {
 }
 
 export function useReportPreview(previewRequest: ReportPreviewRequest | null) {
-  const [preview, setPreview] = React.useState<{ request: ReportPreviewRequest; result: ReportPreviewResponse } | null>(null);
-  const [previewError, setPreviewError] = React.useState<{ request: ReportPreviewRequest; message: string } | null>(null);
-  React.useEffect(() => {
+  const [preview, setPreview] = React.useState<{ request: ReportPreviewRequest; revision: number; result: ReportPreviewResponse } | null>(null);
+  const [previewError, setPreviewError] = React.useState<{ request: ReportPreviewRequest; revision: number; message: string } | null>(null);
+  const [revision, setRevision] = React.useState(0);
+  const revisionRef = React.useRef(0);
+  const read = React.useCallback(async (signal: AbortSignal) => {
     if (!previewRequest) return;
-    const controller = new AbortController();
-    reportsApi.preview(previewRequest, { signal: controller.signal })
-      .then((result) => { if (!controller.signal.aborted) setPreview({ request: previewRequest, result }); })
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted) setPreviewError({ request: previewRequest, message: error instanceof Error ? error.message : "Report preview failed." });
-      });
-    return () => controller.abort();
+    const currentRevision = ++revisionRef.current; setRevision(currentRevision);
+    try {
+      const result = await reportsApi.preview(previewRequest, { signal });
+      if (!signal.aborted) setPreview({ request: previewRequest, revision: currentRevision, result });
+    } catch (error) {
+      if (!signal.aborted) setPreviewError({ request: previewRequest, revision: currentRevision, message: error instanceof Error ? error.message : "Report preview failed." });
+      throw error;
+    }
   }, [previewRequest]);
-  const currentPreview = preview?.request === previewRequest ? preview.result : null;
-  const currentPreviewError = previewError?.request === previewRequest ? previewError.message : null;
+  useCoordinatedRead(read, reportsEventMatches, Boolean(previewRequest));
+  const currentPreview = preview?.request === previewRequest && preview.revision === revision ? preview.result : null;
+  const currentPreviewError = previewError?.request === previewRequest && previewError.revision === revision ? previewError.message : null;
   const previewPending = Boolean(previewRequest && !currentPreview && !currentPreviewError);
-  return { currentPreview, currentPreviewError, previewPending };
+  return { currentPreview, currentPreviewError, previewPending, revision };
 }

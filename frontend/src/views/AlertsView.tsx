@@ -33,7 +33,7 @@ export type AlertActionTarget = {
   action: "resolve" | "reopen";
 };
 
-export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetId }: { refreshDashboard: () => Promise<void>; refreshToken: number; resetToken: number; targetId: string | null }) {
+export function AlertsView({ refreshDashboard, targetId }: { refreshDashboard: () => Promise<void>; targetId: string | null }) {
   const [focused, setFocused] = React.useState<Anomaly | null>(null);
   const [statusFilter, setStatusFilter] = React.useState<"open" | "resolved" | "all">("open");
   const [severityFilter, setSeverityFilter] = React.useState<"all" | AlertSeverity>("all");
@@ -59,7 +59,7 @@ export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetI
   if (deferredQuery.trim()) params.set("q", deferredQuery.trim());
   if (from) params.set("from", from);
   if (to) params.set("to", to);
-  const history = useHistoryPage<Anomaly>("/api/v1/alerts/history", params, refreshToken, resetToken);
+  const history = useHistoryPage<Anomaly>("/api/v1/alerts/history", params);
   const alerts = focused && !history.items.some((alert) => alertMatchesFocus(alert, focusedAlertId))
     ? [focused, ...history.items] : history.items;
 

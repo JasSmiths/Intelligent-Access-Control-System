@@ -1,3 +1,4 @@
+import { settingsEventMatches } from "../settings/invalidation";
 import React from "react";
 import { useDirectoryOptions } from "../directory/reads";
 import { DirectoryPagination } from "../directory/DirectoryPagination";
@@ -14,13 +15,13 @@ const ownerValues = (person?: Person): OwnerConfig => ({ enabled: person?.missed
 const sameOwnerValues = (a: OwnerConfig, b: OwnerConfig) => a.enabled === b.enabled && a.tracker === b.tracker;
 const newOwnerDraft = (person?: Person): OwnerDraft => ({ config: ownerValues(person), dirty: false, trackerTouched: false, saved: null, autoTarget: null });
 
-export function RecoveryConfiguration({ people, refreshToken, refresh }: { people: Person[]; refreshToken: number; refresh: () => Promise<void> }) {
-  const settings = useSettings("missed_exit_recovery", refreshToken);
+export function RecoveryConfiguration({ refresh }: { refresh: () => Promise<void> }) {
+  const settings = useSettings("missed_exit_recovery", settingsEventMatches);
   const [config, setConfig] = React.useState({ enabled: false, latitude: "", longitude: "" });
   const [globalDirty, setGlobalDirty] = React.useState(false);
   const [settingsKnown, setSettingsKnown] = React.useState(false);
   const [ownerId, setOwnerId] = React.useState("");
-  const personOptions = useDirectoryOptions("people", people, ownerId ? [ownerId] : [], true, refreshToken);
+  const personOptions = useDirectoryOptions("people", [], ownerId ? [ownerId] : []);
   const owner = personOptions.items.find((person) => person.id === ownerId);
   const [ownerDraft, setOwnerDraft] = React.useState<OwnerDraft>(() => newOwnerDraft());
   const ownerConfig = ownerDraft.config;

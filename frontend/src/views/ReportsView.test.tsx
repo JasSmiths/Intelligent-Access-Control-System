@@ -1,3 +1,6 @@
+import React from "react";
+import { waitFor } from "@testing-library/react";
+import { createReadSignals, ReadSignalsContext } from "../lib/readSignals";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as directoryApi from "../api/directory";
@@ -50,7 +53,7 @@ function setupReports() {
 async function selectResident() {
   await act(async () => {});
   fireEvent.focus(screen.getByRole("combobox", { name: "Subject" }));
-  fireEvent.click(screen.getByRole("option", { name: /Synthetic Resident/ }));
+  fireEvent.click(await screen.findByRole("option", { name: /Synthetic Resident/ }));
 }
 
 beforeEach(() => {
@@ -65,14 +68,14 @@ it("retries a canceled visitor list read and ignores the late canceled response"
   const old = deferred<VisitorPass[]>();
   const current = deferred<VisitorPass[]>();
   const read = vi.spyOn(api, "get").mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
-  render(<ReportsView events={[]} people={[]} presence={[]} />);
+  render(<ReportsView />);
   const subject = screen.getByRole("combobox", { name: "Subject" });
   fireEvent.focus(subject);
   expect(read).toHaveBeenCalledTimes(1);
   const canceledSignal = read.mock.calls[0][1]?.signal;
   fireEvent.change(subject, { target: { value: "Visitor" } });
   expect(canceledSignal?.aborted).toBe(true);
-  expect(read).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   await act(async () => { current.resolve([visitor("Visitor Current")]); });
   expect(screen.getByRole("option", { name: /Visitor Current/ })).toBeInTheDocument();
   await act(async () => { old.resolve([visitor("Visitor Stale")]); });
@@ -85,33 +88,32 @@ it("allows another visitor read after a failure instead of treating a started re
   const failed = deferred<VisitorPass[]>();
   const retried = deferred<VisitorPass[]>();
   const read = vi.spyOn(api, "get").mockReturnValueOnce(failed.promise).mockReturnValueOnce(retried.promise);
-  render(<ReportsView events={[]} people={[]} presence={[]} />);
+  render(<ReportsView />);
   const subject = screen.getByRole("combobox", { name: "Subject" });
   fireEvent.focus(subject);
   await act(async () => { failed.reject(new Error("Synthetic offline")); });
   fireEvent.change(subject, { target: { value: "Visitor" } });
-  expect(read).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   await act(async () => { retried.resolve([visitor("Visitor Retry")]); });
   expect(screen.getByRole("option", { name: /Visitor Retry/ })).toBeInTheDocument();
 });
 
-it("retries a canceled complete preview on shell invalidation and ignores late data", async () => {
+it("refreshes an unchanged preview through its explicit revision and discards canceled manual data", async () => {
   setupReports();
-  const old = deferred<ReportPreviewResponse>();
-  const current = deferred<ReportPreviewResponse>();
+  const old = deferred<ReportPreviewResponse>(); const current = deferred<ReportPreviewResponse>();
   const preview = vi.spyOn(reportsApi, "preview").mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
-  const view = render(<ReportsView events={[]} people={[person]} presence={[]} />);
+  const signals = createReadSignals("test");
+  render(<ReadSignalsContext.Provider value={signals}><ReportsView /></ReadSignalsContext.Provider>);
   await selectResident();
-  expect(preview).toHaveBeenCalledTimes(1);
-  const oldSignal = preview.mock.calls[0][1]!.signal!;
-  view.rerender(<ReportsView events={[]} people={[person]} presence={[]} />);
-  expect(oldSignal.aborted).toBe(true);
-  expect(preview).toHaveBeenCalledTimes(2);
-  await act(async () => { current.resolve(previewWithSource("Current camera")); });
-  expect(screen.getByText("Current camera")).toBeInTheDocument();
+  expect(preview).toHaveBeenCalledOnce(); const oldSignal = preview.mock.calls[0][1]!.signal!;
+  let pending!: Promise<void>;
+  act(() => { pending = signals.publish({ type: "refresh", reason: "manual", resetHistory: false }); });
+  expect(oldSignal.aborted).toBe(true); expect(preview).toHaveBeenCalledOnce();
   await act(async () => { old.resolve(previewWithSource("Stale camera")); });
+  expect(preview).toHaveBeenCalledTimes(2);
   expect(screen.queryByText("Stale camera")).not.toBeInTheDocument();
-  expect(api.get).not.toHaveBeenCalledWith("/api/v1/events?limit=250", expect.anything());
+  await act(async () => { current.resolve(previewWithSource("Current camera")); await pending; });
+  expect(screen.getByText("Current camera")).toBeInTheDocument();
 });
 
 it("renders all supplied events and authoritative duration and site labels, then exports accepted UTC bounds", async () => {
@@ -126,7 +128,7 @@ it("renders all supplied events and authoritative duration and site labels, then
   const exported = { report_id: "123456", report: { ...response.report, report_id: "123456" }, download_url: "/api/v1/reports/123456/pdf" } as ReportExportResponse;
   const exportReport = vi.spyOn(reportsApi, "export").mockResolvedValue(exported);
   const download = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
-  render(<ReportsView events={[]} people={[person]} presence={[]} />);
+  render(<ReportsView />);
   await selectResident();
   await act(async () => {});
   expect(screen.getByText("Showing 251 of 251 events")).toBeInTheDocument();
@@ -147,7 +149,7 @@ it("requires the server's repeated-time choice and forwards its fold without cli
   setupReports();
   vi.spyOn(reportsApi, "context").mockResolvedValue({ ...context, now: "2026-11-01T03:00:00Z" });
   const preview = vi.spyOn(reportsApi, "preview").mockResolvedValueOnce(ready).mockResolvedValue(ambiguous);
-  render(<ReportsView events={[]} people={[person]} presence={[]} />);
+  render(<ReportsView />);
   await selectResident();
   await act(async () => {});
   fireEvent.click(screen.getByRole("button", { name: "From" }));
@@ -169,7 +171,7 @@ it("invalidates an old preview immediately when options change and suppresses la
   setupReports();
   const next = deferred<ReportPreviewResponse>();
   const preview = vi.spyOn(reportsApi, "preview").mockResolvedValueOnce(ready).mockReturnValueOnce(next.promise);
-  const view = render(<ReportsView events={[]} people={[person]} presence={[]} />);
+  const view = render(<ReportsView />);
   await selectResident();
   await act(async () => {});
   expect(screen.getByRole("button", { name: "Export PDF" })).toBeEnabled();
@@ -185,7 +187,7 @@ it("invalidates an old preview immediately when options change and suppresses la
 it("shows a missing-hour error without enabling export and allows a new preview after editing", async () => {
   setupReports();
   const preview = vi.spyOn(reportsApi, "preview").mockRejectedValueOnce(new Error(contract.gap.detail)).mockResolvedValueOnce(ready);
-  render(<ReportsView events={[]} people={[person]} presence={[]} />);
+  render(<ReportsView />);
   await selectResident();
   await act(async () => {});
   expect(screen.getByRole("alert")).toHaveTextContent(contract.gap.detail);
@@ -202,13 +204,13 @@ it("cancels a historical lookup when another subject is selected", async () => {
   vi.spyOn(reportsApi, "preview").mockResolvedValue(ready);
   const lookup = deferred<ReportExportResponse>();
   const read = vi.spyOn(reportsApi, "load").mockReturnValue(lookup.promise);
-  render(<ReportsView events={[]} people={[person]} presence={[]} />);
+  render(<ReportsView />);
   await act(async () => {});
   const input = screen.getByRole("combobox", { name: "Subject" });
   fireEvent.change(input, { target: { value: "123456" } });
   fireEvent.click(screen.getByRole("option", { name: /Open Report #123456/ }));
   fireEvent.change(input, { target: { value: "Synthetic" } });
-  fireEvent.click(screen.getByRole("option", { name: /Synthetic Resident/ }));
+  fireEvent.click(await screen.findByRole("option", { name: /Synthetic Resident/ }));
   expect(read.mock.calls[0][1]!.signal!.aborted).toBe(true);
   await act(async () => { lookup.resolve({ report_id: "123456", report: ready.report } as ReportExportResponse); });
   expect(screen.queryByText("Exported Report")).not.toBeInTheDocument();
@@ -222,7 +224,7 @@ it("finds a subject outside the shell page and retains its selection after searc
   vi.mocked(directoryApi.readDirectory).mockResolvedValue({ items: [later], total: 1, next_cursor: null });
   vi.mocked(directoryApi.lookupDirectory).mockResolvedValue([later]);
   const preview = vi.spyOn(reportsApi, "preview").mockResolvedValue(ready);
-  render(<ReportsView events={[]} people={[]} presence={[]} />);
+  render(<ReportsView />);
   const subject = screen.getByRole("combobox", { name: "Subject" });
   fireEvent.focus(subject);
   fireEvent.change(subject, { target: { value: "Later" } });
@@ -240,9 +242,20 @@ it("clears a selected inactive identity without treating another directory page 
   setupReports();
   vi.spyOn(reportsApi, "preview").mockResolvedValue(ready);
   vi.mocked(directoryApi.lookupDirectory).mockResolvedValue([{ ...person, is_active: false }]);
-  render(<ReportsView events={[]} people={[person]} presence={[]} />);
+  render(<ReportsView />);
   await selectResident();
   await act(async () => {});
   expect(screen.getByRole("combobox", { name: "Subject" })).toHaveValue("");
   expect(screen.getByRole("button", { name: "Export PDF" })).toBeDisabled();
+});
+
+it("keeps server-only phone matches visible and searches only while the subject picker is open", async () => {
+  setupReports(); vi.spyOn(reportsApi, "preview").mockResolvedValue(ready);
+  const read = vi.mocked(directoryApi.readDirectory);
+  render(<ReportsView />); await act(async () => {}); expect(read).not.toHaveBeenCalled();
+  const subject = screen.getByRole("combobox", { name: "Subject" }); fireEvent.focus(subject);
+  await screen.findByRole("option", { name: /Synthetic Resident/ });
+  fireEvent.change(subject, { target: { value: "07700123999" } });
+  await waitFor(() => expect(read.mock.calls.at(-1)?.[1]).toMatchObject({ q: "07700123999", active: true }));
+  expect(screen.getByRole("option", { name: /Synthetic Resident/ })).toBeInTheDocument();
 });

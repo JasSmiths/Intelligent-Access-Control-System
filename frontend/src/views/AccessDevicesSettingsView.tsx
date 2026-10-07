@@ -1,3 +1,8 @@
+import { useCoordinatedRead } from "../lib/useCoordinatedRead";
+import { auditResource } from "../lib/realtime";
+import type { RealtimeMessage } from "../api/types";
+const devicesEventMatches = (event: RealtimeMessage) => ["access_device", "esphome", "home_assistant", "settings", "schedule"].includes(auditResource(event));
+import { useSchedules } from "../features/schedules/reads";
 import { CircleDot, Home, Plus, SlidersHorizontal, Zap } from "lucide-react";
 import React from "react";
 
@@ -5,7 +10,7 @@ import { api, createActionConfirmation } from "../api/client";
 import { integrationsApi } from "../api/integrations";
 import { stringifySetting, useSettings } from "../lib/settings";
 import { Badge } from "../ui/primitives";
-import type { AccessDevice, Schedule, UserAccount } from "../api/types";
+import type { AccessDevice, UserAccount } from "../api/types";
 import { coverMatchesKind, deviceHasProviderBinding, deviceHasAnyProviderBinding, providerLabel, bindingConfigForDiscovery } from "../features/settings/accessDeviceModel";
 import type { AccessDeviceKind, AccessDeviceDiscoveryItem } from "../features/settings/accessDeviceModel";
 import { AccessDeviceEditor } from "../features/settings/AccessDeviceEditor";
@@ -15,16 +20,13 @@ export function AccessDevicesSettingsView({
   title,
   icon: Icon,
   currentUser,
-  refreshToken,
-  schedules
 }: {
   kind: AccessDeviceKind;
   title: string;
   icon: React.ElementType;
   currentUser: UserAccount;
-  refreshToken: number;
-  schedules: Schedule[];
 }) {
+  const scheduleCatalog = useSchedules(); const schedules = scheduleCatalog.items;
   const [devices, setDevices] = React.useState<AccessDevice[]>([]);
   const [admissionChoices, setAdmissionChoices] = React.useState<Array<{ key: string; name: string }>>([]);
   const [devicesLoading, setDevicesLoading] = React.useState(true);
@@ -35,52 +37,45 @@ export function AccessDevicesSettingsView({
   const [error, setError] = React.useState("");
   const [homeAssistantCovers, setHomeAssistantCovers] = React.useState<AccessDeviceDiscoveryItem[]>([]);
   const [esphomeCovers, setEsphomeCovers] = React.useState<AccessDeviceDiscoveryItem[]>([]);
-  const accessSettings = useSettings("access");
+  const accessSettings = useSettings("access", devicesEventMatches);
   const dirtyDeviceIds = React.useRef(new Set<string>());
   const savingKeyRef = React.useRef("");
-  const lastRefreshTokenRef = React.useRef(refreshToken);
   const isAdmin = currentUser.role === "admin";
 
-  const loadDevices = React.useCallback(async (showLoading = true) => {
-    if (showLoading) setDevicesLoading(true);
+  const readDevices = React.useCallback(async (signal: AbortSignal) => {
+    setDevicesLoading(true);
     setError("");
     try {
-      const saved = await integrationsApi.getAccessDevices(kind);
+      const saved = await integrationsApi.getAccessDevices(kind, { signal });
+      if (signal.aborted) return;
       setDevices((current) => saved.map((device) => dirtyDeviceIds.current.has(device.id) ? current.find((item) => item.id === device.id) ?? device : device));
       // Choices are server-validated saved devices, independent of unsaved editor drafts.
       setAdmissionChoices(saved.filter((device) => device.admission_eligible === true).map(({ key, name }) => ({ key, name })));
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Unable to load access devices.");
+      if (!signal.aborted) setError(loadError instanceof Error ? loadError.message : "Unable to load access devices.");
+      throw loadError;
     } finally {
-      if (showLoading) setDevicesLoading(false);
+      if (!signal.aborted) setDevicesLoading(false);
     }
   }, [kind]);
 
-  const loadDiscovery = React.useCallback(async () => {
+  const readDiscovery = React.useCallback(async (signal: AbortSignal) => {
     setDiscoveryLoading(true);
     try {
       const [haDiscovery, esphomeDiscovery] = await Promise.all([
-        api.get<{ cover_entities: AccessDeviceDiscoveryItem[] }>("/api/v1/integrations/home-assistant/entities").catch(() => ({ cover_entities: [] })),
-        api.get<{ cover_entities: AccessDeviceDiscoveryItem[] }>("/api/v1/integrations/esphome/entities").catch(() => ({ cover_entities: [] }))
+        api.get<{ cover_entities: AccessDeviceDiscoveryItem[] }>("/api/v1/integrations/home-assistant/entities", { signal }).catch(() => ({ cover_entities: [] })),
+        api.get<{ cover_entities: AccessDeviceDiscoveryItem[] }>("/api/v1/integrations/esphome/entities", { signal }).catch(() => ({ cover_entities: [] }))
       ]);
+      if (signal.aborted) return;
       setHomeAssistantCovers((haDiscovery.cover_entities ?? []).filter((cover) => coverMatchesKind(cover, kind)));
       setEsphomeCovers((esphomeDiscovery.cover_entities ?? []).filter((cover) => coverMatchesKind(cover, kind)));
     } finally {
-      setDiscoveryLoading(false);
+      if (!signal.aborted) setDiscoveryLoading(false);
     }
   }, [kind]);
 
-  React.useEffect(() => {
-    loadDevices().catch(() => undefined);
-    loadDiscovery().catch(() => undefined);
-  }, [loadDevices, loadDiscovery]);
-
-  React.useEffect(() => {
-    if (lastRefreshTokenRef.current === refreshToken) return;
-    lastRefreshTokenRef.current = refreshToken;
-    loadDevices().catch(() => undefined);
-    loadDiscovery().catch(() => undefined);
-  }, [loadDevices, loadDiscovery, refreshToken]);
+  const loadDevices = useCoordinatedRead(readDevices, devicesEventMatches);
+  useCoordinatedRead(readDiscovery, devicesEventMatches);
 
   const enabledCount = React.useMemo(() => devices.filter((device) => device.enabled).length, [devices]);
   const haMappedCount = React.useMemo(() => devices.filter((device) => deviceHasProviderBinding(device, "home_assistant")).length, [devices]);
@@ -213,7 +208,7 @@ export function AccessDevicesSettingsView({
       setDevices((current) => current.map((item) => item.id === saved.id ? saved : item));
       dirtyDeviceIds.current.delete(saved.id);
       setMessage("Device saved.");
-      await loadDevices(false);
+      await loadDevices();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save access device.");
     } finally {
@@ -363,11 +358,12 @@ export function AccessDevicesSettingsView({
               </div>
             </div>
             {isAdmin ? (
-              <button className="secondary-button" onClick={addDevice} disabled={devicesLoading} type="button"><Plus size={15} /> Add {kind === "gate" ? "Gate" : "Door"}</button>
+              <button className="secondary-button" onClick={addDevice} disabled={devicesLoading || !scheduleCatalog.ready} type="button"><Plus size={15} /> Add {kind === "gate" ? "Gate" : "Door"}</button>
             ) : null}
           </div>
           {(devicesLoading || discoveryLoading) ? <AccessDeviceLoadingBar label={devicesLoading ? "Loading access devices" : "Refreshing provider discovery"} /> : null}
-          {error ? <div className="auth-error inline-error">{error}</div> : null}
+          {scheduleCatalog.error ? <p role="alert">{scheduleCatalog.error}</p> : null}
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
           {accessSettings.error ? <div className="auth-error inline-error">{accessSettings.error}</div> : null}
           {message ? <div className="success-note">{message}</div> : null}
           <div className="access-device-list">
