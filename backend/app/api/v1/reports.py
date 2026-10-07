@@ -2,17 +2,18 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import current_user
-from app.db.session import get_db_session
+from app.db.session import AsyncSessionLocal, get_db_session
 from app.models import User
+from app.services.auth import authenticate_token, extract_http_token
+from app.services.report_contracts import ReportAuthority, ReportExportError, ReportRequest
+from app.services.report_exports import report_exports
 from app.services.reports import (
-    ReportExportError,
-    create_person_movement_report_export,
     load_report_export,
     preview_person_movement_report,
     report_export_payload,
@@ -21,6 +22,17 @@ from app.services.reports import (
 )
 
 router = APIRouter()
+
+
+async def report_authority(request: Request) -> ReportAuthority:
+    # Do not use the request-yield session/current_user fallback here: rendering
+    # must hold neither its source nor its authentication transaction.
+    token = await extract_http_token(request)
+    async with AsyncSessionLocal() as session:
+        actor = await authenticate_token(session, token)
+        if actor is None or token is None:
+            raise HTTPException(status_code=401, detail="Sign in before exporting a report.")
+        return ReportAuthority(actor.id, token)
 
 
 class PersonMovementReportExportRequest(BaseModel):
@@ -83,30 +95,25 @@ async def preview_movement_report(
     try:
         return await preview_person_movement_report(session, **request.model_dump())
     except ReportExportError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.post("/person-movements/export")
 async def export_person_movement_report(
     request: PersonMovementReportExportRequest,
-    actor: Annotated[User, Depends(current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    authority: Annotated[ReportAuthority, Depends(report_authority)],
+    http_request: Request,
 ) -> dict:
+    async def disconnected() -> None:
+        # FastAPI has consumed the JSON body before invoking this adapter. The
+        # server exposes disconnect through receive; it need not cancel our task.
+        while (await http_request.receive())["type"] != "http.disconnect":
+            pass
     try:
-        row = await create_person_movement_report_export(
-            session,
-            person_id=request.person_id,
-            visitor_pass_id=request.visitor_pass_id,
-            period_start=request.period_start,
-            period_end=request.period_end,
-            include_denied=request.include_denied,
-            include_snapshots=request.include_snapshots,
-            include_confidence=request.include_confidence,
-            actor=actor,
-        )
+        return await report_exports.export(ReportRequest(**request.model_dump()), authority, disconnected=disconnected)
     except ReportExportError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return report_export_payload(row)
+        headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
+        raise HTTPException(status_code=exc.status_code, detail=str(exc), headers=headers) from exc
 
 
 @router.get("/{report_id}")

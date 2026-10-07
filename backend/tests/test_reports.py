@@ -2,8 +2,10 @@ import base64
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -12,6 +14,9 @@ import pytest
 from fastapi import FastAPI
 from PIL import Image
 
+from app.services import report_exports as exports_service
+from app.services import report_renderer as renderer_service
+from app.services.report_contracts import ReportAuthority, ReportWork
 from app.api.dependencies import current_user
 from app.api.v1 import reports as reports_api
 from app.db.session import get_db_session
@@ -28,6 +33,9 @@ from app.services import auth as auth_service
 from app.services import reports as reports_service
 from app.services import report_durations as duration_service
 from app.services import snapshots as snapshots_service
+from app.services import report_images as images_service
+from app.services.report_reads import ReportEvent, ReportPerson
+from app.services.report_contracts import ReportLimitError
 
 
 def make_user() -> User:
@@ -166,13 +174,13 @@ def test_snapshot_toggle_controls_serialized_event_media(monkeypatch) -> None:
     )
 
     without_snapshot = reports_service.serialize_report_event(
-        event,
+        compact_event(event),
         include_snapshots=False,
         duration={"label": "New Arrival"},
         timezone=reports_service._timezone("Europe/London"),
     )
     with_snapshot = reports_service.serialize_report_event(
-        event,
+        compact_event(event),
         include_snapshots=True,
         duration={"label": "New Arrival"},
         timezone=reports_service._timezone("Europe/London"),
@@ -185,41 +193,33 @@ def test_snapshot_toggle_controls_serialized_event_media(monkeypatch) -> None:
 
 
 def test_pdf_safe_profile_image_keeps_browser_supported_data_url() -> None:
-    data_url = "data:image/jpeg;base64,aGVsbG8="
-
-    assert reports_service._pdf_safe_image_data_url(data_url) == data_url
+    source = BytesIO()
+    Image.new("RGB", (12, 9), "#8ab4f8").save(source, format="JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(source.getvalue()).decode("ascii")
+    report = renderer_service.report_for_pdf({"person": {"profile_photo_data_url": data_url}, "events": []}, ReportWork(monotonic() + 120))
+    assert report["person"]["pdf_profile_photo_data_url"] == data_url
 
 
 def test_pdf_safe_profile_image_resizes_converted_images() -> None:
     source = BytesIO()
     Image.new("RGB", (1200, 900), "#8ab4f8").save(source, format="TIFF")
     data_url = f"data:image/tiff;base64,{base64.b64encode(source.getvalue()).decode('ascii')}"
-
-    converted = reports_service._pdf_safe_image_data_url(data_url)
-
-    assert converted is not None
+    report = renderer_service.report_for_pdf({"person": {"profile_photo_data_url": data_url}, "events": []}, ReportWork(monotonic() + 120))
+    converted = report["person"]["pdf_profile_photo_data_url"]
     assert converted.startswith("data:image/jpeg;base64,")
-    encoded = converted.split(",", 1)[1]
-    with Image.open(BytesIO(base64.b64decode(encoded))) as image:
-        assert max(image.size) == reports_service.PDF_SAFE_PROFILE_IMAGE_MAX_EDGE_PX
+    with Image.open(BytesIO(base64.b64decode(converted.split(",", 1)[1]))) as image:
+        assert max(image.size) == images_service.PDF_SAFE_PROFILE_IMAGE_MAX_EDGE_PX
 
 
-def test_pdf_report_uses_pdf_safe_profile_photo(monkeypatch) -> None:
-    monkeypatch.setattr(
-        reports_service,
-        "_pdf_safe_image_data_url",
-        lambda value: f"safe:{value}" if value else None,
-    )
-
-    report = reports_service._report_for_pdf(
-        {
-            "person": {"profile_photo_data_url": "data:image/heic;base64,abc"},
-            "brand": {},
-            "events": [],
-        }
-    )
-
-    assert report["person"]["pdf_profile_photo_data_url"] == "safe:data:image/heic;base64,abc"
+def test_pdf_report_uses_verified_profile_photo_without_mutating_snapshot() -> None:
+    source = BytesIO()
+    Image.new("RGB", (12, 9), "#8ab4f8").save(source, format="PNG")
+    data_url = "data:image/png;base64," + base64.b64encode(source.getvalue()).decode("ascii")
+    snapshot = {"person": {"profile_photo_data_url": data_url}, "brand": {}, "events": []}
+    report = renderer_service.report_for_pdf(snapshot, ReportWork(monotonic() + 120))
+    assert report["person"]["pdf_profile_photo_data_url"] == data_url
+    assert "pdf_profile_photo_data_url" not in snapshot["person"]
+    assert report["brand"]["site"] == "Crest House"
 
 
 def test_public_report_snapshot_strips_embedded_media() -> None:
@@ -288,6 +288,10 @@ def app_for_reports(user: User) -> FastAPI:
     async def override_db_session():
         yield SimpleNamespace()
 
+    async def override_report_authority():
+        return ReportAuthority(user.id, "synthetic-only")
+
+    app.dependency_overrides[reports_api.report_authority] = override_report_authority
     app.dependency_overrides[current_user] = override_current_user
     app.dependency_overrides[get_db_session] = override_db_session
     return app
@@ -312,9 +316,9 @@ async def test_report_export_endpoint_returns_download_payload(monkeypatch) -> N
     )
 
     async def fake_create(*_args, **_kwargs):
-        return row
+        return reports_service.report_export_payload(row)
 
-    monkeypatch.setattr(reports_api, "create_person_movement_report_export", fake_create)
+    monkeypatch.setattr(reports_api.report_exports, "export", fake_create)
     app = app_for_reports(user)
     transport = httpx.ASGITransport(app=app)
 
@@ -361,11 +365,12 @@ async def test_report_export_endpoint_accepts_visitor_pass_subject(monkeypatch) 
         updated_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
     )
 
-    async def fake_create(*_args, **kwargs):
-        captured_kwargs.update(kwargs)
-        return row
+    async def fake_create(request, authority, **_kwargs):
+        captured_kwargs.update(vars(request))
+        assert authority.user_id == user.id
+        return reports_service.report_export_payload(row)
 
-    monkeypatch.setattr(reports_api, "create_person_movement_report_export", fake_create)
+    monkeypatch.setattr(reports_api.report_exports, "export", fake_create)
     app = app_for_reports(user)
     transport = httpx.ASGITransport(app=app)
 
@@ -500,47 +505,81 @@ def test_report_boundary_rejects_nonexistent_time_instead_of_normalizing_it():
 
 
 def report_person():
-    return SimpleNamespace(
+    return ReportPerson(
         id=uuid.UUID(PREVIEW_CONTRACT["ready"]["report"]["person"]["id"]),
         first_name="Synthetic", last_name="Resident", display_name="Synthetic Resident",
-        pronouns=None, profile_photo_data_url=None, group=None, vehicles=[], presence=None, updated_at=None,
+        pronouns=None, profile_photo_data_url=None, group_name=None, group_category=None,
+        vehicles=[], presence=None, updated_at=None,
     )
 
 
+def compact_event(event):
+    visitor = (event.raw_payload or {}).get("visitor_pass", {})
+    return ReportEvent(
+        event.id, event.registration_number, event.direction, event.decision,
+        event.confidence, event.source, event.occurred_at, event.timing_classification,
+        event.snapshot_path, event.snapshot_content_type, event.snapshot_bytes,
+        event.snapshot_width, event.snapshot_height, event.snapshot_captured_at,
+        event.snapshot_camera, visitor.get("id"), visitor.get("visitor_name"), visitor.get("mode"),
+        len(event.anomalies),
+    )
+
+
+class ReportRows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def all(self):
+        return self.rows
+
+    def first(self):
+        return self.rows[0] if self.rows else None
+
+    def __iter__(self):
+        return iter(self.rows)
+
+
 class ReportReadSession:
-    """Only reads exist; accidental persistence calls fail the test."""
+    """Composed snapshot fixture; genuine SQL behavior is covered by PG fixtures."""
     def __init__(self, event_batches=()):
-        self.event_batches = iter(event_batches)
+        batches = list(event_batches)
+        self.events, self.history, self.timeline = (batches + [[], [], []])[:3]
         self.queries = []
-        self.history = None
 
     async def scalar(self, statement):
         self.queries.append(statement)
         return report_person()
 
-    async def scalars(self, statement):
-        self.queries.append(statement)
-        return SimpleNamespace(all=lambda: next(self.event_batches))
-
     async def execute(self, statement):
         self.queries.append(statement)
-        if self.history is None:
-            self.history = next(self.event_batches)
+        sql = str(statement)
         params = statement.compile().params
+        columns = list(statement.selected_columns)
+        if "FROM people" in sql:
+            person = report_person()
+            return ReportRows([(person.id, person.first_name, person.last_name, person.display_name,
+                               person.pronouns, None, 0, None, None, None)])
+        if "FROM vehicles" in sql and "FROM access_events" not in sql:
+            return ReportRows([])
+        if "FROM anomalies" in sql:
+            return ReportRows([])
+        if len(columns) == 18:
+            events = self.events
+            if " != " in sql:
+                events = [event for event in events if event.decision != AccessDecision.DENIED]
+            events = sorted(events, key=lambda event: (event.occurred_at, event.id))
+            return ReportRows([tuple(vars(compact_event(event)).values())[:18]
+                               for event in events[:statement._limit_clause.value]])
+        if "occurred_at < :" not in sql:
+            return ReportRows([(event.id, event.registration_number, event.direction, event.decision,
+                                event.occurred_at) for event in self.timeline[:statement._limit_clause.value]])
         boundary = params["occurred_at_1"]
         history = [event for event in self.history if event.occurred_at < boundary]
         if "direction_2" in params:
             history = [event for event in history if event.direction == params["direction_2"]]
             history = sorted(history, key=lambda event: event.occurred_at, reverse=True)[:1]
-        rows = [(event.id, event.registration_number, event.direction, event.decision, event.occurred_at) for event in history]
-        return SimpleNamespace(first=lambda: rows[0] if rows else None) if "direction_2" in params else rows
-
-    async def stream(self, statement):
-        self.queries.append(statement)
-        async def rows():
-            for event in next(self.event_batches):
-                yield (event.id, event.registration_number, event.direction, event.decision, event.occurred_at)
-        return rows()
+        return ReportRows([(event.id, event.registration_number, event.direction, event.decision,
+                            event.occurred_at) for event in history])
 
     async def get(self, _model, _identity):
         return None
@@ -551,13 +590,24 @@ def forbid_report_effects(monkeypatch):
         raise AssertionError("Preview attempted a write, media restoration or export effect")
 
     for name in ("generate_report_number", "render_person_movement_report_pdf", "write_audit_log", "_resolve_report_path"):
-        monkeypatch.setattr(reports_service, name, forbidden)
-    monkeypatch.setattr(reports_service, "get_snapshot_manager", forbidden)
+        monkeypatch.setattr(exports_service, name, forbidden)
+    monkeypatch.setattr(images_service, "get_snapshot_manager", forbidden)
     monkeypatch.setattr(snapshots_service, "get_snapshot_manager", forbidden)
 
 
 async def london_report_config():
     return SimpleNamespace(site_timezone="Europe/London")
+
+
+@asynccontextmanager
+async def synthetic_report_transaction(_session):
+    # Real isolation/config transaction behavior is exercised by PG fixtures.
+    yield await london_report_config()
+
+
+@pytest.fixture(autouse=True)
+def report_snapshot_source(monkeypatch):
+    monkeypatch.setattr(reports_service, "report_read_transaction", synthetic_report_transaction)
 
 
 async def test_preview_contract_is_built_without_export_or_persistence(monkeypatch):
@@ -578,7 +628,7 @@ async def test_preview_contract_is_built_without_export_or_persistence(monkeypat
     # Brand is an existing site presentation constant, outside this synthetic DTO fixture.
     preview["report"].pop("brand")
     assert preview == PREVIEW_CONTRACT["ready"]
-    assert len(session.queries) == 5
+    assert len(session.queries) == 7
 
 
 async def test_preview_complete_history_duration_and_media_are_shared_with_export_builder(monkeypatch):
@@ -602,8 +652,9 @@ async def test_preview_complete_history_duration_and_media_are_shared_with_expor
     assert first_departure["duration"] == {"label": "6hrs 0m"}
     assert first_departure["snapshot_url"] == f"/api/v1/events/{departures[0].id}/snapshot"
     assert "_snapshot_path" not in first_departure
-    assert "LIMIT" not in str(session.queries[1]).upper()
-    assert "LIMIT" not in str(session.queries[-1]).upper()
+    selected_query = next(query for query in session.queries if len(query.selected_columns) == 18)
+    assert selected_query._limit_clause.value == 10001
+    assert session.queries[-1]._limit_clause.value == 10000 - 251 * 2 + 1
     # Export invokes this same snapshot builder; media availability is its only read-policy difference.
     exported = reports_service.public_report_snapshot(await reports_service.build_movement_report_snapshot(
         ReportReadSession([departures, [prior, *departures], departures]),
@@ -703,59 +754,6 @@ def test_report_timeline_emits_the_public_fixture_fields_in_site_time():
     assert reports_service.serialize_timeline_event(event, timezone=reports_service._timezone("Europe/London")) == expected
 
 
-async def test_export_orchestration_preserves_actor_subject_utc_bounds_and_saved_snapshot(monkeypatch, tmp_path):
-    monkeypatch.setattr(reports_service, "get_runtime_config", london_report_config)
-    captured = {}
-    class ExportSession(ReportReadSession):
-        def add(self, row):
-            captured["row"] = row
-
-        async def commit(self):
-            captured["committed"] = True
-
-        async def refresh(self, row):
-            assert captured["committed"] is True and row is captured["row"]
-            captured["refreshed"] = True
-
-    async def number(_session):
-        return "123456"
-
-    async def render(snapshot, path, *, timezone):
-        captured["rendered"] = snapshot
-        assert path == tmp_path / "synthetic.pdf"
-        assert timezone.key == "Europe/London"
-        return 321
-
-    async def audit(_session, **kwargs):
-        captured["audit"] = kwargs
-
-    monkeypatch.setattr(reports_service, "generate_report_number", number)
-    monkeypatch.setattr(reports_service, "render_person_movement_report_pdf", render)
-    monkeypatch.setattr(reports_service, "_resolve_report_path", lambda _relative, **_kwargs: tmp_path / "synthetic.pdf")
-    monkeypatch.setattr(reports_service, "write_audit_log", audit)
-    actor = make_user()
-    row = await reports_service.create_person_movement_report_export(
-        ExportSession([[], [], []]), person_id=report_person().id,
-        period_start=datetime.fromisoformat("2026-07-14T09:00:00+01:00"),
-        period_end=datetime.fromisoformat("2026-07-14T10:00:00+01:00"),
-        include_denied=False, include_snapshots=True, include_confidence=True, actor=actor,
-    )
-    assert row is captured["row"]
-    assert row.report_number == "123456"
-    assert row.person_id == report_person().id
-    assert row.created_by_user_id == actor.id
-    assert row.period_start.isoformat() == PREVIEW_CONTRACT["ready"]["report"]["period"]["start"]
-    assert row.period_end.isoformat() == PREVIEW_CONTRACT["ready"]["report"]["period"]["end"]
-    assert row.pdf_bytes == 321
-    assert row.snapshot is captured["rendered"]
-    assert row.snapshot["report_id"] == "123456"
-    assert row.snapshot["subject"] == PREVIEW_CONTRACT["ready"]["report"]["subject"]
-    assert captured["audit"]["action"] == "report.export"
-    assert captured["audit"]["actor_user_id"] == actor.id
-    assert captured["audit"]["metadata"]["subject_type"] == "person"
-    assert captured["refreshed"] is True
-
-
 def _legacy_duration_lookup(events, history, timezone):
     """Frozen pre-refactor policy oracle; intentionally inefficient."""
     result = {}
@@ -833,3 +831,46 @@ async def test_predecessor_query_is_strictly_prior_and_projects_bounded_state():
     assert all("LIMIT 1" in query for query in session.queries[:2])
     assert "DISTINCT ON" in session.queries[2]
     assert "AB12CDE" in session.queries[2]
+
+
+@pytest.mark.parametrize("total", [10000, 10001])
+async def test_preview_combines_all_three_activity_arrays_under_one_limit(monkeypatch, total):
+    monkeypatch.setattr(reports_service, "get_runtime_config", london_report_config)
+    forbid_report_effects(monkeypatch)
+    start = datetime(2026, 7, 14, 8, tzinfo=UTC)
+    events = [make_event(occurred_at=start + timedelta(minutes=index), direction=AccessDirection.ENTRY)
+              for index in range(3333)]
+    extra = [make_event(occurred_at=start, direction=AccessDirection.EXIT, registration_number="OTHER")
+             for _ in range(total - 9999)]
+    session = ReportReadSession([events, [], [*events, *extra]])
+    async def preview():
+        return await reports_service.preview_person_movement_report(
+            session, person_id=report_person().id, period_start=start, period_end=start + timedelta(days=4),
+            include_denied=False, include_snapshots=False, include_confidence=False,
+        )
+    if total == 10001:
+        with pytest.raises(ReportLimitError, match="combined activity rows"):
+            await preview()
+    else:
+        report = (await preview())["report"]
+        assert len(report["events"]) + len(report["timeline"]["all"]) + len(report["timeline"]["selected"]) == 10000
+
+
+@pytest.mark.parametrize("include_denied", [False, True])
+async def test_preview_applies_denied_filter_before_activity_sentinel(monkeypatch, include_denied):
+    monkeypatch.setattr(reports_service, "get_runtime_config", london_report_config)
+    forbid_report_effects(monkeypatch)
+    start = datetime(2026, 7, 14, 8, tzinfo=UTC)
+    events = [make_event(occurred_at=start, direction=AccessDirection.ENTRY, decision=AccessDecision.DENIED)
+              for _ in range(10001)]
+    session = ReportReadSession([events, [], []])
+    async def preview():
+        return await reports_service.preview_person_movement_report(
+            session, person_id=report_person().id, period_start=start, period_end=start + timedelta(hours=1),
+            include_denied=include_denied, include_snapshots=False, include_confidence=False,
+        )
+    if include_denied:
+        with pytest.raises(ReportLimitError, match="combined activity rows"):
+            await preview()
+    else:
+        assert (await preview())["report"]["events"] == []

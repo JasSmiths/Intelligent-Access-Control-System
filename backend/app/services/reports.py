@@ -1,28 +1,21 @@
 from __future__ import annotations
 
-import asyncio
-import base64
 import copy
 import re
 import secrets
 import uuid
 from datetime import UTC, datetime
-from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-from PIL import Image, ImageOps, UnidentifiedImageError
-from playwright.async_api import async_playwright
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.models import AccessEvent, Person, Presence, ReportExport, User, Vehicle, VisitorPass
+from app.models import AccessEvent, Presence, ReportExport, User, VisitorPass
 from app.models.enums import AccessDecision, AccessDirection, UserRole
-from app.services.profile_photos import stored_image_url
+from app.services.report_contracts import ReportExportError
 from app.services.report_durations import (
     MovementPoint,
     MovementRecord,
@@ -30,115 +23,28 @@ from app.services.report_durations import (
     is_movement_event,
     normalize_plate,
 )
+from app.services.report_reads import (
+    ReportEvent,
+    ReportPerson,
+    ReportVehicle,
+    load_report_events,
+    load_report_person,
+    load_report_timeline,
+    person_event_filter,
+    remaining_activity_rows,
+    report_read_transaction,
+)
 from app.services.settings import get_runtime_config
-from app.services.snapshots import access_event_snapshot_payload, get_snapshot_manager
-from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, actor_from_user, write_audit_log
+from app.services.snapshots import access_event_snapshot_payload
 
 REPORT_TYPE_PERSON_MOVEMENTS = "person_movements"
 REPORT_ID_RE = re.compile(r"^\d{4,12}$")
-DATA_URL_RE = re.compile(r"^data:(?P<content_type>[^;,]+)(?P<base64>;base64)?,(?P<data>.*)$", re.DOTALL)
 REPORT_ID_LENGTH = 6
-PDF_SAFE_PROFILE_IMAGE_MAX_EDGE_PX = 640
 CREST_HOUSE_ADDRESS = [
     "157 Rugeley Road,",
     "Burntwood,",
     "WS7 9HA",
 ]
-
-_TEMPLATE_ROOT = Path(__file__).resolve().parent / "report_templates"
-_TEMPLATES = Environment(
-    loader=FileSystemLoader(_TEMPLATE_ROOT),
-    autoescape=select_autoescape(("html", "xml")),
-    trim_blocks=True,
-    lstrip_blocks=True,
-)
-
-
-class ReportExportError(Exception):
-    """Raised when a report export request cannot be completed."""
-
-
-async def create_person_movement_report_export(
-    session: AsyncSession,
-    *,
-    person_id: uuid.UUID | None = None,
-    visitor_pass_id: uuid.UUID | None = None,
-    period_start: datetime,
-    period_end: datetime,
-    include_denied: bool,
-    include_snapshots: bool,
-    include_confidence: bool,
-    actor: User,
-) -> ReportExport:
-    start = _ensure_aware(period_start)
-    end = _ensure_aware(period_end)
-    if end <= start:
-        raise ReportExportError("Report end time must be after the start time.")
-
-    config = await get_runtime_config()
-    timezone = _timezone(config.site_timezone)
-    report_number = await generate_report_number(session)
-    options = {
-        "include_denied": include_denied,
-        "include_snapshots": include_snapshots,
-        "include_confidence": include_confidence,
-    }
-    snapshot = await build_movement_report_snapshot(
-        session, person_id=person_id, visitor_pass_id=visitor_pass_id,
-        report_number=report_number, period_start=start, period_end=end,
-        options=options, timezone=timezone,
-    )
-    subject_type = snapshot["subject_type"]
-    subject_id = snapshot["subject"]["id"]
-    row_person_id = uuid.UUID(subject_id) if subject_type == "person" else None
-    target_label = (
-        f"Visitor pass movement report {report_number}" if subject_type == "visitor_pass"
-        else f"Person movement report {report_number}"
-    )
-
-    relative_pdf_path = _report_pdf_relative_path(report_number)
-    pdf_path = _resolve_report_path(relative_pdf_path, must_exist=False)
-    pdf_bytes = await render_person_movement_report_pdf(snapshot, pdf_path, timezone=timezone)
-
-    row = ReportExport(
-        report_number=report_number,
-        report_type=REPORT_TYPE_PERSON_MOVEMENTS,
-        person_id=row_person_id,
-        period_start=start,
-        period_end=end,
-        options=options,
-        snapshot=snapshot,
-        pdf_path=relative_pdf_path,
-        pdf_bytes=pdf_bytes,
-        created_by_user_id=actor.id,
-    )
-    session.add(row)
-    await write_audit_log(
-        session,
-        category=TELEMETRY_CATEGORY_ACCESS,
-        action="report.export",
-        actor=actor_from_user(actor),
-        actor_user_id=actor.id,
-        target_entity="ReportExport",
-        target_id=report_number,
-        target_label=target_label,
-        metadata={
-            "report_number": report_number,
-            "report_type": REPORT_TYPE_PERSON_MOVEMENTS,
-            "subject_type": subject_type,
-            "subject_id": str(subject_id) if subject_id else None,
-            "person_id": str(row_person_id) if row_person_id else None,
-            "visitor_pass_id": str(visitor_pass_id) if visitor_pass_id else None,
-            "period_start": start.isoformat(),
-            "period_end": end.isoformat(),
-            "pdf_bytes": pdf_bytes,
-            "options": options,
-        },
-    )
-    await session.commit()
-    await session.refresh(row)
-    return row
-
 
 async def report_preview_context() -> dict[str, str]:
     config = await get_runtime_config()
@@ -191,27 +97,27 @@ async def preview_person_movement_report(
     include_confidence: bool, period_start_fold: int | None = None,
     period_end_fold: int | None = None,
 ) -> dict[str, Any]:
-    config = await get_runtime_config()
-    timezone = _timezone(config.site_timezone)
-    start, start_choice = resolve_report_boundary(
-        period_start, timezone=timezone, field="period_start", fold=period_start_fold,
-    )
-    end, end_choice = resolve_report_boundary(
-        period_end, timezone=timezone, field="period_end", fold=period_end_fold,
-    )
-    choices = [choice for choice in (start_choice, end_choice) if choice is not None]
-    if choices:
-        return {"status": "time_choice_required", "site_timezone": timezone.key, "time_choices": choices}
-    if start is None or end is None or end <= start:
-        raise ReportExportError("Report end time must be after the start time.")
-    snapshot = await build_movement_report_snapshot(
-        session, person_id=person_id, visitor_pass_id=visitor_pass_id,
-        report_number=None, period_start=start, period_end=end,
-        options={"include_denied": include_denied, "include_snapshots": include_snapshots,
-                 "include_confidence": include_confidence},
-        timezone=timezone, verify_snapshot_availability=False,
-    )
-    return {"status": "ready", "complete": True, "report": public_report_snapshot(snapshot)}
+    async with report_read_transaction(session) as config:
+        timezone = _timezone(config.site_timezone)
+        start, start_choice = resolve_report_boundary(
+            period_start, timezone=timezone, field="period_start", fold=period_start_fold,
+        )
+        end, end_choice = resolve_report_boundary(
+            period_end, timezone=timezone, field="period_end", fold=period_end_fold,
+        )
+        choices = [choice for choice in (start_choice, end_choice) if choice is not None]
+        if choices:
+            return {"status": "time_choice_required", "site_timezone": timezone.key, "time_choices": choices}
+        if start is None or end is None or end <= start:
+            raise ReportExportError("Report end time must be after the start time.")
+        snapshot = await build_movement_report_snapshot(
+            session, person_id=person_id, visitor_pass_id=visitor_pass_id,
+            report_number=None, period_start=start, period_end=end,
+            options={"include_denied": include_denied, "include_snapshots": include_snapshots,
+                     "include_confidence": include_confidence},
+            timezone=timezone, verify_snapshot_availability=False,
+        )
+        return {"status": "ready", "complete": True, "report": public_report_snapshot(snapshot)}
 
 
 async def build_movement_report_snapshot(
@@ -219,6 +125,7 @@ async def build_movement_report_snapshot(
     visitor_pass_id: uuid.UUID | None, report_number: str | None,
     period_start: datetime, period_end: datetime, options: dict[str, bool],
     timezone: ZoneInfo, verify_snapshot_availability: bool = True,
+    include_profile_source: bool = False,
 ) -> dict[str, Any]:
     """One subject/history policy for previews and persisted exports."""
     if visitor_pass_id:
@@ -232,7 +139,7 @@ async def build_movement_report_snapshot(
         )
     if not person_id:
         raise ReportExportError("Person or Visitor Pass must be selected.")
-    person = await _get_report_person(session, person_id)
+    person = await load_report_person(session, person_id, include_profile_source=include_profile_source)
     if not person:
         raise ReportExportError("Person was not found.")
     return await build_person_movement_report_snapshot(
@@ -300,7 +207,7 @@ async def generate_report_number(session: AsyncSession) -> str:
 async def build_person_movement_report_snapshot(
     session: AsyncSession,
     *,
-    person: Person,
+    person: ReportPerson,
     report_number: str | None,
     period_start: datetime,
     period_end: datetime,
@@ -308,9 +215,7 @@ async def build_person_movement_report_snapshot(
     timezone: ZoneInfo,
     verify_snapshot_availability: bool = True,
 ) -> dict[str, Any]:
-    vehicle_ids = [vehicle.id for vehicle in person.vehicles]
-    selected_plates = {normalize_plate(vehicle.registration_number) for vehicle in person.vehicles}
-    selected_filter = _selected_event_filter(person.id, vehicle_ids, selected_plates)
+    selected_filter = person_event_filter(person.id)
     report_events, serialized_events, all_timeline_events, summary = await _collect_movement_report_events(
         session,
         selected_filter=selected_filter,
@@ -432,20 +337,18 @@ async def _collect_movement_report_events(
     options: dict[str, bool],
     timezone: ZoneInfo,
     verify_snapshot_availability: bool = True,
-) -> tuple[list[AccessEvent], list[dict[str, Any]], list[MovementPoint], dict[str, Any]]:
+) -> tuple[list[ReportEvent], list[dict[str, Any]], list[MovementPoint], dict[str, Any]]:
     movement_filters = (
         AccessEvent.decision == AccessDecision.GRANTED,
         AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]),
     )
-    report_events = await _load_report_events(
+    report_events = await load_report_events(
         session,
         selected_filter,
         AccessEvent.occurred_at >= period_start,
         AccessEvent.occurred_at <= period_end,
-        include_anomalies=True,
+        include_denied=options["include_denied"],
     )
-    if not options["include_denied"]:
-        report_events = [event for event in report_events if event.decision != AccessDecision.DENIED]
 
     # Duration needs only the latest prior arrival/departure for each report
     # plate, plus the latest subject-wide pair for cross-vehicle departures.
@@ -454,11 +357,12 @@ async def _collect_movement_report_events(
         plates={normalize_plate(event.registration_number) for event in report_events
                 if event.direction == AccessDirection.ENTRY and is_movement_event(event)},
     )
-    all_timeline_events = await _load_timeline_events(
+    all_timeline_events = await load_report_timeline(
         session,
         AccessEvent.occurred_at >= period_start,
         AccessEvent.occurred_at <= period_end,
         *movement_filters,
+        remaining=remaining_activity_rows(report_events),
     )
     duration_lookup = build_duration_lookup(report_events, [*predecessors, *report_events], timezone=timezone)
     serialized_events = [
@@ -469,34 +373,15 @@ async def _collect_movement_report_events(
             timezone=timezone,
             verify_snapshot_availability=verify_snapshot_availability,
         )
-        for event in sorted(report_events, key=lambda item: item.occurred_at, reverse=True)
+        for event in sorted(report_events, key=lambda item: (item.occurred_at, item.id), reverse=True)
     ]
     return report_events, serialized_events, all_timeline_events, _direction_summary(report_events, timezone)
-
-
-async def _load_report_events(
-    session: AsyncSession,
-    *filters: Any,
-    include_anomalies: bool = False,
-) -> list[AccessEvent]:
-    query = select(AccessEvent).where(*filters).order_by(AccessEvent.occurred_at.asc())
-    if include_anomalies:
-        query = query.options(selectinload(AccessEvent.anomalies))
-    return list((await session.scalars(query)).all())
 
 
 _MOVEMENT_COLUMNS = (
     AccessEvent.id, AccessEvent.registration_number, AccessEvent.direction,
     AccessEvent.decision, AccessEvent.occurred_at,
 )
-
-
-async def _load_timeline_events(session: AsyncSession, *filters: Any) -> list[MovementPoint]:
-    query = select(*_MOVEMENT_COLUMNS).where(*filters).order_by(AccessEvent.occurred_at.asc())
-    # Read projected columns in batches, avoiding ORM identities and large JSON /
-    # snapshot fields. The public snapshot itself still retains the period rows.
-    result = await session.stream(query.execution_options(yield_per=1024))
-    return [MovementPoint(*row) async for row in result]
 
 
 async def _load_duration_predecessors(
@@ -530,7 +415,7 @@ async def _load_duration_predecessors(
     return list(points.values())
 
 
-def serialize_report_person(person: Person) -> dict[str, Any]:
+def serialize_report_person(person: ReportPerson) -> dict[str, Any]:
     return {
         "id": str(person.id),
         "first_name": person.first_name,
@@ -538,25 +423,16 @@ def serialize_report_person(person: Person) -> dict[str, Any]:
         "display_name": person.display_name,
         "pronouns": person.pronouns,
         "profile_photo_data_url": person.profile_photo_data_url,
-        "profile_photo_url": stored_image_url(
-            person.profile_photo_data_url,
-            f"/api/v1/people/{person.id}/photo",
-            person.updated_at,
-        ),
-        "group": person.group.name if person.group else None,
-        "category": person.group.category.value if person.group else None,
+        "profile_photo_url": person.profile_photo_url,
+        "group": person.group_name,
+        "category": person.group_category,
         "vehicles": [
             {
                 "id": str(vehicle.id),
                 "registration_number": vehicle.registration_number,
                 "description": vehicle.description,
                 "title": _vehicle_title(vehicle),
-                "vehicle_photo_data_url": vehicle.vehicle_photo_data_url,
-                "vehicle_photo_url": stored_image_url(
-                    vehicle.vehicle_photo_data_url,
-                    f"/api/v1/vehicles/{vehicle.id}/photo",
-                    vehicle.updated_at,
-                ),
+                "vehicle_photo_url": vehicle.vehicle_photo_url,
                 "make": vehicle.make,
                 "model": vehicle.model,
                 "color": vehicle.color,
@@ -618,7 +494,7 @@ def serialize_report_visitor_pass(visitor_pass: VisitorPass) -> dict[str, Any]:
 
 
 def serialize_report_event(
-    event: AccessEvent,
+    event: ReportEvent,
     *,
     include_snapshots: bool,
     duration: dict[str, Any] | None,
@@ -626,7 +502,6 @@ def serialize_report_event(
     verify_snapshot_availability: bool = True,
 ) -> dict[str, Any]:
     snapshot = access_event_snapshot_payload(event, verify_available=verify_snapshot_availability) if include_snapshots else {}
-    visitor_pass = _event_visitor_pass_payload(event)
     return {
         "id": str(event.id),
         "registration_number": event.registration_number,
@@ -642,10 +517,10 @@ def serialize_report_event(
         "detail": "Access granted" if event.decision == AccessDecision.GRANTED else "Access denied",
         "tone": event_tone(event.direction, event.decision),
         "timing_classification": event.timing_classification.value,
-        "anomaly_count": len(event.anomalies),
-        "visitor_pass_id": _optional_text(visitor_pass.get("id")),
-        "visitor_name": _optional_text(visitor_pass.get("visitor_name")),
-        "visitor_pass_mode": _optional_text(visitor_pass.get("mode")),
+        "anomaly_count": event.anomaly_count,
+        "visitor_pass_id": _optional_text(event.visitor_pass_id),
+        "visitor_name": _optional_text(event.visitor_name),
+        "visitor_pass_mode": _optional_text(event.visitor_pass_mode),
         "duration": duration or {"label": "N/A", "tone": "muted"},
         "snapshot_url": snapshot.get("snapshot_url"),
         "snapshot_captured_at": snapshot.get("snapshot_captured_at"),
@@ -669,49 +544,6 @@ def serialize_timeline_event(event: MovementRecord, *, timezone: ZoneInfo) -> di
         "tone": event_tone(event.direction, event.decision),
         "progress": _day_progress(event.occurred_at, timezone),
     }
-
-
-async def render_person_movement_report_pdf(
-    snapshot: dict[str, Any],
-    output_path: Path,
-    *,
-    timezone: ZoneInfo,
-) -> int:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    report = await asyncio.to_thread(_report_for_pdf, snapshot)
-    html = await asyncio.to_thread(
-        _TEMPLATES.get_template("person_movements.html").render,
-        report=report,
-    )
-    footer = (
-        "<div style=\"width:100%;font-family:Inter,Arial,sans-serif;font-size:8px;"
-        "color:#6b7890;padding:0 14mm;display:flex;justify-content:space-between;\">"
-        "<span>Crest House</span><span>Report "
-        f"{snapshot.get('report_id', '')}"
-        " &middot; Page <span class=\"pageNumber\"></span> of <span class=\"totalPages\"></span></span></div>"
-    )
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
-        try:
-            page = await browser.new_page(
-                viewport={"width": 1240, "height": 1754},
-                device_scale_factor=1,
-            )
-            await page.set_content(html, wait_until="networkidle")
-            await page.emulate_media(media="print")
-            await page.pdf(
-                path=str(output_path),
-                format="A4",
-                print_background=True,
-                prefer_css_page_size=True,
-                display_header_footer=True,
-                header_template="<span></span>",
-                footer_template=footer,
-                margin={"top": "0", "right": "0", "bottom": "11mm", "left": "0"},
-            )
-        finally:
-            await browser.close()
-    return output_path.stat().st_size
 
 
 def source_label(source: str | None) -> str:
@@ -740,33 +572,8 @@ def event_tone(direction: AccessDirection | str, decision: AccessDecision | str)
     return "green" if direction_value == AccessDirection.ENTRY.value else "blue"
 
 
-async def _get_report_person(session: AsyncSession, person_id: uuid.UUID) -> Person | None:
-    return await session.scalar(
-        select(Person)
-        .options(
-            selectinload(Person.group),
-            selectinload(Person.vehicles),
-            selectinload(Person.presence),
-        )
-        .where(Person.id == person_id)
-    )
-
-
 async def _get_report_visitor_pass(session: AsyncSession, visitor_pass_id: uuid.UUID) -> VisitorPass | None:
     return await session.get(VisitorPass, visitor_pass_id)
-
-
-def _selected_event_filter(
-    person_id: uuid.UUID,
-    vehicle_ids: list[uuid.UUID],
-    selected_plates: set[str],
-) -> Any:
-    clauses: list[Any] = [AccessEvent.person_id == person_id]
-    if vehicle_ids:
-        clauses.append(AccessEvent.vehicle_id.in_(vehicle_ids))
-    if selected_plates:
-        clauses.append(AccessEvent.registration_number.in_(sorted(selected_plates)))
-    return or_(*clauses)
 
 
 def _visitor_pass_event_filter(visitor_pass: VisitorPass) -> Any:
@@ -803,78 +610,7 @@ def _visitor_pass_presence_payload(visitor_pass: VisitorPass) -> dict[str, str |
     }
 
 
-def _report_for_pdf(snapshot: dict[str, Any]) -> dict[str, Any]:
-    report = copy.deepcopy(snapshot)
-    brand = report.setdefault("brand", {})
-    if isinstance(brand, dict):
-        brand.setdefault("site", "Crest House")
-        brand.setdefault("address", CREST_HOUSE_ADDRESS)
-    person = report.get("person")
-    if isinstance(person, dict):
-        person["pdf_profile_photo_data_url"] = _pdf_safe_image_data_url(
-            _optional_text(person.get("profile_photo_data_url"))
-        )
-    for event in report.get("events", []):
-        if isinstance(event, dict):
-            event["pdf_snapshot_data_url"] = _snapshot_data_url(event)
-    return report
-
-
-def _pdf_safe_image_data_url(value: str | None) -> str | None:
-    if not value:
-        return None
-    match = DATA_URL_RE.fullmatch(value)
-    if not match or not match.group("base64"):
-        return value
-    content_type = match.group("content_type").lower()
-    if content_type in {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}:
-        return value
-    try:
-        if content_type in {"image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"}:
-            import pillow_heif
-
-            pillow_heif.register_heif_opener()
-        raw = base64.b64decode(match.group("data"), validate=False)
-        with Image.open(BytesIO(raw)) as image:
-            converted = ImageOps.exif_transpose(image)
-            converted.thumbnail(
-                (PDF_SAFE_PROFILE_IMAGE_MAX_EDGE_PX, PDF_SAFE_PROFILE_IMAGE_MAX_EDGE_PX),
-                Image.Resampling.LANCZOS,
-            )
-            output = BytesIO()
-            has_alpha = converted.mode in {"RGBA", "LA"} or "transparency" in converted.info
-            if has_alpha:
-                if converted.mode != "RGBA":
-                    converted = converted.convert("RGBA")
-                converted.save(output, format="PNG", optimize=True)
-                output_content_type = "image/png"
-            else:
-                if converted.mode != "RGB":
-                    converted = converted.convert("RGB")
-                converted.save(output, format="JPEG", quality=88, optimize=True)
-                output_content_type = "image/jpeg"
-    except (OSError, UnidentifiedImageError, ValueError):
-        return None
-    return f"data:{output_content_type};base64,{base64.b64encode(output.getvalue()).decode('ascii')}"
-
-
-def _snapshot_data_url(event: dict[str, Any]) -> str | None:
-    relative_path = event.get("_snapshot_path")
-    if not relative_path:
-        return None
-    try:
-        path = get_snapshot_manager().resolve_path(str(relative_path))
-    except FileNotFoundError:
-        return None
-    content_type = str(event.get("_snapshot_content_type") or "image/jpeg")
-    try:
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-    except OSError:
-        return None
-    return f"data:{content_type};base64,{encoded}"
-
-
-def _direction_summary(events: list[AccessEvent], timezone: ZoneInfo) -> dict[str, Any]:
+def _direction_summary(events: list[ReportEvent], timezone: ZoneInfo) -> dict[str, Any]:
     arrivals = [
         event for event in events
         if event.decision == AccessDecision.GRANTED and event.direction == AccessDirection.ENTRY
@@ -897,12 +633,6 @@ def _direction_summary(events: list[AccessEvent], timezone: ZoneInfo) -> dict[st
             if latest else "No movement in window"
         ),
     }
-
-
-def _event_visitor_pass_payload(event: AccessEvent) -> dict[str, Any]:
-    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    payload = raw_payload.get("visitor_pass")
-    return payload if isinstance(payload, dict) else {}
 
 
 def _optional_text(value: Any) -> str | None:
@@ -938,12 +668,12 @@ def _format_date_only(value: datetime, timezone: ZoneInfo) -> str:
     return value.astimezone(timezone).strftime("%d %b %Y")
 
 
-def _vehicle_title(vehicle: Vehicle) -> str:
+def _vehicle_title(vehicle: ReportVehicle) -> str:
     title = " ".join(part for part in [vehicle.make, vehicle.model] if part)
     return title or vehicle.description or "Vehicle"
 
 
-def _vehicle_is_electric(vehicle: Vehicle) -> bool:
+def _vehicle_is_electric(vehicle: ReportVehicle) -> bool:
     return (vehicle.fuel_type or "").strip().casefold() in {"electric", "electricity", "battery electric"}
 
 
@@ -973,10 +703,6 @@ def _ensure_aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
-
-
-def _report_pdf_relative_path(report_number: str) -> str:
-    return f"reports/Crest-House-Access-Report-{report_number}.pdf"
 
 
 def _resolve_report_path(relative_path: str, *, must_exist: bool) -> Path:

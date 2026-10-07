@@ -11,9 +11,11 @@ import os
 from pathlib import Path
 import sys
 from typing import Any
-from zoneinfo import ZoneInfo
+from time import monotonic
 
-from app.services import reports
+from app.services import report_renderer
+from app.services.report_contracts import REPORT_PIPELINE_SECONDS, ReportWork
+from app.services.report_renderer import render_person_movement_report_pdf
 
 
 def snapshot() -> dict[str, Any]:
@@ -39,16 +41,16 @@ async def render(output: Path) -> dict[str, Any]:
         raise RuntimeError("The final runtime smoke requires network isolation")
     if Path(sys.prefix) != Path("/app/.venv"):
         raise RuntimeError("The smoke must use the final image's own environment")
-    size = await reports.render_person_movement_report_pdf(snapshot(), output, timezone=ZoneInfo("UTC"))
+    size = await render_person_movement_report_pdf(snapshot(), output, work=ReportWork(monotonic() + REPORT_PIPELINE_SECONDS))
     if not output.read_bytes().startswith(b"%PDF-") or size < 1000:
         raise RuntimeError("Renderer did not produce a substantive PDF")
-    template = Path(reports.__file__).parent / "report_templates/person_movements.html"
+    template = Path(report_renderer.__file__).parent / "report_templates/person_movements.html"
     return {"pdf_bytes": size, "pdf_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
             "uid": os.getuid(), "python": sys.executable, "prefix": sys.prefix,
             "playwright": importlib.metadata.version("playwright"),
             "browser_path": os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
-            "renderer_path": reports.__file__, "template_path": str(template),
-            "renderer_sha256": hashlib.sha256(Path(reports.__file__).read_bytes()).hexdigest(),
+            "renderer_path": report_renderer.__file__, "template_path": str(template),
+            "renderer_sha256": hashlib.sha256(Path(report_renderer.__file__).read_bytes()).hexdigest(),
             "template_sha256": hashlib.sha256(template.read_bytes()).hexdigest(),
             "lock_sha256": hashlib.sha256(Path("/app/uv.lock").read_bytes()).hexdigest()}
 
