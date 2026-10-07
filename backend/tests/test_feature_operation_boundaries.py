@@ -7,7 +7,7 @@ ROOT = Path(__file__).parents[1] / "app"
 
 
 def test_notification_crud_adapters_cannot_persist_rules_independently():
-    for relative in ["api/v1/notifications.py", "ai/tool_groups/notifications_handlers.py"]:
+    for relative in ["api/v1/notifications.py"]:
         tree = ast.parse((ROOT / relative).read_text())
         for function in tree.body:
             if not isinstance(function, ast.AsyncFunctionDef) or not function.name.startswith(
@@ -29,11 +29,11 @@ def test_notification_crud_adapters_cannot_persist_rules_independently():
 
 
 def test_automation_adapter_does_not_normalize_mutations():
-    tree = ast.parse((ROOT / "ai/tool_groups/automations_handlers.py").read_text())
+    tree = ast.parse((ROOT / "api/v1/automations.py").read_text())
     for function in tree.body:
         if isinstance(function, ast.AsyncFunctionDef) and function.name in {
             "create_automation",
-            "edit_automation",
+            "update_automation",
         }:
             assert not any(
                 isinstance(n, ast.Name) and n.id.startswith("normalize_automation_")

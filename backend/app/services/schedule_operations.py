@@ -1,4 +1,4 @@
-"""Confirmed schedule mutations shared by API and Alfred adapters.
+"""Confirmed schedule mutations used by API adapters.
 
 The adapter owns confirmation. Each operation owns validation, its transaction,
 and the durable audit; it never calls hardware or publishes notifications.
@@ -92,7 +92,7 @@ async def _locked_schedule(session: AsyncSession, schedule_id: uuid.UUID) -> Sch
 
 async def _commit_change(
     session: AsyncSession, schedule: Schedule, *, action: str, before: dict[str, Any],
-    user: User, source: Literal["api", "alfred"], deleting: bool = False,
+    user: User, source: Literal["api"], deleting: bool = False,
 ) -> None:
     try:
         # Flush first to obtain generated identity/timestamps; audit failure still
@@ -123,7 +123,7 @@ async def _commit_change(
 
 
 async def create_schedule(
-    session: AsyncSession, values: ScheduleValues, *, user: User, source: Literal["api", "alfred"],
+    session: AsyncSession, values: ScheduleValues, *, user: User, source: Literal["api"],
 ) -> Schedule:
     require_schedule_admin(user)
     schedule = Schedule(**values.model_dump())
@@ -134,7 +134,7 @@ async def create_schedule(
 
 async def update_schedule(
     session: AsyncSession, schedule_id: uuid.UUID, changes: dict[str, Any], *,
-    user: User, source: Literal["api", "alfred"],
+    user: User, source: Literal["api"],
 ) -> Schedule:
     require_schedule_admin(user)
     schedule = await _locked_schedule(session, schedule_id)
@@ -147,7 +147,7 @@ async def update_schedule(
 
 
 async def delete_schedule(
-    session: AsyncSession, schedule_id: uuid.UUID, *, user: User, source: Literal["api", "alfred"],
+    session: AsyncSession, schedule_id: uuid.UUID, *, user: User, source: Literal["api"],
 ) -> Schedule:
     require_schedule_admin(user)
     schedule = await _locked_schedule(session, schedule_id)

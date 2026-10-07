@@ -8,11 +8,9 @@ from sqlalchemy import text
 
 from app.db.session import AsyncSessionLocal
 from app.services.access_events import get_access_event_service
-from app.services.discord_messaging import get_discord_messaging_service
 from app.services.event_bus import event_bus
 from app.services.home_assistant import get_home_assistant_service
 from app.services.maintenance import get_status as get_maintenance_status
-from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
 
 router = APIRouter()
 
@@ -38,16 +36,12 @@ async def health() -> dict[str, object]:
     access_events = _access_events_check()
     maintenance = await _maintenance_check()
     home_assistant = await _home_assistant_check()
-    discord = await _discord_check()
-    whatsapp = await _whatsapp_check()
     checks = {
         "database": database,
         "realtime": realtime,
         "access_events": access_events,
         "maintenance": maintenance,
         "home_assistant": home_assistant,
-        "discord": discord,
-        "whatsapp": whatsapp,
     }
     return {
         "status": _overall_status(checks),
@@ -118,55 +112,6 @@ async def _home_assistant_check() -> dict[str, Any]:
         "last_error": last_error,
         "state_refreshed_at": status.get("state_refreshed_at"),
         "listener_running": bool(status.get("listener_running")),
-    }
-
-
-async def _discord_check() -> dict[str, Any]:
-    try:
-        status = await get_discord_messaging_service().status()
-    except Exception as exc:
-        return {"status": "degraded", "configured": None, "connected": False, "detail": _safe_error(exc)}
-    configured = bool(status.get("configured"))
-    connected = bool(status.get("connected"))
-    last_error = status.get("last_error")
-    if not configured:
-        health_status = "disabled"
-    elif connected and not last_error:
-        health_status = "ok"
-    else:
-        health_status = "degraded"
-    return {
-        "status": health_status,
-        "configured": configured,
-        "connected": connected,
-        "guild_count": status.get("guild_count"),
-        "channel_count": status.get("channel_count"),
-        "last_error": last_error,
-    }
-
-
-async def _whatsapp_check() -> dict[str, Any]:
-    try:
-        status = await get_whatsapp_delivery_service().status()
-    except Exception as exc:
-        return {"status": "degraded", "enabled": None, "configured": None, "detail": _safe_error(exc)}
-    enabled = bool(status.get("enabled"))
-    configured = bool(status.get("configured"))
-    last_error = status.get("last_error")
-    if not enabled:
-        health_status = "disabled"
-    elif configured and not last_error:
-        health_status = "ok"
-    else:
-        health_status = "degraded"
-    return {
-        "status": health_status,
-        "enabled": enabled,
-        "configured": configured,
-        "webhook_configured": bool(status.get("webhook_configured")),
-        "signature_configured": bool(status.get("signature_configured")),
-        "admin_target_count": status.get("admin_target_count"),
-        "last_error": last_error,
     }
 
 

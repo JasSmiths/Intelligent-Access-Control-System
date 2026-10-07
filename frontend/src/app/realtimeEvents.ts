@@ -289,10 +289,6 @@ function compactVisitorPassRealtimePayload(candidate: Record<string, unknown>) {
     status: stringPayload(candidate.status),
     creation_source: stringPayload(candidate.creation_source),
     source_reference: stringPayload(candidate.source_reference),
-    source_metadata: compactVisitorPassSourceMetadata(candidate.source_metadata),
-    whatsapp_status: stringPayload(candidate.whatsapp_status),
-    whatsapp_status_label: stringPayload(candidate.whatsapp_status_label),
-    whatsapp_status_detail: stringPayload(candidate.whatsapp_status_detail),
     created_by_user_id: stringPayload(candidate.created_by_user_id),
     created_by: stringPayload(candidate.created_by),
     arrival_time: stringPayload(candidate.arrival_time),
@@ -307,14 +303,6 @@ function compactVisitorPassRealtimePayload(candidate: Record<string, unknown>) {
     telemetry_trace_id: stringPayload(candidate.telemetry_trace_id),
     created_at: stringPayload(candidate.created_at),
     updated_at: stringPayload(candidate.updated_at)
-  };
-}
-function compactVisitorPassSourceMetadata(value: unknown) {
-  if (!isRecord(value)) return null;
-  return {
-    whatsapp_abuse_muted_until: stringPayload(value.whatsapp_abuse_muted_until),
-    whatsapp_abuse_muted_reason: stringPayload(value.whatsapp_abuse_muted_reason),
-    whatsapp_last_error: stringPayload(value.whatsapp_last_error)
   };
 }
 function isNotificationSeverity(value: string): value is NotificationToast["severity"] {

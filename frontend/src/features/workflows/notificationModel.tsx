@@ -1,4 +1,4 @@
-import { AlertTriangle, Bell, Bot, Car, Construction, DoorOpen, Home, MessageCircle, Monitor, PlugZap, ShieldCheck, Smartphone, Trophy, UserPlus, Volume2 } from "lucide-react";
+import { AlertTriangle, Bell, Car, Construction, DoorOpen, Home, MessageCircle, Monitor, PlugZap, ShieldCheck, Smartphone, Trophy, UserPlus, Volume2 } from "lucide-react";
 import React from "react";
 import type { Person, UserAccount } from "../../api/types";
 import type { NotificationAction, NotificationActionableOption, NotificationActionType, NotificationCondition, NotificationConditionType, NotificationEndpoint, NotificationGateMalfunctionStage, NotificationGateMalfunctionStageOption, NotificationIntegration, NotificationRule, NotificationTargetMode, NotificationTriggerGroup, PresenceConditionMode } from "../../api/workflows";
@@ -44,14 +44,6 @@ const defaultWorkflowActionTemplates: Record<NotificationActionType, Pick<Notifi
     title_template: "",
     message_template: "@FirstName has arrived at the gate."
   },
-  discord: {
-    title_template: "@FirstName arrived at the gate",
-    message_template: "@FirstName arrived in the @VehicleName. Gate status: @GateStatus."
-  },
-  whatsapp: {
-    title_template: "@FirstName arrived at the gate",
-    message_template: "@FirstName arrived in the @VehicleName. Gate status: @GateStatus."
-  }
 };
 
 const vehicleTtsPhonetics: Record<string, string> = {
@@ -88,7 +80,6 @@ export function groupNotificationRulesByTriggerCategory(
 }
 
 export function notificationTriggerGroupIcon(groupId: string) {
-  if (groupId === "ai_agents") return Bot;
   if (groupId === "compliance") return ShieldCheck;
   if (groupId === "gate_actions") return DoorOpen;
   if (groupId === "gate_malfunctions") return AlertTriangle;
@@ -101,7 +92,7 @@ export function notificationTriggerGroupIcon(groupId: string) {
 }
 
 export function notificationActionCategories(): TwoPaneCategory[] {
-  return (["mobile", "whatsapp", "discord", "voice", "in_app"] as NotificationActionType[])
+  return (["mobile", "voice", "in_app"] as NotificationActionType[])
     .map((id) => {
       const meta = notificationChannelMeta[id];
       return { id, label: meta.label, count: 0, icon: meta.icon };
@@ -117,8 +108,6 @@ export function buildNotificationActionMethods(
   const mobileIntegration = integrationById.get("mobile");
   const voiceIntegration = integrationById.get("voice");
   const inAppIntegration = integrationById.get("in_app");
-  const discordIntegration = integrationById.get("discord");
-  const whatsappIntegration = integrationById.get("whatsapp");
   const mobileEndpoints = concreteNotificationEndpoints(mobileIntegration?.endpoints ?? []);
   const homeAssistantMobileTargets = mobileEndpoints.filter((endpoint) => endpoint.id.startsWith("home_assistant_mobile:"));
   const appriseTargets = mobileEndpoints.filter((endpoint) => endpoint.id.startsWith("apprise:"));
@@ -197,41 +186,9 @@ export function buildNotificationActionMethods(
     },
   ];
 
-  const discordTargets = concreteNotificationEndpoints(discordIntegration?.endpoints ?? []);
-  const discordMethods = providerNotificationMethods({
-    actionType: "discord",
-    detail: (count) => count ? `${count} channel${count === 1 ? "" : "s"} available` : "No Discord channels discovered",
-    id: "discord",
-    icon: MessageCircle,
-    integration: discordIntegration,
-    label: "Discord",
-    provider: "Discord",
-    targets: discordTargets,
-    tone: "purple",
-    unavailableReason: "Discord is configured, but no channels are available yet.",
-    wildcardId: "discord:*",
-  });
-
-  const whatsappTargets = concreteNotificationEndpoints(whatsappIntegration?.endpoints ?? []);
-  const whatsappMethods = providerNotificationMethods({
-    actionType: "whatsapp",
-    detail: (count) => count ? `${count} Admin target${count === 1 ? "" : "s"} available` : "No Admin users with mobile numbers",
-    id: "whatsapp",
-    icon: MessageCircle,
-    integration: whatsappIntegration,
-    label: "WhatsApp",
-    provider: "WhatsApp",
-    targets: whatsappTargets,
-    tone: "green",
-    unavailableReason: "WhatsApp is configured, but no active Admin users have mobile phone numbers.",
-    wildcardId: "whatsapp:*",
-  });
-
   return {
-    discord: discordMethods.sort(sortNotificationMethods),
     in_app: inAppMethods.sort(sortNotificationMethods),
     mobile: mobileMethods.sort(sortNotificationMethods),
-    whatsapp: whatsappMethods.sort(sortNotificationMethods),
     voice: voiceMethods.sort(sortNotificationMethods),
   };
 }
@@ -304,10 +261,6 @@ export function notificationActionTargetChips(action: NotificationAction, integr
     if (endpoint) {
       return { id: targetId, provider: endpoint.provider, label: endpoint.label, unavailable: false };
     }
-    if (targetId.startsWith("whatsapp:number:")) {
-      const value = targetId.replace(/^whatsapp:number:/, "");
-      return { id: targetId, provider: "WhatsApp", label: value || "Dynamic phone number", unavailable: false };
-    }
     return {
       id: targetId,
       provider: providerLabelForNotificationTarget(targetId, integration),
@@ -319,8 +272,6 @@ export function notificationActionTargetChips(action: NotificationAction, integr
 
 function providerLabelForNotificationTarget(targetId: string, integration?: NotificationIntegration) {
   if (targetId.startsWith("apprise:")) return "Apprise";
-  if (targetId.startsWith("discord:")) return "Discord";
-  if (targetId.startsWith("whatsapp:")) return "WhatsApp";
   if (targetId.startsWith("home_assistant_mobile:") || targetId.startsWith("home_assistant_tts:")) return "Home Assistant";
   if (targetId === "dashboard") return "Dashboard";
   return integration?.provider ?? "Target";
@@ -442,7 +393,7 @@ function normalizeNotificationAction(action: Partial<NotificationAction>): Notif
 }
 
 function isNotificationActionType(value: string): value is NotificationActionType {
-  return value === "mobile" || value === "in_app" || value === "voice" || value === "discord" || value === "whatsapp";
+  return value === "mobile" || value === "in_app" || value === "voice";
 }
 
 function normalizeNotificationTargetMode(value: unknown): NotificationTargetMode {
@@ -527,11 +478,11 @@ function gateMalfunctionPreviewContent(actionType: NotificationActionType, conte
 }
 
 function gateMalfunctionPlainPreviewBody(stage: NotificationGateMalfunctionStage) {
-  if (stage === "initial") return "The gate has malfunctioned and is stuck open. Alfred is trying to resolve it.";
-  if (stage === "30m") return "The gate is still stuck open. Alfred is still working on it.";
-  if (stage === "60m") return "The gate has been stuck open for about an hour. It is not looking good, but Alfred is still on the case.";
-  if (stage === "2hrs") return "The gate has been stuck open for over two hours. Alfred has not been able to fix it yet.";
-  if (stage === "fubar") return "The gate is still stuck open and Alfred has run out of automatic fixes. Please check the gate when you can.";
+  if (stage === "initial") return "The gate has malfunctioned and is stuck open. IACS is trying to resolve it.";
+  if (stage === "30m") return "The gate is still stuck open. IACS is still working on it.";
+  if (stage === "60m") return "The gate has been stuck open for about an hour. It is not looking good, but IACS is still on the case.";
+  if (stage === "2hrs") return "The gate has been stuck open for over two hours. IACS has not been able to fix it yet.";
+  if (stage === "fubar") return "The gate is still stuck open and IACS has run out of automatic fixes. Please check the gate when you can.";
   return "The gate malfunction has been resolved and the gate is closed again.";
 }
 

@@ -1,0 +1,37 @@
+{
+  "captured_date": "2026-10-02",
+  "archived_date": "2026-10-05",
+  "reason": "Pre-retirement design captures; preserved as historical evidence outside current source.",
+  "files": [
+    {
+      "original_path": "prototypes/premium-dashboard/qa/desktop-1440.jpg",
+      "archive_path": "data/archives/prototype-qa-20261005/desktop-1440.jpg",
+      "sha256": "3f038856e3f84b7483b4c4c1453e109d9114abe8508ebf3b1e47df22f22ce409",
+      "current_replacement": "prototypes/premium-dashboard/qa/desktop-1440.jpg"
+    },
+    {
+      "original_path": "prototypes/premium-dashboard/qa/mobile-390.jpg",
+      "archive_path": "data/archives/prototype-qa-20261005/mobile-390.jpg",
+      "sha256": "b7ec63b914e427f38c60c895b7f798881a461a42af5777991d743f07615a6b53",
+      "current_replacement": "prototypes/premium-dashboard/qa/mobile-390.jpg"
+    },
+    {
+      "original_path": "prototypes/premium-dashboard/qa/mobile-evidence-390.jpg",
+      "archive_path": "data/archives/prototype-qa-20261005/mobile-evidence-390.jpg",
+      "sha256": "3d7f276a5511e4f6a9ad0586472aedabe133b0dcdb76c0d1c4bb5ff6e238d9ae",
+      "current_replacement": "prototypes/premium-dashboard/qa/mobile-evidence-390.jpg"
+    },
+    {
+      "original_path": "prototypes/premium-dashboard/qa/reference-comparison.jpg",
+      "archive_path": "data/archives/prototype-qa-20261005/reference-comparison.jpg",
+      "sha256": "3cb4326c707abf9f61b7e67b044ed840db3ad739b825c36f850e5837874e52c4",
+      "current_replacement": null
+    },
+    {
+      "original_path": "prototypes/premium-dashboard/qa/tablet-1024.jpg",
+      "archive_path": "data/archives/prototype-qa-20261005/tablet-1024.jpg",
+      "sha256": "a63f2f91d6f3403ae5b63b54b260cb972f698353f9145b8f391603fbe7ae6008",
+      "current_replacement": "prototypes/premium-dashboard/qa/tablet-1024.jpg"
+    }
+  ]
+}

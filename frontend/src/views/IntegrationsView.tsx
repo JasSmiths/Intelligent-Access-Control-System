@@ -6,32 +6,28 @@ import { isRecord } from "../lib/format";
 import { notificationChannelMeta } from "../lib/notifications";
 import { useSettings } from "../lib/settings";
 import { Badge, Toolbar } from "../ui/primitives";
-import type { IntegrationStatus, Person, RealtimeMessage, UnifiProtectCamera, UserAccount } from "../api/types";
+import type { IntegrationStatus, RealtimeMessage, UnifiProtectCamera, UserAccount } from "../api/types";
 import {
-  DiscordChannel,
-  DiscordIdentity,
-  DiscordStatus,
   ICloudCalendarAccount,
   ICloudCalendarPayload,
   ICloudCalendarSyncRun,
   integrationsApi,
   UnifiProtectStatus,
-  WhatsAppStatus,
   confirmIntegrationAction
 } from "../api/integrations";
 import {
   integrationCategories,
   integrationDefinitions,
   IntegrationDefinition,
-  LlmProviderSelector,
+  CameraAiProviderSelector,
   ProtectIntegrationTab
 } from "../features/integrations/catalog";
-import { IntegrationModal } from "../features/integrations/providerPanels";
+import { IntegrationModal } from "../features/integrations/IntegrationModal";
 import { UnifiProtectCameraSection } from "../features/integrations/unifiProtect";
 
 const ICLOUD_REALTIME_PROCESSED_LIMIT = 60;
 
-export function IntegrationsView({ currentUser, people, latestRealtime, refreshToken, status }: { currentUser: UserAccount; people: Person[]; latestRealtime: RealtimeMessage | null; refreshToken: number; status: IntegrationStatus | null }) {
+export function IntegrationsView({ currentUser, latestRealtime, refreshToken, status }: { currentUser: UserAccount; latestRealtime: RealtimeMessage | null; refreshToken: number; status: IntegrationStatus | null }) {
   const { values, loading, error: settingsError, save, reload } = useSettings();
   const isAdmin = currentUser.role === "admin";
   const [homeAssistantStatus, setHomeAssistantStatus] = React.useState<IntegrationStatus | null>(status);
@@ -49,14 +45,6 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
   const [icloudPayload, setIcloudPayload] = React.useState<ICloudCalendarPayload>({ accounts: [], recent_sync_runs: [] });
   const [icloudLoading, setIcloudLoading] = React.useState(false);
   const [icloudError, setIcloudError] = React.useState("");
-  const [discordStatus, setDiscordStatus] = React.useState<DiscordStatus | null>(null);
-  const [discordChannels, setDiscordChannels] = React.useState<DiscordChannel[]>([]);
-  const [discordIdentities, setDiscordIdentities] = React.useState<DiscordIdentity[]>([]);
-  const [discordLoading, setDiscordLoading] = React.useState(false);
-  const [discordError, setDiscordError] = React.useState("");
-  const [whatsappStatus, setWhatsappStatus] = React.useState<WhatsAppStatus | null>(null);
-  const [whatsappLoading, setWhatsappLoading] = React.useState(false);
-  const [whatsappError, setWhatsappError] = React.useState("");
   const [protectCamerasLoaded, setProtectCamerasLoaded] = React.useState(false);
   const protectCamerasLoadedRef = React.useRef(false);
   const processedIcloudRealtimeRef = React.useRef(new Set<string>());
@@ -152,45 +140,18 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
       }));
     }
   }, [latestRealtime]);
-  const loadDiscord = React.useCallback(async () => {
-    setDiscordLoading(true);
-    setDiscordError("");
-    try {
-      const result = await integrationsApi.getDiscordBundle();
-      setDiscordStatus(result.status);
-      setDiscordChannels(result.channels);
-      setDiscordIdentities(result.identities);
-    } catch (error) {
-      setDiscordError(error instanceof Error ? error.message : "Unable to load Discord integration.");
-    } finally {
-      setDiscordLoading(false);
-    }
-  }, []);
-  const loadWhatsApp = React.useCallback(async () => {
-    setWhatsappLoading(true);
-    setWhatsappError("");
-    try {
-      setWhatsappStatus(await integrationsApi.getWhatsAppStatus());
-    } catch (error) {
-      setWhatsappError(error instanceof Error ? error.message : "Unable to load WhatsApp integration.");
-    } finally {
-      setWhatsappLoading(false);
-    }
-  }, []);
   const reloadSettingsAndProtect = React.useCallback(async () => {
     await reload();
     await loadHomeAssistantStatus();
     await loadAccessDeviceStatus();
     await loadProtect(true);
     await loadICloudCalendar();
-    await loadDiscord();
-    await loadWhatsApp();
-  }, [loadAccessDeviceStatus, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadWhatsApp, reload]);
+  }, [loadAccessDeviceStatus, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, reload]);
 
   React.useEffect(() => {
-    Promise.all([loadHomeAssistantStatus(), loadAccessDeviceStatus(), loadProtect(false), loadICloudCalendar(), loadDiscord(), loadWhatsApp()])
+    Promise.all([loadHomeAssistantStatus(), loadAccessDeviceStatus(), loadProtect(false), loadICloudCalendar()])
       .finally(() => setInitialStatusesLoaded(true));
-  }, [loadAccessDeviceStatus, loadDiscord, loadHomeAssistantStatus, loadICloudCalendar, loadProtect, loadWhatsApp]);
+  }, [loadAccessDeviceStatus, loadHomeAssistantStatus, loadICloudCalendar, loadProtect]);
 
   React.useEffect(() => {
     if (lastRefreshTokenRef.current === refreshToken) return;
@@ -198,7 +159,7 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
     reloadSettingsAndProtect().catch(() => undefined);
   }, [refreshToken, reloadSettingsAndProtect]);
 
-  const tiles = integrationDefinitions(homeAssistantStatus, values, protectStatus, icloudPayload.accounts, icloudError, discordStatus, discordError, whatsappStatus, whatsappError);
+  const tiles = integrationDefinitions(homeAssistantStatus, values, protectStatus, icloudPayload.accounts, icloudError);
   const groupedTiles = integrationCategories
     .map((category) => ({
       ...category,
@@ -220,7 +181,7 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
               </div>
               <div className="integration-category-actions">
                 {category.key === "ai" ? (
-                  <LlmProviderSelector
+                  <CameraAiProviderSelector
                     saving={!isAdmin || llmProviderSaving || loading}
                     values={values}
                     onChange={async (provider) => {
@@ -247,7 +208,7 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
               {category.tiles.map((tile) => {
                 const Icon = tile.icon;
                 const checking = loading || !initialStatusesLoaded;
-                const unavailable = Boolean(settingsError || (tile.key === "home_assistant" && homeAssistantError) || (tile.key === "unifi_protect" && protectError) || (tile.key === "icloud_calendar" && icloudError) || (tile.key === "discord" && discordError) || (tile.key === "whatsapp" && whatsappError));
+                const unavailable = Boolean(settingsError || (tile.key === "home_assistant" && homeAssistantError) || (tile.key === "unifi_protect" && protectError) || (tile.key === "icloud_calendar" && icloudError));
                 return (
                   <article className="card integration-tile" key={tile.key}>
                     <button
@@ -292,27 +253,15 @@ export function IntegrationsView({ currentUser, people, latestRealtime, refreshT
           icloudError={icloudError}
           icloudLoading={icloudLoading}
           icloudPayload={icloudPayload}
-          discordChannels={discordChannels}
-          discordError={discordError}
-          discordIdentities={discordIdentities}
-          discordLoading={discordLoading}
-          discordStatus={discordStatus}
-          whatsappError={whatsappError}
-          whatsappLoading={whatsappLoading}
-          whatsappStatus={whatsappStatus}
-          people={people}
           values={values}
           onClose={() => setActive(null)}
           onICloudChanged={loadICloudCalendar}
-          onDiscordChanged={loadDiscord}
-          onWhatsAppChanged={loadWhatsApp}
           onProtectRefresh={() => loadProtect(true, true)}
           onSettingsChanged={reloadSettingsAndProtect}
           onAccessDeviceStatusChanged={setAccessDeviceStatus}
           onSaved={async (updates, confirmationToken) => {
             await save(updates, confirmationToken ? { confirmationToken } : {});
             await loadProtect(true, active?.key === "unifi_protect" || protectCamerasLoadedRef.current);
-            await loadWhatsApp();
           }}
         />
       ) : null}

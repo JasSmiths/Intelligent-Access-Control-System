@@ -3,8 +3,7 @@ import {
   getActivityEpisode,
   getActivityPage,
   getInvestigationFilters,
-  getInvestigationOverview,
-  investigateQuestion
+  getInvestigationOverview
 } from "../../api/investigations";
 import { isAbortError } from "../../api/client";
 import { DEFAULT_INVESTIGATION_QUERY, readInvestigationQuery, writeInvestigationQuery } from "./query";
@@ -12,7 +11,6 @@ import type {
   ActivityEpisode,
   ActivityEpisodeDetail,
   ActivityPage,
-  InvestigationAnswer,
   InvestigationFilterCatalog,
   InvestigationOverview,
   InvestigationQuery
@@ -195,29 +193,4 @@ export function useEpisodeDetails() {
 
   React.useEffect(() => () => controllers.current.forEach((controller) => controller.abort()), []);
   return { details, loadingIds, errors, load };
-}
-
-export function useQuestionInvestigation(scope: InvestigationQuery, timezone: string) {
-  const [answer, setAnswer] = React.useState<InvestigationAnswer | null>(null);
-  const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState("");
-  const controllerRef = React.useRef<AbortController | null>(null);
-
-  const submit = React.useCallback(async (question: string) => {
-    controllerRef.current?.abort();
-    const controller = new AbortController();
-    controllerRef.current = controller;
-    setLoading(true);
-    setError("");
-    try {
-      setAnswer(await investigateQuestion(question, scope, timezone, { signal: controller.signal }));
-    } catch (error) {
-      if (!isAbortError(error)) setError(errorMessage(error, "Unable to investigate that question"));
-    } finally {
-      if (!controller.signal.aborted) setLoading(false);
-    }
-  }, [scope, timezone]);
-
-  React.useEffect(() => () => controllerRef.current?.abort(), []);
-  return { answer, loading, error, submit, clear: () => setAnswer(null) };
 }

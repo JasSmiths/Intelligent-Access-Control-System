@@ -1,0 +1,84 @@
+# Standalone: never combine this with docker-compose.yml or the production override.
+# Supply the private image/storage receipt with --env-file; see docs/development.md.
+name: iacs-reset-preview
+
+services:
+  frontend:
+    image: ${IACS_PREVIEW_FRONTEND_IMAGE:?Set the paired frontend image}
+    pull_policy: never
+    ports:
+      - "127.0.0.1:${IACS_PREVIEW_PORT:-8189}:80"
+    volumes:
+      - ${IACS_PREVIEW_ROOT:?Set independent preview storage}/logs/frontend:/var/log/nginx
+    networks: [web, isolated]
+    sysctls:
+      net.ipv4.ip_forward: "0"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  backend:
+    image: ${IACS_PREVIEW_BACKEND_IMAGE:?Set the paired backend image}
+    pull_policy: never
+    environment:
+      IACS_ENVIRONMENT: production
+      IACS_DATABASE_URL: postgresql+asyncpg://iacs_preview:iacs_preview_local@postgres:5432/iacs_preview
+      IACS_REDIS_URL: redis://redis:6379/0
+      IACS_DATA_DIR: /app/data
+      IACS_LOG_DIR: /app/logs
+      IACS_AUTO_CREATE_SCHEMA: "false"
+      IACS_SEED_DEMO_DATA: "false"
+      IACS_RECOVERY_HOLD: "false"
+      IACS_AUTH_SECRET_FILE: /app/data/auth-secret.key
+      IACS_AUTH_COOKIE_NAME: iacs_reset_preview_session
+      IACS_AUTH_COOKIE_SECURE: "false"
+      IACS_PUBLIC_BASE_URL: http://iacs-reset.localhost:${IACS_PREVIEW_PORT:-8189}
+      IACS_CORS_ORIGINS: http://iacs-reset.localhost:${IACS_PREVIEW_PORT:-8189}
+      IACS_TRUSTED_HOSTS: iacs-reset.localhost,localhost,127.0.0.1,backend
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ${IACS_PREVIEW_ROOT}/backend:/app/data
+      - ${IACS_PREVIEW_ROOT}/logs/backend:/app/logs
+    networks: [isolated]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    environment:
+      POSTGRES_DB: iacs_preview
+      POSTGRES_USER: iacs_preview
+      POSTGRES_PASSWORD: iacs_preview_local
+    volumes:
+      - ${IACS_PREVIEW_ROOT}/postgres:/var/lib/postgresql/data
+    networks: [isolated]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U iacs_preview -d iacs_preview"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    command: [redis-server, --appendonly, "yes", --dir, /data]
+    volumes:
+      - ${IACS_PREVIEW_ROOT}/redis:/data
+    networks: [isolated]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+networks:
+  web: {}
+  isolated:
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      # internal:true alone still allows connections to the Docker host bridge.
+      com.docker.network.bridge.gateway_mode_ipv4: isolated

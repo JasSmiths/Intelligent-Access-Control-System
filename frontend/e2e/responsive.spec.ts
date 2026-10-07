@@ -64,7 +64,6 @@ async function mockOperationalNetwork(page: Page): Promise<NetworkMock> {
     "/api/v1/integrations/gate/status",
     "/api/v1/maintenance/status",
     "/api/v1/reports/context",
-    "/api/v1/ai/agent/status",
     "/api/v1/settings"
   ]);
 
@@ -100,9 +99,6 @@ async function mockOperationalNetwork(page: Page): Promise<NetworkMock> {
         break;
       case "/api/v1/reports/context":
         body = { site_timezone: "Europe/London", now: "2026-09-23T10:30:00Z" };
-        break;
-      case "/api/v1/ai/agent/status":
-        body = { active_mode: "mocked", provider: "local", v3_ready: true };
         break;
       default:
         body = [];
@@ -625,29 +621,6 @@ test("repositions a JavaScript date popover within the visual viewport", async (
   expect(network.unexpected).toEqual([]);
 });
 
-test("retains the Alfred composer draft and clears scroll lock at each width", async ({ page }) => {
-  const network = await mockOperationalNetwork(page);
-  await openDashboard(page);
-  await page.setViewportSize({ width: 560, height: 800 });
-  await page.getByRole("button", { name: "Open Alfred" }).click();
-  const composer = page.getByPlaceholder("Ask Alfred...");
-  await expect(composer).toBeVisible();
-  await composer.fill("Keep this draft while I rotate the device");
-  await expect.poll(() => page.evaluate(() => document.documentElement.style.overflow)).toBe("hidden");
-
-  await page.setViewportSize({ width: 900, height: 500 });
-  await expect.poll(() => page.evaluate(() => document.documentElement.style.overflow)).toBe("");
-  await expect(composer).toHaveValue("Keep this draft while I rotate the device");
-
-  await page.setViewportSize({ width: 560, height: 800 });
-  await expect.poll(() => page.evaluate(() => document.documentElement.style.overflow)).toBe("hidden");
-  await expect(composer).toHaveValue("Keep this draft while I rotate the device");
-  await page.getByRole("button", { name: "Close Alfred" }).click();
-  await expect.poll(() => page.evaluate(() => document.documentElement.style.overflow)).toBe("");
-  await expect.poll(() => page.evaluate(() => document.body.classList.contains("alfred-chat-open"))).toBe(false);
-  expect(network.unexpected).toEqual([]);
-});
-
 test("applies unequal safe-area tokens and mirrored edge values without overflow", async ({ page }) => {
   const network = await mockOperationalNetwork(page);
   await openDashboard(page);
@@ -682,7 +655,6 @@ test("applies unequal safe-area tokens and mirrored edge values without overflow
         height: document.documentElement.clientHeight,
         navigation: rect(".topbar-menu"),
         alerts: rect(".notification-button"),
-        launcher: rect(".chat-pill"),
         topbar: rect(".topbar")
       };
     });
@@ -692,19 +664,13 @@ test("applies unequal safe-area tokens and mirrored edge values without overflow
     expect(measured.left).toBe(`${edges.left}px`);
     expect(measured.navigation).not.toBeNull();
     expect(measured.alerts).not.toBeNull();
-    expect(measured.launcher).not.toBeNull();
-    if (measured.navigation && measured.alerts && measured.launcher) {
+    if (measured.navigation && measured.alerts) {
       expect(measured.navigation.left).toBeGreaterThanOrEqual(edges.left);
       expect(measured.navigation.left).toBeLessThanOrEqual(edges.left + 32);
       expect(measured.navigation.top).toBeGreaterThanOrEqual(edges.top);
       expect(measured.navigation.top).toBeLessThanOrEqual(edges.top + 32);
       expect(measured.alerts.right).toBeLessThanOrEqual(measured.width - edges.right);
       expect(measured.alerts.top).toBeGreaterThanOrEqual(edges.top);
-      expect(measured.launcher.right).toBeLessThanOrEqual(measured.width - edges.right);
-      expect(measured.launcher.bottom).toBeLessThanOrEqual(measured.height - edges.bottom);
-      expect(measured.width - measured.launcher.right).toBeLessThanOrEqual(edges.right + 32);
-      expect(measured.launcher.top).toBeGreaterThanOrEqual(edges.top);
-      expect(measured.launcher.bottom).toBeLessThanOrEqual(measured.topbar!.bottom);
     }
   }
   expect(network.unexpected).toEqual([]);
@@ -742,7 +708,7 @@ test("supports coarse-pointer form controls at 280px and 320px", async ({ browse
   }
 });
 
-test("keeps collapsed navigation inaccessible and respects reduced motion with a compact mobile launcher", async ({ page }) => {
+test("keeps collapsed navigation inaccessible and respects reduced motion", async ({ page }) => {
   const network = await mockOperationalNetwork(page);
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.setViewportSize({ width: 1200, height: 800 });
@@ -759,24 +725,5 @@ test("keeps collapsed navigation inaccessible and respects reduced motion with a
   const duration = await submenu.evaluate((element) => Math.max(...getComputedStyle(element).transitionDuration.split(",").map(parseFloat)));
   expect(duration).toBeLessThanOrEqual(.001);
   await page.setViewportSize({ width: 390, height: 844 });
-  const launcher = page.getByRole("button", { name: "Open Alfred" });
-  await expect(launcher).toBeVisible();
-  await expect.poll(async () => {
-    const box = await launcher.boundingBox();
-    return box ? [box.width, box.height] : null;
-  }).toEqual([44, 44]);
-  const bounds = await launcher.boundingBox();
-  expect(bounds?.width).toBeCloseTo(44, 1);
-  expect(bounds?.height).toBeCloseTo(44, 1);
-  await expect(page.locator(".chat-widget")).toHaveCSS("position", "static");
-  const header = await page.locator(".topbar").boundingBox();
-  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(header!.y + header!.height);
-  await launcher.click();
-  await expect(page.getByPlaceholder("Ask Alfred...")).toBeVisible();
-  await page.getByPlaceholder("Ask Alfred...").fill("Keep this draft when the launcher returns to the header");
-  await page.getByRole("button", { name: "Close Alfred" }).click();
-  await expect(page.locator(".chat-widget")).toHaveCSS("position", "static");
-  await page.getByRole("button", { name: "Open Alfred" }).click();
-  await expect(page.getByPlaceholder("Ask Alfred...")).toHaveValue("Keep this draft when the launcher returns to the header");
   expect(network.unexpected).toEqual([]);
 });

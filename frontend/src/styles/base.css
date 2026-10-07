@@ -45,7 +45,6 @@
   --edge-right: max(var(--edge-space), var(--safe-right));
   --edge-bottom: max(var(--edge-space), var(--safe-bottom));
   --edge-left: max(var(--edge-space), var(--safe-left));
-  --alfred-launcher-clearance: 104px;
 }
 
 :root[data-theme="dark"] {
@@ -451,7 +450,7 @@ h2 {
   transition: margin-left 260ms var(--ease-out);
   min-height: var(--app-viewport-height);
   margin-left: 258px;
-  scroll-padding-bottom: var(--alfred-launcher-clearance);
+  scroll-padding-bottom: 0px;
 }
 
 .sidebar {
@@ -551,8 +550,7 @@ h2 {
   color: var(--muted);
 }
 
-.search input,
-.chat-input input {
+.search input{
   width: 100%;
   min-width: 0;
   border: 0;
@@ -565,8 +563,7 @@ h2 {
   font-size: 13px;
 }
 
-.search input::placeholder,
-.chat-input input::placeholder {
+.search input::placeholder{
   color: var(--muted);
 }
 

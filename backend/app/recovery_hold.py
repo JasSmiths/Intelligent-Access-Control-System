@@ -21,10 +21,7 @@ _READ_PATHS = (
     r"/api/v1/auth/(status|me|me/photo)",
     rf"/api/v1/integrations/(gate|cover)/commands(?:/{_UUID})?",
     rf"/api/v1/(automations|notifications)/runs(?:/{_UUID})?",
-    rf"/api/v1/integrations/(whatsapp|discord)/incoming(?:/{_UUID})?",
     r"/api/v1/notifications/recovery/gate-outbox",
-    r"/api/v1/ai/chat/approvals(?:/confirm-[0-9a-f]{32})?",
-    r"/api/v1/ai/training/(feedback|lessons|eval-examples|eval-export)",
     r"/(docs|openapi.json|redoc)",
 )
 

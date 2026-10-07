@@ -38,7 +38,7 @@ it("duplicates notification rules as paused drafts for review", async () => {
   await screen.findByText("Notification workflow duplicated and paused for review.");
 });
 it("saves automation edits and reports a subsequent read failure independently", async () => {
-  const read = vi.spyOn(workflowApi, "getAutomationData").mockResolvedValueOnce({ rules: [automation], catalog: automationCatalog, users: [] }).mockRejectedValueOnce(new Error("List offline"));
+  const read = vi.spyOn(workflowApi, "getAutomationData").mockResolvedValueOnce({ rules: [automation], catalog: automationCatalog }).mockRejectedValueOnce(new Error("List offline"));
   const save = vi.spyOn(workflowApi, "saveAutomationRule").mockResolvedValue(automation);
   render(<AutomationsView currentUser={currentUser} people={[]} vehicles={[]} refreshToken={0} />);
   fireEvent.click(await screen.findByRole("button", { name: automation.name }));

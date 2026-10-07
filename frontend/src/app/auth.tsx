@@ -36,7 +36,6 @@ export function LoginPage({ onLogin }: { onLogin: (user: UserAccount) => void })
         password,
         remember_me: rememberMe
       });
-      clearChatTeaserDismissals();
       onLogin(user);
     } catch (authError) {
       setError(authError instanceof Error ? authError.message : "Invalid credentials");
@@ -104,7 +103,6 @@ export function SetupPage({ onComplete }: { onComplete: (user: UserAccount) => v
         email: form.email || null,
         password: form.password
       });
-      clearChatTeaserDismissals();
       onComplete(user);
     } catch (setupError) {
       setError(setupError instanceof Error ? setupError.message : "Setup failed");
@@ -169,11 +167,4 @@ export function SetupPage({ onComplete }: { onComplete: (user: UserAccount) => v
       </form>
     </main>
   );
-}
-function clearChatTeaserDismissals() {
-  for (const key of Object.keys(sessionStorage)) {
-    if (key.startsWith("iacs-chat-teaser-dismissed")) {
-      sessionStorage.removeItem(key);
-    }
-  }
 }

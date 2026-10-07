@@ -81,7 +81,7 @@ _FULL_ACCESS_FLOW_CAPABILITY_SEAL = object()
 
 
 class FullAccessFlowIsolationError(RuntimeError):
-    """The full access-flow runner is restricted to the isolated phase1 harness."""
+    """The full access-flow runner is restricted to the isolated validation harness."""
 
 
 @dataclass(frozen=True)
@@ -101,7 +101,7 @@ class _FullAccessFlowIsolationSnapshot:
 
 
 def issue_isolated_full_access_flow_capability() -> FullAccessFlowIsolationCapability:
-    """Issue the simulator-only capability after proving the phase1 boundary."""
+    """Issue the simulator-only capability after proving the validation boundary."""
     _assert_full_access_flow_isolation()
     return FullAccessFlowIsolationCapability(_FULL_ACCESS_FLOW_CAPABILITY_SEAL)
 
@@ -114,7 +114,7 @@ def _require_isolated_full_access_flow_capability(
         or capability._seal is not _FULL_ACCESS_FLOW_CAPABILITY_SEAL
     ):
         raise FullAccessFlowIsolationError(
-            "Full access-flow simulation requires an isolated phase1 capability."
+            "Full access-flow simulation requires an isolated validation capability."
         )
     _assert_full_access_flow_isolation()
 
@@ -156,7 +156,7 @@ def _full_access_flow_isolation_snapshot() -> _FullAccessFlowIsolationSnapshot:
 
 
 def _full_access_flow_isolation_error(snapshot: _FullAccessFlowIsolationSnapshot) -> str | None:
-    """Mirror the phase1 proof without importing its test or harness code."""
+    """Mirror the validation proof without importing its test or harness code."""
     if snapshot.platform != "linux" or snapshot.network_interfaces != frozenset({"lo"}):
         return "Full access-flow simulation requires a loopback-only Linux namespace."
     if snapshot.docker_socket_present:
@@ -167,17 +167,17 @@ def _full_access_flow_isolation_error(snapshot: _FullAccessFlowIsolationSnapshot
     environment = snapshot.environment
     required = {
         "IACS_ENVIRONMENT": "testing",
-        "IACS_PHASE1_MODE": "persistence",
+        "IACS_VALIDATION_MODE": "persistence",
         "IACS_RECOVERY_PROBES": "synthetic-only",
         "IACS_AUTO_CREATE_SCHEMA": "false",
         "IACS_SEED_DEMO_DATA": "false",
-        "IACS_AUTH_SECRET_KEY": "phase1-synthetic-auth-root-never-production",
+        "IACS_AUTH_SECRET_KEY": "validation-synthetic-auth-root-never-production",
         "IACS_DATA_DIR": "/isolated/runtime",
         "IACS_LOG_DIR": "/isolated/logs",
         "IACS_WORKSPACE_DIR": "/workspace",
     }
     if any(environment.get(key) != value for key, value in required.items()):
-        return "Full access-flow simulation requires the explicit phase1 testing namespace."
+        return "Full access-flow simulation requires the explicit validation testing namespace."
     if any(
         value
         for key, value in environment.items()
@@ -192,9 +192,9 @@ def _full_access_flow_isolation_error(snapshot: _FullAccessFlowIsolationSnapshot
             database.scheme == "postgresql+asyncpg"
             and database.hostname == "127.0.0.1"
             and database.port == 5432
-            and database.username == "phase1"
-            and database.password == "synthetic-phase1-only"
-            and bool(re.fullmatch(r"/iacs_p1_[a-z0-9_]+", database.path))
+            and database.username == "validation"
+            and database.password == "synthetic-validation-only"
+            and bool(re.fullmatch(r"/iacs_validation_[a-z0-9_]+", database.path))
             and not database.query
             and not database.fragment
         )

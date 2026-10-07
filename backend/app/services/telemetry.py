@@ -41,8 +41,8 @@ TELEMETRY_CATEGORIES = [
     },
     {
         "id": TELEMETRY_CATEGORY_ALFRED,
-        "label": "Alfred AI Audit",
-        "description": "AI provider usage, tools, autonomous actions, and outcomes.",
+        "label": "Historical Alfred Audit",
+        "description": "Retained assistant provider usage, tools, actions, and outcomes from before retirement.",
     },
     {
         "id": TELEMETRY_CATEGORY_CRUD,
@@ -72,7 +72,7 @@ TELEMETRY_CATEGORIES = [
     {
         "id": TELEMETRY_CATEGORY_AUTOMATION,
         "label": "Automations",
-        "description": "Trigger, condition, action, and AI-authored automation workflow execution.",
+        "description": "Trigger, condition, and action execution for automation workflows.",
     },
     {
         "id": TELEMETRY_CATEGORY_MAINTENANCE,

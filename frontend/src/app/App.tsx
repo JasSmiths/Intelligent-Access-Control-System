@@ -9,7 +9,6 @@ import { displayUserName } from "../lib/format";
 import { UserAvatar } from "../lib/media";
 import { AlertTray, isBellAlert } from "./alerts";
 import { AuthLoading, LoginPage, SetupPage, type AuthStatus } from "./auth";
-import { DeferredChatWidget } from "./chatLauncher";
 import { canAccessView, initialViewFromLocation, primaryNavItems, settingsNavItems, settingsNavViewKeys, viewFromPath, viewPaths, type ShellDataKey } from "./navigation";
 import { useProfilePreferences } from "./profile";
 import {
@@ -555,7 +554,6 @@ export function App() {
               )}
             </button>
             <ThemeControl theme={theme} setTheme={setTheme} />
-            <DeferredChatWidget currentUser={currentUser} maintenanceStatus={maintenanceStatus} />
           </div>
         </header>
         {routeSearch?.view === view && routeSearch.value && !restrictedView ? <div className="route-filter-bar"><label><Search size={16} /><span>Page filter</span><input aria-label="Page filter" value={routeSearch.value} onChange={(event) => setRouteSearch({ view, value: event.target.value })} /></label><button className="secondary-button" type="button" onClick={() => setRouteSearch(null)}>Clear</button></div> : null}

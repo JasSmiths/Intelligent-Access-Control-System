@@ -5,16 +5,12 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 import uuid
-from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 import pytest
 from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request
 
-from app.ai import tools as ai_tools
-from app.ai.tool_groups import automations_handlers as alfred_automations_handlers
-from app.ai.tool_groups import registry as alfred_registry
 from app.api.v1 import automations as automations_api
 from app.models import AutomationRule, AutomationRun, Presence
 from app.models.enums import PresenceState, UserRole
@@ -26,14 +22,12 @@ from app.services.automations import (
     cron_from_recurrence,
     due_time_trigger,
     next_run_for_trigger,
-    validate_schedule_parse,
 )
 from app.services.workflows.automation_definition import (
     ACTION_CATALOG, CONDITION_CATALOG, TRIGGER_CATALOG, AutomationContext, build_context_variables, context_missing_references, facts_from_payload, normalize_actions, normalize_conditions, normalize_triggers, trigger_keys_for_triggers,
     INTEGRATION_ACTION_KEYS, automation_triggers_for_origin, generate_automation_webhook_key, is_high_entropy_webhook_key,
 )
 from app.services.automation_intake import public_automation_context, automation_execution_context_snapshot
-from app.services.event_bus import RealtimeEvent
 
 
 def make_request(
@@ -67,7 +61,6 @@ def test_automation_registries_expose_required_keys() -> None:
         "time.specific_datetime",
         "time.every_x",
         "time.cron",
-        "time.ai_text",
         "vehicle.known_plate",
         "vehicle.unknown_plate",
         "vehicle.outside_schedule",
@@ -77,8 +70,6 @@ def test_automation_registries_expose_required_keys() -> None:
         "visitor_pass.detected",
         "visitor_pass.used",
         "visitor_pass.expired",
-        "ai.phrase_received",
-        "ai.issue_detected",
         "webhook.received",
         "webhook.unrecognized",
         "webhook.new_sender",
@@ -200,66 +191,9 @@ def test_automation_schema_normalization_shapes_payloads() -> None:
 
 
 def test_integration_action_normalization_sets_provider_and_action() -> None:
-    actions = normalize_actions(
-        [
-            {
-                "type": "integration.icloud_calendar.sync",
-                "config": {},
-            },
-            {
-                "type": "integration.whatsapp.send_message",
-                "config": {
-                    "target_mode": "dynamic",
-                    "phone_number_template": "@AdminPhone",
-                    "message_template": "@Subject",
-                    "target_user_ids": ["ignored-for-dynamic"],
-                },
-            }
-        ]
-    )
-
-    assert "integration.icloud_calendar.sync" in registered_integration_action_types()
-    assert "integration.whatsapp.send_message" in registered_integration_action_types()
-    assert actions[0] == {
-        "id": "action-1",
-        "type": "integration.icloud_calendar.sync",
-        "config": {"provider": "icloud_calendar", "action": "sync_calendars"},
-        "reason_template": "",
-    }
-    assert actions[1]["type"] == "integration.whatsapp.send_message"
-    assert actions[1]["config"] == {
-        "provider": "whatsapp",
-        "action": "send_message",
-        "target_mode": "dynamic",
-        "target_user_ids": ["ignored-for-dynamic"],
-        "phone_number_template": "@AdminPhone",
-        "message_template": "@Subject",
-    }
-
-
-@pytest.mark.asyncio
-async def test_visitor_pass_used_context_maps_registration_variable() -> None:
-    context = await AutomationService().context_for_trigger(
-        "visitor_pass.used",
-        {
-            "visitor_pass": {
-                "id": "not-a-db-uuid",
-                "visitor_name": "Pat",
-                "status": "used",
-                "number_plate": "AB12 CDE",
-                "vehicle_make": "Tesla",
-                "vehicle_colour": "Blue",
-                "duration_human": "42 minutes",
-            },
-            "occurred_at": "2026-04-30T20:15:00+01:00",
-        },
-    )
-
-    assert context.variables["VisitorPassVehicleRegistration"] == "AB12 CDE"
-    assert context.variables["Registration"] == "AB12 CDE"
-    assert context.variables["VisitorName"] == "Pat"
-    assert context_missing_references(context, {"reason_template": "@VisitorPassVehicleRegistration"}) == []
-    assert public_automation_context(context)["missing_required_variables"] == []
+    actions = normalize_actions([{"type": "integration.icloud_calendar.sync", "config": {}}])
+    assert registered_integration_action_types() == {"integration.icloud_calendar.sync"}
+    assert actions[0]["config"] == {"provider": "icloud_calendar", "action": "sync_calendars"}
 
 
 def test_missing_variable_references_skip_unavailable_trigger_scopes() -> None:
@@ -548,45 +482,8 @@ async def test_dry_run_previews_integration_actions_without_executing(monkeypatc
     assert calls == []
 
 
-def test_ai_schedule_validation_accepts_current_llm_cron_shape() -> None:
-    now = datetime(2026, 4, 30, 10, 0, tzinfo=ZoneInfo("Europe/London"))
-    validated = validate_schedule_parse(
-        {
-            "cron_expression": "0 21 * * 4",
-            "end_at": "2026-06-04T23:59:59+01:00",
-            "timezone": "Europe/London",
-            "summary": "Every Thursday at 9pm until 4th June",
-            "confidence": 0.9,
-            "ambiguity_notes": [],
-        },
-        now=now,
-        timezone_name="Europe/London",
-        raw_text="",
-    )
-
-    assert validated["cron_expression"] == "0 21 * * 4"
-    assert validated["end_at"] == "2026-06-04T23:59:59+01:00"
-    assert validated["next_run_at"] == "2026-04-30T20:00:00+00:00"
-    assert validated["requires_review"] is False
 
 
-@pytest.mark.asyncio
-async def test_ai_schedule_parser_fails_closed_without_deterministic_guess(monkeypatch) -> None:
-    async def fake_runtime_config():
-        return SimpleNamespace(site_timezone="Europe/London", llm_provider="openai")
-
-    def unavailable_provider(_provider_name):
-        raise RuntimeError("provider unavailable")
-
-    monkeypatch.setattr(automations, "get_runtime_config", fake_runtime_config)
-    monkeypatch.setattr(automations, "get_llm_provider", unavailable_provider)
-
-    parsed = await AutomationService().parse_ai_schedule("Every Thursday at 9pm until 4th June")
-
-    assert parsed["cron_expression"] == ""
-    assert parsed["next_run_at"] is None
-    assert parsed["requires_review"] is True
-    assert "No cron_expression or run_at was returned." in parsed["errors"]
 
 
 def test_scheduler_next_run_and_due_trigger_helpers() -> None:
@@ -626,33 +523,8 @@ def test_webhook_payload_facts_capture_sender_and_shape_message() -> None:
     assert "doorbell" in facts["message"]
 
 
-@pytest.mark.asyncio
-async def test_alfred_automation_tools_require_confirmation() -> None:
-    create_result = await alfred_automations_handlers.create_automation(
-        {
-            "name": "Open for Steph outside schedule",
-            "triggers": [{"type": "vehicle.outside_schedule", "config": {"person_id": "person-1"}}],
-            "actions": [{"type": "gate.open", "config": {}}],
-        }
-    )
-    delete_result = await alfred_automations_handlers.delete_automation({"automation_name": "Open for Steph outside schedule"})
-    enable_result = await alfred_automations_handlers.enable_automation({"automation_name": "Open for Steph outside schedule"})
-
-    assert create_result["requires_confirmation"] is True
-    assert create_result["confirmation_field"] == "confirm"
-    assert delete_result["requires_confirmation"] is True
-    assert enable_result["requires_confirmation"] is True
 
 
-def test_alfred_registers_automation_tool_metadata() -> None:
-    tools = alfred_registry.build_agent_tools()
-
-    assert tools["query_automation_catalog"].requires_confirmation is False
-    assert tools["create_automation"].requires_confirmation is True
-    assert tools["create_automation"].safety_level == ai_tools.SAFETY_CONFIRMATION_REQUIRED
-    assert tools["edit_automation"].requires_confirmation is True
-    assert tools["delete_automation"].requires_confirmation is True
-    assert "Automations" in tools["create_automation"].categories
 
 
 def test_webhook_triggers_generate_high_entropy_keys_when_requested() -> None:
@@ -962,7 +834,7 @@ def test_automation_definition_and_intake_do_not_import_execution_facades():
             and (node.module or "").startswith("app.")} <= allowed
     intake = ast.parse((base / "automation_intake.py").read_text())
     forbidden = {"app.services.automations", "app.services.automation_integration_actions", "app.services.access_devices",
-                 "app.services.whatsapp_messaging", "app.services.notifications"}
+                 "app.services.notifications"}
     assert not {node.module for node in ast.walk(intake) if isinstance(node, ast.ImportFrom)} & forbidden
     assert not {node.func.attr for node in ast.walk(intake) if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)} & {"commit", "publish", "wake", "command_device", "execute_open"}

@@ -12,7 +12,6 @@ dependencies = [
     "asyncpg>=0.31.0",
     "cryptography>=50.0.0",
     "croniter>=6.2.2",
-    "discord.py>=2.7.1",
     "email-validator>=2.3.0",
     "fastapi>=0.138.2",
     "httpx>=0.28.1",
@@ -20,7 +19,6 @@ dependencies = [
     "pillow>=12.3.0",
     "pillow-heif>=1.3.0",
     "playwright>=1.59.0",
-    "pgvector>=0.4.2",
     "pydantic-settings>=2.14.2",
     "pyicloud>=2.5.0",
     "python-multipart>=0.0.31",
@@ -63,6 +61,3 @@ warn_unused_ignores = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-markers = [
-    "alfred_critical: critical Alfred regressions covering answer correctness and confirmation safety",
-]

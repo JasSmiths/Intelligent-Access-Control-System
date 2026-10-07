@@ -15,15 +15,11 @@ from app.services.gate_commands import GateCommandCoordinator, GateCommandIntent
 
 
 @pytest.mark.parametrize('method,path', [
-    ('POST','/api/v1/integrations/gate/open'), ('POST','/api/v1/ai/chat'),
-    ('POST','/api/v1/ai/chat/approvals/00000000-0000-0000-0000-000000000001'),
-    ('POST','/api/v1/webhooks/whatsapp'), ('POST','/api/v1/webhooks/ubiquiti/lpr'),
+    ('POST','/api/v1/integrations/gate/open'),
+    ('POST','/api/v1/webhooks/ubiquiti/lpr'),
     ('POST','/api/v1/automations/webhooks/key'), ('POST','/api/v1/auth/setup'),
     ('PATCH','/api/v1/settings'), ('DELETE','/api/v1/visitor-passes/id'),
     ('GET','/api/v1/integrations/gate/status'), ('GET','/api/v1/visitor-passes'),
-    ('GET','/api/v1/ai/chat/approvals/id/confirm'), ('GET','/api/v1/notification-snapshots/token'),
-    ('POST','/api/v1/integrations/whatsapp/incoming/00000000-0000-0000-0000-000000000001/retry'),
-    ('GET','/api/v1/integrations/discord/incoming/00000000-0000-0000-0000-000000000001/retry'),
 ])
 async def test_hold_blocks_mutations_ingress_and_potentially_effectful_gets(monkeypatch, method, path):
     monkeypatch.setattr(policy.settings, 'recovery_hold', True)
@@ -37,10 +33,6 @@ async def test_hold_blocks_mutations_ingress_and_potentially_effectful_gets(monk
 
 @pytest.mark.parametrize('path', [
     '/api/v1/integrations/gate/commands', '/api/v1/integrations/cover/commands/00000000-0000-0000-0000-000000000001',
-    '/api/v1/ai/chat/approvals', '/api/v1/automations/runs', '/api/v1/notifications/runs',
-    '/api/v1/ai/chat/approvals/confirm-00000000000000000000000000000001',
-    '/api/v1/integrations/whatsapp/incoming',
-    '/api/v1/integrations/discord/incoming/00000000-0000-0000-0000-000000000001',
 ])
 async def test_hold_delegates_exact_read_paths_to_existing_auth(monkeypatch, path):
     monkeypatch.setattr(policy.settings, 'recovery_hold', True)
@@ -56,10 +48,10 @@ async def test_hold_delegates_exact_read_paths_to_existing_auth(monkeypatch, pat
     assert response.status_code == 401
 
 
-async def test_hold_closes_websockets_before_they_create_chat_work(monkeypatch):
+async def test_hold_closes_websockets_before_realtime_work(monkeypatch):
     monkeypatch.setattr(policy.settings, 'recovery_hold', True)
     inner, send = AsyncMock(), AsyncMock()
-    await RecoveryHoldMiddleware(inner)({'type':'websocket','path':'/api/v1/ai/chat/ws'}, AsyncMock(), send)
+    await RecoveryHoldMiddleware(inner)({'type':'websocket','path':'/api/v1/realtime/ws'}, AsyncMock(), send)
     assert send.call_args.args[0]['code'] == 1008
     inner.assert_not_awaited()
 

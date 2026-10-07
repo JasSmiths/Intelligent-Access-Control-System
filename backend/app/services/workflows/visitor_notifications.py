@@ -8,41 +8,9 @@ from zoneinfo import ZoneInfo
 from app.modules.notifications.base import NotificationContext
 if TYPE_CHECKING:
     from app.services.event_bus import RealtimeEvent
-from app.services.type_helpers import as_dict
 from app.services.workflows.notification_payloads import trigger_severity, _duration_label_from_seconds
 
 
-def visitor_timeframe_request_notification_context(
-    visitor_pass: dict[str, Any], request: dict[str, Any],
-) -> NotificationContext:
-    """Render the existing Admin-request notice from committed conversation facts."""
-    visitor_name = str(visitor_pass.get("visitor_name") or "visitor")
-    subject = f"Visitor Pass timeframe change requested for {visitor_name}"
-    current_window = visitor_window_label_from_values(request.get("current_valid_from"), request.get("current_valid_until"))
-    original_window = visitor_window_label_from_values(
-        request.get("original_valid_from") or request.get("current_valid_from"),
-        request.get("original_valid_until") or request.get("current_valid_until"),
-    )
-    requested_window = visitor_window_label_from_values(request.get("requested_valid_from"), request.get("requested_valid_until"))
-    return NotificationContext(
-        event_type="visitor_pass_timeframe_change_requested", subject=subject, severity="warning",
-        facts={
-            "message": f"{visitor_name} requested changing their Visitor Pass from {current_window} to {requested_window}.",
-            "subject": subject, "visitor_name": visitor_name, "visitor_pass_name": visitor_name,
-            "display_name": visitor_name,
-            "visitor_pass_id": str(visitor_pass.get("id") or ""),
-            "visitor_pass_status": str(visitor_pass.get("status") or ""),
-            "visitor_pass_current_window": current_window, "visitor_pass_original_time": original_window,
-            "visitor_pass_requested_window": requested_window, "visitor_pass_requested_time": requested_window,
-            "visitor_pass_timeframe_request_id": str(request.get("id") or ""),
-            "visitor_pass_current_valid_from": str(request.get("current_valid_from") or ""),
-            "visitor_pass_current_valid_until": str(request.get("current_valid_until") or ""),
-            "visitor_pass_requested_valid_from": str(request.get("requested_valid_from") or ""),
-            "visitor_pass_requested_valid_until": str(request.get("requested_valid_until") or ""),
-            "visitor_pass_visitor_message": str(request.get("visitor_message") or ""),
-            "source": "whatsapp_visitor",
-        },
-    )
 
 
 def visitor_pass_notification_contexts_from_event(event: RealtimeEvent) -> list[NotificationContext]:
@@ -53,9 +21,7 @@ def visitor_pass_notification_contexts_from_event(event: RealtimeEvent) -> list[
     if not visitor_pass:
         return []
 
-    if event.type == "visitor_pass.arranged":
-        event_types = ["visitor_pass_arranged"]
-    elif event.type == "visitor_pass.created":
+    if event.type == "visitor_pass.created":
         event_types = ["visitor_pass_created"]
     elif event.type == "visitor_pass.cancelled":
         event_types = ["visitor_pass_cancelled"]
@@ -141,8 +107,6 @@ def _visitor_pass_notification_facts(
 
 def _visitor_pass_notification_subject(event_type: str, visitor_pass: dict[str, Any]) -> str:
     visitor_name = _visitor_pass_name(visitor_pass)
-    if event_type == "visitor_pass_arranged":
-        return f"Visitor Pass arranged for {visitor_name}"
     if event_type == "visitor_pass_created":
         return f"Visitor Pass created for {visitor_name}"
     if event_type == "visitor_pass_cancelled":
@@ -163,10 +127,6 @@ def _visitor_pass_notification_message(event_type: str, visitor_pass: dict[str, 
     duration = _visitor_pass_text(visitor_pass.get("duration_human")) or _duration_label_from_seconds(
         visitor_pass.get("duration_on_site_seconds")
     )
-    if event_type == "visitor_pass_arranged":
-        window_suffix = f" for {time_window}" if time_window else ""
-        vehicle_suffix = f" with {vehicle}" if vehicle else ""
-        return f"Visitor Pass arranged for {visitor_name}{window_suffix}{vehicle_suffix}."
     if event_type == "visitor_pass_created":
         return f"Visitor Pass created for {visitor_name}."
     if event_type == "visitor_pass_cancelled":
@@ -184,9 +144,6 @@ def _visitor_pass_notification_message(event_type: str, visitor_pass: dict[str, 
 
 
 def _visitor_pass_occurred_at(event_type: str, visitor_pass: dict[str, Any]) -> str:
-    if event_type == "visitor_pass_arranged":
-        metadata = as_dict(visitor_pass.get("source_metadata"))
-        return _visitor_pass_text(metadata.get("whatsapp_last_confirmed_at") or visitor_pass.get("updated_at"))
     if event_type == "visitor_pass_created":
         return _visitor_pass_text(visitor_pass.get("created_at"))
     if event_type == "visitor_pass_cancelled":

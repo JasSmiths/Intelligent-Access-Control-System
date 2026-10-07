@@ -54,7 +54,7 @@ def test_plan_does_not_accept_checkpoint_identity_from_action_input_or_mutate_so
 
 def test_dispatch_input_is_not_truncated_as_telemetry():
     text = "synthetic " * 2000
-    plan = frozen_action_plan(uuid.uuid4(), [{"action": {"id": "a", "type": "integration.whatsapp.send_message", "config": {"message_template": text}}}])
+    plan = frozen_action_plan(uuid.uuid4(), [{"action": {"id": "a", "type": "notification.enable", "config": {"message_template": text}}}])
     assert plan[0]["action"]["config"]["message_template"] == text
 
 

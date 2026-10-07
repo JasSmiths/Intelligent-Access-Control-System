@@ -280,54 +280,6 @@ class HomeAssistantIntegrationService:
         action_id = str(data.get("action") or "").strip()
         if not action_id:
             return
-        from app.services.messaging.whatsapp_helpers import parse_visitor_pass_timeframe_button_id
-        from app.services.visitor_conversations import (
-            HomeAssistantTimeframeAction,
-            get_visitor_conversation_service,
-        )
-
-        decision = parse_visitor_pass_timeframe_button_id(action_id)
-        if decision:
-            try:
-                result = await get_visitor_conversation_service().decide_timeframe_request(
-                    decision.pass_id,
-                    decision.request_id,
-                    decision.decision,
-                    integration_action=HomeAssistantTimeframeAction(decision.pass_id, decision.request_id, decision.decision),
-                )
-                logger.info(
-                    "home_assistant_notification_action_processed",
-                    extra={
-                        "action": action_id,
-                        "decision": decision.decision,
-                        "visitor_pass_id": decision.pass_id,
-                        "request_id": decision.request_id,
-                        "outcome": result.kind,
-                    },
-                )
-                await event_bus.publish(
-                    "home_assistant.notification_action_processed",
-                    {
-                        "action": action_id,
-                        "decision": decision.decision,
-                        "visitor_pass_id": decision.pass_id,
-                        "request_id": decision.request_id,
-                    },
-                )
-                return
-            except Exception as exc:
-                logger.warning(
-                    "home_assistant_notification_action_failed",
-                    extra={
-                        "action": action_id,
-                        "decision": decision.decision,
-                        "visitor_pass_id": decision.pass_id,
-                        "request_id": decision.request_id,
-                        "error": str(exc),
-                    },
-                )
-                return
-
         from app.services.actionable_notifications import (
             GATE_FORCE_OPEN_PREFIX,
             GATE_OPEN_PREFIX,

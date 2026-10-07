@@ -90,31 +90,24 @@ async def test_simulation_gate_observation_hook_preserves_supplied_state() -> No
     assert result is read
 
 
+@pytest.mark.parametrize(
+    "role,body",
+    [
+        pytest.param(UserRole.STANDARD, {}, id="standard-empty-request"),
+        pytest.param(
+            UserRole.ADMIN,
+            {
+                "cleanup": False,
+                "scenario_ids": ["unknown_plate_denied"],
+                "include_debug": True,
+                "confirmation_token": "server-token",
+            },
+            id="admin-with-confirmation",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_full_access_endpoint_is_retired_before_runner(monkeypatch) -> None:
-    calls = 0
-
-    async def fail_runner(*_args, **_kwargs) -> None:
-        nonlocal calls
-        calls += 1
-        raise AssertionError("The retired endpoint must not invoke the E2E simulation.")
-
-    monkeypatch.setattr(simulation_scenarios, "run_full_access_flow", fail_runner)
-    app = app_for_user(user_with_role(UserRole.STANDARD))
-    transport = httpx.ASGITransport(app=app)
-
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/api/v1/simulation/e2e/full-access-flow", json={})
-
-    assert response.status_code == 410
-    assert response.json()["detail"] == (
-        "Full access-flow simulation is available only through the isolated test harness."
-    )
-    assert calls == 0
-
-
-@pytest.mark.asyncio
-async def test_full_access_endpoint_is_retired_before_confirmation_or_runner(monkeypatch) -> None:
+async def test_full_access_endpoint_is_retired_before_confirmation_or_runner(monkeypatch, role, body) -> None:
     runner_calls = 0
     confirmation_calls = 0
 
@@ -130,18 +123,13 @@ async def test_full_access_endpoint_is_retired_before_confirmation_or_runner(mon
 
     monkeypatch.setattr(simulation_scenarios, "run_full_access_flow", fail_runner)
     monkeypatch.setattr(simulation_router_module, "require_confirmed_action", fake_confirmation)
-    app = app_for_user(user_with_role(UserRole.ADMIN))
+    app = app_for_user(user_with_role(role))
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/v1/simulation/e2e/full-access-flow",
-            json={
-                "cleanup": False,
-                "scenario_ids": ["unknown_plate_denied"],
-                "include_debug": True,
-                "confirmation_token": "server-token",
-            },
+            json=body,
         )
 
     assert response.status_code == 410

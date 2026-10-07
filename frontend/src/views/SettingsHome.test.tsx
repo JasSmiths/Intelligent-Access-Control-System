@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import type { UserAccount } from "../api/types";
 import { settingsNavItems } from "../app/navigation";
-import { SettingsView } from "./SettingsViews";
+import { SettingsView } from "./SettingsView";
 
 const fetcher = vi.fn();
 const groupNames = ["Access & Detection", "Automation & Connectivity", "Administration"];
@@ -46,7 +46,7 @@ function expectRestrictedSettingsHidden() {
 
 it("shows each canonical destination once with its own accessible description", () => {
   renderSettings();
-  expect(screen.getByText("13 settings", { exact: true })).toBeInTheDocument();
+  expect(screen.getByText(`${settingsNavItems.length} settings`, { exact: true })).toBeInTheDocument();
   expect(settingsPages().getAllByRole("button")).toHaveLength(settingsNavItems.length);
   for (const item of settingsNavItems) {
     const buttons = settingsPages().getAllByRole("button", { name: item.label });
@@ -102,7 +102,7 @@ it("matches titles and descriptions regardless of letter case and outer whitespa
   expect(visibleSettings().map((item) => item.label)).toEqual(["LPR Tuning"]);
 
   findSetting("   ");
-  expect(screen.getByText("13 settings", { exact: true })).toBeInTheDocument();
+  expect(screen.getByText(`${settingsNavItems.length} settings`, { exact: true })).toBeInTheDocument();
   expect(visibleSettings()).toHaveLength(settingsNavItems.length);
 });
 
@@ -124,7 +124,7 @@ it("clears a matching search and restores all destinations and group headings", 
   findSetting("Garage Doors");
   fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
   expect(screen.getByRole("searchbox", { name: "Find a setting" })).toHaveValue("");
-  expect(screen.getByText("13 settings", { exact: true })).toBeInTheDocument();
+  expect(screen.getByText(`${settingsNavItems.length} settings`, { exact: true })).toBeInTheDocument();
   expect(visibleSettings()).toHaveLength(settingsNavItems.length);
   for (const group of groupNames) expect(screen.getByRole("heading", { name: group })).toBeInTheDocument();
 });
@@ -137,6 +137,6 @@ it("offers a reset when there are no results without rendering empty groups", ()
   for (const group of groupNames) expect(screen.queryByRole("heading", { name: group })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Show all settings" }));
   expect(screen.getByRole("searchbox", { name: "Find a setting" })).toHaveValue("");
-  expect(screen.getByText("13 settings", { exact: true })).toBeInTheDocument();
+  expect(screen.getByText(`${settingsNavItems.length} settings`, { exact: true })).toBeInTheDocument();
   expect(visibleSettings()).toHaveLength(settingsNavItems.length);
 });

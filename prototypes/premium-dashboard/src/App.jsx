@@ -1,14 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, MotionConfig, motion, useReducedMotion } from "motion/react";
 import {
-  ArrowLeftRight, ArrowRight, Bell, Bot, CalendarDays, Camera, Car,
+  ArrowLeftRight, Bell, CalendarDays, Camera, Car,
   ChartNoAxesColumnIncreasing, CheckCircle2, ChevronDown, ChevronRight,
   ChevronUp, Clock3, DoorClosed, FileSearch, Home, Info, LogOut, Menu,
   Moon, Play, Radio, RefreshCw, RotateCcw, Search, Settings, ShieldCheck,
   Ticket, Trophy, UserRound, UsersRound, Warehouse, X,
 } from "lucide-react";
 import "@fontsource-variable/inter";
-import { createDemo, simulateArrival, pulseSlices, formatTime, formatDate, PEOPLE } from "./model.js";
+import { createDemo, simulateArrival, pulseSlices, formatTime, formatDate } from "./model.js";
 import { Pulse } from "./Pulse.jsx";
 import { Presence } from "./Presence.jsx";
 
@@ -142,26 +142,23 @@ function DashboardPreview() {
           <div className="lower-grid"><EventFeed demo={demo} search={search} expandedId={expandedId} chooseEvent={chooseEvent} matchingIds={matchingIds} animate={animate} /><Devices openAlerts={() => setModal("alerts")} /></div>
         </main>
       </div>
-      <button className="alfred-launcher" aria-label="Open Alfred" onClick={() => setModal("alfred")}><Bot size={27} strokeWidth={1.4} /></button>
       <AnimatePresence>{toast && <motion.div className="toast" role="status" initial={{ opacity: 0, y: animate ? 6 : 0 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: animate ? .18 : 0 }}><Info size={16} />{toast}</motion.div>}</AnimatePresence>
       <div className="sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
-      <AnimatePresence>{modal && <PreviewModal type={modal} demo={demo} close={() => setModal(null)} animate={animate} />}</AnimatePresence>
+      <AnimatePresence>{modal && <PreviewModal type={modal} close={() => setModal(null)} animate={animate} />}</AnimatePresence>
     </div>
   </MotionConfig>;
 }
 
-function PreviewModal({ type, demo, close, animate }) {
+function PreviewModal({ type, close, animate }) {
   const closeRef = useRef(null);
   const returnFocus = useRef(document.activeElement);
   const containerRef = useRef(null);
-  const [answer, setAnswer] = useState(false);
   useEffect(() => { closeRef.current?.focus(); return () => returnFocus.current?.focus(); }, []);
-  const titles = { alerts: "Alerts", appearance: "Appearance", account: "Your account", alfred: "Alfred" };
+  const titles = { alerts: "Alerts", appearance: "Appearance", account: "Your account" };
   return <motion.div className="modal-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: animate ? .18 : 0 }} onClick={close}><motion.section ref={containerRef} className="preview-modal" role="dialog" aria-modal="true" aria-label={titles[type]} initial={{ opacity: 0, y: animate ? 8 : 0 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: animate ? .22 : 0, ease }} onClick={event => event.stopPropagation()} onKeyDown={event => { if (event.key !== "Tab") return; const nodes = containerRef.current.querySelectorAll("button:not(:disabled), input"); const first = nodes[0]; const last = nodes[nodes.length - 1]; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } }}><div className="modal-heading"><h2>{titles[type]}</h2><button className="icon-button" ref={closeRef} onClick={close} aria-label="Close dialog"><X size={20} /></button></div>
       {type === "alerts" && <div className="modal-content"><CheckCircle2 size={29} className="entry-text" strokeWidth={1.4} /><h3>No actionable alerts</h3><p>All systems normal at Crest House.</p><small>Sample data</small></div>}
       {type === "appearance" && <div className="modal-content"><Moon size={29} strokeWidth={1.4} /><h3>Dark appearance</h3><p>The dark theme is active in this preview.</p></div>}
       {type === "account" && <div className="modal-content"><img className="account-avatar" src="/assets/jason-landscape.png" alt="Lake landscape" /><h3>Jason Smith</h3><p>Owner · Crest House</p><small>Preview account</small></div>}
-      {type === "alfred" && <div className="alfred-content"><p>Good evening, Jason. How can I help?</p><button className="query-chip" onClick={() => setAnswer(true)}>Who is inside now? <ArrowRight size={14} /></button>{answer && <motion.div className="alfred-answer" initial={{ opacity: 0 }} animate={{ opacity: 1 }}><strong>{demo.inside.length} people are inside.</strong><p>{demo.inside.map(id => PEOPLE[id].name).join(", ")}.</p></motion.div>}<small>Sample data · Alfred preview</small></div>}
     </motion.section></motion.div>;
 }
 

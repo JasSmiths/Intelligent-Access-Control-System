@@ -147,32 +147,7 @@ export type InvestigationOverview = {
   important_activity: ActivityEpisode[];
 };
 
-export type InvestigationClaim = {
-  id?: string | null;
-  text: string;
-  evidence_ids?: string[];
-  citation_ids?: string[];
-};
 
-export type InvestigationAnswer = {
-  question?: string;
-  answer: string;
-  most_likely_reason?: string | null;
-  outcome?: InvestigationOutcome | string | null;
-  classification?: string | null;
-  dispatch_state?: string | null;
-  certainty?: "high" | "medium" | "low" | string | null;
-  site_timezone: string;
-  resolved_range: InvestigationRange;
-  interpreted_filters?: Record<string, unknown>;
-  claims?: InvestigationClaim[];
-  citations?: Array<{ id: string; label: string; timestamp: string; episode_id?: string | null }>;
-  evidence?: InvestigationEvidence[];
-  episodes?: ActivityEpisode[];
-  missing_evidence?: string[];
-  ai_used?: boolean;
-  mode?: string | null;
-};
 
 export type InvestigationQuery = {
   range: "today" | "yesterday" | "24h" | "7d" | "custom";

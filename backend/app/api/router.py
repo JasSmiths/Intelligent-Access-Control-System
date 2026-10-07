@@ -9,7 +9,6 @@ from app.api.v1 import (
     auth,
     diagnostics,
     directory,
-    discord,
     events,
     gate_malfunctions,
     health,
@@ -30,7 +29,6 @@ from app.api.v1 import (
     users,
     visitor_passes,
     webhooks,
-    whatsapp,
 )
 from app.simulation.router import router as simulation_router
 
@@ -40,7 +38,7 @@ api_router.include_router(access.router, prefix="/access", tags=["Access Events"
 api_router.include_router(access_devices.router, prefix="/access-devices", tags=["Access Devices"])
 api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(action_confirmations.router, prefix="/action-confirmations", tags=["Integrations"])
-api_router.include_router(ai.router, prefix="/ai", tags=["AI Agents"])
+api_router.include_router(ai.router, prefix="/ai", tags=["AI Providers"])
 api_router.include_router(automations.router, prefix="/automations", tags=["Automations"])
 api_router.include_router(diagnostics.router, prefix="/diagnostics", tags=["Diagnostics"])
 api_router.include_router(directory.router, tags=["Directory"])
@@ -48,8 +46,6 @@ api_router.include_router(events.router, tags=["Access Events"])
 api_router.include_router(gate_malfunctions.router, prefix="/gate-malfunctions", tags=["Gate Telemetry"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["Integrations"])
 api_router.include_router(icloud_calendar.router, prefix="/integrations/icloud-calendar", tags=["Integrations"])
-api_router.include_router(discord.router, prefix="/integrations/discord", tags=["Integrations"])
-api_router.include_router(whatsapp.router, prefix="/integrations/whatsapp", tags=["Integrations"])
 api_router.include_router(leaderboard.router, tags=["Top Charts"])
 api_router.include_router(missed_exit_recovery.router, prefix="/missed-exit-recovery", tags=["Missed Exit Recovery"])
 api_router.include_router(maintenance.router, prefix="/maintenance", tags=["Maintenance"])

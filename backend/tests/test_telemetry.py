@@ -3,8 +3,6 @@ from typing import Any
 import uuid
 
 from app.api.v1 import telemetry as telemetry_api
-from app.ai.providers import ToolCall
-from app.ai.context import set_chat_tool_context
 from app.models import AccessEvent, AuditLog, GateCommandRecord, MovementSagaRecord, TelemetrySpan, TelemetryTrace
 from app.models.enums import (
     AccessDecision,
@@ -14,10 +12,7 @@ from app.models.enums import (
     TimingClassification,
     UserRole,
 )
-from app.services.chat import ChatService
 from app.services.telemetry import (
-    TELEMETRY_CATEGORY_ALFRED,
-    TELEMETRY_CATEGORY_INTEGRATIONS,
     TELEMETRY_CATEGORY_LPR,
     TelemetryService,
     audit_diff,
@@ -435,53 +430,3 @@ def test_lpr_trace_captures_ordered_spans(monkeypatch) -> None:
         "Home Assistant Gate Open Command Sent",
     ]
     assert captured_spans[0].duration_ms == 1100
-
-
-def test_alfred_tool_audit_includes_provider_model_tool_and_outcome(monkeypatch) -> None:
-    captured = []
-    monkeypatch.setattr("app.services.chat.emit_audit_log", lambda **kwargs: captured.append(kwargs))
-    token = set_chat_tool_context(
-        {
-            "user_id": "00000000-0000-0000-0000-000000000001",
-            "session_id": "session-1",
-            "provider": "openai",
-            "model": "gpt-4o",
-            "trigger": "user_requested",
-        }
-    )
-    try:
-        ChatService()._audit_agent_tool_call(
-            ToolCall("call_1", "open_device", {"target": "main gate", "confirm": True}),
-            {"opened": True, "accepted": True, "state": "opening"},
-        )
-        ChatService()._audit_agent_tool_call(
-            ToolCall("call_2", "lookup_dvla_vehicle", {"registration_number": "AB12CDE"}),
-            {"registration_number": "AB12CDE", "display_vehicle": "2026 Tesla Model Y"},
-        )
-    finally:
-        set_chat_tool_context({}, token=token)
-
-    assert len(captured) == 3
-    row = captured[0]
-    assert row["category"] == TELEMETRY_CATEGORY_ALFRED
-    assert row["actor"] == "Alfred_AI"
-    assert row["metadata"]["provider"] == "openai"
-    assert row["metadata"]["model"] == "gpt-4o"
-    assert row["metadata"]["tool"] == "open_device"
-    assert row["metadata"]["state_changing"] is True
-    assert row["outcome"] == "success"
-
-    lookup_row = captured[1]
-    assert lookup_row["metadata"]["tool"] == "lookup_dvla_vehicle"
-    assert lookup_row["metadata"]["arguments"]["registration_number"] == "AB12CDE"
-    assert lookup_row["metadata"]["state_changing"] is False
-    assert lookup_row["outcome"] == "success"
-
-    integration_row = captured[2]
-    assert integration_row["category"] == TELEMETRY_CATEGORY_INTEGRATIONS
-    assert integration_row["action"] == "dvla.lookup"
-    assert integration_row["actor"] == "Alfred_AI"
-    assert integration_row["target_entity"] == "DVLA"
-    assert integration_row["target_id"] == "AB12CDE"
-    assert integration_row["metadata"]["source"] == "alfred"
-    assert integration_row["metadata"]["tool"] == "lookup_dvla_vehicle"

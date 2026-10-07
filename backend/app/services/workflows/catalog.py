@@ -83,11 +83,6 @@ VARIABLE_DEFINITIONS: tuple[WorkflowVariableDefinition, ...] = (
     V("VisitorPassVehicleMake", "Visitor Pass vehicle make", "Visitor Pass", "visitor_pass"),
     V("VisitorPassVehicleColour", "Visitor Pass vehicle colour", "Visitor Pass", "visitor_pass"),
     V("VisitorPassDurationOnSite", "Visitor Pass duration on site", "Visitor Pass", "visitor_pass", "Visitor Pass duration"),
-    V("VisitorPassCurrentWindow", "Visitor Pass current window", "Visitor Pass"),
-    V("VisitorPassRequestedWindow", "Visitor Pass requested window", "Visitor Pass"),
-    V("VisitorPassOriginalTime", "Visitor Pass original time", "Visitor Pass"),
-    V("VisitorPassRequestedTime", "Visitor Pass requested time", "Visitor Pass"),
-    V("VisitorPassVisitorMessage", "Visitor Pass visitor message", "Visitor Pass"),
     V("MalfunctionDuration", "Malfunction duration", "Malfunction"),
     V("MalfunctionOpenedTime", "Gate opened time", "Malfunction"),
     V("MalfunctionFixAttemptTime", "Latest fix attempt time", "Malfunction"),
@@ -100,12 +95,9 @@ VARIABLE_DEFINITIONS: tuple[WorkflowVariableDefinition, ...] = (
     V("ReadCount", "Read count", "Leaderboard"),
     V("WebhookKey", "Webhook key", None, "webhook"),
     V("WebhookSenderIp", "Webhook sender IP", None, "webhook"),
-    V("AlfredPhrase", "Alfred phrase", None, "ai"),
-    V("AlfredIssue", "Alfred issue", None, "ai"),
 )
 
 NOTIFICATION_TRIGGER_DEFINITIONS = (
-    ("ai_agents", "AI Agents", (("agent_anomaly_alert", "AI Anomaly Alert", "critical", "The AI agent raises an explicit anomaly alert."),)),
     ("compliance", "Compliance", (
         ("expired_mot_detected", "Expired MOT Detected", "warning", "DVLA reports a vehicle MOT status other than Valid or Not Required on arrival."),
         ("expired_tax_detected", "Expired Tax Detected", "warning", "DVLA reports a vehicle tax status other than Taxed or SORN on arrival."),
@@ -137,11 +129,9 @@ NOTIFICATION_TRIGGER_DEFINITIONS = (
         ("visitor_pass_vehicle_exited", "Visitor Pass Vehicle Exited", "info", "A vehicle matched to a Visitor Pass has left the site."),
     )),
     ("visitor_pass", "Visitor Pass", (
-        ("visitor_pass_arranged", "Visitor Pass Arranged", "info", "A WhatsApp visitor completed their Visitor Pass setup."),
         ("visitor_pass_cancelled", "Visitor Pass Cancelled", "info", "A scheduled or active Visitor Pass was cancelled."),
         ("visitor_pass_created", "Visitor Pass Created", "info", "A new Visitor Pass was created."),
         ("visitor_pass_expired", "Visitor Pass Expired", "warning", "A Visitor Pass window elapsed without being used."),
-        ("visitor_pass_timeframe_change_requested", "Visitor Pass Timeframe Change Requested", "warning", "A WhatsApp visitor requested a Visitor Pass timeframe change that needs Admin approval."),
         ("visitor_pass_used", "Visitor Pass Used", "info", "A Visitor Pass was matched to an arriving vehicle."),
     )),
 )
@@ -151,7 +141,6 @@ AUTOMATION_TRIGGER_DEFINITIONS = (
         ("time.specific_datetime", "Specific Date & Time", "Run at one chosen date/time, or recur from that date/time.", ("time", "event")),
         ("time.every_x", "Every X", "Run every configured number of minutes, hours, or days.", ("time", "event")),
         ("time.cron", "Cron Job", "Run from a raw five-field cron expression.", ("time", "event")),
-        ("time.ai_text", "AI Text Input", "Parse natural-language schedule text into cron and optional end date.", ("time", "event")),
     )),
     ("vehicle_detections", "Vehicle Detections", (
         ("vehicle.known_plate", "Known Plate", "A known vehicle is detected.", ("person", "vehicle", "event")),
@@ -169,8 +158,6 @@ AUTOMATION_TRIGGER_DEFINITIONS = (
         ("visitor_pass.expired", "Visitor Pass Expired", "A Visitor Pass window expired unused.", ("visitor_pass", "event")),
     )),
     ("ai_agent", "AI Agent", (
-        ("ai.phrase_received", "Phrase Received", "Alfred receives a phrase that matches this automation.", ("ai", "event")),
-        ("ai.issue_detected", "Issue Detected", "Alfred autonomously flags an anomaly.", ("ai", "event")),
     )),
     ("webhook", "Webhook", (
         ("webhook.received", "Webhook Received", "A webhook is received on an automation endpoint.", ("webhook", "event")),

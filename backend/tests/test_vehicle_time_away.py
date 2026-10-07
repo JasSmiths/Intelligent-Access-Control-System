@@ -7,7 +7,14 @@ import pytest
 
 from app.models.enums import AccessDecision, AccessDirection
 from app.modules.notifications.base import NotificationContext
-from app.services.notifications import VARIABLE_GROUPS, context_variables, render_template, sample_notification_context
+from app.services.notifications import (
+    VARIABLE_GROUPS,
+    render_template,
+    sample_notification_context,
+)
+from app.services.notification_rendering import (
+    context_variables,
+)
 from app.services.workflows.vehicle_away import vehicle_time_away_label, vehicle_time_away_seconds
 
 

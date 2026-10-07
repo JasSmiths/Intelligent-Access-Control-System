@@ -52,7 +52,7 @@ class NotificationDispatcher:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), timeout=POLL_SECONDS)
 
-    async def run_once(self, run_id=None, *, claimed=None, ephemeral_config=None) -> bool:
+    async def run_once(self, run_id=None, *, claimed=None) -> bool:
         row = claimed if claimed is not None else await self.store.claim(run_id)
         if row is None:
             return False
@@ -86,7 +86,6 @@ class NotificationDispatcher:
                             payload,
                             identity,
                             plan=plan,
-                            ephemeral_config=ephemeral_config,
                             action=_action,
                             item=_item,
                         )
@@ -170,12 +169,7 @@ class NotificationDispatcher:
                 config = attempt["config"]
                 try:
                     async with asyncio.timeout(ACTION_TIMEOUT_SECONDS):
-                        if ephemeral_config is None:
-                            outcome = await self.service.deliver_planned_action(item, row, config)
-                        else:
-                            outcome = await self.service.deliver_planned_action(
-                                item, row, config, ephemeral_config=ephemeral_config,
-                            )
+                        outcome = await self.service.deliver_planned_action(item, row, config)
                 except NotificationDeliveryError as exc:
                     checkpoint = _checkpoint_from_delivery_error(exc)
                     await self.store.finish_action(
@@ -183,7 +177,6 @@ class NotificationDispatcher:
                         token,
                         index,
                         checkpoint,
-                        prepare_output=getattr(self.service, "prepare_delivery_output", None),
                     )
                     try:
                         await self.service.publish_planned_failure(
@@ -205,7 +198,6 @@ class NotificationDispatcher:
                         token,
                         index,
                         checkpoint,
-                        prepare_output=getattr(self.service, "prepare_delivery_output", None),
                     )
                     try:
                         await self.service.publish_planned_failure(item, row)
@@ -220,7 +212,6 @@ class NotificationDispatcher:
                     token,
                     index,
                     checkpoint,
-                    prepare_output=getattr(self.service, "prepare_delivery_output", None),
                 )
                 if checkpoint.get("review_required"):
                     try:

@@ -37,7 +37,7 @@ def test_hardware_admission_uses_original_origin_not_payload_authority(action, t
 
 
 @pytest.mark.parametrize("trigger", ["vehicle.unknown_plate", "ai.phrase_received"])
-@pytest.mark.parametrize("action", ["integration.whatsapp.send_message", "notification.enable", "notification.disable"])
+@pytest.mark.parametrize("action", ["notification.enable", "notification.disable"])
 def test_safe_notification_actions_are_independent_of_hardware_admission(trigger, action):
     origin = TriggerProvenance.from_trigger(trigger, {"decision": "denied"})
     assert hardware_action_denial(action, origin) is None
@@ -63,4 +63,4 @@ def test_other_rule_configurations_keep_their_current_contract(trigger):
     # Phrase hardware remains expressible but requires a real confirmation at
     # execution; saving a rule cannot supply a requester-bound approval.
     assert hardware_configuration_error([trigger], ["gate.open"]) is None
-    assert hardware_configuration_error(["vehicle.unknown_plate"], ["integration.whatsapp.send_message"]) is None
+    assert hardware_configuration_error(["vehicle.unknown_plate"], ["integration.icloud_calendar.sync"]) is None

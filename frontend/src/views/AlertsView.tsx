@@ -6,6 +6,7 @@ AlertTriangle,
 Bell,
 Check,
 CheckCircle2,
+ChevronDown,
 RefreshCcw,
 Search
 } from "lucide-react";
@@ -162,12 +163,16 @@ export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetI
           <Search size={16} />
           <input aria-label="Search alerts" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search plate, message, or context..." />
         </label>
+        <div className="alerts-select">
         <select value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value as typeof severityFilter)} aria-label="Filter by severity">
           <option value="all">All severities</option>
           <option value="critical">Critical</option>
           <option value="warning">Warning</option>
           <option value="info">Informational</option>
         </select>
+        <ChevronDown size={16} aria-hidden="true" />
+        </div>
+        <div className="alerts-select">
         <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} aria-label="Filter by alert type">
           <option value="all">All types</option>
           <option value="unauthorized_plate">Unknown plate</option>
@@ -175,6 +180,8 @@ export function AlertsView({ refreshDashboard, refreshToken, resetToken, targetI
           <option value="duplicate_entry">Duplicate entry</option>
           <option value="duplicate_exit">Duplicate exit</option>
         </select>
+        <ChevronDown size={16} aria-hidden="true" />
+        </div>
         <div className="history-date-range">
         <label className="history-date-field">From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
         <label className="history-date-field">Before<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>

@@ -4,9 +4,9 @@ import { LoadingState } from "../ui/primitives";
 import { RouteErrorBoundary } from "../RouteErrorBoundary";
 import type { AccessEvent, Anomaly, ExpectedPresenceSummary, Group, IntegrationStatus, MaintenanceStatus, NavigateToView, Person, Presence, RealtimeMessage, Schedule, UserAccount, Vehicle, ViewKey } from "../api/types";
 const Dashboard = React.lazy(() => import("../views/DashboardView").then((module) => ({ default: module.Dashboard })));
-const GroupsView = React.lazy(() => import("../views/DirectoryViews").then((module) => ({ default: module.GroupsView })));
-const PeopleView = React.lazy(() => import("../views/DirectoryViews").then((module) => ({ default: module.PeopleView })));
-const VehiclesView = React.lazy(() => import("../views/DirectoryViews").then((module) => ({ default: module.VehiclesView })));
+const GroupsView = React.lazy(() => import("../views/GroupsView").then((module) => ({ default: module.GroupsView })));
+const PeopleView = React.lazy(() => import("../views/PeopleView").then((module) => ({ default: module.PeopleView })));
+const VehiclesView = React.lazy(() => import("../views/VehiclesView").then((module) => ({ default: module.VehiclesView })));
 const SchedulesView = React.lazy(() => import("../features/schedules/SchedulesView").then((module) => ({ default: module.SchedulesView })));
 const PassesView = React.lazy(() => import("../views/PassesView").then((module) => ({ default: module.PassesView })));
 const TopChartsView = React.lazy(() => import("../views/TopChartsView").then((module) => ({ default: module.TopChartsView })));
@@ -16,14 +16,13 @@ const AlertsView = React.lazy(() => import("../views/AlertsView").then((module) 
 const ReportsView = React.lazy(() => import("../views/ReportsView").then((module) => ({ default: module.ReportsView })));
 const IntegrationsView = React.lazy(() => import("../views/IntegrationsView").then((module) => ({ default: module.IntegrationsView })));
 const LogsView = React.lazy(() => import("../views/LogsView").then((module) => ({ default: module.LogsView })));
-const AlfredTrainingView = React.lazy(() => import("../views/AlfredTrainingView").then((module) => ({ default: module.AlfredTrainingView })));
 const AutomationsView = React.lazy(() => import("../features/workflows/AutomationsView").then((module) => ({ default: module.AutomationsView })));
 const NotificationsView = React.lazy(() => import("../features/workflows/NotificationsView").then((module) => ({ default: module.NotificationsView })));
-const SettingsView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.SettingsView })));
-const DynamicSettingsView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.DynamicSettingsView })));
-const AccessDevicesSettingsView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.AccessDevicesSettingsView })));
-const ZonesSettingsView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.ZonesSettingsView })));
-const UsersView = React.lazy(() => import("../views/SettingsViews").then((module) => ({ default: module.UsersView })));
+const SettingsView = React.lazy(() => import("../views/SettingsView").then((module) => ({ default: module.SettingsView })));
+const DynamicSettingsView = React.lazy(() => import("../views/DynamicSettingsView").then((module) => ({ default: module.DynamicSettingsView })));
+const AccessDevicesSettingsView = React.lazy(() => import("../views/AccessDevicesSettingsView").then((module) => ({ default: module.AccessDevicesSettingsView })));
+const ZonesSettingsView = React.lazy(() => import("../views/ZonesSettingsView").then((module) => ({ default: module.ZonesSettingsView })));
+const UsersView = React.lazy(() => import("../views/UsersView").then((module) => ({ default: module.UsersView })));
 const CommandHistoryView = React.lazy(() => import("../views/CommandHistoryView").then((module) => ({ default: module.CommandHistoryView })));
 const MissedExitRecoveryView = React.lazy(() => import("../features/missedExitRecovery/MissedExitRecoveryView").then((module) => ({ default: module.MissedExitRecoveryView })));
 function RouteLoading() {
@@ -85,7 +84,7 @@ export function View(props: {
       content = <ReportsView events={props.events} people={props.people} presence={props.presence} />;
       break;
     case "integrations":
-      content = <IntegrationsView currentUser={props.currentUser} people={props.people} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
+      content = <IntegrationsView currentUser={props.currentUser} latestRealtime={props.latestRealtime} refreshToken={props.dataRefreshToken} status={props.integrationStatus} />;
       break;
     case "logs":
       content = <LogsView currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
@@ -107,11 +106,6 @@ export function View(props: {
       break;
     case "settings_auth":
       content = <DynamicSettingsView key={`${props.currentUser.id}:auth`} category="auth" title="Auth & Security" icon={Lock} currentUser={props.currentUser} refreshToken={props.dataRefreshToken} />;
-      break;
-    case "alfred_training":
-      content = props.currentUser.role === "admin"
-        ? <AlfredTrainingView refreshToken={props.dataRefreshToken} />
-        : <div className="permission-state" role="alert">Administrator access required for Alfred Training.</div>;
       break;
     case "settings_automations":
       content = <AutomationsView key={`${props.currentUser.id}:${props.currentUser.role}`} currentUser={props.currentUser} people={props.people} refreshToken={props.dataRefreshToken} vehicles={props.vehicles} />;

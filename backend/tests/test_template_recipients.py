@@ -62,7 +62,7 @@ def test_allowed_recipient_token_spacing_preserves_literal_and_value_whitespace(
 
 @pytest.mark.parametrize("change", [
     {"occurrence": -1}, {"occurrence": 4}, {"occurrence": True}, {"name": "FirstName"},
-    {"target_ids": ["home_assistant_mobile:*"]}, {"target_ids": ["whatsapp:admin:someone"]},
+    {"target_ids": ["home_assistant_mobile:*"]}, {"target_ids": ["unsupported:someone"]},
     {"target_ids": "Jason"},
 ])
 def test_invalid_visibility_is_rejected_instead_of_becoming_public(change):
@@ -122,40 +122,3 @@ async def test_voice_destinations_receive_their_own_copy(monkeypatch):
     await service._send_voice(rendered("voice", "home_assistant_tts:media_player.jason"), SimpleNamespace())
     assert [call.args[1] for call in announcer.announce.await_args_list] == [
         "after 2hrs 20m then after 2hrs 20m.", "after 2hrs 20m then."]
-
-
-@pytest.mark.asyncio
-async def test_discord_channels_receive_their_own_copy(monkeypatch):
-    from app.services.discord_messaging import DiscordMessagingService
-
-    service = DiscordMessagingService()
-    sender = AsyncMock()
-    monkeypatch.setattr(service, "send_message", sender)
-    action = rendered("discord", "discord:jason")
-    await service.send_notification_to_channels(
-        ["jason", "shared"], action["title"], action["message"],
-        NotificationContext("authorized_entry", "Arrival", "info", {}),
-        config=SimpleNamespace(), recipient_content=action["recipient_content"],
-    )
-    assert [call.kwargs["embeds"][0]["description"] for call in sender.await_args_list] == [
-        "after 2hrs 20m then after 2hrs 20m.", "after 2hrs 20m then."]
-
-
-@pytest.mark.asyncio
-async def test_whatsapp_admin_and_number_bindings_receive_their_own_copy(monkeypatch):
-    from app.services.messaging.whatsapp_delivery import WhatsAppDeliveryService
-
-    service = WhatsAppDeliveryService()
-    sender = AsyncMock()
-    monkeypatch.setattr(service, "send_text_message", sender)
-    action = rendered("whatsapp", "whatsapp:admin:jason")
-    action["frozen_whatsapp_recipients"] = [
-        {"kind": "admin", "user_id": "jason", "phone": "447700900001"},
-        {"kind": "number", "phone": "447700900002"},
-    ]
-    await service.send_notification_action(action, NotificationContext("authorized_entry", "Arrival", "info", {}),
-        config=SimpleNamespace(configured=True))
-    assert [call.args for call in sender.await_args_list] == [
-        ("447700900001", "Arrival\n\nafter 2hrs 20m then after 2hrs 20m."),
-        ("447700900002", "Arrival\n\nafter 2hrs 20m then."),
-    ]

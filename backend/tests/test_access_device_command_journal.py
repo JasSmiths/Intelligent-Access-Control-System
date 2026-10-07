@@ -1,4 +1,4 @@
-"""PostgreSQL target-journal contracts; explicit phase1 synthetic namespace only.
+"""PostgreSQL target-journal contracts; explicit validation synthetic namespace only.
 
 The ordinary unit suite skips these checks. The recovery harness must run this
 file explicitly with IACS_RECOVERY_PROBES=synthetic-only and report that outcome.
@@ -34,9 +34,9 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.skipif(
 async def synthetic_namespace(monkeypatch):
     url = urlsplit(os.environ.get("IACS_DATABASE_URL", ""))
     assert os.environ.get("IACS_ENVIRONMENT") == "testing"
-    assert os.environ.get("IACS_AUTH_SECRET_KEY") == "phase1-synthetic-auth-root-never-production"
-    assert url.hostname == "127.0.0.1" and url.port == 5432 and url.path.startswith("/iacs_p1_")
-    assert url.username == "phase1" and url.password == "synthetic-phase1-only"
+    assert os.environ.get("IACS_AUTH_SECRET_KEY") == "validation-synthetic-auth-root-never-production"
+    assert url.hostname == "127.0.0.1" and url.port == 5432 and url.path.startswith("/iacs_validation_")
+    assert url.username == "validation" and url.password == "synthetic-validation-only"
     assert {item.name for item in Path("/sys/class/net").iterdir()} == {"lo"}
     assert not Path("/var/run/docker.sock").exists()
     original_connect = socket.socket.connect

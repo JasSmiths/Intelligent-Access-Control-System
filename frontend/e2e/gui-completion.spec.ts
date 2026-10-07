@@ -9,7 +9,7 @@ const blocks = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [String(
 const schedule = { id: "schedule-1", name: "Weekday access", description: "Work hours", time_blocks: blocks };
 const event = { id: "event-1", registration_number: "AB12 CDE", direction: "entry", decision: "granted", confidence: .98, source: "lpr", occurred_at: now, timing_classification: "on_time", anomaly_count: 0, visitor_pass_id: null, visitor_name: null, snapshot_url: null, movement_saga: null };
 const movement = { id: "movement-1", source: "lpr", state: "pending", access_event_id: "event-1", registration_number: "AB12 CDE", direction: "entry", decision: "granted", occurred_at: now, gate_command_required: true, presence_committed: true, reconciliation_required: false, failure_detail: null, updated_at: now, gate_commands: [], intent_payload: { source: "synthetic fixture" }, decision_payload: { decision: "granted" }, state_history: [] };
-const pass = { id: "pass-1", visitor_name: "Sam Visitor", pass_type: "one-time", visitor_phone: null, expected_time: now, window_minutes: 30, valid_from: null, valid_until: null, window_start: now, window_end: "2026-09-23T11:00:00Z", status: "scheduled", creation_source: "manual", source_reference: null, source_metadata: null, whatsapp_status: null, whatsapp_status_label: null, whatsapp_status_detail: null, created_by_user_id: null, created_by: null, arrival_time: null, departure_time: null, number_plate: null, vehicle_make: null, vehicle_colour: null, duration_on_site_seconds: null, duration_human: null, arrival_event_id: null, departure_event_id: null, telemetry_trace_id: null, created_at: now, updated_at: now };
+const pass = { id: "pass-1", visitor_name: "Sam Visitor", pass_type: "one-time", visitor_phone: null, expected_time: now, window_minutes: 30, valid_from: null, valid_until: null, window_start: now, window_end: "2026-09-23T11:00:00Z", status: "scheduled", creation_source: "manual", source_reference: null, created_by_user_id: null, created_by: null, arrival_time: null, departure_time: null, number_plate: null, vehicle_make: null, vehicle_colour: null, duration_on_site_seconds: null, duration_human: null, arrival_event_id: null, departure_event_id: null, telemetry_trace_id: null, created_at: now, updated_at: now };
 
 function history(items: unknown[]) { return { items, next_cursor: null, as_of: now }; }
 
@@ -44,10 +44,6 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
       case "/api/v1/integrations/unifi-protect/status": body = { configured: false, connected: false, realtime_connected: false }; break;
       case "/api/v1/integrations/unifi-protect/cameras": body = { cameras: [] }; break;
       case "/api/v1/integrations/icloud-calendar/accounts": body = { accounts: [], recent_sync_runs: [] }; break;
-      case "/api/v1/integrations/discord/status": body = { configured: false, connected: false }; break;
-      case "/api/v1/integrations/discord/channels": body = { channels: [] }; break;
-      case "/api/v1/integrations/discord/identities": body = { identities: [] }; break;
-      case "/api/v1/integrations/whatsapp/status": body = { configured: false, enabled: false }; break;
       case "/api/v1/integrations/home-assistant/entities": body = { cover_entities: [] }; break;
       case "/api/v1/integrations/home-assistant/recovery-trackers": body = { trackers: [], mappings: [], reason: "not_configured" }; break;
       case "/api/v1/integrations/esphome/entities": body = { cover_entities: [] }; break;
@@ -63,10 +59,6 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
       case "/api/v1/automations/rules": body = []; break;
       case "/api/v1/notifications/catalog": body = { triggers: [], conditions: [], actions: [], variables: [], integrations: [], actionable_notifications: [], gate_malfunction_stages: [], mock_context: {} }; break;
       case "/api/v1/notifications/rules": body = []; break;
-      case "/api/v1/ai/agent/status": body = { active_mode: "mocked", provider: "local", v3_ready: true }; break;
-      case "/api/v1/ai/training/feedback": body = { feedback: [] }; break;
-      case "/api/v1/ai/training/lessons": body = { lessons: [] }; break;
-      case "/api/v1/ai/training/eval-examples": body = { examples: [] }; break;
       case "/api/v1/telemetry/investigation-filters": body = { site_timezone: "Europe/London", devices: [], automations: [], schedules: [], integrations: [], categories: [], severities: [], outcomes: [], triggers: [], actors: [] }; break;
       case "/api/v1/telemetry/investigation-overview": body = { site_timezone: "Europe/London", resolved_range: {}, recent_problems: [], incomplete_runs: [], repeated_problems: [], important_activity: [] }; break;
       case "/api/v1/telemetry/activity": body = { items: [], next_cursor: null, site_timezone: "Europe/London", resolved_range: {}, partial: false }; break;
@@ -79,10 +71,93 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
   return unexpected;
 }
 
+test("keeps alert filters level and contained across themes and viewport sizes", async ({ page }, testInfo) => {
+  const unexpected = await installFixtures(page);
+  await page.goto("/alerts");
+  await expect(page.getByRole("tab", { name: "Open", exact: true })).toBeVisible();
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    for (const [width, height] of [[1680, 900], [1280, 800], [981, 640], [979, 640], [768, 1024], [721, 800], [720, 800], [390, 844], [280, 640], [640, 360]]) {
+      await page.setViewportSize({ width, height });
+      const controls = await page.locator(".alert-status-tabs, .alerts-search, .alerts-controls select, .alerts-controls input[type=date]").evaluateAll((elements) => elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        return { height: rect.height, top: rect.top, left: rect.left, right: rect.right };
+      }));
+      expect(controls).toHaveLength(6);
+      for (const control of controls) {
+        expect(control.height, `${theme} ${width}px control height`).toBeCloseTo(40, 0);
+        expect(control.left).toBeGreaterThanOrEqual(0);
+        expect(control.right).toBeLessThanOrEqual(width);
+      }
+      if (width === 1680) {
+        expect(Math.max(...controls.map((control) => control.top)) - Math.min(...controls.map((control) => control.top))).toBeLessThanOrEqual(1);
+      }
+      if (width <= 360) {
+        const dates = await page.locator(".alerts-controls input[type=date]").evaluateAll((inputs) => inputs.map((input) => input.getBoundingClientRect().width));
+        expect(Math.min(...dates)).toBeGreaterThanOrEqual(140);
+      }
+      const placeholder = await page.getByRole("textbox", { name: "Search alerts" }).evaluate((input) => getComputedStyle(input, "::placeholder").color);
+      expect(placeholder).not.toBe("rgba(0, 0, 0, 0)");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+      await page.screenshot({ path: testInfo.outputPath(`alert-filters-${theme}-${width}x${height}.png`), animations: "disabled" });
+    }
+  }
+  await page.getByRole("combobox", { name: "Filter by severity" }).selectOption("warning");
+  await expect(page.getByRole("combobox", { name: "Filter by severity" })).toHaveValue("warning");
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(page.getByRole("combobox", { name: "Filter by severity" })).toHaveValue("all");
+  expect(unexpected).toEqual([]);
+});
+
+test("resolves a dashboard-linked alert group without a UUID error", async ({ page }, testInfo) => {
+  const unexpected = await installFixtures(page);
+  const memberId = "d882ffcb-4a35-4c77-bda5-fb8c1b0bab31";
+  const member = {
+    id: memberId, alert_ids: [memberId], grouped: false, type: "unauthorized_plate",
+    severity: "warning", status: "open", message: "Unauthorised Plate, Access Denied",
+    registration_number: "TEST123", count: 1, local_date: null,
+    created_at: now, first_seen_at: now, last_seen_at: now, resolved_at: null,
+    resolved_by_user_id: null, resolved_by: null, resolution_note: null, snapshot_url: null
+  };
+  const groupAlert = { ...member, id: "group:unauthorized_plate:2026-09-23:TEST123",
+    grouped: true, local_date: "2026-09-23", member_hash: "reviewed-members" };
+  let resolved = false;
+  const detailReads: string[] = [];
+  await page.route("**/api/v1/alerts**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    let body: unknown;
+    if (request.method() === "GET" && path === "/api/v1/alerts") body = resolved ? [] : [groupAlert];
+    else if (request.method() === "GET" && path === "/api/v1/alerts/history") body = history(resolved ? [] : [groupAlert]);
+    else if (request.method() === "GET" && path === `/api/v1/alerts/${memberId}`) {
+      detailReads.push(path);
+      body = resolved ? { ...member, status: "resolved", resolved_at: now } : groupAlert;
+    } else if (request.method() === "POST" && path === "/api/v1/alerts/groups/confirmation") {
+      expect(request.postDataJSON()).toMatchObject({ group_id: groupAlert.id, count: 1, member_hash: groupAlert.member_hash });
+      body = { confirmation_token: "reviewed-group", count: 1 };
+    } else if (request.method() === "PATCH" && path === "/api/v1/alerts/action") {
+      expect(request.postDataJSON()).toMatchObject({ group_id: groupAlert.id, action: "resolve", confirmation_token: "reviewed-group" });
+      resolved = true;
+      body = { updated: 1, alert_ids: [memberId] };
+    } else { await route.fallback(); return; }
+    await route.fulfill({ json: body });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Unauthorised Plate, Access Denied/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/alerts\\?alert=${memberId}$`));
+  await page.getByRole("button", { name: "Resolve", exact: true }).click();
+  await page.getByRole("button", { name: "Resolve Alert", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Reopen", exact: true })).toBeVisible();
+  await expect(page.locator(".error-banner")).toHaveCount(0);
+  expect(detailReads).toContain(`/api/v1/alerts/${memberId}`);
+  expect(unexpected).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath("resolved-alert-after.png"), fullPage: false, animations: "disabled" });
+});
+
 test("opens all route families with isolated loaded fixtures across viewport sizes", async ({ page }, testInfo) => {
   test.setTimeout(300_000);
   const unexpected = await installFixtures(page);
-  const routes = ["/", "/events", "/movements", "/alerts", "/people", "/groups", "/vehicles", "/schedules", "/passes", "/reports", "/top-charts", "/logs", "/settings", "/settings/general", "/settings/gates", "/settings/garage-doors", "/settings/command-history", "/settings/missed-exit-recovery", "/settings/auth-security", "/integrations", "/settings/automations", "/settings/notifications", "/settings/lpr-tuning", "/settings/zones", "/settings/users", "/settings/alfred-training"];
+  const routes = ["/", "/events", "/movements", "/alerts", "/people", "/groups", "/vehicles", "/schedules", "/passes", "/reports", "/top-charts", "/logs", "/settings", "/settings/general", "/settings/gates", "/settings/garage-doors", "/settings/command-history", "/settings/missed-exit-recovery", "/settings/auth-security", "/integrations", "/settings/automations", "/settings/notifications", "/settings/lpr-tuning", "/settings/zones", "/settings/users"];
   const viewports = [{ name: "desktop", width: 1440, height: 1000 }, { name: "tablet", width: 900, height: 1000 }, { name: "mobile", width: 390, height: 844 }, { name: "mobile-short", width: 390, height: 600 }];
   for (const viewport of viewports) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
@@ -144,8 +219,8 @@ test("keeps Settings state, search filters, role gates, and mobile dismissal in 
 test("scrolls a lower active Settings destination into the sidebar viewport", async ({ page }) => {
   const unexpected = await installFixtures(page);
   await page.setViewportSize({ width: 1440, height: 600 });
-  await page.goto("/settings/alfred-training");
-  await expect(page.getByRole("button", { name: "Alfred Training" })).toBeInViewport();
+  await page.goto("/settings/users");
+  await expect(page.getByRole("button", { name: "Users" })).toBeInViewport();
   expect(unexpected).toEqual([]);
 });
 
@@ -154,7 +229,7 @@ test("shows a complete touch navigation drawer at iPhone landscape size", async 
   const page = await context.newPage();
   try {
     const unexpected = await installFixtures(page);
-    await page.goto("/settings/alfred-training");
+    await page.goto("/settings/users");
     await page.evaluate(() => {
       const root = document.documentElement;
       root.style.setProperty("--safe-top", "12px");
@@ -168,7 +243,7 @@ test("shows a complete touch navigation drawer at iPhone landscape size", async 
     const sidebar = page.getByRole("dialog", { name: "Site navigation" });
     await expect(sidebar).toBeVisible();
     await expect.poll(async () => Math.round((await sidebar.boundingBox())?.x ?? -1)).toBe(0);
-    const active = sidebar.getByRole("button", { name: "Alfred Training" });
+    const active = sidebar.getByRole("button", { name: "Users" });
     await expect(active).toBeInViewport();
     await expect(sidebar.getByRole("button", { name: "Close navigation" })).toBeInViewport();
     await expect(sidebar.getByRole("button", { name: "Account menu for Alex Operator" })).toBeInViewport();
@@ -234,7 +309,6 @@ test("preserves a dirty group draft and keeps actions visible on a short phone",
   await page.getByRole("button", { name: "Add Group" }).click();
   const editor = page.getByRole("dialog", { name: "Group" });
   await editor.getByLabel("Group name").fill("Draft group");
-  await expect(page.locator(".chat-widget")).toBeHidden();
   await expect(editor.getByRole("button", { name: "Cancel" })).toBeInViewport();
   await expect(editor.getByRole("button", { name: "Save Group" })).toBeInViewport();
   await page.screenshot({ path: testInfo.outputPath("group-editor-mobile-short-after.png"), fullPage: false });
@@ -256,7 +330,6 @@ test("keeps Schedule actions reachable on a short phone", async ({ page }, testI
   await editor.getByLabel("Schedule name").fill("Early deliveries");
   await expect(editor.getByRole("button", { name: "Cancel" })).toBeInViewport();
   await expect(editor.getByRole("button", { name: "Create Schedule" })).toBeInViewport();
-  await expect(page.locator(".chat-widget")).toBeHidden();
   await page.screenshot({ path: testInfo.outputPath("schedule-editor-mobile-short-after.png"), fullPage: false });
   page.once("dialog", (dialog) => dialog.accept());
   await editor.getByRole("button", { name: "Cancel" }).click();
@@ -270,7 +343,6 @@ test("keeps Notification Save, Test, Cancel and preview reachable on mobile", as
   await page.getByRole("button", { name: "Add Notification" }).click();
   const editor = page.getByRole("dialog", { name: "Add Notification" });
   for (const name of ["Save", "Send Test", "Cancel"]) await expect(editor.getByRole("button", { name, exact: true })).toBeInViewport();
-  await expect(page.locator(".chat-widget")).toBeHidden();
   await expect(editor.getByLabel("Live notification preview")).toBeHidden();
   await page.screenshot({ path: testInfo.outputPath("notification-editor-mobile-short-after.png"), fullPage: false });
   await editor.getByRole("button", { name: "Preview" }).click();
@@ -387,22 +459,6 @@ test("clears search and account state across logout and another login", async ({
   expect(unexpected).toEqual([]);
 });
 
-test("retains Alfred's draft through a failed synthetic attachment upload and removal", async ({ page }) => {
-  const unexpected = await installFixtures(page);
-  await page.route("**/api/v1/ai/chat/upload*", (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: "Synthetic upload unavailable" }) }));
-  await page.goto("/");
-  await page.getByRole("button", { name: "Open Alfred" }).click();
-  const composer = page.getByPlaceholder("Ask Alfred...");
-  await composer.fill("Keep this investigation draft");
-  await page.locator("input.chat-file-input").setInputFiles({ name: "synthetic.txt", mimeType: "text/plain", buffer: Buffer.from("synthetic attachment") });
-  await expect(page.getByLabel("Pending attachments")).toContainText("Synthetic upload unavailable");
-  await expect(composer).toHaveValue("Keep this investigation draft");
-  await page.getByRole("button", { name: "Remove synthetic.txt" }).click();
-  await expect(page.getByLabel("Pending attachments")).toHaveCount(0);
-  await expect(composer).toHaveValue("Keep this investigation draft");
-  expect(unexpected).toEqual([]);
-});
-
 test("shows movement detail without clipping on desktop and mobile", async ({ page }, testInfo) => {
   const unexpected = await installFixtures(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -423,7 +479,6 @@ test("shows movement detail without clipping on desktop and mobile", async ({ pa
   expect(mobileBounds).not.toBeNull();
   expect(mobileBounds!.x).toBeGreaterThanOrEqual(0);
   expect(mobileBounds!.x + mobileBounds!.width).toBeLessThanOrEqual(391);
-  await expect(page.locator(".chat-widget")).toBeHidden();
   await page.screenshot({ path: testInfo.outputPath("movement-detail-mobile-after.png"), fullPage: false });
   await detail.locator(".movement-detail-section").last().scrollIntoViewIfNeeded();
   await expect(detail.locator(".movement-detail-section").last()).toBeInViewport({ ratio: 0.1 });
@@ -437,9 +492,8 @@ test("Settings hub adapts across screens and themes using the console theme cont
   const unexpected = await installFixtures(page);
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/settings");
-  await page.getByRole("button", { name: "Dismiss chat prompt" }).click();
   const hub = page.getByRole("region", { name: "Settings pages" });
-  await expect(hub.getByRole("button")).toHaveCount(13);
+  await expect(hub.getByRole("button")).toHaveCount(12);
   await expect(page.getByRole("heading", { name: "Appearance" })).toHaveCount(0);
   await expect(page.getByRole("radio")).toHaveCount(0);
   const themeControl = page.getByRole("button", { name: "Theme", exact: true });
@@ -462,11 +516,7 @@ test("Settings hub adapts across screens and themes using the console theme cont
     }
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     const destinationBottom = await hub.getByRole("button").evaluateAll((nodes) => Math.max(...nodes.map((node) => node.getBoundingClientRect().bottom)));
-    const launcher = await page.getByRole("button", { name: "Open Alfred" }).boundingBox();
-    expect(launcher).not.toBeNull();
     expect(destinationBottom).toBeGreaterThan(0);
-    if (width > 768) expect(destinationBottom).toBeLessThanOrEqual(launcher!.y);
-    else await expect(page.locator(".chat-widget")).toHaveCSS("position", "static");
   }
 
   await themeControl.press("Enter");
@@ -493,7 +543,7 @@ test("Settings hub searches titles, descriptions and groups and navigates to a d
   await expect(hub.getByRole("heading", { name: "Administration" })).toHaveCount(0);
   await page.getByRole("button", { name: "Clear search" }).click();
   await expect(search).toBeFocused();
-  await expect(hub.getByRole("button")).toHaveCount(13);
+  await expect(hub.getByRole("button")).toHaveCount(12);
   await search.fill("no matching destination");
   await expect(page.getByRole("heading", { name: "No settings found" })).toBeVisible();
   await expect(page.locator(".settings-home-count")).toHaveText("0 results");
@@ -528,5 +578,41 @@ test("explains restricted direct URLs without admin reads", async ({ page }) => 
   await page.goto("/settings/command-history");
   await expect(page.getByRole("heading", { name: "Administrator access required" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Command History" })).toHaveCount(0);
+  expect(unexpected).toEqual([]);
+});
+
+test("creates manual duration passes with a normalized plate and optional phone across screen sizes", async ({ page }, testInfo) => {
+  const unexpected = await installFixtures(page);
+  const confirmations: Record<string, unknown>[] = [];
+  const created: Record<string, unknown>[] = [];
+  await page.route("**/api/v1/action-confirmations", async (route) => {
+    confirmations.push(route.request().postDataJSON());
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ confirmation_token: "fixture-only-confirmation" }) });
+  });
+  await page.route("**/api/v1/visitor-passes", async (route) => {
+    if (route.request().method() !== "POST") { await route.fallback(); return; }
+    const payload = route.request().postDataJSON();
+    created.push(payload);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...pass, ...payload }) });
+  });
+  await page.goto("/passes");
+  for (const [width, height] of [[1440, 900], [390, 600]]) {
+    await page.setViewportSize({ width, height });
+    await page.getByRole("button", { name: "Visitor Pass", exact: true }).click();
+    const editor = page.getByRole("dialog", { name: "Visitor pass", exact: true });
+    await editor.getByRole("button", { name: "Duration", exact: true }).click();
+    await expect(editor.getByRole("textbox", { name: "Number plate", exact: true })).toHaveJSProperty("required", true);
+    await expect(editor.getByRole("textbox", { name: "Visitor phone", exact: true })).toHaveJSProperty("required", false);
+    await editor.getByRole("textbox", { name: "Visitor name", exact: true }).fill("Fixture Duration Visitor");
+    await editor.getByRole("textbox", { name: "Number plate", exact: true }).fill("ab 12-cde");
+    await page.screenshot({ path: testInfo.outputPath(`duration-pass-${width}x${height}.png`), animations: "disabled" });
+    await editor.getByRole("button", { name: "Create Pass", exact: true }).click();
+    await expect(editor).toHaveCount(0);
+    expect(created.at(-1)).toMatchObject({ pass_type: "duration", number_plate: "AB12CDE", visitor_phone: null, confirmation_token: "fixture-only-confirmation" });
+    expect(confirmations.at(-1)).toMatchObject({ action: "visitor_pass.create", payload: { number_plate: "AB12CDE", visitor_phone: null } });
+  }
+  await page.locator(".visitor-pass-card").first().click();
+  const tabs = page.getByRole("tablist", { name: "Visitor Pass details", exact: true });
+  await expect(tabs.getByRole("tab")).toHaveText(["Details", "Log"]);
   expect(unexpected).toEqual([]);
 });

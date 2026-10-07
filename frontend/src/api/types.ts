@@ -322,7 +322,7 @@ export type HomeAssistantDiscovery = {
   mobile_app_notification_services: HomeAssistantMobileAppService[];
   mobile_app_notification_mappings: HomeAssistantMobileAppSuggestion[];
 };
-export type NotificationChannelId = "mobile" | "in_app" | "voice" | "discord" | "whatsapp";
+export type NotificationChannelId = "mobile" | "in_app" | "voice";
 export type NotificationTriggerOption = {
   value: string;
   label: string;
@@ -416,7 +416,6 @@ export type ViewKey =
   | "settings_command_history"
   | "settings_missed_exit_recovery"
   | "settings_auth"
-  | "alfred_training"
   | "settings_automations"
   | "settings_notifications"
   | "settings_lpr"

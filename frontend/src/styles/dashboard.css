@@ -1,7 +1,7 @@
 /* Shared card primitives and dashboard layout. */
 .dashboard-page, .view-stack, .settings-grid {
   min-width: 0;
-  padding: 20px max(28px, var(--safe-right)) calc(max(30px, var(--safe-bottom)) + var(--alfred-launcher-clearance)) 28px;
+  padding: 20px max(28px, var(--safe-right)) max(30px, var(--safe-bottom)) 28px;
 }
 .dashboard-page { container: dashboard / inline-size; }
 .dashboard-intro { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 5px 0 26px; }

@@ -19,7 +19,6 @@ import { AutomationRunHistory } from "./AutomationRunHistory";
 export function AutomationsView({ currentUser, people, refreshToken, vehicles }: { currentUser: UserAccount; people: Person[]; refreshToken: number; vehicles: Vehicle[] }) {
   const { data, rules, setRules, loading, error, load } = useWorkflowData(workflowApi.getAutomationData, refreshToken);
   const catalog = data?.catalog ?? null;
-  const users = data?.users ?? [];
   const [draft, setDraft] = React.useState<AutomationRule | null>(null);
   const [modal, setModal] = React.useState<"trigger" | "condition" | "action" | null>(null);
   const [saving, setSaving] = React.useState(false);
@@ -139,34 +138,6 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
     }
   };
 
-  const parseAiSchedule = async (trigger: AutomationNode) => {
-    const text = String(trigger.config.natural_text ?? "").trim();
-    if (!text) {
-      setFeedback({ tone: "error", text: "Enter a natural-language schedule first." });
-      return;
-    }
-    setFeedback({ tone: "info", text: "Parsing schedule text." });
-    try {
-      const parsed = await workflowApi.parseAutomationSchedule(text);
-      updateDraft((rule) => ({
-        ...rule,
-        triggers: rule.triggers.map((item) => item.id === trigger.id ? {
-          ...item,
-          config: {
-            ...item.config,
-            cron_expression: parsed.cron_expression ?? "",
-            timezone: parsed.timezone ?? "Europe/London",
-            end_at: parsed.end_at ?? "",
-            summary: parsed.summary ?? text
-          }
-        } : item)
-      }));
-      setFeedback({ tone: parsed.requires_review ? "error" : "success", text: parsed.requires_review ? "Schedule parsed but needs review." : "Schedule parsed." });
-    } catch (parseError) {
-      setFeedback({ tone: "error", text: parseError instanceof Error ? parseError.message : "Schedule parsing failed." });
-    }
-  };
-
   if (loading || (!data && !error)) {
     return (
       <section className="view-stack notifications-page workflow-notifications-page">
@@ -281,11 +252,9 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
                                 nodes={draft.triggers}
                                 people={people}
                                 triggerMeta={triggerByType}
-                                users={users}
                                 vehicles={vehicles}
                                 onAdd={() => setModal("trigger")}
                                 onChange={(node) => updateDraft((rule) => ({ ...rule, triggers: rule.triggers.map((item) => item.id === node.id ? node : item) }))}
-                                onParseAiSchedule={parseAiSchedule}
                                 onRemove={(node) => updateDraft((rule) => ({ ...rule, triggers: rule.triggers.filter((item) => item.id !== node.id) }))}
                               />
                             </WorkflowBlock>
@@ -298,7 +267,6 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
                                 nodes={draft.conditions}
                                 people={people}
                                 triggerMeta={triggerByType}
-                                users={users}
                                 vehicles={vehicles}
                                 onAdd={() => setModal("condition")}
                                 onChange={(node) => updateDraft((rule) => ({ ...rule, conditions: rule.conditions.map((item) => item.id === node.id ? node : item) }))}
@@ -315,7 +283,6 @@ export function AutomationsView({ currentUser, people, refreshToken, vehicles }:
                                 notificationRules={catalog?.notification_rules ?? []}
                                 people={people}
                                 triggerMeta={triggerByType}
-                                users={users}
                                 variables={variables}
                                 vehicles={vehicles}
                                 onAdd={() => setModal("action")}

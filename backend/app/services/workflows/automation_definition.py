@@ -29,10 +29,9 @@ ACTION_CATALOG = automation_action_catalog()
 VARIABLES = automation_variables()
 VARIABLE_BY_NAME = {variable.name.lower(): variable for variable in VARIABLES}
 TRIGGER_SCOPES = {trigger["type"]: set(trigger.get("scopes") or []) for group in TRIGGER_CATALOG for trigger in group["triggers"]}
-TIME_TRIGGER_KEYS = {"time.specific_datetime", "time.every_x", "time.cron", "time.ai_text"}
+TIME_TRIGGER_KEYS = {"time.specific_datetime", "time.every_x", "time.cron"}
 INTEGRATION_ACTION_KEYS = {
     "integration.icloud_calendar.sync": ("icloud_calendar", "sync_calendars"),
-    "integration.whatsapp.send_message": ("whatsapp", "send_message"),
 }
 
 @dataclass
@@ -113,14 +112,12 @@ def normalize_trigger_config(
             "start_at": optional_text(config.get("start_at")),
             "end_at": optional_text(config.get("end_at")),
         }
-    if trigger_type in {"time.cron", "time.ai_text"}:
+    if trigger_type == "time.cron":
         return {
             "cron_expression": optional_text(config.get("cron_expression")),
             "timezone": optional_text(config.get("timezone")) or "Europe/London",
             "start_at": optional_text(config.get("start_at")),
             "end_at": optional_text(config.get("end_at")),
-            "natural_text": optional_text(config.get("natural_text")),
-            "summary": optional_text(config.get("summary")),
         }
     if trigger_type == "time.specific_datetime":
         recurrence = str(config.get("recurrence") or "none").lower()
@@ -166,8 +163,6 @@ def normalize_trigger_config(
             "vehicle_id",
             "registration_number",
             "visitor_pass_id",
-            "phrase",
-            "match_mode",
             "webhook_key",
             "source_ip",
         }
@@ -285,13 +280,6 @@ def facts_from_payload(trigger_key: str, payload: dict[str, Any]) -> dict[str, A
                 "message": json.dumps(body)[:500] if body else payload.get("message"),
             }
         )
-    if trigger_key.startswith("ai."):
-        merged.update(
-            {
-                "alfred_phrase": payload.get("phrase") or payload.get("message"),
-                "alfred_issue": payload.get("issue") or payload.get("message"),
-            }
-        )
     return merged
 
 
@@ -341,8 +329,6 @@ def build_context_variables(context: AutomationContext) -> dict[str, str]:
         "MaintenanceModeDuration": pick("maintenance_mode_duration", "duration_label"),
         "WebhookKey": pick("webhook_key"),
         "WebhookSenderIp": pick("webhook_sender_ip", "source_ip"),
-        "AlfredPhrase": pick("alfred_phrase", "phrase", "message"),
-        "AlfredIssue": pick("alfred_issue", "issue", "message"),
         "OccurredAt": occurred_at,
         "Date": date_label(occurred_at),
         "Time": time_label(occurred_at),
@@ -393,12 +379,6 @@ def trigger_matches(trigger: dict[str, Any], context: AutomationContext) -> bool
         return False
     if config.get("source_ip") and str(config["source_ip"]) != str(context.facts.get("source_ip") or ""):
         return False
-    phrase = str(config.get("phrase") or "").strip().lower()
-    if phrase:
-        actual_phrase = str(context.facts.get("alfred_phrase") or context.facts.get("message") or "").lower()
-        if str(config.get("match_mode") or "contains") == "exact":
-            return actual_phrase == phrase
-        return phrase in actual_phrase
     return True
 
 
@@ -486,18 +466,6 @@ def integration_action_config(action_type: str, config: dict[str, Any]) -> dict[
     action = INTEGRATION_ACTION_KEYS.get(action_type)
     if not action:
         return {}
-    if action_type == "integration.whatsapp.send_message":
-        target_mode = str(config.get("target_mode") or "selected")
-        if target_mode not in {"all", "selected", "dynamic"}:
-            target_mode = "selected"
-        return {
-            "provider": "whatsapp",
-            "action": "send_message",
-            "target_mode": target_mode,
-            "target_user_ids": normalize_string_list(config.get("target_user_ids"), allow_scalar=False),
-            "phone_number_template": str(config.get("phone_number_template") or ""),
-            "message_template": str(config.get("message_template") or "@Subject"),
-        }
     return {
         "provider": str(config.get("provider") or action[0]),
         "action": str(config.get("action") or action[1]),
@@ -542,10 +510,6 @@ def automation_triggers_for_origin(event_type: str, payload: dict[str, Any], *, 
         visitor_pass = as_dict(payload.get("visitor_pass"))
         if str(visitor_pass.get("status") or "").lower() == "expired":
             return [("visitor_pass.expired", {**payload, "occurred_at": occurred_at})]
-    if event_type == "ai.phrase_received":
-        return [("ai.phrase_received", {**payload, "occurred_at": occurred_at})]
-    if event_type == "ai.issue_detected":
-        return [("ai.issue_detected", {**payload, "occurred_at": occurred_at})]
     return []
 
 

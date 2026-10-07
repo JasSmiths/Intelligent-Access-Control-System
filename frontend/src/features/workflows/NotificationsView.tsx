@@ -48,7 +48,7 @@ export function NotificationsView({ currentUser, people, refreshToken, schedules
   }, [catalog?.actionable_notifications]);
   const activeDraft = draft;
   const cameras = useNotificationCameras(Boolean(draft?.actions.some((action) =>
-    action.type === "mobile" || action.type === "in_app" || action.type === "discord"
+    action.type === "mobile" || action.type === "in_app"
   )), refreshToken);
   const workflowModalMode: "editor" | "trigger" | "action" = modal === "trigger" || modal === "action" ? modal : "editor";
   const previewContext = catalog?.mock_context ?? {};

@@ -10,10 +10,9 @@ import json
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AutomationRule, AutomationRun, MaintenanceModeState, Presence, Vehicle
+from app.models import AutomationRule, MaintenanceModeState, Presence, Vehicle
 from app.models.enums import PresenceState
 
 
@@ -61,52 +60,13 @@ async def person_is_present(session: AsyncSession, identity: str) -> bool:
 
 
 async def notification_origin_denial(session: AsyncSession, payload: dict[str, Any], notification_id: uuid.UUID, *, authorize_recognition) -> str | None:
-    """Lock rule -> run before the notification row; the final send owns commit.
+    """Reject unsupported notification handoffs; ordinary domain notices remain independent.
 
-    Operational notices without an automation origin are independent. An
-    automation origin is created only by its transactional handoff, never read
-    from a trigger's arbitrary payload or requester-supplied role fields.
+    No retained automation action creates notification delivery handoffs. Stored
+    or unrecognized origins cannot gain authority after their producer retires.
+    Shared automation rule and recognition checks remain with command execution.
     """
-    origin = payload.get("automation_origin")
-    if origin is None:
-        return None
-    if not isinstance(origin, dict):
-        return "automation_origin_invalid"
-    rule_id, run_id, operation_id = (_uuid(origin.get(key)) for key in ("rule_id", "run_id", "operation_id"))
-    if not all((rule_id, run_id, operation_id)) or operation_id != notification_id:
-        return "automation_origin_invalid"
-    rule = await session.scalar(select(AutomationRule).where(AutomationRule.id == rule_id)
-                                .with_for_update().execution_options(populate_existing=True))
-    run = await session.scalar(select(AutomationRun).where(AutomationRun.id == run_id)
-                               .with_for_update().execution_options(populate_existing=True))
-    denial = current_rule_denial(rule, origin.get("rule_fingerprint"))
-    if denial:
-        return denial
-    if (run is None or run.rule_id != rule_id or run.recovery_version != 1
-            or run.context.get("rule_fingerprint") != origin.get("rule_fingerprint")):
-        return "automation_origin_invalid"
-    action = next((item for item in run.action_plan or [] if item.get("operation_id") == str(operation_id)), None)
-    if (not action or action.get("state") != "succeeded"
-            or action.get("action", {}).get("type") != "integration.whatsapp.send_message"
-            or action.get("result", {}).get("notification_run_id") != str(notification_id)):
-        return "automation_handoff_not_accepted"
-    captured = run.context.get("dispatch") or {}
-    for index, raw in enumerate(rule.conditions or []):
-        result = await evaluate_current_condition(session, {"id": f"condition-{index + 1}", **raw}, captured.get("entities") or {})
-        if not result["passed"]:
-            return "condition_failed"
-    # Unknown-denied observations still produce their intended notifications.
-    # Recognition authority is required for a formerly authorized identified
-    # vehicle/visitor, never fabricated for schedules, phrases or other origins.
-    if run.trigger_key in {"vehicle.known_plate", "vehicle.outside_schedule", "visitor_pass.used", "visitor_pass.detected"}:
-        now = await session.scalar(select(func.clock_timestamp()))
-        try:
-            await authorize_recognition(session,
-                event_id=(captured.get("provenance") or {}).get("event_id"),
-                allow_vehicle_schedule_override=run.trigger_key == "vehicle.outside_schedule", now=now)
-        except ValueError:
-            return "recognition_authorization_changed"
-    return None
+    return "unsupported_automation_notification_origin" if "automation_origin" in payload else None
 
 
 def _uuid(value: Any) -> uuid.UUID | None:

@@ -12,6 +12,18 @@ const props = {
 };
 afterEach(() => { cleanup(); vi.clearAllMocks(); sessionStorage.clear(); });
 
+it.each([true, false])("links grouped=%s alerts to a durable record UUID", (grouped) => {
+  const memberId = "d882ffcb-4a35-4c77-bda5-fb8c1b0bab31";
+  render(<Dashboard {...props} anomalies={[{
+    id: grouped ? "group:unauthorized_plate:2026-10-05:TEST123" : memberId,
+    alert_ids: [memberId], grouped, type: "unauthorized_plate", severity: "warning",
+    status: "open", message: "Unauthorised Plate, Access Denied",
+    created_at: "2026-10-05T12:00:00Z", count: 1, registration_number: "TEST123"
+  } as Anomaly]} />);
+  fireEvent.click(screen.getByRole("button", { name: /Unauthorised Plate, Access Denied/ }));
+  expect(props.navigateToView).toHaveBeenLastCalledWith("alerts", { search: `?alert=${memberId}` });
+});
+
 it.each([
   { severity: "warning", title: "Action needed", tone: "attention" },
   { severity: "critical", title: "Critical alerts", tone: "degraded" }

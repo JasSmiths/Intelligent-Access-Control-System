@@ -1,18 +1,16 @@
 import { Bell, Bot, CalendarDays, Camera, CircleDot, Database, Home, MessageCircle, Search, Zap } from "lucide-react";
 import React from "react";
 import { isLlmProviderConfigured, llmProviderDefinitions, normalizeLlmProvider } from "../../lib/format";
-import { discordListSettingKeys, secretSettingKeys, stringifySetting } from "../../lib/settings";
+import { secretSettingKeys, stringifySetting } from "../../lib/settings";
 import type { IntegrationStatus, NotificationChannelId, SettingsMap } from "../../api/types";
 import type { LlmProviderKey } from "../../lib/format";
 import type { SettingFieldDefinition } from "../../lib/settings";
 import type { BadgeTone } from "../../ui/primitives";
 import {
-  DiscordStatus,
   ICloudCalendarAccount,
   UnifiProtectStatus,
-  WhatsAppStatus
 } from "../../api/integrations";
-export function LlmProviderSelector({
+export function CameraAiProviderSelector({
   saving,
   values,
   onChange
@@ -26,7 +24,7 @@ export function LlmProviderSelector({
     <div className="llm-provider-selector">
       <Bot size={15} />
       <label className="llm-provider-select">
-        <span>System LLM</span>
+        <span>Camera AI provider</span>
         <select
           disabled={saving}
           value={activeProvider}
@@ -87,7 +85,7 @@ export const integrationCategories: Array<{
   {
     key: "ai",
     label: "AI Providers",
-    description: "LLM providers used by chat, summaries, and analysis."
+    description: "Providers used to analyse camera images."
   }
 ];
 const integrationFieldSets: Record<string, SettingFieldDefinition[]> = {
@@ -99,28 +97,6 @@ const integrationFieldSets: Record<string, SettingFieldDefinition[]> = {
     { key: "home_assistant_default_media_player", label: "Default media player" }
   ],
   apprise: [{ key: "apprise_urls", label: "Apprise URLs", type: "textarea", href: "https://github.com/caronc/apprise/wiki", help: "For Pushover use pover://USER_KEY@APP_TOKEN. The app also accepts pushover://USER_KEY/APP_TOKEN and normalizes it." }],
-  discord: [
-    { key: "discord_bot_token", label: "Bot token", type: "password" },
-    { key: "discord_guild_allowlist", label: "Guild allowlist", type: "textarea", help: "One Discord server ID per line." },
-    { key: "discord_channel_allowlist", label: "Channel allowlist", type: "textarea", help: "One channel ID per line. Empty denies guild-channel messages." },
-    { key: "discord_user_allowlist", label: "User allowlist", type: "textarea", help: "One Discord user ID per line." },
-    { key: "discord_role_allowlist", label: "Role allowlist", type: "textarea", help: "One Discord role ID per line." },
-    { key: "discord_admin_role_ids", label: "Admin role IDs", type: "textarea", help: "Members with these roles can resolve Alfred confirmations." },
-    { key: "discord_default_notification_channel_id", label: "Default notification channel" },
-    { key: "discord_allow_direct_messages", label: "Allow direct messages", type: "select", options: ["false", "true"] },
-    { key: "discord_require_mention", label: "Require mention", type: "select", options: ["true", "false"] }
-  ],
-  whatsapp: [
-    { key: "whatsapp_enabled", label: "Enabled", type: "select", options: ["false", "true"] },
-    { key: "whatsapp_access_token", label: "Access token", type: "password" },
-    { key: "whatsapp_phone_number_id", label: "Phone Number ID" },
-    { key: "whatsapp_business_account_id", label: "WhatsApp Business Account ID" },
-    { key: "whatsapp_webhook_verify_token", label: "Webhook verify token", type: "password" },
-    { key: "whatsapp_app_secret", label: "App secret", type: "password", help: "Required for incoming POST webhooks. IACS rejects unsigned WhatsApp payloads when WhatsApp is enabled." },
-    { key: "whatsapp_graph_api_version", label: "Graph API version" },
-    { key: "whatsapp_visitor_pass_template_name", label: "Visitor Pass template name" },
-    { key: "whatsapp_visitor_pass_template_language", label: "Visitor Pass template language" }
-  ],
   dvla: [
     { key: "dvla_api_key", label: "DVLA API Key", type: "password", href: "https://developer-portal.driver-vehicle-licensing.api.gov.uk/apis/vehicle-enquiry-service/vehicle-enquiry-service-description.html" },
     { key: "dvla_vehicle_enquiry_url", label: "Vehicle enquiry URL", help: "Production endpoint for the DVLA Vehicle Enquiry Service API." },
@@ -162,10 +138,6 @@ export function integrationDefinitions(
   protectStatus: UnifiProtectStatus | null,
   icloudAccounts: ICloudCalendarAccount[],
   icloudError: string,
-  discordStatus: DiscordStatus | null,
-  discordError: string,
-  whatsappStatus: WhatsAppStatus | null,
-  whatsappError: string
 ): IntegrationDefinition[] {
   const activeProvider = normalizeLlmProvider(values.llm_provider);
   const providerStatus = (key: string, secretKey?: string): Pick<IntegrationDefinition, "statusLabel" | "statusTone"> => {
@@ -186,13 +158,11 @@ export function integrationDefinitions(
     { key: "esphome", title: "ESPHome", description: "Direct native API access for gate and garage-door covers.", category: "access", icon: Zap, fields: [], statusLabel: values.esphome_devices ? "Configured" : "Not Configured", statusTone: values.esphome_devices ? "blue" : "gray" },
     { key: "icloud_calendar", title: "iCloud Calendar", description: "Create Visitor Passes from calendar events marked Open Gate.", category: "access", icon: CalendarDays, fields: [], statusLabel: icloudError ? "Error" : icloudNeedsAttention ? "Needs Attention" : activeIcloudAccounts.length ? `${activeIcloudAccounts.length} active accounts` : "Not Configured", statusTone: icloudError ? "red" : icloudNeedsAttention ? "amber" : activeIcloudAccounts.length ? "blue" : "gray" },
     { key: "apprise", title: "Apprise", description: "Mobile and push notification fan-out.", category: "notifications", icon: Bell, fields: integrationFieldSets.apprise, statusLabel: values.apprise_urls ? "Configured" : "Not Configured", statusTone: values.apprise_urls ? "blue" : "gray", notificationChannels: ["mobile"] },
-    { key: "discord", title: "Discord", description: "Bidirectional Alfred chat and Discord notification channels.", category: "notifications", icon: MessageCircle, fields: integrationFieldSets.discord, statusLabel: discordError ? "Error" : discordStatus?.connected ? "Connected" : discordStatus?.configured || values.discord_bot_token ? "Configured" : "Not Configured", statusTone: discordError ? "red" : discordStatus?.connected ? "green" : discordStatus?.configured || values.discord_bot_token ? "blue" : "gray", notificationChannels: ["discord"] },
-    { key: "whatsapp", title: "WhatsApp", description: "Bidirectional Alfred chat and WhatsApp notification messages.", category: "notifications", icon: MessageCircle, fields: integrationFieldSets.whatsapp, statusLabel: whatsappError ? "Error" : whatsappStatus?.enabled && whatsappStatus?.configured ? "Enabled" : whatsappStatus?.configured || values.whatsapp_access_token || values.whatsapp_phone_number_id ? "Configured" : "Not Configured", statusTone: whatsappError ? "red" : whatsappStatus?.enabled && whatsappStatus?.configured ? "blue" : whatsappStatus?.configured || values.whatsapp_access_token || values.whatsapp_phone_number_id ? "blue" : "gray", notificationChannels: ["whatsapp"] },
     { key: "dvla", title: "DVLA Lookup", description: "Vehicle Enquiry Service API plate lookups.", category: "data", icon: Search, fields: integrationFieldSets.dvla, statusLabel: values.dvla_api_key ? "Configured" : "Not Configured", statusTone: values.dvla_api_key ? "blue" : "gray" },
     { key: "unifi_protect", title: "UniFi Protect", description: "Camera snapshots, detection events, and AI image analysis.", category: "data", icon: Camera, fields: integrationFieldSets.unifi_protect, statusLabel: protectRealtimeDegraded ? "Realtime Degraded" : protectStatus?.connected ? "Connected" : protectStatus?.configured || values.unifi_protect_host ? "Configured" : "Not Configured", statusTone: protectRealtimeDegraded ? "red" : protectStatus?.connected ? "green" : protectStatus?.configured || values.unifi_protect_host ? "blue" : "gray" }
   ];
   return base.concat([
-    { key: "openai", title: "OpenAI", description: "Responses API provider for tool-capable chat.", icon: Bot, secret: "openai_api_key", oauth: true },
+    { key: "openai", title: "OpenAI", description: "OpenAI image analysis provider.", icon: Bot, secret: "openai_api_key", oauth: true },
     { key: "gemini", title: "Gemini", description: "Google Gemini provider.", icon: CircleDot, secret: "gemini_api_key", oauth: true },
     { key: "anthropic", title: "Anthropic", description: "Claude provider.", icon: MessageCircle, secret: "anthropic_api_key" },
     { key: "ollama", title: "Ollama", description: "Local model endpoint.", icon: Database }
@@ -219,25 +189,12 @@ export function integrationInitialValues(definition: IntegrationDefinition, valu
     unifi_protect_snapshot_height: "720",
     home_assistant_gate_entities: "[]",
     home_assistant_garage_door_entities: "[]",
-    discord_guild_allowlist: "",
-    discord_channel_allowlist: "",
-    discord_user_allowlist: "",
-    discord_role_allowlist: "",
-    discord_admin_role_ids: "",
-    discord_allow_direct_messages: "false",
-    discord_require_mention: "true",
-    whatsapp_enabled: "false",
-    whatsapp_graph_api_version: "v25.0",
-    whatsapp_visitor_pass_template_name: "iacs_visitor_welcome",
-    whatsapp_visitor_pass_template_language: "en"
   };
   return definition.fields.reduce<Record<string, string>>((acc, field) => {
     const current = values[field.key];
     const currentOrDefault = current !== undefined && current !== null ? current : defaults[field.key] || "";
     if (secretSettingKeys.has(field.key)) {
       acc[field.key] = "";
-    } else if (discordListSettingKeys.has(field.key)) {
-      acc[field.key] = Array.isArray(current) ? current.map(String).join("\n") : stringifySetting(currentOrDefault);
     } else if (["home_assistant_gate_entities", "home_assistant_garage_door_entities"].includes(field.key) && typeof current === "object") {
       acc[field.key] = JSON.stringify(current ?? {}, null, 2);
     } else {

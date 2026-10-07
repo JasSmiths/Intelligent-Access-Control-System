@@ -26,7 +26,6 @@ from app.services.investigations import (
 from app.services.investigations.contracts import OUTCOMES
 from app.services.investigations.service import (
     get_activity_detail,
-    investigate,
     investigation_filter_options,
     investigation_overview,
     list_activity,
@@ -69,13 +68,6 @@ class InvestigationScope(BaseModel):
     include_routine: bool | None = None
 
 
-class InvestigationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    question: str = Field(min_length=1, max_length=1000)
-    scope: InvestigationScope = Field(default_factory=InvestigationScope)
-    max_evidence: int = Field(default=30, ge=5, le=50)
-    use_ai: bool = True
 
 
 @router.get("/categories")
@@ -142,28 +134,6 @@ async def get_investigation_filters(
     return await investigation_filter_options(session, site_timezone=runtime.site_timezone)
 
 
-@router.post("/investigate")
-async def investigate_logs(
-    request: InvestigationRequest,
-    _: User = Depends(admin_user),
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, Any]:
-    runtime = await get_runtime_config()
-    scope = request.scope.model_dump(exclude_none=True)
-    if "time" in scope:
-        scope["time_range"] = scope.pop("time")
-    _validate_investigation_outcome(scope.get("outcome"))
-    try:
-        return await investigate(
-            session,
-            question=request.question.strip(),
-            scope=scope,
-            max_evidence=request.max_evidence,
-            use_ai=request.use_ai,
-            runtime=runtime,
-        )
-    except InvalidTimeRangeError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/activity")

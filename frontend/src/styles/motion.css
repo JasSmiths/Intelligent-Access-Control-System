@@ -55,16 +55,16 @@
   .mobile-nav-scrim { animation: console-fade 220ms ease-out; }
   .modal-backdrop, .search-palette-backdrop, .workflow-recipient-modal::backdrop { animation: console-fade 280ms ease-out; }
   .modal-card, .search-palette, .workflow-recipient-modal { animation: console-modal-in 480ms var(--ease-out) backwards; }
-  .alert-tray, .profile-menu, .notification-toast, .chat-panel { animation: console-dialog 320ms var(--ease-out); }
+  .alert-tray, .profile-menu, .notification-toast{ animation: console-dialog 320ms var(--ease-out); }
   .nav-submenu-region { transition: grid-template-rows 320ms var(--ease-out), visibility 0s 320ms; }
   .nav-submenu-region.open { transition-delay: 0s; }
   .nav-submenu { transition: opacity 200ms ease-out, transform 320ms var(--ease-out); }
   .nav-submenu-region:not(.open) > .nav-submenu { opacity: 0; transform: translateY(-6px); }
   .nav-item.active::before { animation: console-indicator 360ms var(--ease-out); }
-  :is(.nav-item, .nav-disclosure, .icon-button, .primary-button, .secondary-button, .danger-button, .panel-link, .profile-switcher, .settings-home-destination, .chat-pill, .badge-action) {
+  :is(.nav-item, .nav-disclosure, .icon-button, .primary-button, .secondary-button, .danger-button, .panel-link, .profile-switcher, .settings-home-destination, .badge-action) {
     transition: color var(--duration-fast), background-color var(--duration-fast), border-color var(--duration-fast), box-shadow 220ms, transform 240ms var(--ease-out);
   }
-  :is(.icon-button, .primary-button, .secondary-button, .danger-button, .chat-pill, .badge-action):not(:disabled):active { transform: scale(.96); }
+  :is(.icon-button, .primary-button, .secondary-button, .danger-button, .badge-action):not(:disabled):active { transform: scale(.96); }
   .nav-item > svg, .nav-disclosure svg, .settings-home-destination-arrow { transition: transform 280ms var(--ease-out), color 180ms; }
   .nav-item.active > svg { animation: console-ring 380ms var(--ease-out); }
   .settings-home-destination:hover .settings-home-destination-arrow { transform: translateX(4px); }
@@ -77,7 +77,6 @@
   }
   @media (hover: hover) {
     .nav-item:hover > svg { transform: translateX(2px); }
-    .chat-pill:hover { transform: translateY(-2px); box-shadow: 0 10px 24px color-mix(in srgb, var(--action-blue) 25%, transparent); }
   }
 }
 .modal-backdrop[data-closing], .search-palette-backdrop[data-closing], .workflow-recipient-modal[data-closing]::backdrop { animation: console-backdrop-out 200ms ease-in both; }

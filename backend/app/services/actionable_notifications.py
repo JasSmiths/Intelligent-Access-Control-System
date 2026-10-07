@@ -11,12 +11,6 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.providers import (
-    ChatMessageInput,
-    ProviderNotConfiguredError,
-    complete_with_provider_options,
-    get_llm_provider,
-)
 from app.core.auth_secret import get_auth_secret
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
@@ -1260,119 +1254,11 @@ class ActionableNotificationService:
         )
 
     async def _malfunction_failure_message(
-        self,
-        bound: BoundActionContext,
-        identity: ActionIdentity,
-        malfunction: ActiveGateMalfunctionContext,
-        *,
-        force: bool,
+        self, bound: BoundActionContext, identity: ActionIdentity,
+        malfunction: ActiveGateMalfunctionContext, *, force: bool,
     ) -> str:
-        fallback = _fallback_malfunction_failure_message(bound, malfunction, force=force)
-        try:
-            runtime = await get_runtime_config()
-            provider_name = str(runtime.llm_provider or "").strip().lower()
-            if not provider_name or provider_name == "local":
-                return fallback
-            provider = get_llm_provider(provider_name)
-            result = await complete_with_provider_options(
-                provider,
-                [
-                    ChatMessageInput(
-                        role="system",
-                        content=(
-                            "You write short Home Assistant mobile push notification messages for a private "
-                            "gate access system. Be calm, human, and specific. Return only the notification "
-                            "body, no markdown, no JSON, and no sign-off. Use natural wording, not incident "
-                            "or engineering terminology."
-                        ),
-                    ),
-                    ChatMessageInput(
-                        role="user",
-                        content=(
-                            "A user pressed an actionable notification to open the gate. The gate was not "
-                            "opened because there is already an unresolved malfunction. "
-                            f"Registration: {bound.registration_number}. "
-                            f"Gate: {malfunction.gate_name or malfunction.gate_entity_id}. "
-                            f"Duration: {malfunction.duration_display}. "
-                            "Write one concise sentence under 220 characters. Start with \"Sorry,\". It must "
-                            "say the gate was not opened for the registration, that the gate has been "
-                            "malfunctioning for the duration, and that it is currently unresolved. Do not "
-                            "mention the requester, action type, IACS, force-open, Home Assistant, "
-                            "active/FUBAR/status labels, blocking, retrying, or trying again."
-                        ),
-                    ),
-                ],
-                max_output_tokens=120,
-                request_purpose="notifications.actionable_malfunction_failure",
-            )
-            message = _clean_llm_notification_text(result.text)
-            if not _valid_malfunction_message(
-                message,
-                registration_number=bound.registration_number,
-                duration_display=malfunction.duration_display,
-                person_name=identity.person.display_name,
-            ):
-                message = await self._repair_malfunction_failure_message(
-                    provider,
-                    bad_message=message,
-                    bound=bound,
-                    malfunction=malfunction,
-                )
-            if not _valid_malfunction_message(
-                message,
-                registration_number=bound.registration_number,
-                duration_display=malfunction.duration_display,
-                person_name=identity.person.display_name,
-            ):
-                return fallback
-            return message[:500]
-        except ProviderNotConfiguredError:
-            logger.info("actionable_notification_malfunction_llm_not_configured")
-        except Exception as exc:  # noqa: BLE001 - optional LLM failures cannot block durable gate output.
-            logger.warning(
-                "actionable_notification_malfunction_message_failed",
-                extra={
-                    "context_id": str(bound.id),
-                    "malfunction_id": str(malfunction.id),
-                    "error": str(exc),
-                },
-            )
-        return fallback
+        return _fallback_malfunction_failure_message(bound, malfunction, force=force)
 
-    async def _repair_malfunction_failure_message(
-        self,
-        provider: Any,
-        *,
-        bad_message: str,
-        bound: BoundActionContext,
-        malfunction: ActiveGateMalfunctionContext,
-    ) -> str:
-        result = await complete_with_provider_options(
-            provider,
-            [
-                ChatMessageInput(
-                    role="system",
-                    content=(
-                        "Rewrite a Home Assistant mobile notification. Return only one natural sentence. "
-                        "No markdown, no JSON, no sign-off."
-                    ),
-                ),
-                ChatMessageInput(
-                    role="user",
-                    content=(
-                        f"The previous notification was unsuitable: {bad_message!r}. "
-                        f"Write a replacement for registration {bound.registration_number}. "
-                        f"The gate has been malfunctioning for {malfunction.duration_display} and is "
-                        "currently unresolved. Start with \"Sorry,\" and keep it under 220 characters. "
-                        "Do not mention the requester, blocked, try again, active "
-                        "unresolved malfunction state, request, IACS, Home Assistant, force-open, or status labels."
-                    ),
-                ),
-            ],
-            max_output_tokens=120,
-            request_purpose="notifications.actionable_malfunction_repair",
-        )
-        return _clean_llm_notification_text(result.text)
 
 def _derived_action_token(context_id: uuid.UUID, action: str) -> str:
     """Opaque deterministic descriptor; only its HMAC hash is persisted."""
@@ -1827,62 +1713,10 @@ def _fallback_generic_gate_failure(bound: BoundActionContext) -> str:
     return f"The gate was not opened for {bound.registration_number}. The gate command failed."
 
 
-def _clean_llm_notification_text(value: str) -> str:
-    text = " ".join(str(value or "").strip().split())
-    if not text:
-        return ""
-    if text.startswith('"') and text.endswith('"') and len(text) > 1:
-        text = text[1:-1].strip()
-    return text
 
 
-def _valid_malfunction_message(
-    message: str,
-    *,
-    registration_number: str,
-    duration_display: str,
-    person_name: str,
-) -> bool:
-    text = _clean_llm_notification_text(message)
-    if not text or len(text) > 500:
-        return False
-    lowered = text.lower()
-    compact = _compact_alnum(text)
-    if not lowered.startswith("sorry"):
-        return False
-    if _compact_alnum(registration_number) not in compact:
-        return False
-    if duration_display.lower() not in lowered:
-        return False
-    if "unresolved" not in lowered or "malfunction" not in lowered:
-        return False
-    if not any(phrase in lowered for phrase in ("not opened", "could not be opened", "couldn't be opened")):
-        return False
-    banned_terms = (
-        "active unresolved malfunction state",
-        "try again",
-        "retry",
-        "blocked",
-        "request ",
-        "request:",
-        "request for",
-        "iacs",
-        "home assistant",
-        "force-open",
-        "force open",
-        "fubar",
-        "status",
-        "requester",
-        "action type",
-    )
-    if any(term in lowered for term in banned_terms):
-        return False
-    person = str(person_name or "").strip().lower()
-    return not (person and person in lowered)
 
 
-def _compact_alnum(value: str) -> str:
-    return "".join(character.lower() for character in str(value or "") if character.isalnum())
 
 
 @lru_cache

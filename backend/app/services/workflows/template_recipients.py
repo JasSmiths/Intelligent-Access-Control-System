@@ -14,8 +14,6 @@ FIELDS = ("title_template", "message_template")
 PREFIXES = {
     "mobile": ("home_assistant_mobile:", "apprise:"),
     "voice": ("home_assistant_tts:",),
-    "discord": ("discord:",),
-    "whatsapp": ("whatsapp:admin:", "whatsapp:number:"),
 }
 
 

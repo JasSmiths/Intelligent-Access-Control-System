@@ -1,5 +1,5 @@
 import { api, createActionConfirmation, type ApiRequestOptions } from "./client";
-import type { NotificationChannelId, NotificationTriggerOption, UnifiProtectCamera, UserAccount } from "./types";
+import type { NotificationChannelId, NotificationTriggerOption, UnifiProtectCamera } from "./types";
 
 export type NotificationActionType = NotificationChannelId;
 export type NotificationConditionType = "schedule" | "presence";
@@ -69,9 +69,9 @@ export const workflowApi = {
   getAutomationRun(runId: string, options: ApiRequestOptions = {}): Promise<AutomationRun> {
     return api.get<AutomationRun>(`/api/v1/automations/runs/${encodeURIComponent(runId)}`, options);
   },
-  async getAutomationData(options: ApiRequestOptions = {}): Promise<{ catalog: AutomationCatalogResponse; rules: AutomationRule[]; users: UserAccount[] }> {
-    const [catalog, rules, users] = await Promise.all([api.get<AutomationCatalogResponse>("/api/v1/automations/catalog", options), api.get<AutomationRule[]>("/api/v1/automations/rules", options), api.get<UserAccount[]>("/api/v1/users?include_photo=false", options)]);
-    return { catalog, rules, users };
+  async getAutomationData(options: ApiRequestOptions = {}): Promise<{ catalog: AutomationCatalogResponse; rules: AutomationRule[] }> {
+    const [catalog, rules] = await Promise.all([api.get<AutomationCatalogResponse>("/api/v1/automations/catalog", options), api.get<AutomationRule[]>("/api/v1/automations/rules", options)]);
+    return { catalog, rules };
   },
   saveAutomationRule(rule: AutomationRule, payload: AutomationRulePayload): Promise<AutomationRule> {
     const isCreate = rule.id.startsWith("draft-");
@@ -87,9 +87,6 @@ export const workflowApi = {
   },
   runAutomationDryRun(payload: AutomationRulePayload): Promise<Record<string, unknown>> {
     return api.post<Record<string, unknown>>("/api/v1/automations/dry-run", payload);
-  },
-  parseAutomationSchedule(text: string): Promise<Record<string, unknown>> {
-    return api.post<Record<string, unknown>>("/api/v1/automations/parse-schedule", { text });
   },
   async getNotificationData(options: ApiRequestOptions = {}): Promise<{ catalog: NotificationCatalogResponse; rules: NotificationRule[] }> {
     const [catalog, rules] = await Promise.all([

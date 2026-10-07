@@ -128,7 +128,6 @@ def _apprise_service_label(scheme: str) -> str:
     labels = {
         "pover": "Pushover",
         "mailto": "Email",
-        "discord": "Discord",
         "slack": "Slack",
         "tgram": "Telegram",
         "telegram": "Telegram",

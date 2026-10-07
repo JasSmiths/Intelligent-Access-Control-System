@@ -2,7 +2,6 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import Awaitable, Callable
 import asyncio
 from datetime import UTC, datetime
-from functools import partial
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -17,13 +16,10 @@ from app.core.logging import configure_logging, get_logger
 from app.db.bootstrap import init_database
 from app.db.session import AsyncSessionLocal, engine
 from app.services.auth import authenticate_request, count_users
-from app.services.chat import chat_service
-from app.services.alfred.feedback import alfred_feedback_service
 from app.services.access_devices import get_access_device_service
 from app.services.event_bus import event_bus
 from app.services.access_events import get_access_event_service
 from app.services.automations import get_automation_service
-from app.services.discord_messaging import get_discord_messaging_service
 from app.services.home_assistant import get_home_assistant_service
 from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.lpr_webhook_security import verify_lpr_webhook_request
@@ -48,17 +44,12 @@ from app.services.telemetry import (
 )
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.visitor_passes import get_visitor_pass_service
-from app.services.messaging.whatsapp_delivery import get_whatsapp_delivery_service
-from app.services.messaging.whatsapp_incoming import get_whatsapp_incoming_dispatcher
-from app.services.messaging.discord_incoming import DiscordIncomingGateway
-from app.services.messaging_bridge import messaging_bridge_service
 
 logger = get_logger(__name__)
 
 KIB = 1024
 MIB = 1024 * KIB
 DEFAULT_API_BODY_LIMIT_BYTES = 2 * MIB
-CHAT_UPLOAD_BODY_LIMIT_BYTES = 25 * MIB
 WEBHOOK_BODY_LIMIT_BYTES = 1 * MIB
 AUTOMATION_WEBHOOK_BODY_LIMIT_BYTES = 256 * KIB
 
@@ -96,7 +87,7 @@ async def lifespan(app: FastAPI):
     validate_startup_security_config()
     logger.info("starting_backend", extra={"app_name": settings.app_name, "environment": settings.environment})
     try:
-        async with AsyncExitStack() as resources, AsyncExitStack() as approvals, AsyncExitStack() as producers:
+        async with AsyncExitStack() as resources, AsyncExitStack() as producers:
             resources.push_async_callback(_stop_owned_service, "database", engine.dispose)
             if is_recovery_hold():
                 await verify_readable_schema()
@@ -107,23 +98,11 @@ async def lifespan(app: FastAPI):
                     app.state.startup_complete = False
                 return
             await init_database()
-            # Drain intake first, then its shielded approval tasks, while hardware,
-            # delivery sinks and database resources are still available.
-            approvals.push_async_callback(_stop_owned_service, "alfred_approvals", chat_service.stop)
-            resources.push_async_callback(_stop_owned_service, "whatsapp_delivery", get_whatsapp_delivery_service().stop)
-            discord_service = get_discord_messaging_service()
-            discord_gateway = DiscordIncomingGateway(
-                discord_service, message_handler=messaging_bridge_service.handle_message,
-                confirmation_handler=partial(messaging_bridge_service.handle_confirmation, provider="discord"),
-            )
-            discord_service.configure_gateway(discord_gateway)
             # Register before start so a partially started service is also closed.
             for name, service in (
                 ("realtime", event_bus),
                 ("notifications", get_notification_service()),
                 ("automations", get_automation_service()),
-                ("alfred_feedback", alfred_feedback_service),
-                ("discord", discord_service),
                 ("visitor_passes", get_visitor_pass_service()),
                 ("access_devices", get_access_device_service()),
                 ("access_events", get_access_event_service()),
@@ -132,19 +111,11 @@ async def lifespan(app: FastAPI):
                 ("gate_malfunctions", get_gate_malfunction_service()),
                 ("unifi_protect", get_unifi_protect_service()),
             ):
-                if name == "discord":
-                    # Reverse cleanup stops the bot producer before draining its
-                    # incoming worker, while notification sinks and DB stay alive.
-                    producers.push_async_callback(_stop_owned_service, "discord_incoming", discord_gateway.stop)
-                    discord_gateway.start()
                 owner = producers if name in {
-                    "discord", "automations", "unifi_protect", "access_events", "movement_reconciliation"
+                    "automations", "unifi_protect", "access_events", "movement_reconciliation"
                 } else resources
                 owner.push_async_callback(_stop_owned_service, name, service.stop)
                 await service.start()
-            whatsapp_incoming = get_whatsapp_incoming_dispatcher()
-            producers.push_async_callback(_stop_owned_service, "whatsapp_incoming", whatsapp_incoming.stop)
-            whatsapp_incoming.start()
             startup_at = datetime.now(tz=UTC)
             previous_runtime_state = read_backend_runtime_state()
             for name, create_coroutine in (
@@ -171,13 +142,13 @@ app = FastAPI(
     openapi_tags=[
         {"name": "Health", "description": "Backend health and service readiness checks."},
         {"name": "Authentication", "description": "First-run setup, login, logout, and current-user preferences."},
-        {"name": "AI Agents", "description": "Provider discovery, agent tooling, chat, uploads, and chat realtime."},
+        {"name": "AI Providers", "description": "Configured providers for camera image analysis."},
         {"name": "Automations", "description": "System-wide trigger, condition, and action automation rules."},
         {"name": "Diagnostics", "description": "Operational diagnostics and LPR timing instrumentation."},
         {"name": "Directory", "description": "People, vehicles, groups, and directory-owned DVLA refresh actions."},
         {"name": "Access Events", "description": "Access history, presence, anomalies, alerts, and alert snapshots."},
         {"name": "Gate Telemetry", "description": "Gate malfunction state, history, trace lookup, and operator override."},
-        {"name": "Integrations", "description": "Home Assistant, Apprise, Discord, DVLA, iCloud Calendar, gate, cover, and announcement operations."},
+        {"name": "Integrations", "description": "Home Assistant, Apprise, DVLA, iCloud Calendar, gate, cover, and announcement operations."},
         {"name": "UniFi Protect", "description": "UniFi Protect cameras and media."},
         {"name": "Top Charts", "description": "Leaderboard and access rhythm rankings."},
         {"name": "Maintenance", "description": "Maintenance mode status and controls."},
@@ -210,7 +181,6 @@ PUBLIC_AUTH_PATHS = {
     "/api/v1/auth/login",
     "/api/v1/auth/logout",
     "/api/v1/webhooks/ubiquiti/lpr",
-    "/api/v1/webhooks/whatsapp",
 }
 PUBLIC_AUTH_PREFIXES = (
     "/api/v1/automations/webhooks/",
@@ -247,9 +217,7 @@ def _should_trace_api_request(method: str, path: str) -> bool:
 def _body_limit_for_request(method: str, path: str) -> int | None:
     if method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
         return None
-    if path == "/api/v1/ai/chat/upload":
-        return CHAT_UPLOAD_BODY_LIMIT_BYTES
-    if path == "/api/v1/webhooks/whatsapp" or path == "/api/v1/webhooks/ubiquiti/lpr":
+    if path == "/api/v1/webhooks/ubiquiti/lpr":
         return WEBHOOK_BODY_LIMIT_BYTES
     if path.startswith("/api/v1/automations/webhooks/"):
         return AUTOMATION_WEBHOOK_BODY_LIMIT_BYTES
@@ -456,7 +424,6 @@ async def service_root() -> dict[str, object]:
             "api_health": "/api/v1/health",
             "docs": "/docs",
             "realtime": "/api/v1/realtime/ws",
-            "ai_chat": "/api/v1/ai/chat/ws",
         },
     }
 

@@ -17,10 +17,6 @@ export const secretSettingKeys = new Set([
   "home_assistant_token",
   "esphome_devices",
   "apprise_urls",
-  "discord_bot_token",
-  "whatsapp_access_token",
-  "whatsapp_webhook_verify_token",
-  "whatsapp_app_secret",
   "dvla_api_key",
   "unifi_protect_username",
   "unifi_protect_password",
@@ -30,15 +26,7 @@ export const secretSettingKeys = new Set([
   "anthropic_api_key",
   "lpr_webhook_token"
 ]);
-export const discordListSettingKeys = new Set([
-  "discord_guild_allowlist",
-  "discord_channel_allowlist",
-  "discord_user_allowlist",
-  "discord_role_allowlist",
-  "discord_admin_role_ids"
-]);
 const listSettingKeys = new Set([
-  ...discordListSettingKeys,
   "lpr_allowed_smart_zones",
   "lpr_webhook_allowed_source_ips"
 ]);
@@ -187,7 +175,7 @@ export function coerceSettingsPayload(form: Record<string, string>): Record<stri
       payload[key] = parsed;
     } else if (listSettingKeys.has(key)) {
       payload[key] = value.replace(/,/g, "\n").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-    } else if (["auth_cookie_secure", "unifi_protect_verify_ssl", "discord_allow_direct_messages", "discord_require_mention", "whatsapp_enabled"].includes(key)) {
+    } else if (["auth_cookie_secure", "unifi_protect_verify_ssl"].includes(key)) {
       payload[key] = value === "true";
     } else if ([
       "auth_access_token_minutes",

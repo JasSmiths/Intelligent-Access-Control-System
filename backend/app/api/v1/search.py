@@ -56,7 +56,6 @@ ViewTarget = Literal[
     "settings",
     "settings_general",
     "settings_auth",
-    "alfred_training",
     "settings_automations",
     "settings_notifications",
     "settings_lpr",
