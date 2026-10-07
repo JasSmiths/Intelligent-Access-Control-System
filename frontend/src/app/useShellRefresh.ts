@@ -57,9 +57,10 @@ export function useShellRefresh(view: ViewKey, user: UserAccount | null, setters
         const stillFailed = [...failures];
         setFailedKeys(stillFailed);
         setReadState(stillFailed.length ? stillFailed.some((key) => critical.has(key) && !loaded.has(key)) ? "unavailable" : "stale" : "ready");
+        // Feature reads own their errors; an unrelated shell failure must not hide an invalidation.
+        if (route) setDataRefreshToken((token) => token + 1);
         const failure = results.find((result) => result.status === "rejected");
         if (failure?.status === "rejected") throw failure.reason;
-        if (route) setDataRefreshToken((token) => token + 1);
       });
       return { coordinator, controller };
     }

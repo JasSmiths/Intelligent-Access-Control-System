@@ -82,3 +82,24 @@ it("retains an unavailable critical read across an unrelated successful invalida
   expect(result.current.readState).toBe("ready");
   expect(result.current.failedKeys).toEqual([]);
 });
+
+it("ignores a rejected blocked refresh after its account session is replaced", async () => {
+  let rejectOld!: (error: Error) => void;
+  const blocked = new Promise<unknown>((_resolve, reject) => { rejectOld = reject; });
+  const read = vi.spyOn(api, "get").mockReturnValue(blocked);
+  const updates = setters();
+  const { result, rerender } = renderHook(({ user }) => useShellRefresh("people", user, updates), { initialProps: { user: admin } });
+  let oldRefresh!: Promise<void>;
+  act(() => { oldRefresh = result.current.refresh(); });
+  const oldSignals = read.mock.calls.map(([, options]) => options?.signal);
+  rerender({ user: { ...admin, id: "admin-two" } });
+  expect(oldSignals.every((signal) => signal?.aborted)).toBe(true);
+  await act(async () => { rejectOld(new Error("Old account read failed late")); await oldRefresh; });
+  expect(result.current.dataRefreshToken).toBe(0);
+  expect(result.current.failedKeys).toEqual([]);
+  for (const update of Object.values(updates)) expect(update).not.toHaveBeenCalled();
+  read.mockImplementation(async (path) => path.startsWith("/api/v1/people?") || path.startsWith("/api/v1/vehicles?") ? { items: [], total: 0, next_cursor: null } : []);
+  await act(async () => { await result.current.refresh(); });
+  expect(result.current.dataRefreshToken).toBe(1);
+  expect(updates.people).toHaveBeenCalledOnce();
+});
