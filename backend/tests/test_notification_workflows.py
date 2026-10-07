@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, cast
 import uuid
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -26,9 +27,9 @@ from app.services.notifications import (
     NotificationService,
     TRIGGER_CATALOG,
     VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE,
-    visitor_pass_notification_contexts_from_event,
 )
 from app.services.notification_planning import presence_condition_matches
+from app.services.workflows.visitor_notifications import visitor_pass_notification_contexts_from_event
 from app.services.workflows.context import render_template
 from app.services.notification_rendering import (
     context_variables,
@@ -1620,3 +1621,16 @@ async def test_home_assistant_gate_bearer_never_enters_success_or_error_logs(mon
     assert records[0][1]["extra"]["action_kind"] == "gate_force_open"
     if raises:
         assert records[0][1]["extra"]["error_class"] == "RuntimeError"
+
+
+async def test_realtime_visitor_events_cannot_enqueue_and_only_trigger_wakes_dispatcher():
+    service = NotificationService()
+    service.enqueue_notification = AsyncMock(side_effect=AssertionError("Realtime cannot reserve duplicate notification work"))
+    service.dispatcher = SimpleNamespace(wake=Mock())
+    for kind in ("visitor_pass.created", "visitor_pass.cancelled", "visitor_pass.status_changed", "visitor_pass.used", "visitor_pass.departure_recorded", "unrelated"):
+        await service._handle_realtime_event(RealtimeEvent(type=kind, payload={}, created_at="2026-10-07T00:00:00+00:00"))
+    service.enqueue_notification.assert_not_awaited()
+    service.dispatcher.wake.assert_not_called()
+    await service._handle_realtime_event(RealtimeEvent(type="notification.trigger", payload={"id": "untrusted-hint"}, created_at="2026-10-07T00:00:00+00:00"))
+    service.dispatcher.wake.assert_called_once()
+    service.enqueue_notification.assert_not_awaited()

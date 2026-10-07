@@ -2,10 +2,12 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 import uuid
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import current_user
 from app.api.v1 import integrations, maintenance, settings, unifi_protect
@@ -193,8 +195,10 @@ def app_for_user(user: User) -> FastAPI:
     async def override_current_user() -> User:
         return user
 
+    app.state.owner_session = AsyncMock(spec=AsyncSession)
+
     async def override_db_session():
-        yield SimpleNamespace()
+        yield app.state.owner_session
 
     app.dependency_overrides[current_user] = override_current_user
     app.dependency_overrides[get_db_session] = override_db_session
@@ -312,7 +316,8 @@ async def test_gate_open_succeeds_with_admin_and_consumed_confirmation(monkeypat
     monkeypatch.setattr(integrations, "get_gate_command_coordinator", lambda: FakeCoordinator())
     monkeypatch.setattr(integrations, "get_access_device_service", lambda: FakeDevices())
     monkeypatch.setattr(integrations, "write_audit_log", audit)
-    transport = httpx.ASGITransport(app=app_for_user(user_with_role(UserRole.ADMIN)))
+    app = app_for_user(user_with_role(UserRole.ADMIN))
+    transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/v1/integrations/gate/open",
@@ -321,6 +326,7 @@ async def test_gate_open_succeeds_with_admin_and_consumed_confirmation(monkeypat
 
     assert response.status_code == 200
     assert response.json()["accepted"] is True
+    app.state.owner_session.commit.assert_awaited_once()
     assert consumed["action"] == "gate.open"
     assert consumed["payload"] == {"reason": "test"}
     assert consumed["confirmation_token"] == "server-token"

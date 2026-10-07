@@ -77,7 +77,6 @@ logger = get_logger(__name__)
 
 @dataclass
 class AccessExecutionResult:
-    window: DebounceWindow
     read: PlateRead
     runtime: RuntimeConfig
     event: AccessEvent
@@ -89,9 +88,6 @@ class AccessExecutionResult:
     direction_resolution: dict[str, Any]
     timing: TimingClassification
     anomalies: list[Anomaly]
-    gate_command_required: bool
-    gate_open_skipped: bool
-    gate_outcome: GateCommandOutcome | None
     presence_updated: bool
     movement_saga: MovementSagaRecord
 
@@ -344,23 +340,19 @@ class AccessExecution:
             }
         )
         return AccessExecutionResult(
-            window,
-            read,
-            runtime,
-            event,
-            person,
-            vehicle,
-            visitor_pass,
-            visitor_pass_mode,
-            external_admission,
-            direction_resolution,
-            timing,
-            anomalies,
-            gate_command_required,
-            gate_open_skipped,
-            gate_outcome,
-            presence_updated,
-            movement_saga,
+            read=read,
+            runtime=runtime,
+            event=event,
+            person=person,
+            vehicle=vehicle,
+            visitor_pass=visitor_pass,
+            visitor_pass_mode=visitor_pass_mode,
+            external_admission=external_admission,
+            direction_resolution=direction_resolution,
+            timing=timing,
+            anomalies=anomalies,
+            presence_updated=presence_updated,
+            movement_saga=movement_saga,
         )
 
     async def _build_anomalies(

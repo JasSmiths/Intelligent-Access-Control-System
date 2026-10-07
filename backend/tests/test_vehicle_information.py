@@ -242,3 +242,20 @@ async def test_transient_backoff_escalates_and_preserves_last_success():
         remaining = (result.results["dvsa"].retry_at-datetime.now(UTC)).total_seconds()
         assert seconds-2 <= remaining <= seconds
         assert result.information.model == "Focus" and result.information.mot_freshness == "stale"
+
+
+async def test_in_session_invalidation_clears_only_owned_aggregate_and_never_commits():
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from app.models import Vehicle
+    from app.services.vehicle_information_store import INFORMATION_SUMMARY_FIELDS, invalidate_information_in_session
+    vehicle = Vehicle(registration_number="SYNTH01", make="User make", model="User model", color="User colour")
+    for field in INFORMATION_SUMMARY_FIELDS:
+        setattr(vehicle, field, "synthetic-owned-value")
+    session = AsyncMock(spec=AsyncSession)
+    snapshot = object()
+    session.get.return_value = snapshot
+    await invalidate_information_in_session(session, vehicle)
+    session.delete.assert_awaited_once_with(snapshot)
+    session.commit.assert_not_awaited()
+    assert all(getattr(vehicle, field) is None for field in INFORMATION_SUMMARY_FIELDS)
+    assert (vehicle.registration_number, vehicle.make, vehicle.model, vehicle.color) == ("SYNTH01", "User make", "User model", "User colour")

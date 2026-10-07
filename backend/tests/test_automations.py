@@ -3,7 +3,7 @@ import hashlib
 import hmac
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 import uuid
 
 from fastapi import HTTPException
@@ -836,3 +836,24 @@ def test_automation_definition_and_intake_do_not_import_execution_facades():
     assert not {node.module for node in ast.walk(intake) if isinstance(node, ast.ImportFrom)} & forbidden
     assert not {node.func.attr for node in ast.walk(intake) if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)} & {"commit", "publish", "wake", "command_device", "execute_open"}
+
+
+async def test_automation_lifecycle_has_no_realtime_bridge_subscription(monkeypatch):
+    import asyncio
+    service = AutomationService()
+    started = asyncio.Event()
+    async def scheduler():
+        started.set()
+        await asyncio.Event().wait()
+    subscribe, unsubscribe = Mock(), Mock()
+    monkeypatch.setattr(automations.event_bus, "subscribe", subscribe)
+    monkeypatch.setattr(automations.event_bus, "unsubscribe", unsubscribe)
+    monkeypatch.setattr(service, "_run_scheduler", scheduler)
+    service.dispatcher = SimpleNamespace(start=Mock(), stop=AsyncMock())
+    await service.start()
+    await asyncio.wait_for(started.wait(), 1)
+    await service.stop()
+    subscribe.assert_not_called()
+    unsubscribe.assert_not_called()
+    service.dispatcher.start.assert_called_once()
+    service.dispatcher.stop.assert_awaited_once()

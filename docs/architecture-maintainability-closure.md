@@ -34,10 +34,19 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   30; checked/strict coverage is 60/43 with unchanged flags. Four affected browser
   cases carried forward by all 225 frontend hashes; source integrity, cleanup and
   operational snapshots are clean. Earlier failed P2 candidates are superseded.
-- Current checkpoint: P4 backend policy extraction and E1 fixture implemented;
-  final required validation and Astra patch sign-off pending. P3 frontend reads
-  develop separately from approved P2, with sequential workflow-file ownership.
-  P4 integration editor lifetime remains a separate frontend slice.
+- Approved P4 backend checkpoint: `3416d577169943e1c9a7f4db240c051e525cc7da`,
+  tree `1145c5a2512e404078fa1a3d5a313f274dc26c4b`. Astra Ultra approved
+  final mapped source `27f12cbdfbed61991d90b089cd2eb00e63ae0e0facd4fe6d087f112c4059da65`
+  and patch `ba4e28da05c34890c4c20208994667a280ae66e69f3c1f3a89dd92c94ed0f0c0`.
+  All 148 full-gate entries passed, including 1,258 backend/294 frontend tests,
+  seven PostgreSQL provider extension cases and checked/strict coverage 61/44.
+  A mapped closure-only sentence correction passed docs checks with all runtime,
+  test, frontend, schema and harness bytes unchanged. All 727 committed source
+  hashes equal the approved candidate; source, cleanup and operational state are clean.
+- Current checkpoint: P5 bounded cleanup and in-session information reset are
+  implemented, awaiting the required full gate and Astra exact patch approval.
+  P3 frontend reads develop separately from approved P2, with sequential workflow
+  ownership. P4 integration editor lifetime remains a separate frontend slice.
   The brief initial shared-checkout editing period was separated before the first
   validation checkpoint; integration remains sequential.
 - Retained evidence: `p0-p1-validation/iacs-validation-smbqtetg`,
@@ -49,8 +58,12 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   `p2-candidate-corrected.json`, `p2-correction-source-mapping.json`,
   `p2-evidence-summary.json`, `p2-astra-approval.json` and
   `p2-commit-equivalence.json`, relative to the evidence root. The original audit
-  remains byte-identical. P4 evidence is retained separately and is not approved
-  merely because its design was approved.
+  remains byte-identical.
+- P4 backend retained evidence: `p4-validation/iacs-validation-j64g1vik`,
+  `p4-candidate-final.json`, `p4-docs-only-source-mapping.json`,
+  `p4-evidence-summary.json`, `p4-astra-approval.json`,
+  `p4-commit-equivalence.json` and `p4-benchmark-coordination.json`.
+  P5 evidence is retained separately; design approval is not patch approval.
 - Deployment, production migrations and live provider/hardware tests are excluded.
 
 ## Findings
@@ -59,31 +72,31 @@ an explicit disposition requiring approval, not a claim that code was fixed.
 | --- | --- | --- | --- |
 | AM-01 workflow definitions | Workflow definitions, handlers and generated editor contracts; P2 | Exhaustive action/config/editor/handler parity, historical plan/recovery checks, E2 conformance | Closed / Astra approved P2 exact candidate |
 | AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Pending / pending |
-| AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Implemented, final validation/review pending / pending |
+| AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Closed backend / Astra approved P4 exact candidate |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Pending / pending |
 | AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Astra-approved schema/state design; restart/crash/deadline/late-linkage checks; E2/E4 conformance | Pending / pending |
 | AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | Pending / pending |
 | AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Overflow/counters/current evidence, nested publication, shutdown and 20/2,000-input probes | Pending / pending |
 | AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Pending / pending |
 | AM-09 runtime PDF support | Shared backend image ancestry and final-image smoke; P1 | Runtime-user PDF from installed actual template with no network/overlays; image identity/size/build time | Closed / Astra approved P1 runtime packaging |
-| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original coverage/flags preserved; package inheritance and negative guards; successful JSON/complete-plan retention and full harness | P0 safeguards and P2 coverage/evidence approved; continuous P3–P9 checks pending / Astra approved P0/P2 |
-| AM-11 obsolete authority/bridges | Pure access plan, execution result and durable workflow intake; P5 | Whole-repository consumer trace; authoritative journals retained; no duplicate realtime intake | Pending / pending |
+| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original coverage/flags preserved; package inheritance and negative guards; successful JSON/complete-plan retention and full harness | P0 safeguards and P2/P4 coverage/evidence approved; continuous P3–P9 checks pending / Astra approved P0/P2/P4 |
+| AM-11 obsolete authority/bridges | Pure access plan, execution result and durable workflow intake; P5 | Whole-repository consumer trace; authoritative journals retained; no duplicate realtime intake | Implemented; full validation/review pending / pending |
 | AM-12 compact presence/forecast | Presence/predictor reads; P7 | Equivalent output and compact unloaded columns; bounded internal reads; 20/2,000-person density evidence; public-list exception disclosed | Pending / pending |
-| AM-13 provider-information reset | Vehicle information store in-session invalidation; P5 | Plate-change aggregate, stale completion and user-field preservation; E4 conformance | Pending / pending |
+| AM-13 provider-information reset | Vehicle information store in-session invalidation; P5 | Plate-change aggregate, stale completion and user-field preservation; E4 conformance | Implemented; full validation/review pending / pending |
 
 ## Simplification candidates
 
 | Candidate | Disposition and owner | Required evidence or retention reason | Status / Astra approval |
 | --- | --- | --- | --- |
-| Pure plan discarded command field | Remove; P5/AM-11 | Trace internal consumers; preserve persisted saga/receipt semantics | Pending / pending |
-| Automation realtime bridge and notification visitor fallback | Remove; P5/AM-11 | Keep durable mapper and notification wake; negative duplicate-intake fixtures | Pending / pending |
-| AccessExecutionResult unused window/command/skipped/outcome fields | Narrow after tracing; P5/AM-11 | Whole-repository and fixture trace; retain durable fields | Pending / pending |
+| Pure plan discarded command field | Remove; P5/AM-11 | Trace internal consumers; preserve persisted saga/receipt semantics | Implemented; full validation/review pending / pending |
+| Automation realtime bridge and notification visitor fallback | Remove; P5/AM-11 | Keep durable mapper and notification wake; negative duplicate-intake fixtures | Implemented; full validation/review pending / pending |
+| AccessExecutionResult unused window/command/skipped/outcome fields | Narrow after tracing; P5/AM-11 | Whole-repository and fixture trace; retain durable fields | Implemented; full validation/review pending / pending |
 | External-admission private method | Explicit supported admission interface; P6 | One admission implementation; preserve execution/admission ordering | Pending / pending |
 | Unused shell reads and seeds | Remove with feature ownership; P3 | Actual feature read coverage and invalidation/draft lifetimes | Pending / pending |
 | OAuth placeholder flags/button/import | Remove together; P4 | No implemented OAuth operation; provider editor checks | Pending / pending |
 | Artificial provider progress waits | Remove; P4 | Actual pending work owns feedback; no backend speedup claim | Pending / pending |
 | Report first-500/secondary subject filtering | Replace with bounded server search and selected hydration; P3 | Subject beyond 500 and server-only searchable-field fixtures | Pending / pending |
-| _commit_if_supported and guaranteed-protocol getattr wrappers | Remove after correcting fakes/ports; P5 | Concrete required ports and uncertainty-boundary regression checks | Pending / pending |
+| _commit_if_supported and guaranteed-protocol getattr wrappers | Remove after correcting fakes/ports; P5 | Concrete required ports and uncertainty-boundary regression checks | Implemented; full validation/review pending / pending |
 | IACS_SEED_DEMO_DATA | Retain pending external-consumer evidence; P5 | Parsed public deployment option; audit did not establish all external configuration users | Planned retention / pending |
 | Calendar SDK fallback shapes | Retain unless locked-SDK/serialized-session fixtures prove obsolete; P5/P8 | Vendor/data compatibility not established by absence of one call path | Planned retention / pending |
 | Public legacy cover aliases | Retain; P5 | External consumers unknown; confirmation bindings remain supported | Planned retention / pending |
@@ -101,7 +114,7 @@ an explicit disposition requiring approval, not a claim that code was fixed.
 
 | Exercise | Stage and acceptance | Status / Astra approval |
 | --- | --- | --- |
-| E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | Backend fixture implemented, final validation/review pending / pending |
+| E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | Backend fixture approved; frontend/P9 integration pending / Astra approved P4 backend |
 | E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | P2 conformance approved; P6/P9 integration pending / Astra approved P2 |
 | E3 calendar schedule exception | P2/P8/P9: schedule ownership, current authority and generated configuration contracts | Pending / pending |
 | E4 last recorded mileage summary | P5/P6/P9: feature store owns new summary/reset and optional completion | Pending / pending |
@@ -151,3 +164,37 @@ Negative schema, binding, historical and editor fixtures, plus a test-only
 transactional action through real intake/reservation/completion/audit, passed the
 corrected P2 gate and received Astra approval on the exact checkpoint recorded
 above. No new production action is shipped.
+
+## P5 implementation and retained dispositions
+
+The pure access plan no longer carries the discarded command field or its unused
+hardware inputs. The execution result exposes only consumed fields, with named
+construction; execution locals, persisted saga/journal/outcome payloads and the
+separate resident-recovery command requirement remain authoritative. Repository
+consumer traces found no supported readers of the removed result fields.
+
+The automation no-op realtime subscription and notification visitor fallback are
+removed. Durable producers still use their pure mappers, and
+`notification.trigger` still wakes the notification dispatcher. The two manual
+hardware HTTP paths now require AsyncSession.commit before a negative receipt;
+the concrete HA client close port is called directly. Test fakes implement those
+required ports. Optional ESPHome verification and provider close/subscription
+capabilities, heterogeneous provider errors and locked-vendor Calendar fallback
+shapes remain: those are distinct optional/vendor contracts, not guaranteed ports.
+
+Vehicle-information invalidation now lives beside snapshot application in its
+store. It deletes the snapshot and clears the one owned summary-field inventory
+in the caller's transaction. Directory still owns authorization, row lock, cached
+replacement, required audit and commit. Unit and PostgreSQL fixtures cover no
+independent commit, rollback, late old-plate completion and preserved user fields.
+The E4 last-mileage extension remains an inert final integrated exercise pending
+P6/P9; no new production summary field is introduced here.
+
+All planned-retention rows above keep their stated disposition: public deployment
+options/scripts and cover aliases have unproven external consumers; assignment
+attribution and camera interfaces remain active contracts; Python Playwright,
+pgvector and exact locked dependencies support active rendering/migration paths;
+historical names/checksums/redaction preserve audit interpretation; the prototype,
+screenshots and V2 privacy workflow are separate retained evidence/processes.
+These are explicit retention decisions awaiting Astra's P5 exact-candidate review,
+not claims of deletion or completed final integrated conformance.

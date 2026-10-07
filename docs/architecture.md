@@ -57,6 +57,11 @@ owner explicitly; vendor modules never construct business services.
    transaction. A grant awaiting gate verification does not establish admission.
    Applicable garage fanout follows verified admission through the device owner.
 
+The pure plan carries decision and direction evidence. Execution computes whether
+a command is required; persisted journals, movement sagas and receipts retain
+command authority and outcome. Resident recovery retains its command requirement in the persisted movement
+saga.
+
 The ledger supplies durable idempotency; duplicate reads and retries cannot renew
 recognition authority. Suppressed movements remain in history. Reconciliation
 resolves pending receipts and admission, while historical/backfill processing
@@ -252,7 +257,11 @@ normalization. Preview remains a tolerant display operation. Historical serializ
 retain unknown records;
 unsupported or malformed pending work becomes an explicit review hold before
 attempt. Attempted payloads and frozen destinations remain unchanged on recovery.
-Keep automation and notification stores separate.
+Keep automation and notification stores separate. Automation intake uses durable
+trigger producers and its scheduler; it has no realtime subscription. The
+notification listener treats `notification.trigger` only as a wake hint. Visitor
+realtime messages cannot reserve work; pure workflow mappers remain available to
+the durable producers.
 
 [The exporter](../backend/app/services/workflows/export_contracts.py) derives
 [static frontend types and defaults](../frontend/src/api/generated/workflows.ts).
@@ -293,7 +302,11 @@ MOT/tax notice handoffs use stable event identities and the originating job dead
 
 The [snapshot owner](../backend/app/services/vehicle_information_store.py) stores
 allowlisted results separately from vehicle rows and pages history on the server.
-Summary reads do not join or load history. Vehicle registration and request-time
+Its in-session invalidation operation clears the snapshot and owned summary
+fields together when a registration changes. Directory mutations retain the
+vehicle lock, actor checks, cached replacement lookup, required audit and commit;
+the store never commits independently. User-entered make/model remain outside
+this reset. Summary reads do not join or load history. Vehicle registration and request-time
 checks prevent late refreshes overwriting a changed plate or newer data. Existing
 models are preserved; DVSA fills blanks. Editor request cancellation and individual
 field edits remain owned by the directory feature. Source and freshness travel

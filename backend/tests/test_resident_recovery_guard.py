@@ -91,7 +91,6 @@ async def test_present_owner_at_departure_gate_preserves_ordinary_exit(monkeypat
     result = await value.resolve(FakeSession(), observation, observation, None, trace)
     assert result.plan.direction == AccessDirection.EXIT
     assert result.plan.decision == AccessDecision.GRANTED
-    assert result.plan.gate_command_required is False
     assert "missed_exit_recovery" not in result.direction_resolution
     phone.assert_not_awaited()
     recovery.has_conflict.assert_not_awaited()
@@ -112,7 +111,6 @@ async def test_canonical_fuzzy_plate_cannot_gain_phone_camera_or_resident_author
     assert detail["approval_eligible"] is False
     assert result.plan.decision == AccessDecision.DENIED
     assert result.plan.allowed is False
-    assert result.plan.gate_command_required is False
 
 
 @pytest.mark.parametrize("camera", [
@@ -133,7 +131,6 @@ async def test_ambiguous_or_timed_out_camera_does_not_grant_entry(monkeypatch, t
     assert detail["approval_eligible"] is True
     assert result.plan.direction == AccessDirection.ENTRY
     assert result.plan.decision == AccessDecision.DENIED
-    assert result.plan.gate_command_required is False
     value._resolve_duplicate_arrival_with_camera.assert_not_awaited()
 
 
@@ -148,7 +145,6 @@ async def test_clear_current_camera_evidence_can_resolve_recovery_as_entry(monke
                                  camera_evidence=prepared)
     assert result.direction_resolution["missed_exit_recovery"]["method"] == "camera_automatic"
     assert result.plan.decision == AccessDecision.GRANTED
-    assert result.plan.gate_command_required is True
 
 
 async def test_schedule_denial_cannot_gain_camera_or_resident_authority(monkeypatch, trace):
@@ -161,7 +157,6 @@ async def test_schedule_denial_cannot_gain_camera_or_resident_authority(monkeypa
     result = await value.resolve(FakeSession(), observation, observation, None, trace,
                                  camera_evidence=prepared)
     assert result.plan.decision == AccessDecision.DENIED
-    assert result.plan.gate_command_required is False
     assert result.direction_resolution["missed_exit_recovery"]["approval_eligible"] is False
     phone.assert_not_awaited()
 
@@ -173,7 +168,6 @@ async def test_explicit_departure_cannot_be_converted_to_phone_entry(monkeypatch
     observation = read(explicit="exit")
     result = await value.resolve(FakeSession(), observation, observation, None, trace)
     assert result.plan.direction == AccessDirection.EXIT
-    assert result.plan.gate_command_required is False
     assert result.direction_resolution["missed_exit_recovery"]["method"] == "none"
 
 
@@ -209,7 +203,6 @@ async def test_recovery_camera_timeout_is_bounded_and_discards_late_clear_entry(
     result = await value.resolve(FakeSession(), observation, observation, None, trace,
                                  camera_evidence=prepared)
     assert result.plan.decision == AccessDecision.DENIED
-    assert result.plan.gate_command_required is False
     assert result.direction_resolution["missed_exit_recovery"]["method"] == "none"
 @pytest.mark.parametrize("connected,expected_reason", [
     (False, "tracker_disconnected"), (True, "journey_configuration_or_connection_changed"),

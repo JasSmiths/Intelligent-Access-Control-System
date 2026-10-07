@@ -18,7 +18,6 @@ from app.services import person_presence_input_booleans as presence_input_boolea
 from app.services.access import enrichment as access_enrichment_module
 from app.services.access import hardware as access_hardware_module
 from app.services.access import snapshots as access_snapshots_module
-from app.services.access.decision import plan_access
 from app.services.access.enrichment import (
     AccessEnrichment,
 )
@@ -1165,7 +1164,6 @@ async def test_gate_malfunction_known_vehicle_last_live_exit_resolves_as_entry()
     assert resolution["source"] == "gate_malfunction_vehicle_history"
     assert resolution["previous_live_direction"] == "exit"
     assert resolution["previous_live_event_id"] == str(previous_event.id)
-    assert not plan_access(allowed=True, direction=direction, gate_state=GateState(resolution["gate_observation"]["state"])).gate_command_required
 
 
 
@@ -1379,7 +1377,6 @@ async def test_duplicate_arrival_keeps_closed_gate_entry_when_camera_tiebreaker_
     assert resolution["source"] == "gate_state"
     assert resolution["camera_tiebreaker"]["confidence"] == 0.54
     assert resolution["camera_tiebreaker_ignored_reason"] == "low_confidence"
-    assert plan_access(allowed=True, direction=direction, gate_state=GateState(resolution["gate_observation"]["state"])).gate_command_required
 
 
 

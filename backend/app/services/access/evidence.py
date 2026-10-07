@@ -296,10 +296,6 @@ class AccessEvidenceResolver:
         plan = plan_access(
             allowed=allowed,
             direction=direction,
-            gate_state=coerce_gate_state(
-                direction_resolution.get("gate_observation", {}).get("state")
-            ),
-            hardware_suppressed=bool(external_admission),
         )
         return AccessEvidence(
             vehicle,

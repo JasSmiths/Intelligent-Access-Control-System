@@ -53,7 +53,7 @@ from app.services.automation_rules import AutomationRuleService
 from app.services.automation_serialization import serialize_rule, serialize_run
 from app.services.automation_time_intake import AutomationTimeIntake
 from app.services.automation_webhooks import AutomationWebhookIntake
-from app.services.event_bus import RealtimeEvent, event_bus
+from app.services.event_bus import event_bus
 from app.services.gate_commands import get_gate_command_coordinator
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.maintenance import set_mode as set_maintenance_mode
@@ -79,7 +79,6 @@ from app.services.workflows.automation_definition import (
     TRIGGER_SCOPES,
     VARIABLES,
     AutomationContext,
-    automation_triggers_for_origin,
     build_context_variables,
     captured_automation_context,
     context_missing_references,
@@ -144,7 +143,6 @@ class AutomationService:
     async def start(self) -> None:
         if self._started:
             return
-        event_bus.subscribe(self._handle_realtime_event)
         self.dispatcher.start()
         self._scheduler_task = asyncio.create_task(
             self._run_scheduler(), name="automation-scheduler"
@@ -155,7 +153,6 @@ class AutomationService:
     async def stop(self) -> None:
         if not self._started:
             return
-        event_bus.unsubscribe(self._handle_realtime_event)
         if self._scheduler_task:
             self._scheduler_task.cancel()
             try:
@@ -969,34 +966,6 @@ class AutomationService:
             except Exception:
                 logger.exception("automation_scheduler_tick_failed")
             await asyncio.sleep(SCHEDULER_INTERVAL_SECONDS)
-
-    async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
-        # Their canonical mutation owners already committed matching occurrences.
-        # Realtime delivery may repeat or disappear and never creates a second run.
-        if event.type in {
-            "access_event.finalized",
-            "maintenance_mode.changed",
-            "visitor_pass.created",
-            "visitor_pass.used",
-            "visitor_pass.status_changed",
-        }:
-            return
-        for trigger_key, payload in automation_triggers_for_origin(
-            event.type,
-            event.payload if isinstance(event.payload, dict) else {},
-            occurred_at=event.created_at,
-        ):
-            await self.fire_trigger(
-                trigger_key,
-                payload,
-                actor="Automation Engine",
-                source="event_bus",
-                origin_id=str(
-                    payload.get("access_event_id")
-                    or payload.get("event_id")
-                    or f"{event.type}:{event.created_at}"
-                ),
-            )
 
     async def _evaluate_condition(
         self,

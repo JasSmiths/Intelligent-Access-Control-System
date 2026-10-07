@@ -73,12 +73,6 @@ async def _raise_if_maintenance_active() -> None:
         )
 
 
-async def _commit_if_supported(session: AsyncSession) -> None:
-    commit = getattr(session, "commit", None)
-    if commit is not None:
-        await commit()
-
-
 async def update_integration_settings(
     user: User,
     values: dict,
@@ -647,7 +641,7 @@ async def open_gate(
         level="warning" if result.delivery == "unknown" else "info" if result.accepted else "error",
         metadata={"reason": request.reason, **receipt},
     )
-    await _commit_if_supported(session)
+    await session.commit()
     if not result.accepted:
         # Keep the legacy HTTP status/detail while exposing the durable outcome.
         return JSONResponse(
@@ -809,7 +803,7 @@ async def cover_command(
         else "error",
         metadata={"reason": request.reason, **receipt},
     )
-    await _commit_if_supported(session)
+    await session.commit()
     if not outcome.accepted:
         return JSONResponse(
             status_code=503,

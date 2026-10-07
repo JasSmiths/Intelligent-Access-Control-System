@@ -96,8 +96,7 @@ class HomeAssistantIntegrationService:
         invalidate_connection()
         self._listener = None
         self._state_refresh_task = None
-        if hasattr(self._client, "close"):
-            await self._client.close()
+        await self._client.close()
         logger.info("home_assistant_listener_stopped")
 
     async def status(self, *, refresh: bool = False) -> dict:

@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -287,3 +288,10 @@ async def test_home_assistant_entities_includes_input_boolean_entities(monkeypat
             "device_class": None,
         }
     ]
+
+
+async def test_home_assistant_stop_closes_its_required_client_port():
+    client = SimpleNamespace(close=AsyncMock())
+    service = HomeAssistantIntegrationService(client)
+    await service.stop()
+    client.close.assert_awaited_once()

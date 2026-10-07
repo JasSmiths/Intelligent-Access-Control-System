@@ -25,6 +25,21 @@ from app.services.vehicle_information_contracts import (
     resolve_information,
 )
 
+INFORMATION_SUMMARY_FIELDS = (
+    "mot_status", "mot_expiry", "tax_status", "tax_expiry", "last_dvla_lookup_date",
+    "mot_source", "mot_checked_at", "mot_valid_until", "mot_expiry_kind",
+    "information_checked_at", "information_outcome",
+)
+
+
+async def invalidate_information_in_session(session: AsyncSession, vehicle: Vehicle) -> None:
+    """Clear the feature-owned aggregate; caller owns vehicle lock/audit/commit."""
+    snapshot = await session.get(VehicleInformationSnapshot, vehicle.id)
+    if snapshot:
+        await session.delete(snapshot)
+    for field in INFORMATION_SUMMARY_FIELDS:
+        setattr(vehicle, field, None)
+
 
 async def apply_information(session: AsyncSession, vehicle: Vehicle, lookup: VehicleLookup, *, timezone: str) -> VehicleInformation:
     """Caller owns the short transaction and vehicle row lock."""

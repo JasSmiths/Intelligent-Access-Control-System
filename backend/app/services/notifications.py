@@ -90,9 +90,6 @@ from app.services.workflows.notification_payloads import (
     trigger_severity,
 )
 from app.services.workflows.template_recipients import content_for_recipient
-from app.services.workflows.visitor_notifications import (
-    visitor_pass_notification_contexts_from_event,
-)
 
 logger = get_logger(__name__)
 HomeAssistantClient = DefaultHomeAssistantClient
@@ -876,18 +873,6 @@ class NotificationService:
             # Event contents never override persisted work. Unknown/legacy IDs cannot send.
             self.dispatcher.wake()
             return
-        # These visitor transitions reserve notification intents in the pass
-        # mutation transaction; realtime cannot produce another delivery run.
-        if event.type in {
-            "visitor_pass.created",
-            "visitor_pass.cancelled",
-            "visitor_pass.status_changed",
-            "visitor_pass.used",
-            "visitor_pass.departure_recorded",
-        }:
-            return
-        for context in visitor_pass_notification_contexts_from_event(event):
-            await self.enqueue_notification(context)
 
     async def _deliver_action(
         self,

@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from app.models.enums import AccessDecision, AccessDirection
-from app.modules.gate.base import GateState
 from app.services.access.decision import access_is_allowed, plan_access
 
 ROOT = Path(__file__).resolve().parents[1] / 'app' / 'services'
@@ -44,9 +43,9 @@ def test_identity_and_schedule_policy(schedule, identity, visitor, external):
 
 
 @pytest.mark.parametrize('direction', list(AccessDirection))
-@pytest.mark.parametrize('gate_state', list(GateState))
-@pytest.mark.parametrize('allowed,suppressed', list(product([False, True], repeat=2)))
-def test_only_granted_closed_gate_arrival_can_plan_hardware(direction, gate_state, allowed, suppressed):
-    plan = plan_access(allowed=allowed, direction=direction, gate_state=gate_state, hardware_suppressed=suppressed)
+@pytest.mark.parametrize('allowed', [False, True])
+def test_access_plan_exposes_decision_and_resolved_direction(allowed, direction):
+    plan = plan_access(allowed=allowed, direction=direction)
+    assert plan.allowed is allowed
+    assert plan.direction == direction
     assert plan.decision == (AccessDecision.GRANTED if allowed else AccessDecision.DENIED)
-    assert plan.gate_command_required == (allowed and direction == AccessDirection.ENTRY and gate_state == GateState.CLOSED and not suppressed)

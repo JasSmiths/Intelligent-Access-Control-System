@@ -266,3 +266,103 @@ async def test_older_completion_uses_current_tax_outcome_for_notification(record
     async with AsyncSessionLocal() as session:
         assert await session.get(NotificationRun, uuid.uuid5(event.id, "expired_tax_detected")) is None
         assert (await session.get(VehicleInformationJob, event.id)).status == "completed"
+
+
+async def test_information_invalidation_rollback_and_directory_plate_replacement(records, monkeypatch):
+    from app.models import AuditLog, User
+    from app.models.enums import UserRole
+    from app.schemas.directory import UpdateVehicleRequest
+    from app.services.directory import vehicles
+    from app.services.vehicle_information_store import invalidate_information_in_session
+    vehicle, _event = records
+    actor = User(username=f"synthetic-reset-{uuid.uuid4().hex}", full_name="Synthetic reset operator",
+        password_hash="inert", role=UserRole.ADMIN, is_active=True)
+    old_lookup = lookup(vehicle.registration_number)
+    async with AsyncSessionLocal() as session:
+        session.add(actor)
+        saved = await session.get(Vehicle, vehicle.id, with_for_update=True)
+        await apply_information(session, saved, old_lookup, timezone="Europe/London")
+        saved.tax_status, saved.tax_expiry = "Taxed", datetime.now(UTC).date()
+        saved.last_dvla_lookup_date = datetime.now(UTC).date()
+        await session.commit()
+    try:
+        # The feature owner participates in its caller's transaction; another
+        # connection still observes the committed aggregate until caller commit.
+        async with AsyncSessionLocal() as session:
+            saved = await session.get(Vehicle, vehicle.id, with_for_update=True)
+            await invalidate_information_in_session(session, saved)
+            await session.flush()
+            async with AsyncSessionLocal() as observer:
+                prior = await observer.get(Vehicle, vehicle.id)
+                assert prior.mot_source == "dvsa" and prior.tax_status == "Taxed"
+                assert await observer.get(VehicleInformationSnapshot, vehicle.id) is not None
+            await session.rollback()
+        new_plate = "NEW" + uuid.uuid4().hex[:9].upper()
+        fresh = lookup(new_plate)
+        facade = SimpleNamespace(lookup=AsyncMock(return_value=fresh))
+        monkeypatch.setattr(vehicles, "get_vehicle_information_service", lambda: facade)
+        async with AsyncSessionLocal() as session:
+            response = await vehicles.update_vehicle(vehicle.id, UpdateVehicleRequest(registration_number=new_plate,
+                make="Edited make", model="Edited model"), actor, session)
+            assert response.registration_number == new_plate
+        facade.lookup.assert_awaited_once()
+        assert facade.lookup.await_args.kwargs["cached_only"] is True
+        async with AsyncSessionLocal() as session:
+            saved = await session.get(Vehicle, vehicle.id, with_for_update=True)
+            assert saved.registration_number == new_plate and saved.mot_source == "dvsa"
+            assert saved.tax_status is None and saved.tax_expiry is None and saved.last_dvla_lookup_date is None
+            assert (saved.make, saved.model) == ("Edited Make", "Edited Model")
+            snapshot = await session.get(VehicleInformationSnapshot, vehicle.id)
+            assert snapshot.registration_number == new_plate
+            before = (saved.information_checked_at, copy_json(saved.information_outcome), copy_json(snapshot.dvsa))
+            await apply_information(session, saved, old_lookup, timezone="Europe/London")
+            await session.commit()
+        async with AsyncSessionLocal() as observer:
+            saved = await observer.get(Vehicle, vehicle.id)
+            snapshot = await observer.get(VehicleInformationSnapshot, vehicle.id)
+            assert before == (saved.information_checked_at, saved.information_outcome, snapshot.dvsa)
+            assert (saved.make, saved.model) == ("Edited Make", "Edited Model")
+            assert await observer.scalar(select(AuditLog.id).where(AuditLog.action == "vehicle.update", AuditLog.target_id == str(vehicle.id)))
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.actor_user_id == actor.id))
+            await session.execute(delete(User).where(User.id == actor.id))
+            await session.commit()
+
+
+async def test_plate_reset_and_snapshot_replacement_roll_back_with_failed_audit(records, monkeypatch):
+    from app.models import User
+    from app.models.enums import UserRole
+    from app.schemas.directory import UpdateVehicleRequest
+    from app.services.directory import vehicles
+    vehicle, _event = records
+    actor = User(username=f"synthetic-reset-{uuid.uuid4().hex}", full_name="Synthetic reset operator",
+        password_hash="inert", role=UserRole.ADMIN, is_active=True)
+    old = lookup(vehicle.registration_number)
+    async with AsyncSessionLocal() as session:
+        session.add(actor)
+        saved = await session.get(Vehicle, vehicle.id, with_for_update=True)
+        await apply_information(session, saved, old, timezone="Europe/London")
+        await session.commit()
+    try:
+        new_plate = "NEW" + uuid.uuid4().hex[:9].upper()
+        monkeypatch.setattr(vehicles, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=AsyncMock(return_value=lookup(new_plate))))
+        monkeypatch.setattr(vehicles, "write_audit_log", AsyncMock(side_effect=RuntimeError("synthetic audit failure")))
+        async with AsyncSessionLocal() as session:
+            with pytest.raises(RuntimeError, match="synthetic audit failure"):
+                await vehicles.update_vehicle(vehicle.id, UpdateVehicleRequest(registration_number=new_plate, model="Changed model"), actor, session)
+            await session.rollback()
+        async with AsyncSessionLocal() as observer:
+            saved = await observer.get(Vehicle, vehicle.id)
+            snapshot = await observer.get(VehicleInformationSnapshot, vehicle.id)
+            assert saved.registration_number == vehicle.registration_number
+            assert saved.model == "Manual model" and saved.mot_source == "dvsa"
+            assert snapshot.registration_number == vehicle.registration_number
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(delete(User).where(User.id == actor.id))
+            await session.commit()
+
+
+def copy_json(value):
+    return json.loads(json.dumps(value))

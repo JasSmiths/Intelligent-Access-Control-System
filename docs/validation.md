@@ -293,6 +293,11 @@ fixed allocation increase from the additional bounded queries.
 The required [vehicle information persistence suite](../scripts/validation/test_vehicle_information.py)
 checks leased jobs, notification handoff/deadlines, stale registration writes,
 server-paged snapshots, Redis throttling and bounded summary reads at 2,000 vehicles.
+Plate-change fixtures prove snapshot/summary rollback with failed audit, caller
+transaction ownership, cached replacement and rejection of late old-plate results
+while preserving user-entered fields. Inert hardware HTTP fixtures require the
+real AsyncSession commit port before returning rejected or uncertain gate/cover
+receipts; no provider is invoked.
 Provider/token, date precedence and cache coalescing tests use synthetic responses.
 The [MOT browser suite](../frontend/e2e/mot-history.spec.ts) uses fixture-only HTTP
 and closed WebSockets, covering lazy history, pagination and retained editor drafts

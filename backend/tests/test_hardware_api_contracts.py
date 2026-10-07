@@ -7,13 +7,16 @@ import uuid
 import httpx
 import pytest
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import current_user
 from app.api.v1 import action_confirmations as confirmation_api, integrations
 from app.db.session import get_db_session
 from app.models import ActionConfirmation, User
 from app.models.enums import UserRole
+from app.modules.access_devices.base import AccessDeviceEntity
 from app.modules.gate.base import CommandDelivery, GateState
+from app.services.access_device_outcomes import AccessDeviceOperationResult
 from app.services import action_confirmations
 from app.services.gate_commands import GateCommandOutcome
 
@@ -28,12 +31,14 @@ def application(user):
     app.include_router(integrations.router, prefix="/api/v1/integrations")
     app.include_router(confirmation_api.router, prefix="/api/v1/action-confirmations")
     app.dependency_overrides[current_user] = lambda: user
-    app.dependency_overrides[get_db_session] = lambda: SimpleNamespace()
+    app.state.owner_session = AsyncMock(spec=AsyncSession)
+    app.dependency_overrides[get_db_session] = lambda: app.state.owner_session
     return app
 
 
 @pytest.mark.parametrize("target", [None, "entry", "side-gate"])
-async def test_manual_request_keeps_scope_and_reuses_confirmation_identity(monkeypatch, target):
+@pytest.mark.parametrize("delivery", [CommandDelivery.UNKNOWN, CommandDelivery.REJECTED])
+async def test_manual_request_keeps_scope_and_reuses_confirmation_identity(monkeypatch, target, delivery):
     user, identity = actor(), uuid.uuid4()
     plan = {"selected_device_key": target, "targets": [{"target_device_id": "synthetic"}]}
     devices = SimpleNamespace(preview_gate_open=AsyncMock(return_value=plan))
@@ -45,7 +50,7 @@ async def test_manual_request_keeps_scope_and_reuses_confirmation_identity(monke
         sent.append(intent)
         now = datetime.now(tz=UTC)
         return GateCommandOutcome(intent, False, GateState.UNKNOWN, "Response lost", now, now,
-                                  command_id=str(uuid.uuid4()), delivery=CommandDelivery.UNKNOWN)
+                                  command_id=str(uuid.uuid4()), delivery=delivery)
 
     audit = AsyncMock()
     monkeypatch.setattr(integrations, "get_access_device_service", lambda: devices)
@@ -56,17 +61,20 @@ async def test_manual_request_keeps_scope_and_reuses_confirmation_identity(monke
     body = {"reason": "Synthetic manual action", "confirmation_token": "synthetic-token"}
     if target is not None:
         body["target_device_key"] = target
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application(user)), base_url="http://test") as client:
+    app = application(user)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/integrations/gate/open", json=body)
     assert response.status_code == 503
-    assert response.json()["delivery"] == "unknown" and response.json()["requires_reconciliation"] is True
+    assert response.json()["delivery"] == delivery.value
+    assert response.json()["requires_reconciliation"] is (delivery == CommandDelivery.UNKNOWN)
+    app.state.owner_session.commit.assert_awaited_once()
     assert len(sent) == 1
     assert sent[0].target_device_key == target and sent[0].target_plan == plan
     assert sent[0].intent_id == sent[0].idempotency_key == str(identity)
     assert sent[0].actor_user_id == str(user.id) and sent[0].auth_version == 3
     assert sent[0].require_admission is False
     assert consume.await_args.kwargs["expected_hardware_plan"] == plan
-    assert audit.await_args.kwargs["outcome"] == "uncertain"
+    assert audit.await_args.kwargs["outcome"] == ("uncertain" if delivery == CommandDelivery.UNKNOWN else "failed")
 
 
 @pytest.mark.parametrize("kind", ["gate", "cover"])
@@ -118,3 +126,37 @@ async def test_client_cannot_supply_the_hardware_plan(monkeypatch):
     assert response.status_code == 200
     assert create.await_args.kwargs["metadata"]["hardware_plan"] == canonical
     assert preview.await_args.kwargs == {"target_device_key": "side-gate"}
+
+
+@pytest.mark.parametrize("delivery", [CommandDelivery.UNKNOWN, CommandDelivery.REJECTED])
+async def test_manual_cover_failure_commits_audit_before_returning_receipt(monkeypatch, delivery):
+    user, identity = actor(), uuid.uuid4()
+    device = AccessDeviceEntity("cover.synthetic", "garage_door", "Synthetic garage")
+    plan = {"targets": [{"target_device_id": "synthetic"}]}
+    outcome = AccessDeviceOperationResult(
+        device=device, action="open", accepted=False, state=GateState.UNKNOWN,
+        delivery=delivery, detail="Synthetic rejected or lost response",
+    )
+    command = AsyncMock(return_value=outcome)
+    service = SimpleNamespace(
+        list_devices=AsyncMock(return_value=[device]),
+        preview_device_command=AsyncMock(return_value=plan), command_device=command,
+    )
+    approval = SimpleNamespace(id=identity, expires_at=datetime.now(tz=UTC) + timedelta(minutes=1))
+    consume, audit = AsyncMock(return_value=approval), AsyncMock()
+    monkeypatch.setattr(integrations, "get_access_device_service", lambda: service)
+    monkeypatch.setattr(integrations, "require_confirmed_action", consume)
+    monkeypatch.setattr(integrations, "is_maintenance_mode_active", AsyncMock(return_value=False))
+    monkeypatch.setattr(integrations, "write_audit_log", audit)
+    app = application(user)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/integrations/cover/command", json={
+            "entity_id": device.key, "action": "open", "confirmation_token": "synthetic-token",
+        })
+    assert response.status_code == 503
+    assert response.json()["delivery"] == delivery.value
+    assert response.json()["requires_reconciliation"] is (delivery == CommandDelivery.UNKNOWN)
+    app.state.owner_session.commit.assert_awaited_once()
+    assert audit.await_args.kwargs["outcome"] == ("uncertain" if delivery == CommandDelivery.UNKNOWN else "failed")
+    assert command.await_args.kwargs["intent_id"] == command.await_args.kwargs["idempotency_key"] == str(identity)
+    assert consume.await_args.kwargs["expected_hardware_plan"] == plan

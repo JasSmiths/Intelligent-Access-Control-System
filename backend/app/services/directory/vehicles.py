@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
 
-from app.models import User, Vehicle, VehicleInformationSnapshot, VehiclePersonAssignment
+from app.models import User, Vehicle, VehiclePersonAssignment
 from app.schemas.directory import CreateVehicleRequest, UpdateVehicleRequest, VehicleResponse
 from app.services.mutation_context import MutationError, load_active_admin
 from app.services.settings import get_runtime_config
@@ -17,7 +17,11 @@ from app.services.telemetry import (
 )
 from app.services.vehicle_information import get_vehicle_information_service
 from app.services.vehicle_information_contracts import MotHistoryPage
-from app.services.vehicle_information_store import apply_information, read_mot_history
+from app.services.vehicle_information_store import (
+    apply_information,
+    invalidate_information_in_session,
+    read_mot_history,
+)
 
 from .assignments import (
     derived_vehicle_person_id,
@@ -121,12 +125,7 @@ async def update_vehicle(
     if request.registration_number is not None:
         plate = normalize_registration_number(request.registration_number)
         if plate != vehicle.registration_number:
-            snapshot = await session.get(VehicleInformationSnapshot, vehicle.id)
-            if snapshot:
-                await session.delete(snapshot)
-            for field in ("mot_status", "mot_expiry", "tax_status", "tax_expiry", "last_dvla_lookup_date",
-                          "mot_source", "mot_checked_at", "mot_valid_until", "mot_expiry_kind", "information_checked_at", "information_outcome"):
-                setattr(vehicle, field, None)
+            await invalidate_information_in_session(session, vehicle)
             vehicle.registration_number = plate
             config = await get_runtime_config()
             lookup = await get_vehicle_information_service().lookup(plate, cached_only=True, config=config)
