@@ -43,3 +43,19 @@ it("refreshes recovery diagnostics and owner config without refreshing unrelated
   expect(select(event("audit.log.created", { action: "settings.update" }), "settings_missed_exit_recovery").route).toBe(true);
   expect(select(event("audit.log.created", { action: "person.update" }), "settings_missed_exit_recovery")).toEqual({ keys: new Set(["people"]), route: true });
 });
+
+
+it("invalidates directory owners whenever their shell representations change", () => {
+  for (const action of ["group.update", "person.update", "schedule.update", "vehicle.update"]) {
+    for (const view of ["people", "vehicles"] as const) {
+      expect(select(event("audit.log.created", { action }), view).route).toBe(true);
+    }
+  }
+  expect(select(event("audit.log.created", { action: "access_device.update" }), "people").route).toBe(true);
+  for (const view of ["people", "vehicles", "events"] as const) {
+    expect(select(event("access_event.finalized"), view).route).toBe(true);
+    expect(select(event("access_event.finalize_failed"), view).route).toBe(true);
+    expect(select(event("vehicle_information.updated"), view).route).toBe(true);
+  }
+  expect(select(event("visitor_pass.updated"), "events").route).toBe(true);
+});
