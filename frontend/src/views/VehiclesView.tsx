@@ -8,7 +8,7 @@ import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 
 import { api, createActionConfirmation } from "../api/client";
 import { useScheduleDefaultPolicyOptionLabel } from "../lib/format";
-import { Badge, EmptyState } from "../ui/primitives";
+import { Badge, EmptyState, ErrorState, LoadingState } from "../ui/primitives";
 import type { Vehicle } from "../api/types";
 
 import { directoryGroupDefaultOpen, indexPeopleByVehicleId, ownerPeopleForVehicle, vehicleOwnerLabel, groupVehiclesByDirectoryGroup, vehicleTitle } from "../features/directory/model";
@@ -21,7 +21,8 @@ export function VehiclesView({ canRefreshInformation, query }: { canRefreshInfor
   const ownerOptions = useDirectoryIdentities("people", [], directoryPage.items.flatMap((vehicle) => vehicle.person_ids ?? (vehicle.person_id ? [vehicle.person_id] : [])));
   const groupCatalog = useGroups(); const scheduleCatalog = useSchedules();
   const groups = groupCatalog.items; const schedules = scheduleCatalog.items;
-  const referencesReady = groupCatalog.ready && scheduleCatalog.ready;
+  const readError = directoryPage.error || ownerOptions.error || groupCatalog.error || scheduleCatalog.error;
+  const referencesReady = directoryPage.ready && groupCatalog.ready && scheduleCatalog.ready && ownerOptions.ready;
   const signals = React.useContext(ReadSignalsContext);
   const refresh = React.useCallback(() => signals?.publish({ type: "refresh", reason: "manual", resetHistory: false }) ?? Promise.resolve(directoryPage.refresh()), [signals, directoryPage.refresh]);
   const [modalOpen, setModalOpen] = React.useState(false);
@@ -86,7 +87,8 @@ export function VehiclesView({ canRefreshInformation, query }: { canRefreshInfor
         </button>
       </div>
 
-      {error || ownerOptions.error ? <div className="auth-error inline-error">{error || ownerOptions.error}</div> : null}
+      {readError ? <ErrorState title="Vehicles data unavailable" description={readError} onRetry={() => void refresh().catch(() => undefined)} retrying={directoryPage.loading} /> : null}
+      {error ? <div className="auth-error inline-error">{error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
       <DirectoryPagination page={directoryPage} />
@@ -134,7 +136,7 @@ export function VehiclesView({ canRefreshInformation, query }: { canRefreshInfor
               </DirectoryGroupAccordion>
             ))}
           </div>
-        ) : (
+        ) : readError ? null : !directoryPage.ready ? <LoadingState label="Loading vehicles" /> : (
           <EmptyState icon={Car} label="No vehicles match this view" description={query ? "Try another registration, owner, or vehicle name in search." : "Keep registration details and owners together for clear access records."} action={!query ? <button className="secondary-button" onClick={openCreate} disabled={!referencesReady} type="button"><Plus size={15} /> Register vehicle</button> : undefined} />
         )}
       </div>
@@ -151,7 +153,6 @@ export function VehiclesView({ canRefreshInformation, query }: { canRefreshInfor
               setSaved("Vehicle saved.");
               try { await refresh(); } catch { setError("Vehicle saved, but the list could not be refreshed. Refresh to see the latest data."); }
             }}
-            people={ownerOptions.items}
             refreshVehicles={refresh}
             schedules={schedules}
             setPageError={setError}

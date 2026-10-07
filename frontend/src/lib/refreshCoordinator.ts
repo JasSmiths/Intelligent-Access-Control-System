@@ -1,7 +1,7 @@
 type Batch<Key extends string> = { selection: Set<Key>; due: number; completion: Promise<void>; resolve: () => void; reject: (error: unknown) => void };
 
 // Serialize reads and retain invalidations received during a read. Each batch
-// owns its waiters, so a failed batch cannot strand the next one.
+// owns one completion promise, so a failed batch cannot strand the next one.
 export function createRefreshCoordinator<Key extends string>(execute: (selection: Set<Key>) => Promise<void>) {
   let pending: Batch<Key> | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;

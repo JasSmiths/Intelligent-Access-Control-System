@@ -61,7 +61,7 @@ export function PersonAvatar({ person, size = "normal" }: { person: Person; size
   );
 }
 
-export function VehiclePhoto({ vehicle, size = "normal" }: { vehicle: Vehicle; size?: "normal" | "large" }) {
+export function VehiclePhoto({ vehicle, size = "normal" }: { vehicle: Pick<Vehicle, "registration_number" | "vehicle_photo_url" | "vehicle_photo_data_url">; size?: "normal" | "large" }) {
   const imageSource = mediaSource(vehicle.vehicle_photo_url, vehicle.vehicle_photo_data_url, "thumb");
   return (
     <span className={size === "large" ? "vehicle-photo large" : "vehicle-photo"} aria-label={vehicle.registration_number}>

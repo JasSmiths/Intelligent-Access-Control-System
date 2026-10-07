@@ -8,7 +8,7 @@ import { schedulesApi } from "../../api/schedules";
 import type { Schedule } from "../../api/types";
 import { matches, scheduleDays } from "../../lib/format";
 import { useSettings } from "../../lib/settings";
-import { Badge, EmptyState } from "../../ui/primitives";
+import { Badge, EmptyState, ErrorState, LoadingState } from "../../ui/primitives";
 import { scheduleDayHasBlocks, scheduleHasBlocks, scheduleIntervalLabels, scheduleSummary } from "./model";
 import { ScheduleEditor } from "./ScheduleEditor";
 
@@ -145,7 +145,7 @@ export function SchedulesView({ query }: { query: string }) {
         </section>
       </div>
 
-      {catalog.error ? <div role="alert">{catalog.error}</div> : null}
+      {catalog.error ? <ErrorState title="Schedules unavailable" description={catalog.error} onRetry={() => void refresh().catch(() => undefined)} retrying={catalog.loading} /> : null}
       {error ? <div className="auth-error inline-error">{error}</div> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
       {accessSettings.error ? <div className="auth-error inline-error">{accessSettings.error}</div> : null}
@@ -185,7 +185,7 @@ export function SchedulesView({ query }: { query: string }) {
               </button>
             </div>
           </article>
-        )) : (
+        )) : catalog.error ? null : !catalog.ready ? <LoadingState label="Loading schedules" /> : (
           <div className="card schedule-empty-card">
             <EmptyState icon={Clock3} label="No schedules match this view" description={query ? "Try another schedule name, day, or time in search." : "Define weekly access windows, then assign them to people or vehicles."} action={!query ? <button className="secondary-button" onClick={openCreate} disabled={!catalog.ready} type="button"><Plus size={15} /> Create schedule</button> : undefined} />
           </div>
