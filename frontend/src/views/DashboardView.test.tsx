@@ -1,4 +1,4 @@
-const testReads = vi.hoisted(() => ({ presence: [] as Presence[], expectedPresence: null as ExpectedPresenceSummary | null, events: [] as AccessEvent[], people: [] as Person[], vehicles: [] as Vehicle[] }));
+const testReads = vi.hoisted(() => ({ presence: [] as Presence[], presenceCounts: { total: 0, present: 0, exited: 0, unknown: 0 }, insideHidden: 0, expectedPresence: null as ExpectedPresenceOverview | null, events: [] as AccessEvent[], people: [] as Person[], vehicles: [] as Vehicle[] }));
 vi.mock("../features/dashboard/reads", () => ({ useDashboardReads: () => ({ ...testReads, error: "", refresh: vi.fn().mockResolvedValue(undefined) }) }));
 vi.mock("../features/dashboard/useDashboardDirectory", () => ({ useDashboardDirectory: () => ({ people: testReads.people, vehicles: testReads.vehicles, activeVehicleCount: testReads.vehicles.length, error: "", refresh: vi.fn().mockResolvedValue(undefined) }) }));
 import * as directoryApi from "../api/directory";
@@ -6,7 +6,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
 import { integrationsApi, type GateCommandReceipt } from "../api/integrations";
-import type { AccessEvent, ActionConfirmation, ExpectedPresenceSummary, IntegrationStatus, Person, Presence, UserAccount, Vehicle } from "../api/types";
+import type { AccessEvent, ActionConfirmation, ExpectedPresenceOverview, IntegrationStatus, Person, Presence, UserAccount, Vehicle } from "../api/types";
 import contract from "../api/fixtures/gateCommandReceipts.generated.json";
 import { CommandReceiptDetails } from "../features/integrations/CommandReceiptDetails";
 import { Dashboard } from "./DashboardView";
@@ -36,7 +36,7 @@ async function clickGate(name: string) {
   await act(async () => fireEvent.click(screen.getByRole("button", { name: `Open ${name}` })));
 }
 beforeEach(() => {
-  Object.assign(testReads, { presence: [], expectedPresence: null, events: [], people: [], vehicles: [] });
+  Object.assign(testReads, { presence: [], presenceCounts: { total: 0, present: 0, exited: 0, unknown: 0 }, insideHidden: 0, expectedPresence: null, events: [], people: [], vehicles: [] });
   vi.spyOn(directoryApi, "listVehicles").mockResolvedValue({ items: [], total: 0, next_cursor: null });
   vi.spyOn(directoryApi, "lookupVehicleRegistrations").mockResolvedValue([]);
   vi.spyOn(directoryApi, "lookupPeople").mockResolvedValue([]);
@@ -284,11 +284,12 @@ it("lists the people inside now and who exited today in the presence hover popov
     accessEvent({ id: "ada-entry", direction: "entry", occurred_at: at(23, 9, 4), registration_number: "ADA1" }),
     accessEvent({ id: "old-exit", direction: "exit", occurred_at: at(22, 16, 0), registration_number: "OLD1", visitor_name: "Old Exit" })
   ];
-  const expectedPresence: ExpectedPresenceSummary = {
+  const expectedPresence: ExpectedPresenceOverview = {
     date: "2026-09-23",
     timezone: "UTC",
     generated_at: at(23, 8, 0),
     count: 1,
+    hidden: 0,
     learning: true,
     coverage: { regular_candidates: 1, learned_candidates: 1, learning_population: 1, ratio: 1 },
     people: [{
@@ -301,7 +302,9 @@ it("lists the people inside now and who exited today in the presence hover popov
       typical_departure: null
     }]
   };
-  Object.assign(testReads, { events, expectedPresence, people, presence, vehicles });
+  Object.assign(testReads, { events, expectedPresence, people, vehicles,
+    presence: presence.filter((person) => person.state === "present"),
+    presenceCounts: { total: 4, present: 3, exited: 1, unknown: 0 }, insideHidden: 0 });
   render(<Dashboard {...props} />);
 
   const inside = screen.getByLabelText("People inside now");
@@ -356,7 +359,8 @@ it("keeps the inside popover to the first six people", () => {
     state: "present",
     last_changed_at: at(23, 8 + index, 0)
   }));
-  Object.assign(testReads, { people, presence });
+  Object.assign(testReads, { people, presence: presence.slice().reverse().slice(0, 6),
+    presenceCounts: { total: 7, present: 7, exited: 0, unknown: 0 }, insideHidden: 1 });
   render(<Dashboard {...props} />);
   const inside = screen.getByLabelText("People inside now");
   expect(within(inside).getByText("7 people")).toBeInTheDocument();
