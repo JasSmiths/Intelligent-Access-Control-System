@@ -50,8 +50,8 @@ async function fixtures(page: Page, lostStart = false) {
   await page.routeWebSocket("**/*", () => {});
   return { writes, reads, unexpected, get admitted() { return admitted; } };
 }
-for (const viewport of [{ width: 390, height: 844 }, { width: 1440, height: 900 }, { width: 900, height: 1000 }]) {
-  test(`explicit workflow recovery retains original request and dirty authentication at ${viewport.width}px`, async ({ page }, testInfo) => {
+for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }, { width: 1440, height: 900 }, { width: 900, height: 1000 }]) {
+  test(`explicit workflow recovery retains original request and dirty authentication at ${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.addInitScript(({ key, original }) => sessionStorage.setItem(key, JSON.stringify({ original_request_id: original, selected_run_id: original })), { key, original });
     const fixture = await fixtures(page);
@@ -76,6 +76,10 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 1440, height: 900 
     await expect(modal.getByText(original, { exact: true })).toBeVisible();
     expect(await page.evaluate((key) => JSON.parse(sessionStorage.getItem(key)!), key)).toEqual({ original_request_id: original, selected_run_id: original });
     expect(fixture.reads).toContain(`/api/v1/integrations/icloud-calendar/sync/${workflow}`); expect(fixture.unexpected).toEqual([]);
+    const close = modal.getByRole("button", { name: "Close", exact: true });
+    await close.focus(); await page.keyboard.press("Shift+Tab");
+    await expect(modal.getByRole("button", { name: "Done", exact: true })).toBeFocused();
+    await page.keyboard.press("Tab"); await expect(close).toBeFocused();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`calendar-recovery-${viewport.width}.png`), fullPage: true });
   });
