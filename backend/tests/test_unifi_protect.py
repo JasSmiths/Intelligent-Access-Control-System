@@ -55,7 +55,9 @@ def test_camera_serialization_exposes_metadata_not_stream_urls() -> None:
             smart_detect_audio_types=[],
         ),
         smart_detect_zones=[
-            SimpleNamespace(id=2, name="Default", object_types=[EnumValue("person"), EnumValue("vehicle")]),
+            SimpleNamespace(
+                id=2, name="Default", object_types=[EnumValue("person"), EnumValue("vehicle")]
+            ),
         ],
         has_mic=True,
     )
@@ -64,7 +66,9 @@ def test_camera_serialization_exposes_metadata_not_stream_urls() -> None:
 
     assert payload["id"] == "cam-1"
     assert payload["detections"]["active"] == ["person"]
-    assert payload["smart_detect_zones"] == [{"id": 2, "name": "Default", "object_types": ["person", "vehicle"]}]
+    assert payload["smart_detect_zones"] == [
+        {"id": 2, "name": "Default", "object_types": ["person", "vehicle"]}
+    ]
     assert payload["channels"][0]["is_rtsp_enabled"] is True
     assert "rtsp_url" not in payload["channels"][0]
 
@@ -123,34 +127,39 @@ def test_websocket_state_normalization_preserves_bool_backed_enum_names() -> Non
 async def test_websocket_states_are_channel_specific_and_do_not_replace_bootstrap_health() -> None:
     service = UnifiProtectIntegrationService()
     service._connected = True
-    service._spawn_background = lambda coro, *, name: coro.close()
 
     for channel in ("private", "events", "devices"):
         service._handle_websocket_state(channel, FakeWebsocketState.CONNECTED)
 
     assert service._connected is True
     assert service._realtime_connected() is True
-    assert service._websocket_states == {"private": "connected", "events": "connected", "devices": "connected"}
+    assert service._websocket_states == {
+        "private": "connected",
+        "events": "connected",
+        "devices": "connected",
+    }
 
     service._handle_websocket_state("events", FakeWebsocketState.AUTH_FAILED)
     assert service._connected is True
     assert service._realtime_connected() is False
     assert service._realtime_error() == "UniFi Protect websocket authentication failed: events."
 
-    await service._stop_locked()
+    await service.stop()
     assert service._connected is False
-    assert service._websocket_states == {"private": "unknown", "events": "unknown", "devices": "unknown"}
+    assert service._websocket_states == {
+        "private": "unknown",
+        "events": "unknown",
+        "devices": "unknown",
+    }
 
 
 def test_stream_metadata_update_does_not_refresh_vehicle_presence() -> None:
     service = UnifiProtectIntegrationService()
-    spawned: list[str] = []
+    from types import SimpleNamespace
 
-    def capture(coro, *, name: str) -> None:
-        spawned.append(name)
-        coro.close()
+    from app.services.unifi_protect_runtime import UnifiProtectRuntime
 
-    service._spawn_background = capture
+    service._runtime = UnifiProtectRuntime(SimpleNamespace(), service._evidence, service._counters)
     camera = SimpleNamespace(
         id="cam-1",
         model=EnumValue("camera"),
@@ -167,20 +176,19 @@ def test_stream_metadata_update_does_not_refresh_vehicle_presence() -> None:
         )
     )
 
-    assert "unifi-protect-vehicle-presence-message" not in spawned
-    assert "unifi-protect-lpr-timing-message" not in spawned
-    assert "unifi-protect-vehicle-visual-message" not in spawned
+    work = service._runtime._callbacks[0][0]
+    assert work.presence == ()
+    assert work.timing == ()
+    assert work.visual == ()
 
 
 def test_detection_update_still_refreshes_vehicle_presence() -> None:
     service = UnifiProtectIntegrationService()
-    spawned: list[str] = []
+    from types import SimpleNamespace
 
-    def capture(coro, *, name: str) -> None:
-        spawned.append(name)
-        coro.close()
+    from app.services.unifi_protect_runtime import UnifiProtectRuntime
 
-    service._spawn_background = capture
+    service._runtime = UnifiProtectRuntime(SimpleNamespace(), service._evidence, service._counters)
     camera = SimpleNamespace(
         id="cam-1",
         model=EnumValue("camera"),
@@ -197,4 +205,4 @@ def test_detection_update_still_refreshes_vehicle_presence() -> None:
         )
     )
 
-    assert "unifi-protect-vehicle-presence-message" in spawned
+    assert service._runtime._callbacks[0][0].presence[0].active is True

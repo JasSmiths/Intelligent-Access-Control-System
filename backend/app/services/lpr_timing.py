@@ -10,6 +10,11 @@ from typing import Any
 
 from app.modules.lpr.base import PlateRead
 from app.services.event_bus import event_bus
+from app.services.unifi_protect_contracts import (
+    ProtectEvidenceStamp,
+    ProtectTimingFields,
+    ProtectWorkValidity,
+)
 
 MAX_LPR_TIMING_OBSERVATIONS = 2000
 PLATE_VALUE_KEYS = {
@@ -102,12 +107,16 @@ class LprTimingRecorder:
     """In-memory diagnostic timing feed for comparing LPR sources."""
 
     def __init__(self) -> None:
-        self._observations: deque[LprTimingObservation] = deque(maxlen=MAX_LPR_TIMING_OBSERVATIONS)
+        self._observations: deque[tuple[LprTimingObservation, ProtectEvidenceStamp | None]] = deque(
+            maxlen=MAX_LPR_TIMING_OBSERVATIONS
+        )
         self._lock = asyncio.Lock()
 
     async def recent(self, limit: int = 200) -> list[dict[str, Any]]:
         async with self._lock:
-            observations = list(self._observations)[-limit:]
+            observations = [
+                row for row, stamp in self._observations if stamp is None or stamp.current()
+            ][-limit:]
         return [asdict(observation) for observation in reversed(observations)]
 
     async def clear(self) -> None:
@@ -158,9 +167,19 @@ class LprTimingRecorder:
             await self._append_and_publish(observation)
         return len(observations)
 
-    async def _append_and_publish(self, observation: LprTimingObservation) -> None:
+    async def record_observations(
+        self, observations: tuple[LprTimingObservation, ...], validity: ProtectWorkValidity
+    ) -> None:
+        for observation in observations:
+            await self._append_and_publish(observation, validity=validity)
+
+    async def _append_and_publish(
+        self, observation: LprTimingObservation, *, validity: ProtectWorkValidity | None = None
+    ) -> None:
         async with self._lock:
-            self._observations.append(observation)
+            if validity is not None and not validity.current():
+                return
+            self._observations.append((observation, validity.stamp if validity else None))
         await event_bus.publish("lpr_timing.observed", {"observation": asdict(observation)})
 
 
@@ -193,6 +212,7 @@ def extract_unifi_protect_track_observations(
     event_id: str | None = None,
     received_at: datetime | None = None,
     probe_attempt: int | None = None,
+    context: ProtectTimingFields | None = None,
 ) -> list[LprTimingObservation]:
     received_at = received_at or _now_utc()
     raw_track = _model_to_debug_dict(track)
@@ -203,10 +223,17 @@ def extract_unifi_protect_track_observations(
         return []
 
     resolved_event_id = (
-        event_id or _track_event_id(raw_track) or str(getattr(event, "id", "") or "") or None
+        event_id
+        or _track_event_id(raw_track)
+        or (context.object_id if context is not None else str(getattr(event, "id", "") or ""))
+        or None
     )
-    common = _protect_common_fields(
-        event, action="track_probe", model="event", received_at=received_at
+    common = (
+        context.common()
+        if context is not None
+        else _protect_common_fields(
+            event, action="track_probe", model="event", received_at=received_at
+        )
     )
     common["event_id"] = resolved_event_id or common["event_id"]
 
@@ -564,6 +591,22 @@ def _is_lpr_candidate_key(key: str) -> bool:
 def _path_has_lpr_context(path: str) -> bool:
     normalized = _normalize_key(path).replace("_", "")
     return any(marker in normalized for marker in PLATE_KEY_MARKERS)
+
+
+def unifi_protect_timing_fields(event: Any, received_at: datetime) -> ProtectTimingFields:
+    common = _protect_common_fields(
+        event, action="track_probe", model="event", received_at=received_at
+    )
+    return ProtectTimingFields(
+        object_id=str(getattr(event, "id", "") or "") or None,
+        received_at=common["received_at"],
+        event_id=common["event_id"],
+        camera_id=common["camera_id"],
+        camera_name=common["camera_name"],
+        protect_action=common["protect_action"],
+        protect_model=common["protect_model"],
+        smart_detect_types=tuple(common["smart_detect_types"]),
+    )
 
 
 def _protect_common_fields(

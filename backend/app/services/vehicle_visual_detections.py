@@ -8,6 +8,11 @@ from functools import lru_cache
 from typing import Any
 
 from app.services.event_bus import event_bus
+from app.services.unifi_protect_contracts import (
+    ProtectEvidenceStamp,
+    ProtectVisualFields,
+    ProtectWorkValidity,
+)
 
 MAX_VEHICLE_VISUAL_OBSERVATIONS = 500
 MAX_VEHICLE_PRESENCE_OBSERVATIONS = 1000
@@ -75,14 +80,16 @@ class VehicleVisualDetectionRecorder:
     """In-memory feed of UniFi Protect vehicle colour/type observations."""
 
     def __init__(self) -> None:
-        self._observations: deque[VehicleVisualObservation] = deque(
-            maxlen=MAX_VEHICLE_VISUAL_OBSERVATIONS
+        self._observations: deque[tuple[VehicleVisualObservation, ProtectEvidenceStamp | None]] = (
+            deque(maxlen=MAX_VEHICLE_VISUAL_OBSERVATIONS)
         )
         self._lock = asyncio.Lock()
 
     async def recent(self, limit: int = 100) -> list[dict[str, Any]]:
         async with self._lock:
-            observations = list(self._observations)[-limit:]
+            observations = [
+                row for row, stamp in self._observations if stamp is None or stamp.current()
+            ][-limit:]
         return [asdict(observation) for observation in reversed(observations)]
 
     async def clear(self) -> None:
@@ -152,7 +159,9 @@ class VehicleVisualDetectionRecorder:
             return None
 
         async with self._lock:
-            observations = list(self._observations)
+            observations = [
+                row for row, stamp in self._observations if stamp is None or stamp.current()
+            ]
 
         candidates = [
             observation
@@ -185,9 +194,19 @@ class VehicleVisualDetectionRecorder:
 
         return asdict(min(candidates, key=score))
 
-    async def _append_and_publish(self, observation: VehicleVisualObservation) -> None:
+    async def record_observations(
+        self, observations: tuple[VehicleVisualObservation, ...], validity: ProtectWorkValidity
+    ) -> None:
+        for observation in observations:
+            await self._append_and_publish(observation, validity=validity)
+
+    async def _append_and_publish(
+        self, observation: VehicleVisualObservation, *, validity: ProtectWorkValidity | None = None
+    ) -> None:
         async with self._lock:
-            self._observations.append(observation)
+            if validity is not None and not validity.current():
+                return
+            self._observations.append((observation, validity.stamp if validity else None))
         await event_bus.publish(
             "vehicle_visual_detection.observed",
             {"observation": asdict(observation)},
@@ -198,14 +217,16 @@ class VehiclePresenceTracker:
     """In-memory UniFi vehicle-presence feed for access-event suppression."""
 
     def __init__(self) -> None:
-        self._observations: deque[VehiclePresenceObservation] = deque(
-            maxlen=MAX_VEHICLE_PRESENCE_OBSERVATIONS
-        )
+        self._observations: deque[
+            tuple[VehiclePresenceObservation, ProtectEvidenceStamp | None]
+        ] = deque(maxlen=MAX_VEHICLE_PRESENCE_OBSERVATIONS)
         self._lock = asyncio.Lock()
 
     async def recent(self, limit: int = 100) -> list[dict[str, Any]]:
         async with self._lock:
-            observations = list(self._observations)[-limit:]
+            observations = [
+                row for row, stamp in self._observations if stamp is None or stamp.current()
+            ][-limit:]
         return [asdict(observation) for observation in reversed(observations)]
 
     async def clear(self) -> None:
@@ -283,7 +304,9 @@ class VehiclePresenceTracker:
         device_id = str(device_id or "").strip() or None
 
         async with self._lock:
-            observations = list(self._observations)
+            observations = [
+                row for row, stamp in self._observations if stamp is None or stamp.current()
+            ]
 
         candidates: list[tuple[int, float, VehiclePresenceObservation]] = []
         for observation in observations:
@@ -320,9 +343,22 @@ class VehiclePresenceTracker:
         payload["age_seconds"] = abs(age_sort)
         return payload
 
-    async def _append_and_publish(self, observation: VehiclePresenceObservation) -> None:
+    async def record_observations(
+        self, observations: tuple[VehiclePresenceObservation, ...], validity: ProtectWorkValidity
+    ) -> None:
+        for observation in observations:
+            await self._append_and_publish(observation, validity=validity)
+
+    async def _append_and_publish(
+        self,
+        observation: VehiclePresenceObservation,
+        *,
+        validity: ProtectWorkValidity | None = None,
+    ) -> None:
         async with self._lock:
-            self._observations.append(observation)
+            if validity is not None and not validity.current():
+                return
+            self._observations.append((observation, validity.stamp if validity else None))
         await event_bus.publish(
             "vehicle_presence.observed",
             {"observation": asdict(observation)},
@@ -474,6 +510,7 @@ def _presence_from_track(
     event_id: str | None,
     received_at: datetime,
     probe_attempt: int | None,
+    context: ProtectVisualFields | None = None,
 ) -> list[VehiclePresenceObservation]:
     raw_track = _model_to_debug_dict(track)
     if not isinstance(raw_track, dict):
@@ -482,8 +519,12 @@ def _presence_from_track(
     if not isinstance(payload, list):
         return []
 
-    common = _protect_common_fields(
-        event, action="track_probe", model="event", received_at=received_at
+    common = (
+        context.common()
+        if context is not None
+        else _protect_common_fields(
+            event, action="track_probe", model="event", received_at=received_at
+        )
     )
     resolved_event_id = (
         event_id
@@ -588,6 +629,7 @@ def extract_unifi_protect_track_vehicle_visual_observations(
     event_id: str | None = None,
     received_at: datetime | None = None,
     probe_attempt: int | None = None,
+    context: ProtectVisualFields | None = None,
 ) -> list[VehicleVisualObservation]:
     received_at = received_at or _now_utc()
     raw_track = _model_to_debug_dict(track)
@@ -597,8 +639,12 @@ def extract_unifi_protect_track_vehicle_visual_observations(
     if not isinstance(payload, list):
         return []
 
-    common = _protect_common_fields(
-        event, action="track_probe", model="event", received_at=received_at
+    common = (
+        context.common()
+        if context is not None
+        else _protect_common_fields(
+            event, action="track_probe", model="event", received_at=received_at
+        )
     )
     common["event_id"] = (
         event_id
@@ -870,6 +916,40 @@ def _plate_from_mapping(value: dict[str, Any]) -> str | None:
             (item for item in found if isinstance(item, str) and _normalize_plate(item)), None
         )
     return str(found) if found else None
+
+
+def unifi_protect_visual_fields(event: Any, received_at: datetime) -> ProtectVisualFields:
+    return ProtectVisualFields(
+        **_protect_common_fields(
+            event, action="track_probe", model="event", received_at=received_at
+        )
+    )
+
+
+def extract_unifi_realtime_presence_observations(
+    payload: dict[str, Any], *, received_at: datetime
+) -> tuple[VehiclePresenceObservation, ...]:
+    return tuple(_presence_from_realtime_payload(payload, received_at=received_at))
+
+
+def extract_unifi_track_presence_observations(
+    track: Any,
+    *,
+    context: ProtectVisualFields,
+    event_id: str,
+    received_at: datetime,
+    probe_attempt: int,
+) -> tuple[VehiclePresenceObservation, ...]:
+    return tuple(
+        _presence_from_track(
+            track,
+            event=None,
+            event_id=event_id,
+            received_at=received_at,
+            probe_attempt=probe_attempt,
+            context=context,
+        )
+    )
 
 
 def _protect_common_fields(

@@ -539,3 +539,25 @@ feature and schedule suites run with it; their old detached-audit monkeypatches
 are retired. [Confirmation units](../backend/tests/test_action_confirmations.py)
 include actual session-close ownership under repeated cancellation. This prerequisite
 does not activate HA effects or close the integrated P6/P8 gates.
+
+## UniFi bounded stream fixtures
+
+[Runtime fixtures](../backend/tests/test_unifi_protect_runtime.py) use inert SDK
+messages, fake operations and isolated recorders. They cover 20/2,000-input bursts,
+callback count/byte budgets including active work, probe pending/active context
+bytes, exact release, retention caps/TTL, immediate gap invalidation, webhook
+survival, full-field extractor parity, original timestamps/deadlines, late probes,
+provider replacement and current evidence. Cancellation-resistant operation/worker
+and blocked-close cases verify actual cleanup; reentrant lifecycle rejection is
+checked before any state mutation and followed by a successful external stop.
+Delayed actual-child fixtures close admission, replace the provider or expire the
+original deadline before I/O and assert no SDK call begins. Confirmed test fixtures
+retain accepted receipts after repeated caller cancellation and actual cleanup,
+preserve failure before acceptance and verify ordinary read cancellation.
+These fixtures do not contact UniFi, actuate devices or establish production sizing.
+
+Retain source/tool/lock identities with before/after callback workload evidence.
+Queue/context accounting bounds retained work; SDK response and synchronous
+extractor allocation before admission is a separate transient cost. Supplemental
+socket-denied macOS checks do not replace the required Linux isolated harness,
+persistence, migrations and restore rehearsal.

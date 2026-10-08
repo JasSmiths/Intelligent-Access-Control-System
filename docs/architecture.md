@@ -549,3 +549,19 @@ Standalone consumption (`commit=True`) owns its same-session rejection audit and
 Audit failure remains visible; no detached task substitutes for required evidence.
 The fresh audit's active SQL is cancellable while its actual session close is owned
 through completion.
+
+### UniFi stream runtime
+
+The [UniFi runtime](../backend/app/services/unifi_protect_runtime.py) owns bounded
+optional callback/probe processing and runtime counters. Existing timing and
+visual/presence extractors still own observation interpretation; concrete scalar
+[contracts](../backend/app/services/unifi_protect_contracts.py) preserve each
+extractor's camera/event precedence without retaining SDK objects. Cached stream
+observations reference only a tiny generation cell, so invalidated evidence cannot
+retain old clients or runtimes. Contracts import no integration, recorder or bus.
+
+[Operation scopes](../backend/app/services/unifi_protect_operations.py) own actual
+operation admission/completion, independently of the calling request's remaining
+lifetime. The service detaches under its lock and drains outside it, allowing
+reentrant status/read observers. Application shutdown must stop UniFi before
+stopping event delivery/diagnostics or disposing the database.
