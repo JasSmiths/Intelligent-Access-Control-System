@@ -103,7 +103,6 @@ async def confirmed_resources(isolated_resources, monkeypatch):
             session.add(SystemSetting(key=key, category=category, description=description,
                 value=settings.setting_payload(key, value), is_secret=key in settings.SECRET_KEYS))
         await session.commit()
-    monkeypatch.setattr(action_confirmations, "emit_audit_log", lambda **kwargs: None)
     yield
     await clear()
 

@@ -537,3 +537,15 @@ single cancellation and drain, so renewal loss followed by the send deadline
 cannot interrupt an already-running cleanup. The lane remains occupied until
 that child settles; no ACK or retry is created after ownership loss. The actual
 transport invocation checks the conservative original lease/start deadline too.
+
+
+Required confirmation rejection audit stays with the
+[confirmation owner](../backend/app/services/action_confirmations.py). A participant
+(`commit=False`) carries frozen scalar evidence on its typed rejection and leaves
+caller state untouched. The notification-send and grouped-alert transaction owners
+roll back before awaiting a fresh audit transaction, so the audit actor foreign-key
+check cannot wait on their own retained Admin lock. Missing-token 428 carries no audit.
+Standalone consumption (`commit=True`) owns its same-session rejection audit and commit.
+Audit failure remains visible; no detached task substitutes for required evidence.
+The fresh audit's active SQL is cancellable while its actual session close is owned
+through completion.

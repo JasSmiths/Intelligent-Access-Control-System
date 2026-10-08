@@ -527,3 +527,15 @@ and repeatedly cancelling stop cannot deliver a second cancellation, release
 the lane, ACK/retry lost ownership or admit another identifier. A stalled actual
 transport child cannot start after its original deadline. Its complete18-case
 PG/Redis suite is rerun for the corresponding runtime correction.
+
+
+The [confirmation rejection persistence suite](../scripts/validation/test_confirmation_rejections.py)
+uses real preheld Admin row locks and both production outer adapters to prove
+rollback-before-audit without a foreign-key self-block. It covers missing, consumed
+and invalid tokens, rollback of caller mutations and token rejection state, token
+reuse after rollback, original scalar correlation, and visible required-audit failures.
+Missing-token 428 remains unaudited. Complete existing notification, authority,
+feature and schedule suites run with it; their old detached-audit monkeypatches
+are retired. [Confirmation units](../backend/tests/test_action_confirmations.py)
+include actual session-close ownership under repeated cancellation. This prerequisite
+does not activate HA effects or close the integrated P6/P8 gates.

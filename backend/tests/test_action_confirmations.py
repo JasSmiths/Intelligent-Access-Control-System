@@ -92,7 +92,6 @@ def test_confirmation_payload_hash_normalizes_equivalent_timestamps() -> None:
 
 async def test_create_action_confirmation_returns_secret_token_without_storing_raw_value(monkeypatch) -> None:
     monkeypatch.setattr(action_confirmations, "get_auth_secret", lambda: "test-secret")
-    monkeypatch.setattr(action_confirmations, "emit_audit_log", lambda **_kwargs: None)
     user = user_with_role(UserRole.ADMIN)
     session = FakeSession()
 
@@ -117,7 +116,6 @@ async def test_create_action_confirmation_returns_secret_token_without_storing_r
 
 async def test_consume_action_confirmation_rejects_replay_and_payload_mismatch(monkeypatch) -> None:
     monkeypatch.setattr(action_confirmations, "get_auth_secret", lambda: "test-secret")
-    monkeypatch.setattr(action_confirmations, "emit_audit_log", lambda **_kwargs: None)
     user = user_with_role(UserRole.ADMIN)
     token = "token-123"
     row = ActionConfirmation(
@@ -158,7 +156,7 @@ async def test_consume_action_confirmation_rejects_replay_and_payload_mismatch(m
         )
     assert replay.value.status_code == 409
     assert row.outcome == "consumed"
-    assert session.commits == 1
+    assert session.commits == 2
 
     fresh_row = ActionConfirmation(
         id=uuid.uuid4(),
@@ -382,3 +380,40 @@ async def test_auth_secret_rotation_consumes_confirmation(monkeypatch) -> None:
     assert consumed["action"] == "auth_secret.rotate"
     assert consumed["payload"] == {"new_secret_provided": True}
     assert consumed["confirmation_token"] == "server-token"
+
+
+async def test_required_rejection_audit_retains_actual_close_through_repeated_cancel(monkeypatch):
+    import asyncio
+    from dataclasses import FrozenInstanceError
+    closing, release = asyncio.Event(), asyncio.Event()
+    original = AsyncSession.close
+    closes = 0
+
+    async def blocked_close(session):
+        nonlocal closes
+        closes += 1
+        closing.set()
+        await release.wait()
+        await original(session)
+
+    monkeypatch.setattr(action_confirmations, "AsyncSessionLocal", AsyncSession)
+    monkeypatch.setattr(AsyncSession, "close", blocked_close)
+    monkeypatch.setattr(action_confirmations, "write_audit_log", AsyncMock())
+    rejection = action_confirmations.ConfirmationRejection(
+        actor="Synthetic", actor_user_id=uuid.uuid4(), action="synthetic.action",
+        payload_hash="a" * 64, reason="not_found", confirmation_id=None,
+        target_entity=None, target_id=None, target_label=None, trace_id=None, request_id=None,
+    )
+    with pytest.raises(FrozenInstanceError):
+        rejection.reason = "changed"
+    task = asyncio.create_task(action_confirmations.persist_confirmation_rejection(rejection))
+    await closing.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0.01)
+    assert not task.done() and closes == 1
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closes == 1

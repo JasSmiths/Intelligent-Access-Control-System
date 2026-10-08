@@ -26,7 +26,6 @@ from app.services.telemetry import actor_from_user
 
 @pytest_asyncio.fixture(autouse=True)
 async def isolated(monkeypatch):
-    monkeypatch.setattr(action_confirmations, "emit_audit_log", lambda **kw: None)
 
     async def publish(*args, **kw):
         pass

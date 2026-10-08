@@ -649,10 +649,10 @@ HA effects/resolution, historical candidates, charts, frontend revisions and the
 full integrated runtime/lifecycle/performance harness remain outstanding.
 
 
-### P6 media/link/zone owner candidate
+### P6 media/link/zone owner checkpoint
 
-The latest approved backend base is `893614f909a995170c685a0b87af1bf40378ebd8`.
-This bounded candidate implements the separate approved media design
+This checkpoint was built on approved base `893614f909a995170c685a0b87af1bf40378ebd8`.
+It implements the separate approved media design
 `d9791fc9f2834cee57ac0df5aade8c55dc5557cb0c0e3765a5e91decb2180175`.
 It defines two actual optional-work slots and an independent publication lifetime,
 explicit closed stage ports, owned session/provider/thread cleanup, immutable
@@ -707,9 +707,59 @@ delivery failure. Large relevant zone arrays remain complete and can themselves 
 large; unused vendor blobs are excluded. This is correctness/allocation-boundary
 evidence, not a new end-to-end performance or production-throughput claim.
 
-Exact-source Astra approval is required for this uncommitted media owner candidate.
+Astra approved this bounded owner and the subsequent EOF-only mapping. Commit
+`702fb9cf53223f9ca022b5c77869acf9a4f29409` preserves final source
+`fb1194e31ac27361f43993a9e909b64a79a16e807bf27678861222f62a59de73`
+and full patch `76f3a25c62676f03daf993b78a92ab4a61ceea75cc14ecb28a3a27b6dacaade5`.
+Its archive SHA `c40815ecd0489b42cad362a92a83e71b5fb55a9ae9c9278cb735ad4a4422b68b`
+matches all 801 selected files; only the two established templates are excluded.
+The staged precommit check found one extra terminal newline in a new source file.
+Its removal preserved the AST and all other 800 hashes; the failed preflight and
+exact approval/mapping remain in `p6-media-final-astra-approval.json` and
+`p6-media-final-commit-equivalence.json`. No runtime gate was repeated for whitespace.
 P6 still needs the atomic decision/reservation/window terminalization and RAM switch,
 HA desired effects/settlement, historical candidates, charts, frontend revision
 consumers, real production lifecycle composition and the complete integrated harness
 with equivalent-output burst/many-window performance evidence. Crash/unknown-outcome
-claim files may be retained on disk; this candidate does not invent a sweep.
+claim files may be retained on disk; this owner does not invent a sweep.
+
+
+### Confirmation rejection audit prerequisite candidate
+
+This bounded early P8 audit slice supports the pending P6 HA acknowledgement owner.
+The approved design is `59c93424ed944d24cfc40adc394d683052cb409408e8dd12e6afe25dd5e26d6e`.
+The confirmation participant now returns frozen scalar rejection evidence through
+its typed error. With `commit=False` it neither mutates a rejected confirmation nor
+commits, rolls back, writes an audit or starts another task/session. Notification
+send and grouped-alert owners finish rollback first, then await the confirmation
+owner's fresh required audit transaction before returning the original rejection.
+That releases the preheld Admin row before the audit actor foreign-key check.
+Missing-token 428 remains unaudited. Standalone `commit=True` remains a commit-owning
+API: rejection audit and the existing rejected/consumed disposition share its session.
+Required audit failure is visible; there is no detached fallback. Active audit SQL
+remains cancellable and actual session close is drained before the owner returns.
+
+Final `iacs-validation-f7cdgx74` passes all 132 real PostgreSQL cases: 19 new rejection
+cases plus 113 complete existing notification, authority, feature and schedule cases.
+The initial 130-pass progress run is retained separately. The final matrix covers
+preheld actor locks for missing/consumed/invalid tokens, caller mutation/token rollback,
+reuse of an otherwise eligible invalid token after rollback, both actual outer adapters,
+original scalar correlation, and standalone/participant/outer required-audit failures.
+It retains the original missing-token behavior and forbids notification dispatch.
+Migration parity, isolation, unchanged source, empty cleanup and equal operational
+snapshots pass. Full backend passes 1,318 with 29 expected skips; 63 affected units
+include an actual session-close barrier with repeated cancellation. Types88/71,
+host22/29 and Ruff/F821 pass on the corrected source. An initial Ruff import-order
+failure was repaired; the later no-escalation Docker socket setup failure ran no
+checks and is retained separately from the successful final tooling invocation.
+
+The separate calendar branch is adding account removal/resume confirmation
+participants. They must adopt the same rollback-before-audit contract with real
+actor-lock and audit-failure tests before integration; this checkpoint covers the
+existing programme consumers and does not claim that unintegrated caller migrated.
+
+Exact-source Astra review of this candidate is still required. This is no HA send
+or settlement implementation, no production activation and no P6/P8 completion.
+Atomic core reservations, RAM retirement, HA/historical/chart owners, frontend
+consumer revisions, full lifecycle composition and integrated performance/full
+harness gates remain pending.

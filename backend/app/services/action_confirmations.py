@@ -4,6 +4,7 @@ import json
 import re
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -11,11 +12,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth_secret import get_auth_secret
+from app.core.task_lifecycle import drain_owned
+from app.db.session import AsyncSessionLocal
 from app.models import ActionConfirmation, User
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
-    emit_audit_log,
+    current_request_id,
+    current_trace_id,
     write_audit_log,
 )
 
@@ -25,11 +29,32 @@ ISO_TIMESTAMP_PATTERN = re.compile(
 )
 
 
+@dataclass(frozen=True)
+class ConfirmationRejection:
+    """Scalar audit handoff; no ORM instances, payload or bearer token survive."""
+
+    actor: str
+    actor_user_id: uuid.UUID
+    action: str
+    payload_hash: str
+    reason: str
+    confirmation_id: uuid.UUID | None
+    target_entity: str | None
+    target_id: str | None
+    target_label: str | None
+    trace_id: str | None
+    request_id: str | None
+
+
 class ActionConfirmationError(Exception):
-    def __init__(self, detail: str, *, status_code: int = 403) -> None:
+    def __init__(
+        self, detail: str, *, status_code: int = 403,
+        rejection: ConfirmationRejection | None = None,
+    ) -> None:
         super().__init__(detail)
         self.detail = detail
         self.status_code = status_code
+        self.rejection = rejection
 
 
 def confirmation_payload_hash(payload: dict[str, Any]) -> str:
@@ -111,11 +136,11 @@ async def consume_action_confirmation(
     expected_hardware_plan: dict[str, Any] | None = None,
     commit: bool = True,
 ) -> ActionConfirmation:
-    """Consume once; ``commit=False`` joins a durable effect's intake transaction.
+    """Standalone calls own commit; participants return rejection evidence.
 
-    The participant never commits a rejection either. Its caller must roll back
-    the whole transaction on failure. Existing standalone callers retain their
-    commit behavior.
+    A commit=False caller rolls back its full transaction, then awaits
+    persist_confirmation_rejection. An independent audit must not wait on the
+    caller's actor FK while that caller still holds User FOR UPDATE.
     """
     if not confirmation_token:
         raise ActionConfirmationError(
@@ -124,22 +149,21 @@ async def consume_action_confirmation(
         )
     token_hash = confirmation_token_hash(confirmation_token)
     row = await find_action_confirmation(session, token_hash)
-    if row is None:
-        _emit_confirmation_rejected(
-            user,
-            action=action,
-            payload_hash=confirmation_payload_hash(payload),
-            reason="not_found",
-        )
-        raise ActionConfirmationError("Confirmation is invalid or has expired.", status_code=403)
-
     expected_payload_hash = confirmation_payload_hash(payload)
+    if row is None:
+        rejection = _confirmation_rejection(
+            user, action=action, payload_hash=expected_payload_hash, reason="not_found",
+        )
+        if commit:
+            await _write_confirmation_rejection(session, rejection)
+            await session.commit()
+        raise ActionConfirmationError(
+            "Confirmation is invalid or has expired.", status_code=403, rejection=rejection,
+        )
+
     try:
         _validate_confirmation_row(
-            row,
-            user=user,
-            action=action,
-            payload_hash=expected_payload_hash,
+            row, user=user, action=action, payload_hash=expected_payload_hash,
             now=datetime.now(tz=UTC),
         )
         if (
@@ -151,25 +175,15 @@ async def consume_action_confirmation(
                 status_code=409,
             )
     except ActionConfirmationError as exc:
-        if row.consumed_at is None:
-            row.consumed_at = datetime.now(tz=UTC)
-            row.outcome = "rejected"
-            await write_audit_log(
-                session,
-                **_confirmation_rejection(
-                    user,
-                    action=action,
-                    payload_hash=expected_payload_hash,
-                    reason=exc.detail,
-                    row=row,
-                ),
-            )
-            if commit:
-                await session.commit()
-        else:
-            _emit_confirmation_rejected(
-                user, action=action, payload_hash=expected_payload_hash, reason=exc.detail, row=row
-            )
+        exc.rejection = _confirmation_rejection(
+            user, action=action, payload_hash=expected_payload_hash, reason=exc.detail, row=row,
+        )
+        if commit:
+            if row.consumed_at is None:
+                row.consumed_at = datetime.now(tz=UTC)
+                row.outcome = "rejected"
+            await _write_confirmation_rejection(session, exc.rejection)
+            await session.commit()
         raise
 
     row.consumed_at = datetime.now(tz=UTC)
@@ -276,28 +290,47 @@ def _confirmation_rejection(
     payload_hash: str,
     reason: str,
     row: ActionConfirmation | None = None,
-) -> dict[str, Any]:
-    return {
-        "category": TELEMETRY_CATEGORY_INTEGRATIONS,
-        "action": "real_world_action.confirmation.rejected",
-        "actor": actor_from_user(user),
-        "actor_user_id": user.id,
-        "target_entity": row.target_entity if row else None,
-        "target_id": row.target_id if row else None,
-        "target_label": row.target_label if row else None,
-        "outcome": "failed",
-        "level": "warning",
-        "metadata": {
-            "confirmation_id": str(row.id) if row else None,
-            "action": _normalize_action(action),
-            "payload_hash": payload_hash,
-            "reason": reason,
+) -> ConfirmationRejection:
+    return ConfirmationRejection(
+        actor=actor_from_user(user), actor_user_id=user.id,
+        action=_normalize_action(action), payload_hash=payload_hash, reason=reason,
+        confirmation_id=row.id if row else None,
+        target_entity=row.target_entity if row else None,
+        target_id=row.target_id if row else None,
+        target_label=row.target_label if row else None,
+        trace_id=current_trace_id(), request_id=current_request_id(),
+    )
+
+
+async def _write_confirmation_rejection(
+    session: AsyncSession, rejection: ConfirmationRejection,
+) -> None:
+    await write_audit_log(
+        session,
+        category=TELEMETRY_CATEGORY_INTEGRATIONS,
+        action="real_world_action.confirmation.rejected",
+        actor=rejection.actor, actor_user_id=rejection.actor_user_id,
+        target_entity=rejection.target_entity, target_id=rejection.target_id,
+        target_label=rejection.target_label, outcome="failed", level="warning",
+        trace_id=rejection.trace_id, request_id=rejection.request_id,
+        metadata={
+            "confirmation_id": str(rejection.confirmation_id) if rejection.confirmation_id else None,
+            "action": rejection.action, "payload_hash": rejection.payload_hash,
+            "reason": rejection.reason,
         },
-    }
+    )
 
 
-def _emit_confirmation_rejected(user: User, **kwargs: Any) -> None:
-    emit_audit_log(**_confirmation_rejection(user, **kwargs))
+async def persist_confirmation_rejection(rejection: ConfirmationRejection | None) -> None:
+    """Await only after the participant's entire transaction has rolled back."""
+    if rejection is None:
+        return  # Missing-token428 has never been an audited rejection path.
+    session = AsyncSessionLocal()
+    try:
+        await _write_confirmation_rejection(session, rejection)
+        await session.commit()
+    finally:
+        await drain_owned(session.close())
 
 
 def _normalize_action(action: str) -> str:

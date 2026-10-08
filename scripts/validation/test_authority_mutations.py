@@ -85,7 +85,6 @@ async def owned_resources(isolated_resources, monkeypatch):
     settings.invalidate_runtime_config_cache()
     service = NotificationService(run_store=NotificationRunStore())
     monkeypatch.setattr(notifications, "get_notification_service", lambda: service)
-    monkeypatch.setattr(confirmations, "emit_audit_log", lambda **_kwargs: None)
     # set_mode(sync_ha=False) must never need this sink; unexpected calls fail.
     monkeypatch.setattr(maintenance, "_sync_home_assistant", AsyncMock(side_effect=AssertionError("Hardware sync is forbidden")))
     try:

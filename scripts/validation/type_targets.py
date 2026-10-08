@@ -35,6 +35,7 @@ TYPE_OWNERS = (
     TypeOwner('app/services/domain_events.py', 'checked'),
     TypeOwner('app/services/event_bus.py', 'strict'),
     TypeOwner('app/services/realtime_contracts.py', 'strict'),
+    TypeOwner('app/services/action_confirmations.py', 'strict'),
     TypeOwner('app/services/access_events.py', 'checked'),
     TypeOwner('app/services/lpr_ingest.py', 'strict'),
     TypeOwner('app/ai/providers.py', 'checked'),

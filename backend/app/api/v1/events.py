@@ -27,6 +27,7 @@ from app.services.action_confirmations import (
     ActionConfirmationError,
     consume_action_confirmation,
     create_action_confirmation,
+    persist_confirmation_rejection,
 )
 from app.services.event_bus import event_bus
 from app.services.expected_presence import expected_presence_today
@@ -603,6 +604,7 @@ async def action_alerts(
             )
         except ActionConfirmationError as exc:
             await session.rollback()
+            await persist_confirmation_rejection(exc.rejection)
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         frozen_ids = (confirmation.metadata_ or {}).get("alert_ids")
         if (
