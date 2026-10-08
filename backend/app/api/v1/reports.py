@@ -14,6 +14,7 @@ from app.services.auth import authenticate_token, extract_http_token
 from app.services.report_contracts import ReportAuthority, ReportExportError, ReportRequest
 from app.services.report_exports import report_exports
 from app.services.reports import (
+    load_report_download,
     load_report_export,
     preview_person_movement_report,
     report_export_payload,
@@ -134,7 +135,7 @@ async def download_report_export_pdf(
     actor: Annotated[User, Depends(current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> FileResponse:
-    row = await load_report_export(session, report_id, actor=actor)
+    row = await load_report_download(session, report_id, actor=actor)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report was not found.")
     try:

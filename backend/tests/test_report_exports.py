@@ -11,6 +11,9 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy.exc import IntegrityError
 
+from test_process_lifecycle import owned_resources as owned_resources
+
+from app import main
 from app.api.v1 import reports as api
 from app.models import ReportExport
 from app.services import report_exports as exports
@@ -420,3 +423,65 @@ async def test_busy_export_creates_no_disconnect_waiter_and_success_drains_one(h
     await task
     assert calls == ["admitted"]
     assert not [task for task in asyncio.all_tasks() if task.get_name() == "report-disconnect"]
+
+
+@pytest.mark.parametrize("stage", ["thread", "driver", "commit"])
+async def test_full_lifespan_cleanup_waits_actual_report_work_even_after_stop_timeout(harness, owned_resources, monkeypatch, stage):
+    events, _controls = owned_resources
+    entered, release = asyncio.Event(), asyncio.Event()
+    thread_entered, thread_release = Event(), Event()
+    cleanup = []
+    if stage == "thread":
+        def blocked(snapshot, work):
+            thread_entered.set()
+            assert thread_release.wait(5)
+            cleanup.append("thread")
+            work.check()
+        monkeypatch.setattr(renderer, "report_for_pdf", blocked)
+        monkeypatch.setattr(exports, "render_person_movement_report_pdf", renderer.render_person_movement_report_pdf)
+    elif stage == "driver":
+        class Driver:
+            async def stop(self):
+                cleanup.append("driver")
+        class Starter:
+            async def start(self):
+                entered.set()
+                await release.wait()
+                return Driver()
+        monkeypatch.setattr(renderer, "async_playwright", Starter)
+        monkeypatch.setattr(renderer, "report_for_pdf", lambda snapshot, work: snapshot)
+        monkeypatch.setattr(renderer, "_TEMPLATES", SimpleNamespace(get_template=lambda _: SimpleNamespace(render=lambda **_: "synthetic")))
+        monkeypatch.setattr(exports, "render_person_movement_report_pdf", renderer.render_person_movement_report_pdf)
+    else:
+        async def commit(session):
+            entered.set()
+            await release.wait()
+            cleanup.append("commit")
+        harness.commit_hook = commit
+    monkeypatch.setattr(main, "report_exports", harness.owner)
+    real_wait_for = asyncio.wait_for
+    async def short_stop(awaitable, *, timeout):
+        return await real_wait_for(awaitable, timeout=.02)
+    monkeypatch.setattr(main.asyncio, "wait_for", short_stop)
+    lifespan = main.lifespan(FastAPI())
+    await lifespan.__aenter__()
+    request_task = asyncio.create_task(harness.owner.export(harness.request, harness.authority))
+    if stage == "thread":
+        assert await asyncio.to_thread(thread_entered.wait, 5)
+    else:
+        await entered.wait()
+    shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
+    await asyncio.sleep(.04)  # Exceed injected outer service-stop timeout.
+    assert not shutdown.done() and harness.owner._active is not None
+    assert ("stop", "database") not in events
+    thread_release.set()
+    release.set()
+    if stage == "commit":
+        assert (await request_task)["report_id"] == "123456"
+    else:
+        with pytest.raises(ReportStoppedError):
+            await request_task
+    await shutdown
+    assert cleanup == [stage]
+    assert events[-1] == ("stop", "database")
+    assert harness.owner._active is None and all(session.closed for session in harness.sessions)

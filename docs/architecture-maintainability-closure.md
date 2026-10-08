@@ -55,7 +55,7 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   run; every other full-gate check passed. All 727 committed source hashes equal
   the approved candidate, with clean source/cleanup and unchanged operational state.
   Retention dispositions were accepted; E4 integrated conformance remains pending.
-- Current integrated checkpoint: `4445db74bfe1a556103647bd2bddce112b2c6646`
+- Current approved backend checkpoint: `d079bb04a12d927084acee9b2f4d013ddfe2e2f4`
   includes approved P3, P4 frontend and P5, plus the separately approved P6
   foundation (`876deec32b2da8559585c5333964af211f3d2308`) and immutable intake
   (`f9e1dba7d043bed9d378de6205a05cbb8c047856`) owner checkpoints. The integration
@@ -67,13 +67,24 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   `cbf55317abb1826f1fb63c98286553def95f154a3d1e48f276f3f2028b872c96`.
   Its receipt is `p6-window-astra-approval.json`; archive equivalence is retained in
   `p6-window-commit-equivalence.json`. The publication owner is separately
-  approved and committed at the current checkpoint, with source
+  approved and committed at `4445db74bfe1a556103647bd2bddce112b2c6646`, with source
   `6f1761640bf4c7622941033ecf48669004eade768f12af23ff2438470f333d75`
   and patch `c9d0a7c192df0651493bf210b35df97c6cb17e465d9ca7c8ea9d2a9fe67a0f07`.
   Its 18 PostgreSQL/Redis and 37 unit cases, checked/strict 73/56, host 22/29,
   migration/source/cleanup/operational evidence are retained in
   `p6-publication-candidate.json`, `p6-publication-astra-approval.json` and
-  `p6-publication-commit-equivalence.json`. P6 remains incomplete: the RAM/runtime
+  `p6-publication-commit-equivalence.json`. The origin/readiness completion
+  repository is separately approved and committed at the current backend
+  checkpoint, with source
+  `2ac90b93086842221c130a4a5ae92422b9fa2043a1128e37c75969427f4c0d1d`
+  and patch `4a1cc4a4db9dcb5c73e09e62b658186b84b30621875d98af527d369351558891`.
+  Its 38 PostgreSQL/91 unit cases, checked/strict 75/58, host 22/29 and clean
+  migration/source/cleanup/operational gates are mapped in
+  `p6-completion-candidate.json`, `p6-completion-astra-approval.json` and
+  `p6-completion-commit-equivalence.json`. The approved report range
+  `ef1647b23289ede8daf174e9d4e54e272dac6327..5a4ad72074ff5b50b9f4764a8ee63c268a6d575f`
+  is integrated sequentially with the union of type/persistence registrations and
+  separately reviewed documentation. P6 remains incomplete: the RAM/runtime
   handoff, completion applicators, HA, historical, chart, lifecycle, matching
   frontend changes and final integrated validation remain required.
   The brief initial shared-checkout editing period was separated before the first
@@ -184,6 +195,57 @@ amendment is mapped separately in `p4-frontend-approval-docs-mapping.json` with
 runtime bytes unchanged. AM-04 is closed for this frontend stage. Backend P4
 approval and later programme stages remain unchanged.
 
+## P8 report owner evidence (Astra approved)
+
+The reports lane rebases its owned work onto approved P6 window checkpoint
+`ef1647b23289ede8daf174e9d4e54e272dac6327`, preserving the approved frontend and
+backend bytes outside the coordinated report composition. Separate compact source,
+image, renderer and export owners replace the long request transaction. Preview
+and export share the N + M + S 10,000 activity representation budget; vehicle
+metadata has a separate 10,000 ceiling. Export admission, the whole 120-second
+budget, actual HTTP disconnect/resource drain, fresh token/user authority, required
+audit rollback, accepted/unknown commits and UUID artifact ownership are covered
+by focused fixtures. This is report-slice evidence; calendar and AM-08 closure
+remain pending.
+
+The runtime image `6f23f9cb891d` renders the actual template as the non-root user
+with networking disabled. Small smoke, external-source rejection, separate row
+and image ceilings, and combined 10,000 rows/25 MiB data URLs/64 Mi-pixels are
+retained in `p8-report-runtime-pdf` and `p8-report-runtime-limits`. The combined
+fixture passed only in the tested 4 GiB RAM plus 4 GiB swap allowance/512 MiB
+`/tmp` envelope (RAM peak 3,889,774,592; sampled swap peak 1,076,711,424 bytes).
+The original 256 MiB temp failure and combined 2 GiB RAM/2 GiB swap OOM remain
+explicit failures. This establishes one synthetic envelope, with ordinary app,
+concurrent work and multiple workers unmeasured; it is not an RSS guarantee or
+proof that 4 GiB total/no-swap suffices. No Compose/product caps were changed.
+
+Focused PostgreSQL checks pass 17 cases, including actual blocked SQL during full
+lifespan shutdown and an audit fault after both rows flush, followed by a fresh
+successful retry. Unit/lifespan checks pass 92 cases; checked bodies/strict targets
+and source-selection checks pass. The corrected before/final read pair preserves
+exact public output at both scales and actual target plans (2,500 selected/5,000
+site rows). Target full unused blob scalar bytes loaded fall from 23,285,210 to
+zero; Python allocation peak falls from 44,181,925 to 15,710,081 bytes. Small query
+count rises 11 → 13 and target selected SQL plan time rises 0.682 → 4.298 ms;
+these are materialization results, not universal SQL/production speed claims.
+The narrow download projection also proves no stored 16 MiB historical snapshot
+is loaded for a PDF download, while metadata remains complete and sanitized.
+The frozen full harness `iacs-validation-n606vzeg` retained 160 entries. It
+failed only the inherited simulation unit and three access-pipeline assertions
+that still supplied retired raw trust flags; all other groups, including report
+PostgreSQL, locked Node 22 frontend build/353 tests, migrations and restore, passed.
+Exact Astra-reviewed fixture corrections preserve typed gate provenance, genuine
+external session/presence matching, denied forged tags, raw ingest evidence and
+no-command guarantees. The complete corrected backend selection passes 1,241
+tests with 29 expected database-free skips; the complete pipeline passes 31 real
+PostgreSQL cases. F821 and source/harness guards pass. The final immutable mapping
+carries unchanged runtime/full-run/image evidence forward; the original harness
+exit remains a recorded failure, not a claimed successful rerun. Astra Ultra approved the complete report-owner source and mapped evidence.
+Calendar, other P8 owners, AM-08 as a whole and P9 remain pending.
+Failed progress/fake-fixture attempts, the external runner basetemp setup failure
+and superseded assertion-shape run remain retained. P9 integrated programme
+conformance and non-report P8 owners remain pending.
+
 ## Findings
 
 | Finding | Owner and stages | Required closure evidence | Status / Astra approval |
@@ -211,8 +273,8 @@ approval and later programme stages remain unchanged.
 | AccessExecutionResult unused window/command/skipped/outcome fields | Narrow after tracing; P5/AM-11 | Whole-repository and fixture trace; retain durable fields | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
 | External-admission private method | Explicit supported admission interface; P6 | One admission implementation; preserve execution/admission ordering | Pending / pending |
 | Unused shell reads and seeds | Remove with feature ownership; P3 | Actual feature read coverage and invalidation/draft lifetimes | Closed / Astra approved P3 |
-| OAuth placeholder flags/button/import | Remove together; P4 | No implemented OAuth operation; provider editor checks | Pending / pending |
-| Artificial provider progress waits | Remove; P4 | Actual pending work owns feedback; no backend speedup claim | Pending / pending |
+| OAuth placeholder flags/button/import | Remove together; P4 | No implemented OAuth operation; provider editor checks | Closed / Astra approved P4 frontend |
+| Artificial provider progress waits | Remove; P4 | Actual pending work owns feedback; no backend speedup claim | Closed / Astra approved P4 frontend |
 | Report first-500/secondary subject filtering | Replace with bounded server search and selected hydration; P3 | Subject beyond 500 and server-only searchable-field fixtures | Closed / Astra approved P3 |
 | _commit_if_supported and guaranteed-protocol getattr wrappers | Remove after correcting fakes/ports; P5 | Concrete required ports and uncertainty-boundary regression checks | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
 | IACS_SEED_DEMO_DATA | Retain pending external-consumer evidence; P5 | Parsed public deployment option; audit did not establish all external configuration users | Retained / Astra approved P5 |
@@ -232,7 +294,7 @@ approval and later programme stages remain unchanged.
 
 | Exercise | Stage and acceptance | Status / Astra approval |
 | --- | --- | --- |
-| E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | Backend fixture approved; frontend/P9 integration pending / Astra approved P4 backend |
+| E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | Backend and frontend stage fixtures approved; final integrated P9 exercise pending / Astra approved P4 backend and frontend |
 | E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | P2 conformance approved; P6/P9 integration pending / Astra approved P2 |
 | E3 calendar schedule exception | P2/P8/P9: schedule ownership, current authority and generated configuration contracts | Pending / pending |
 | E4 last recorded mileage summary | P5/P6/P9: feature store owns new summary/reset and optional completion | Pending / pending |
@@ -422,7 +484,7 @@ handling, provider shutdown order and the complete integrated harness remain
 required before P6 approval.
 
 
-## P6 completion repository candidate
+## P6 approved completion repository
 
 The origin/readiness repository is a separate partial owner checkpoint. Core
 transactions reserve deterministic per-event/stage work; the original receipt,
@@ -449,5 +511,5 @@ are explicitly test-only sequential handoffs, reviewed separately by Astra;
 they use typed fixture-owned observation input and real session/camera matching,
 retain the closed-gate domain no-command guard, and add forged raw-tag denial.
 The original failures remain retained. No runtime compatibility bypass is added,
-and the programme fixtures remain unchanged until the approved report mapping
-is integrated.
+and the programme receives these exact corrected fixtures only through the
+approved report integration mapping.

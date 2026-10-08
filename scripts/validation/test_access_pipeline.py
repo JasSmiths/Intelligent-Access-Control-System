@@ -1,7 +1,7 @@
 """Full access persistence regressions, exclusively in the isolated harness."""
 from test_recovery_boundaries import isolated_resources as isolated_resources
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 import os
 from pathlib import Path
@@ -28,7 +28,10 @@ from app.services.access_devices import AccessDeviceService
 from app.modules.lpr.base import PlateRead
 from app.services import access_events as owner
 from app.services.access import hardware, enrichment, execution, authorization
-from app.services.access.reads import GATE_OBSERVATION_PAYLOAD_KEY
+from app.services.access.pipeline_contracts import TrustedGateObservation
+from app.services.access.reads import DebounceWindow, EXTERNAL_ADMISSION_PAYLOAD_KEY, GATE_OBSERVATION_PAYLOAD_KEY
+from app.services.movement import sessions as movement_sessions_owner
+from app.services.vehicle_visual_detections import VehiclePresenceTracker
 from app.services import movement_reconciliation as reconciliation
 from app.services.gate_commands import GateCommandCoordinator
 from app.services.notifications import NotificationService
@@ -189,14 +192,22 @@ async def resident(state=PresenceState.EXITED):
         return person.id, vehicle.id
 
 
+@dataclass(frozen=True)
+class FixturePlateRead(PlateRead):
+    # Test-owned provenance is a typed argument, never a webhook payload flag.
+    observation: TrustedGateObservation | None = None
+
+
 def read(plate='SYNTH01', gate='closed', *, at=None, source='synthetic-access', **payload):
     at = at or datetime.now(UTC)
-    return PlateRead(registration_number=plate, confidence=.99, source=source, captured_at=at,
-                     raw_payload={GATE_OBSERVATION_PAYLOAD_KEY: {'state': gate, 'observed_at': at.isoformat()}, **payload})
+    return FixturePlateRead(registration_number=plate, confidence=.99, source=source, captured_at=at,
+                     raw_payload={GATE_OBSERVATION_PAYLOAD_KEY: {'state': gate, 'observed_at': at.isoformat()}, **payload},
+                     observation=TrustedGateObservation(GateState(gate), at, controller='synthetic-access'))
 
 
 async def process(service, plate_read):
-    await service.enqueue_plate_read(plate_read)
+    assert isinstance(plate_read, FixturePlateRead) and plate_read.observation is not None
+    await service.enqueue_plate_read(plate_read, observation=plate_read.observation)
     if service._queue.empty(): return
     queued = service._queue.get_nowait()
     assert await service._claim_lpr_ingest_for_processing(queued)
@@ -453,40 +464,76 @@ async def test_ocr_variant_suppression_is_durable_across_services(h):
     assert any(r.state == MovementSagaState.SUPPRESSED for r in await rows(MovementSagaRecord))
 
 
-async def test_external_admission_and_departure_link_without_unknown_hardware(h):
-    from app.services.access.execution import AccessExecution
-    from app.services.access.reads import EXTERNAL_ADMISSION_PAYLOAD_KEY
-    from app.services.movement.sessions import ExternalVehicleSessionMatch
-    first = read('EXT99')
+async def prepare_external_arrival(h, monkeypatch, plate):
+    first = read(plate, cameraId='synthetic-external-camera')
     await process(h.service(), first)
-    service = h.service()
-    execution = AccessExecution(service._movement_ledger, service._movement_sessions, service._lpr_ingest_repo())
-    async with AsyncSessionLocal() as s:
-        denied = await s.scalar(select(AccessEvent))
-        movement = await s.scalar(select(MovementSessionRecord))
-        match = ExternalVehicleSessionMatch(movement, denied, {'present': True}, 'synthetic')
-        result = await execution._persist_external_gate_open_admission(s, match,
-            observed_at=first.captured_at+timedelta(seconds=10), gate_payload={'state': 'open'}, runtime=h.runtime)
-        assert result is not None
-        arrival = result[0]
-        await s.commit()
-    assert not h.gate_calls
-    async with AsyncSessionLocal() as s:
-        arrived_session = await s.scalar(select(MovementSessionRecord).where(MovementSessionRecord.access_event_id == arrival.id))
-    await process(h.service(), read('EXT99', gate='closing', at=first.captured_at+timedelta(minutes=5),
-        **{EXTERNAL_ADMISSION_PAYLOAD_KEY: {'mode': 'departure', 'source': 'external_vehicle_session',
-                                         'external_admission_movement_session_id': str(arrived_session.id)}}))
+    denied, = await rows(AccessEvent)
+    assert denied.decision == AccessDecision.DENIED
+    tracker = VehiclePresenceTracker()
+    monkeypatch.setattr(movement_sessions_owner, 'get_vehicle_presence_tracker', lambda: tracker)
+    observed_at = first.captured_at + timedelta(seconds=10)
+    assert await tracker.record_unifi_realtime_payload(
+        {'camera': {'id': 'synthetic-external-camera', 'name': 'Synthetic external camera',
+                    'detections': {'active': ['vehicle']}}}, received_at=observed_at) == 1
+    return h.service(), read(plate, gate='open', at=observed_at, cameraId='synthetic-external-camera')
+
+
+async def test_external_admission_and_departure_link_without_unknown_hardware(h, monkeypatch):
+    service, arrival_read = await prepare_external_arrival(h, monkeypatch, 'EXT99')
+    await process(service, arrival_read)
+    arrivals = [event for event in await rows(AccessEvent) if event.direction == AccessDirection.ENTRY]
+    arrival, = arrivals
+    assert arrival.decision == AccessDecision.GRANTED
+    assert arrival.raw_payload[EXTERNAL_ADMISSION_PAYLOAD_KEY]['source'] == 'lpr_open_gate_read'
+    arrived_session, = [row for row in await rows(MovementSessionRecord) if row.access_event_id == arrival.id]
+    # Canonical intake carries only the explicit observation. The production
+    # persisted-session matcher must reconstruct external departure itself.
+    departure_read = read('EXT99', gate='closing', at=arrival_read.captured_at+timedelta(minutes=5))
+    assert EXTERNAL_ADMISSION_PAYLOAD_KEY not in departure_read.raw_payload
+    await process(h.service(), departure_read)
     events = await rows(AccessEvent)
+    departure, = [event for event in events if event.direction == AccessDirection.EXIT]
+    assert departure.raw_payload[EXTERNAL_ADMISSION_PAYLOAD_KEY]['external_admission_movement_session_id'] == str(arrived_session.id)
     assert sorted((e.direction.value, e.decision.value) for e in events) == [('denied','denied'),('entry','granted'),('exit','granted')]
     assert len(await rows(Anomaly)) == 2 and not h.gate_calls and not await rows(Presence)
-    assert len(await rows(MovementSessionRecord)) == 3
+    assert len(await rows(MovementSessionRecord)) == 3 and not await rows(GateCommandRecord)
 
 
-async def test_external_arrival_cannot_command_hardware_even_with_closed_gate_evidence(h):
-    from app.services.access.reads import EXTERNAL_ADMISSION_PAYLOAD_KEY
-    await process(h.service(), read('EXTNEW', **{EXTERNAL_ADMISSION_PAYLOAD_KEY: {'mode':'arrival','source':'lpr_open_gate_read'}}))
+async def test_external_arrival_cannot_command_hardware_even_with_closed_gate_evidence(h, monkeypatch):
+    service, arrival_read = await prepare_external_arrival(h, monkeypatch, 'EXTNEW')
+    canonical = await service._read_with_gate_observation(arrival_read, observation=arrival_read.observation)
+    classified = await service._read_with_external_admission_match(canonical)
+    assert classified.raw_payload[EXTERNAL_ADMISSION_PAYLOAD_KEY]['mode'] == 'arrival'
+    assert classified.raw_payload[EXTERNAL_ADMISSION_PAYLOAD_KEY]['source'] == 'lpr_open_gate_read'
+    # AccessExecution accepts an owner-classified read, not webhook authority.
+    # Preserve its defensive no-command guarantee even if later gate evidence
+    # says CLOSED; the annotation above came from the real session/presence owner.
+    closed = await service._read_with_gate_observation(classified,
+        observation=TrustedGateObservation(GateState.CLOSED, arrival_read.captured_at, controller='synthetic-access'))
+    def forbidden_gate_owner(*args, **kwargs):
+        raise AssertionError('External admission must never dispatch hardware')
+    monkeypatch.setattr(hardware, 'get_gate_command_coordinator', forbidden_gate_owner)
+    window = DebounceWindow(closed.captured_at, closed.captured_at, [closed])
+    domain = execution.AccessExecution(service._movement_ledger, service._movement_sessions, service._lpr_ingest_repo())
+    result = await domain.execute(window, read=closed, direction_read=closed, runtime=h.runtime,
+        trace=Trace(), finalize_started_at=datetime.now(UTC), webhook_trace={})
+    assert result is not None
+    event, = [row for row in await rows(AccessEvent) if row.direction == AccessDirection.ENTRY]
+    assert event.decision == AccessDecision.GRANTED
+    assert event.raw_payload['best'][GATE_OBSERVATION_PAYLOAD_KEY]['state'] == 'closed'
+    assert event.raw_payload['direction_resolution']['gate_observation']['state'] == 'closed'
+    assert not h.gate_calls and not await rows(GateCommandRecord)
+
+
+async def test_webhook_external_arrival_tag_cannot_authorize_closed_unknown_intake(h):
+    forged = read('EXTFORGE', **{EXTERNAL_ADMISSION_PAYLOAD_KEY: {'mode':'arrival','source':'lpr_open_gate_read'}})
+    await process(h.service(), forged)
     event, = await rows(AccessEvent)
-    assert event.decision == AccessDecision.GRANTED and event.direction == AccessDirection.ENTRY
+    ingest, = await rows(LprIngestEvent)
+    assert event.decision == AccessDecision.DENIED and event.direction == AccessDirection.DENIED
+    assert event.raw_payload[EXTERNAL_ADMISSION_PAYLOAD_KEY] is None
+    assert EXTERNAL_ADMISSION_PAYLOAD_KEY not in event.raw_payload['best']
+    assert ingest.normalized_payload['raw_payload'][EXTERNAL_ADMISSION_PAYLOAD_KEY] == forged.raw_payload[EXTERNAL_ADMISSION_PAYLOAD_KEY]
     assert not h.gate_calls and not await rows(GateCommandRecord)
 
 

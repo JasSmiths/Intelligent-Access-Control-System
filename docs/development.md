@@ -5,6 +5,27 @@ Use this guide for a new local instance and routine source work. The
 [integrations and safety](integrations.md) covers provider and hardware effects;
 [validation](validation.md) defines the required checks.
 
+## Report export limits
+
+Preview and PDF activity share a 10,000-row representation limit: selected events,
+all-site timeline rows and selected timeline rows count separately. Subjects may
+have at most 10,000 vehicle metadata rows for a report. Oversized requests fail
+with HTTP 413 and an actionable period/subject message; results are never silently
+truncated. PDF image data URLs total at most 25 MiB, with a separate 25 MiB source
+read guard and 64 Mi-pixels of source canvas across embedded occurrences.
+Multi-frame images and external/non-data profile sources cannot be exported;
+upload a supported static raster profile photo. Public preview URLs and stored
+photos remain unchanged. Invalid image sources return 400, size limits 413.
+
+Each process admits one export and rejects concurrent requests with 503 and
+`Retry-After: 1`. The whole operation has a 120-second deadline (504 on expiry),
+with actual cleanup drained before admitting another operation. Final authority
+is checked again before the atomic export/audit commit. If commit outcome cannot
+be resolved, 503 includes a reconciliation ID; do not blindly retry an unknown
+outcome. Accepted commits retain their receipt. See the measured
+[runtime resource envelope](validation.md#final-runtime-pdf-capability) when sizing
+exports; input caps do not guarantee a fixed memory footprint.
+
 ## Start a new local instance
 
 Install Docker with Compose v2. The images supply Python 3.12, PostgreSQL 16 with

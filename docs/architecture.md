@@ -131,13 +131,35 @@ services. Read operations return bounded pages; editors hydrate explicitly selec
 identities through detail/lookup reads. Snapshot fallback uses per-registration
 latest-row lookups rather than ranking complete movement histories.
 
-Reports query the selected period and necessary predecessor state. The pure
-[duration policy](../backend/app/services/report_durations.py) owns the movement
-state and chronological calculation, with an explicit site timezone. Observations
-at the same timestamp do not establish one another's duration. Departures retain
-the existing cross-vehicle subject
-semantics. Timeline inputs stream in batches; report output still grows with the
-selected period and PDF generation remains a separate cost.
+Reports use compact, bounded [source reads](../backend/app/services/report_reads.py)
+in one read-only repeatable snapshot, including runtime configuration. Subject
+membership stays relational; previews do not load profile or vehicle photo blobs.
+The shared 10,000 activity limit counts every output representation: selected
+`events` plus `timeline.all` plus `timeline.selected`. A separate 10,000 subject
+vehicle metadata ceiling rejects oversized subjects without truncation. The pure
+[duration policy](../backend/app/services/report_durations.py) owns movement state
+with an explicit site timezone and bounded strictly prior predecessor reads.
+Same-time observations do not establish one another's duration; displayed rows
+use ID to break timestamp ties. Departures retain cross-vehicle subject semantics.
+
+The inert [export owner](../backend/app/services/report_exports.py) admits one
+export per process without a queue and owns a 120-second deadline through source,
+image, template, browser and final persistence work. Source/auth sessions close
+before rendering. Request disconnect, cancellation and shutdown stop subsequent
+stages; capacity and database disposal wait for actual owned resource cleanup.
+[Image preparation](../backend/app/services/report_images.py) caps complete data
+URLs at 25 MiB and actual source canvases at 64 Mi-pixels across all embedded
+occurrences; PDF inputs must be static raster data. Public preview photo URLs are
+unchanged. The [renderer](../backend/app/services/report_renderer.py) denies remote
+requests and owns synchronous work in tracked threads. These input caps are not
+an RSS guarantee; the measured runtime envelope is in [validation](validation.md#final-runtime-pdf-capability).
+
+Final persistence freshly verifies the original token's expiry/revocation and
+current active user/session version, then commits export and required audit
+atomically. The public receipt is prepared before commit. Private UUID artifacts
+isolate public-number collisions; a known accepted commit remains success even
+if later cleanup fails. An unresolved commit retains its artifact for reconciliation
+and returns an explicit unknown outcome instead of inviting a blind retry.
 
 Camera AI analyzes images through [provider implementations](../backend/app/ai/providers.py).
 Access evidence and UniFi snapshot analysis consume this interface. Reports and
@@ -269,7 +291,7 @@ introduce shared abstractions only for demonstrated shared behavior.
 | Notification behavior | Use the [planner](../backend/app/services/notification_planning.py), [recipients](../backend/app/services/notification_recipients.py) or [authorization](../backend/app/services/notification_authorization.py) owner. Keep transport orchestration and durable delivery separate from policy. |
 | Automation action or trigger | Extend the [action definitions](../backend/app/services/workflows/action_definitions.py), generated contracts and explicit typed editor for actions, and the supported trigger catalog and [action handler](../backend/app/services/automation_actions.py), [webhook intake](../backend/app/services/automation_webhooks.py) or [time intake](../backend/app/services/automation_time_intake.py) owner. Preserve checked execution identities, deadlines, idempotency and uncertain outcomes; reuse command and authorization owners. |
 | Integration observation or effect | Keep vendor I/O in modules; bind narrow [effect ports](../backend/app/services/integration_effects.py) in [composition](../backend/app/composition.py). Binding must not start services or send requests. Business consumers do not become imports of vendor adapters. |
-| Report or dashboard behavior | Keep request, export and command lifetimes in [report](../frontend/src/features/reports/) or [dashboard](../frontend/src/features/dashboard/) hooks. Put rendering in focused components. Keep [duration policy](../backend/app/services/report_durations.py) pure with an explicit site timezone; the report service owns reads and export orchestration. |
+| Report or dashboard behavior | Keep request, export and command lifetimes in [report](../frontend/src/features/reports/) or [dashboard](../frontend/src/features/dashboard/) hooks. Put rendering in focused components. Keep [duration policy](../backend/app/services/report_durations.py) pure with an explicit site timezone; the compact report read owner and admitted export owner own source and operation lifetimes. |
 
 Type inputs, outputs and dependency ports. Use concrete schemas, dataclasses,
 protocols or TypedDicts for domain values rather than passing unstructured

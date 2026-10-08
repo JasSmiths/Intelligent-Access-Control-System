@@ -119,6 +119,43 @@ template/renderer/lock hashes, the Python environment and Playwright version.
 CI checks its final runtime image before the full isolated harness. This proves
 synthetic PDF capability; supported maximum export sizes are verified separately.
 
+The installed [smoke fixture](../backend/tools/report_pdf_smoke.py) also supports
+`max-images`, `max-rows` and `external` for inert resource/content checks. Keep the
+immutable runtime image, wrapper/fixture hash and Docker command with each result.
+The report PostgreSQL suite checks shared row/vehicle bounds, compact SQL columns,
+repeatable source configuration, final authority, audit rollback and real blocked
+SQL drain. Unit/lifespan fixtures separately cover actual ASGI disconnect,
+thread/driver acquisition, cancellation and accepted/uncertain commit cleanup.
+
+P8 retained maximum diagnostics use image `6f23f9cb891d` and unchanged renderer,
+template and lock bytes. The two-image fixture reaches exactly 25 MiB of complete
+data URLs and 64 Mi-pixels. It failed with a 256 MiB `/tmp` allocation and passed
+with 512 MiB, observing 337,842,176 bytes of temporary storage. The combined
+10,000-row plus maximum-image fixture failed at the 2 GiB RAM and 2 GiB swap
+allowance (cgroup OOM recorded). It passed at a 4 GiB RAM cap with a configured
+4 GiB swap allowance and 512 MiB `/tmp`: cgroup RAM peak 3,889,774,592 bytes,
+sampled swap peak 1,076,711,424 bytes, sampled `/tmp` peak 314,765,312 bytes.
+The resulting PDF has 359 pages, two images and the final row; representative
+pages were visually checked. These are measured single-export synthetic envelopes,
+not proof that 4 GiB total/no-swap suffices, a hard RSS bound, or capacity for normal
+application allocations, concurrent work or multiple workers. Compose resource
+settings are unchanged. All failed runs and cgroup/temp/browser diagnostics remain
+in `p8-report-runtime-limits`, including `resource-envelope-summary.json`.
+
+Before/final source-read evidence runs the same small and target fixtures against
+approved pre-report commit `ef1647b2` and the candidate. Capture equal public output,
+actual SQL/projections and complete plans, ORM instances and unused blob scalar
+bytes materialized, Python allocation peaks and JSON size. Scalar UTF-8 bytes are
+not wire traffic; PDF resource measurements are a separate gate. The corrected
+`p8-report-read-comparison/comparison.json` pair has equal 30,083/3,413,699-byte
+public output at small/target scales. Target Python allocation peak is
+44,181,925 → 15,710,081 bytes and full unused blob scalar values loaded are
+23,285,210 → 0 bytes. Query count is 14 → 13 at target, but 11 → 13 at small;
+selected-event EXPLAIN execution is 0.682 → 4.298 ms despite overall measured
+preview time 1.108 → 0.725 s. These show less materialization, not universal SQL
+speedup. Cached-bind plan attempts and nondeterministic initial photo timestamps
+remain superseded evidence with explicit reasons.
+
 ## Isolated harness
 
 [validate.py](../scripts/validation/validate.py) copies and hashes the current source,

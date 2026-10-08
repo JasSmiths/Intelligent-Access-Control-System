@@ -27,6 +27,7 @@ from app.services.lpr_webhook_security import verify_lpr_webhook_request
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.movement_reconciliation import get_movement_reconciliation_service
 from app.services.notifications import get_notification_service
+from app.services.report_exports import report_exports
 from app.services.restart_backfill import (
     backfill_missed_access_events_safely,
     read_backend_runtime_state,
@@ -117,6 +118,7 @@ async def lifespan(app: FastAPI):
                 ("visitor_passes", get_visitor_pass_service()),
                 ("access_devices", get_access_device_service()),
                 ("vehicle_information", get_vehicle_information_worker()),
+                ("report_exports", report_exports),
                 ("access_events", get_access_event_service()),
                 ("movement_reconciliation", get_movement_reconciliation_service()),
                 ("home_assistant", get_home_assistant_service()),
@@ -126,7 +128,7 @@ async def lifespan(app: FastAPI):
                 owner = (
                     producers
                     if name
-                    in {"automations", "unifi_protect", "access_events", "movement_reconciliation", "vehicle_information"}
+                    in {"automations", "unifi_protect", "access_events", "movement_reconciliation", "vehicle_information", "report_exports"}
                     else resources
                 )
                 owner.push_async_callback(_stop_owned_service, name, service.stop)
