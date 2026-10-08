@@ -239,9 +239,16 @@ Directory pagination, server search and selected-ID hydration belong to
 wins over old page data; deleted selections never fall back to a seed. Refreshes
 preserve local drafts and selected chips outside matching search rows. Groups and
 schedules retain their existing unpaged catalog API contracts without client
-truncation; no bounded-response claim is made for those APIs. Dashboard full
-presence remains temporary until the P7 bounded summary migration; visible
-plate/owner metadata and active counts already use bounded directory queries.
+truncation; no bounded-response claim is made for those APIs. Dashboard uses the
+[compact presence owner](../backend/app/services/presence_reads.py) for global
+state counts and at most six inside names from one statement snapshot, plus the
+same forecast's six-name internal summary. Both responses include explicit hidden
+counts. Visible plate/owner metadata, these selected person IDs and active vehicle
+counts use bounded directory queries. Exited Today still derives from the recent
+40 events. Public `/presence` remains population-sized and keeps its existing
+updated-time order; it projects only its four public fields. Internal equal-change
+name ties use deterministic PostgreSQL C collation, followed by updated-time and
+person-ID ties, rather than browser locale ordering.
 
 [History reads](../frontend/src/views/useHistoryPage.ts) preserve filters and the
 page-two as-of snapshot on realtime/connection signals, exposing new activity
@@ -510,3 +517,25 @@ fingerprints remain separate from the exact identity; nonindexed identity values
 are never truncated to a URL/entity length assumption. UNKNOWN effects and physical
 target barriers remain retained independently of originating Person/event lifetime.
 This is schema compatibility for the pending HA owner, not runtime authority.
+
+
+## Compact chart and forecast reads
+
+[Chart reads](../backend/app/services/leaderboard_reads.py) share one typed known
+leader aggregate with the durable evaluator; winner policy, claims and notification
+intents belong to their P6 owner. Ranking still aggregates full history. Only
+selected scalar person/vehicle fields and small media references leave SQL; data
+URL bodies are not transferred. Unknown plates rank first, then a lateral latest
+snapshot lookup examines only those selected plates. A path with unknown byte size
+remains eligible; an unavailable latest file does not fall back to older media.
+Exact snapshot timestamp ties now use event ID descending as the final tie.
+
+[Expected presence](../backend/app/services/expected_presence.py) keeps its existing
+12-week local-midnight horizon and predictor. Its source query projects only person
+ID/name, event time and direction. Recorded person identity wins over current
+vehicle ownership; inactive recorded identities do not fall back. Only an absent
+recorded identity permits exactly one distinct active owner/assignee, deduplicating
+the same person represented both ways. The full public forecast remains available;
+Dashboard uses the bounded six-name presentation with the same global count and
+learning metadata. Prediction memory still grows with required population/event
+density. These changes add no prediction cache, count store or persisted ranks.

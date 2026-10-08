@@ -62,8 +62,8 @@ scale. Run the identical fixture against the preserved baseline and candidate,
 retain source/runtime/lock/fixture identities, and compare equivalent visible
 outputs. Report the beyond-500 case separately as correctness evidence. Loaded
 payload changes do not establish reduced database work or production speedups;
-unchanged unpaged group/schedule contracts and temporary full presence reads must
-remain explicit limitations. Build and unit evidence uses the guide's locked
+unchanged unpaged group/schedule contracts and the population-sized public
+presence compatibility read remain explicit limitations. Build and unit evidence uses the guide's locked
 Node 22 runtime; host browser runtime identity is recorded separately. If development
 effect replay changes request counts, retain those results and compare the same
 fixture against locked production assets served sequentially from disposable
@@ -487,3 +487,45 @@ including equal prefixes with distinct full identities and retained UNKNOWN effe
 It verifies TEXT/nonindexed identity columns alongside bounded target keys, and
 refuses downgrade before DDL when any accepted information revision, timestamp or
 projection alone would be lost. These are inert schema tests, without provider I/O.
+
+
+## Compact read candidate checks
+
+The [compact-read PG suite](../scripts/validation/test_compact_reads_persistence.py)
+checks rank/group/nullable media semantics, selected snapshot lookup including
+unknown byte sizes and unavailable latest files, four-field public presence order,
+one-statement counts/roster, C-collated name ties, recorded-before-current forecast
+attribution, duplicate owner/assignment identity and DST/horizon boundaries. It
+asserts executed column projections and no entity hydration. The
+[browser fixture](../frontend/e2e/compact-presence.spec.ts) checks global/hidden
+counts, six-name order and recent-event Exited Today at phone, desktop and dark
+tablet sizes; it must run in both configured browsers on owned source assets.
+
+[Compact read measurements](../scripts/benchmarks/compact_reads.py) run the same
+public entry points and fixed synthetic inputs in immutable baseline and candidate
+snapshots with exact locked dependencies. Run only inside the guide's loopback-only
+migrated disposable database/container; the script refuses other database/network
+namespaces. Examples within that owned environment:
+
+```sh
+python scripts/benchmarks/compact_reads.py --phase baseline --suite charts --events 10000 --output /evidence/chart-small.json
+python scripts/benchmarks/compact_reads.py --phase candidate --suite charts --events 1000000 --output /evidence/chart-target.json
+python scripts/benchmarks/compact_reads.py --phase candidate --suite presence --people 2000 --output /evidence/presence-target.json
+python scripts/benchmarks/compact_reads.py --phase candidate --suite forecast --people 2000 --density high --output /evidence/forecast-target-high.json
+```
+
+Run **each** workload against **both** source snapshots, using the identical fixture
+body and all arguments except phase/output path. The full matrix is charts
+10,000/1,000,000 events; presence 20/2,000 people; forecast 20/2,000 people at low
+(12 weekly days × two movements) and high (60 days × four movements) density.
+A separate small `--fat-unused` experiment transfers synthetic unused photo/raw
+strings on the baseline without making million-event blobs a forced OOM test.
+Each receipt retains fixed input cardinality, source/tool/lock identities, three
+query/time/Python-allocation samples, actual executed driver SQL/parameters and
+complete EXPLAIN ANALYZE plans, plus public output bytes/SHA and JSON. Chart
+`generated_at` alone is removed from equality; exact snapshot-time tie behavior
+has a separate documented fixture. Assert equivalent supported output before
+interpreting cost changes. Python allocations are not process RSS; timings are
+synthetic, full-history aggregation remains, and forecast/public population reads
+are not constant-memory claims. No measurement or mandatory gate is implied merely
+by preparing these fixtures while Docker is stopped.

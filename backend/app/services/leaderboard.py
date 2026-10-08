@@ -1,21 +1,27 @@
 import asyncio
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
-from app.models import AccessEvent, LeaderboardState, Person, Vehicle
+from app.models import AccessEvent, LeaderboardState
 from app.models.enums import AccessDecision, AccessDirection, AnomalySeverity
 from app.modules.notifications.base import NotificationContext
 from app.services.event_bus import event_bus
+from app.services.leaderboard_reads import (
+    KnownLeader,
+    UnknownLeader,
+    known_leader_from_state_in_session,
+    known_leaders_in_session,
+    unknown_leaders_in_session,
+)
 from app.services.notifications import get_notification_service
-from app.services.profile_photos import stored_image_url
-from app.services.snapshots import access_event_snapshot_url, snapshot_path_available
 from app.services.type_helpers import as_dict
 from app.services.vehicle_information import get_vehicle_information_service
 
@@ -32,9 +38,12 @@ class LeaderboardService:
         self, *, limit: int = 25, enrich_unknowns: bool = True
     ) -> dict[str, Any]:
         limit = max(1, min(limit, 100))
-        async with AsyncSessionLocal() as session:
-            known = await self._known_leaders(session, limit)
-            unknown = await self._unknown_leaders(session, limit)
+        session = AsyncSessionLocal()
+        try:
+            known = await known_leaders_in_session(session, limit)
+            unknown = await unknown_leaders_in_session(session, limit)
+        finally:
+            await drain_owned(session.close())
 
         if enrich_unknowns:
             unknown = await self._enrich_unknowns(unknown)
@@ -101,180 +110,8 @@ class LeaderboardService:
         )
         return {"changed": True, **payload}
 
-    async def _known_leaders(self, session: AsyncSession, limit: int) -> list[dict[str, Any]]:
-        count_expr = func.count(AccessEvent.id)
-        last_seen_expr = func.max(AccessEvent.occurred_at)
-        aggregate = (
-            select(
-                AccessEvent.registration_number.label("registration_number"),
-                AccessEvent.vehicle_id.label("vehicle_id"),
-                AccessEvent.person_id.label("person_id"),
-                count_expr.label("read_count"),
-                last_seen_expr.label("last_seen_at"),
-            )
-            .where(
-                AccessEvent.vehicle_id.is_not(None),
-                AccessEvent.decision == AccessDecision.GRANTED,
-                AccessEvent.direction == AccessDirection.ENTRY,
-            )
-            .group_by(
-                AccessEvent.registration_number, AccessEvent.vehicle_id, AccessEvent.person_id
-            )
-            .subquery()
-        )
-        query = (
-            select(
-                aggregate.c.registration_number,
-                aggregate.c.vehicle_id,
-                aggregate.c.person_id,
-                aggregate.c.read_count,
-                aggregate.c.last_seen_at,
-                Vehicle,
-                Person,
-            )
-            .outerjoin(Vehicle, Vehicle.id == aggregate.c.vehicle_id)
-            .outerjoin(Person, Person.id == aggregate.c.person_id)
-            .order_by(
-                aggregate.c.read_count.desc(),
-                aggregate.c.last_seen_at.desc(),
-                aggregate.c.registration_number.asc(),
-            )
-            .limit(limit)
-        )
-        rows = (await session.execute(query)).all()
-        return [
-            self._serialize_known_leader(
-                rank=index,
-                registration_number=str(registration_number),
-                vehicle_id=vehicle_id,
-                person_id=person_id,
-                read_count=int(read_count or 0),
-                last_seen_at=last_seen_at,
-                vehicle=vehicle,
-                person=person,
-            )
-            for index, (
-                registration_number,
-                vehicle_id,
-                person_id,
-                read_count,
-                last_seen_at,
-                vehicle,
-                person,
-            ) in enumerate(rows, start=1)
-        ]
-
-    async def _unknown_leaders(self, session: AsyncSession, limit: int) -> list[dict[str, Any]]:
-        count_expr = func.count(AccessEvent.id)
-        first_seen_expr = func.min(AccessEvent.occurred_at)
-        last_seen_expr = func.max(AccessEvent.occurred_at)
-        latest_snapshot_rank = (
-            select(
-                AccessEvent.registration_number.label("registration_number"),
-                AccessEvent.id.label("snapshot_event_id"),
-                AccessEvent.snapshot_captured_at.label("snapshot_captured_at"),
-                AccessEvent.snapshot_path.label("snapshot_path"),
-                AccessEvent.snapshot_bytes.label("snapshot_bytes"),
-                AccessEvent.snapshot_width.label("snapshot_width"),
-                AccessEvent.snapshot_height.label("snapshot_height"),
-                AccessEvent.snapshot_camera.label("snapshot_camera"),
-                func.row_number()
-                .over(
-                    partition_by=AccessEvent.registration_number,
-                    order_by=(AccessEvent.occurred_at.desc(), AccessEvent.created_at.desc()),
-                )
-                .label("snapshot_rank"),
-            )
-            .where(
-                AccessEvent.vehicle_id.is_(None),
-                AccessEvent.decision == AccessDecision.DENIED,
-                AccessEvent.snapshot_path.is_not(None),
-            )
-            .subquery()
-        )
-        aggregate = (
-            select(
-                AccessEvent.registration_number.label("registration_number"),
-                count_expr.label("read_count"),
-                first_seen_expr.label("first_seen_at"),
-                last_seen_expr.label("last_seen_at"),
-            )
-            .where(
-                AccessEvent.vehicle_id.is_(None),
-                AccessEvent.decision == AccessDecision.DENIED,
-            )
-            .group_by(AccessEvent.registration_number)
-            .subquery()
-        )
-        query = (
-            select(
-                aggregate.c.registration_number,
-                aggregate.c.read_count,
-                aggregate.c.first_seen_at,
-                aggregate.c.last_seen_at,
-                latest_snapshot_rank.c.snapshot_event_id,
-                latest_snapshot_rank.c.snapshot_captured_at,
-                latest_snapshot_rank.c.snapshot_path,
-                latest_snapshot_rank.c.snapshot_bytes,
-                latest_snapshot_rank.c.snapshot_width,
-                latest_snapshot_rank.c.snapshot_height,
-                latest_snapshot_rank.c.snapshot_camera,
-            )
-            .outerjoin(
-                latest_snapshot_rank,
-                and_(
-                    latest_snapshot_rank.c.registration_number == aggregate.c.registration_number,
-                    latest_snapshot_rank.c.snapshot_rank == 1,
-                ),
-            )
-            .order_by(
-                aggregate.c.read_count.desc(),
-                aggregate.c.last_seen_at.desc(),
-                aggregate.c.registration_number.asc(),
-            )
-            .limit(limit)
-        )
-        rows = (await session.execute(query)).all()
-        return [
-            {
-                "rank": index,
-                "registration_number": str(registration_number),
-                "read_count": int(read_count or 0),
-                "first_seen_at": _datetime_iso(first_seen_at),
-                "last_seen_at": _datetime_iso(last_seen_at),
-                "latest_snapshot": _snapshot_payload(
-                    event_id=snapshot_event_id,
-                    captured_at=snapshot_captured_at,
-                    relative_path=snapshot_path,
-                    byte_count=snapshot_bytes,
-                    width=snapshot_width,
-                    height=snapshot_height,
-                    camera=snapshot_camera,
-                ),
-                "vehicle_information": {
-                    "status": "pending",
-                    "vehicle": None,
-                    "display_vehicle": None,
-                    "label": "",
-                },
-            }
-            for index, (
-                registration_number,
-                read_count,
-                first_seen_at,
-                last_seen_at,
-                snapshot_event_id,
-                snapshot_captured_at,
-                snapshot_path,
-                snapshot_bytes,
-                snapshot_width,
-                snapshot_height,
-                snapshot_camera,
-            ) in enumerate(rows, start=1)
-        ]
-
-    async def _current_top_known_leader(self, session: AsyncSession) -> dict[str, Any] | None:
-        leaders = await self._known_leaders(session, 1)
+    async def _current_top_known_leader(self, session: AsyncSession) -> KnownLeader | None:
+        leaders = await known_leaders_in_session(session, 1)
         return leaders[0] if leaders else None
 
     async def _leader_from_state(
@@ -284,23 +121,16 @@ class LeaderboardService:
     ) -> dict[str, Any] | None:
         if not state or not state.registration_number:
             return None
-        vehicle = await session.get(Vehicle, state.vehicle_id) if state.vehicle_id else None
-        person = await session.get(Person, state.person_id) if state.person_id else None
-        return self._serialize_known_leader(
-            rank=1,
-            registration_number=state.registration_number,
-            vehicle_id=state.vehicle_id,
-            person_id=state.person_id,
+        return await known_leader_from_state_in_session(
+            session, registration_number=state.registration_number,
+            vehicle_id=state.vehicle_id, person_id=state.person_id,
             read_count=state.read_count,
-            last_seen_at=None,
-            vehicle=vehicle,
-            person=person,
         )
 
-    async def _enrich_unknowns(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def _enrich_unknowns(self, rows: Sequence[UnknownLeader]) -> list[dict[str, Any]]:
         semaphore = asyncio.Semaphore(UNKNOWN_INFORMATION_CONCURRENCY)
 
-        async def enrich(row: dict[str, Any]) -> dict[str, Any]:
+        async def enrich(row: UnknownLeader) -> dict[str, Any]:
             async with semaphore:
                 return {
                     **row,
@@ -314,64 +144,6 @@ class LeaderboardService:
         return {"status": "ok" if info.make or info.model else "unavailable",
                 "information": info.model_dump(mode="json"),
                 "label": " ".join(part for part in (info.colour, info.make, info.model) if part)}
-
-    def _serialize_known_leader(
-        self,
-        *,
-        rank: int,
-        registration_number: str,
-        vehicle_id: uuid.UUID | str | None,
-        person_id: uuid.UUID | str | None,
-        read_count: int,
-        last_seen_at: datetime | None,
-        vehicle: Vehicle | None,
-        person: Person | None,
-    ) -> dict[str, Any]:
-        vehicle_label = _vehicle_display_name(vehicle, registration_number)
-        return {
-            "rank": rank,
-            "registration_number": registration_number,
-            "read_count": read_count,
-            "last_seen_at": _datetime_iso(last_seen_at),
-            "vehicle_id": _uuid_text(vehicle_id),
-            "person_id": _uuid_text(person_id),
-            "first_name": person.first_name if person else "",
-            "display_name": person.display_name if person else registration_number,
-            "vehicle_name": vehicle_label,
-            "person": {
-                "id": _uuid_text(person.id) if person else None,
-                "first_name": person.first_name if person else "",
-                "last_name": person.last_name if person else "",
-                "display_name": person.display_name if person else registration_number,
-                "profile_photo_data_url": None,
-                "profile_photo_url": stored_image_url(
-                    person.profile_photo_data_url,
-                    f"/api/v1/people/{person.id}/photo",
-                    person.updated_at,
-                )
-                if person
-                else None,
-            },
-            "vehicle": {
-                "id": _uuid_text(vehicle.id) if vehicle else _uuid_text(vehicle_id),
-                "registration_number": vehicle.registration_number
-                if vehicle
-                else registration_number,
-                "vehicle_photo_data_url": None,
-                "vehicle_photo_url": stored_image_url(
-                    vehicle.vehicle_photo_data_url,
-                    f"/api/v1/vehicles/{vehicle.id}/photo",
-                    vehicle.updated_at,
-                )
-                if vehicle
-                else None,
-                "make": vehicle.make if vehicle else "",
-                "model": vehicle.model if vehicle else "",
-                "color": vehicle.color if vehicle else "",
-                "description": vehicle.description if vehicle else "",
-                "display_name": vehicle_label,
-            },
-        }
 
     def _should_evaluate_event(self, event: AccessEvent | None) -> bool:
         return bool(
@@ -443,17 +215,6 @@ class LeaderboardService:
         }
 
 
-def _vehicle_display_name(vehicle: Vehicle | None, fallback: str) -> str:
-    if not vehicle:
-        return fallback
-    description = (vehicle.description or "").strip()
-    if description:
-        return description
-    parts = [vehicle.color, vehicle.make, vehicle.model]
-    label = " ".join(str(part).strip() for part in parts if str(part or "").strip())
-    return label or vehicle.registration_number or fallback
-
-
 def _winner_name(leader: dict[str, Any] | None) -> str:
     if not leader:
         return "Unknown"
@@ -464,34 +225,6 @@ def _winner_name(leader: dict[str, Any] | None) -> str:
         or leader.get("registration_number")
         or "Unknown"
     )
-
-
-def _datetime_iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
-
-
-def _snapshot_payload(
-    *,
-    event_id: uuid.UUID | str | None,
-    captured_at: datetime | None,
-    relative_path: str | None,
-    byte_count: int | None,
-    width: int | None,
-    height: int | None,
-    camera: str | None,
-) -> dict[str, Any] | None:
-    snapshot_event_id = _coerce_uuid(event_id)
-    if not snapshot_event_id or not snapshot_path_available(relative_path):
-        return None
-    return {
-        "event_id": _uuid_text(event_id),
-        "url": access_event_snapshot_url(snapshot_event_id),
-        "captured_at": _datetime_iso(captured_at),
-        "bytes": byte_count,
-        "width": width,
-        "height": height,
-        "camera": camera,
-    }
 
 
 def _uuid_text(value: uuid.UUID | str | None) -> str:

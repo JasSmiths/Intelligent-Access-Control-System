@@ -23,8 +23,8 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
     let body: unknown;
     switch (path) {
       case "/api/v1/auth/status": body = { setup_required: false, authenticated: true, user: account(role) }; break;
-      case "/api/v1/presence": body = []; break;
-      case "/api/v1/presence/expected-today": body = { date: "2026-09-23", timezone: "Europe/London", generated_at: now, count: 0, learning: false, coverage: { regular_candidates: 0, learned_candidates: 0, learning_population: 0, ratio: 0 }, people: [] }; break;
+      case "/api/v1/presence/summary": body = { counts: { total: 0, present: 0, exited: 0, unknown: 0 }, inside: { people: [], hidden: 0 } }; break;
+      case "/api/v1/presence/expected-today/summary": body = { date: "2026-09-23", timezone: "Europe/London", generated_at: now, count: 0, hidden: 0, learning: false, coverage: { regular_candidates: 0, learned_candidates: 0, learning_population: 0, ratio: 0 }, people: [] }; break;
       case "/api/v1/events": body = [event]; break;
       case "/api/v1/events/history": body = history([event]); break;
       case "/api/v1/events/event-1": body = event; break;

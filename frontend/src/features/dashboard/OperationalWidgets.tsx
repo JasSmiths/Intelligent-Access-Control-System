@@ -171,6 +171,7 @@ export function PresenceRosterTooltip({
   badge,
   countLabel,
   emptyLabel,
+  hidden: omitted = 0,
   moreLabel,
   people,
   title
@@ -178,12 +179,13 @@ export function PresenceRosterTooltip({
   badge?: string;
   countLabel: string;
   emptyLabel: string;
+  hidden?: number;
   moreLabel: (hidden: number) => string;
   people: PresenceRosterPerson[];
   title: string;
 }) {
   const visible = people.slice(0, PRESENCE_TOOLTIP_LIMIT);
-  const hidden = people.length - visible.length;
+  const hidden = omitted + people.length - visible.length;
   return (
     <>
       <div className="expected-tooltip-head">
@@ -215,10 +217,12 @@ export function PresenceRosterTooltip({
 
 export function ExpectedPresenceTooltip({
   count,
+  hidden,
   learning,
   people
 }: {
   count: number;
+  hidden: number;
   learning: boolean;
   people: ExpectedPresenceTooltipPerson[];
 }) {
@@ -227,6 +231,7 @@ export function ExpectedPresenceTooltip({
       badge={learning ? "Learning" : undefined}
       countLabel={personCountLabel(count)}
       emptyLabel="No expected arrivals learned for today yet."
+      hidden={hidden}
       moreLabel={(hidden) => `+${hidden} more expected`}
       people={people.map((person) => ({
         id: person.person_id,

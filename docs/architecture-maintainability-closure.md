@@ -605,3 +605,29 @@ identities retained; `p8-calendar-duplicate-dependencies-retired.json` records a
 source snapshots, logs/results and immutable approved evidence remain retained.
 Docker was stopped afterward; no restart or successful later runtime gate is
 assumed in this candidate record. Full calendar/AM-08/E3/P9 remain pending.
+
+
+### P7 source preparation — unapproved
+
+The separate compact-read branch starts at the frozen, unapproved calendar WIP
+`7ebc7cf`. Astra approved only the concrete P7 design v2 (`7bc9a84a…ef3be5`).
+The source now shares typed scalar chart reads, ranks unknown plates before latest
+snapshot hydration, projects public presence without entities/photo bodies, and
+provides one-statement global counts plus six ordered roster rows. Forecast reads
+preserve recorded identity and distinct single-current-person fallback with only
+required scalar columns. Dashboard uses bounded presence/expected-name summaries
+and explicit hidden counts; Exited Today retains recent-event semantics.
+
+Host Node 24 matched-lock TypeScript and 40 affected frontend tests provide
+supplemental progress only. A separate exact-calendar-lock macOS Python 3.12
+environment, with socket connections denied before imports, passes 12 existing
+chart/predictor units and strict checks for the three new/factored read owners.
+Original stale-fake/import-order and trailing-blank-line failures remain retained.
+These checks do not substitute for Linux/backend/PG/type/lint, locked Node 22
+build/unit, actual browsers,
+before/after plans/allocation/output evidence, complete harness and exact Astra
+implementation approval remain pending while Docker is stopped. New PG/browser/
+measurement fixtures are prepared but unexecuted. AM-06/AM-12, calendar/AM-08, P9
+and the full programme remain open. Full-history chart aggregation, population-sized
+public presence/forecast and density-dependent forecast memory remain limitations;
+no cache, persisted rank/count projection or schema change is introduced by P7.

@@ -53,8 +53,8 @@ async function mockOperationalNetwork(page: Page): Promise<NetworkMock> {
   const unexpected: string[] = [];
   const allowedReads = new Set([
     "/api/v1/auth/status",
-    "/api/v1/presence",
-    "/api/v1/presence/expected-today",
+    "/api/v1/presence/summary",
+    "/api/v1/presence/expected-today/summary",
     "/api/v1/events",
     "/api/v1/alerts",
     "/api/v1/people",
@@ -83,10 +83,13 @@ async function mockOperationalNetwork(page: Page): Promise<NetworkMock> {
       case "/api/v1/events":
         body = [visitorEvent];
         break;
-      case "/api/v1/presence/expected-today":
+      case "/api/v1/presence/summary":
+        body = { counts: { total: 0, present: 0, exited: 0, unknown: 0 }, inside: { people: [], hidden: 0 } };
+        break;
+      case "/api/v1/presence/expected-today/summary":
         body = {
           date: "2026-09-23", timezone: "Europe/London", generated_at: "2026-09-23T08:00:00Z",
-          count: 0, learning: false,
+          count: 0, hidden: 0, learning: false,
           coverage: { regular_candidates: 0, learned_candidates: 0, learning_population: 0, ratio: 0 },
           people: []
         };

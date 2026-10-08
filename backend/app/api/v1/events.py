@@ -20,8 +20,9 @@ from app.api.v1.history import (
     site_zone,
     write_cursor,
 )
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal, get_db_session
-from app.models import AccessEvent, Anomaly, MovementSagaRecord, Presence, User
+from app.models import AccessEvent, Anomaly, MovementSagaRecord, User
 from app.models.enums import AccessDecision, AccessDirection, AnomalySeverity, AnomalyType
 from app.services.action_confirmations import (
     ActionConfirmationError,
@@ -29,7 +30,8 @@ from app.services.action_confirmations import (
     create_action_confirmation,
 )
 from app.services.event_bus import event_bus
-from app.services.expected_presence import expected_presence_today
+from app.services.expected_presence import expected_presence_summary_today, expected_presence_today
+from app.services.presence_reads import list_presence_in_session, presence_summary_in_session
 from app.services.profile_photos import compact_image_bytes
 from app.services.settings import get_runtime_config
 from app.services.snapshots import (
@@ -377,24 +379,20 @@ def _optional_text(value: Any) -> str | None:
 
 @router.get("/presence")
 async def list_presence() -> list[dict]:
-    async with AsyncSessionLocal() as session:
-        rows = (
-            await session.scalars(
-                select(Presence)
-                .options(selectinload(Presence.person))
-                .order_by(Presence.updated_at.desc())
-            )
-        ).all()
+    session = AsyncSessionLocal()
+    try:
+        return await list_presence_in_session(session)
+    finally:
+        await drain_owned(session.close())
 
-    return [
-        {
-            "person_id": str(row.person_id),
-            "display_name": row.person.display_name,
-            "state": row.state.value,
-            "last_changed_at": row.last_changed_at.isoformat() if row.last_changed_at else None,
-        }
-        for row in rows
-    ]
+
+@router.get("/presence/summary")
+async def presence_summary(_: Annotated[User, Depends(current_user)]) -> dict:
+    session = AsyncSessionLocal()
+    try:
+        return await presence_summary_in_session(session)
+    finally:
+        await drain_owned(session.close())
 
 
 @router.get("/presence/expected-today")
@@ -404,6 +402,15 @@ async def expected_presence_for_today(
 ) -> dict:
     config = await get_runtime_config()
     return await expected_presence_today(session, timezone_name=config.site_timezone)
+
+
+@router.get("/presence/expected-today/summary")
+async def expected_presence_summary_for_today(
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict:
+    config = await get_runtime_config()
+    return await expected_presence_summary_today(session, timezone_name=config.site_timezone)
 
 
 @router.get("/alerts")

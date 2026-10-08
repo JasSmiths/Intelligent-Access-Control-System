@@ -1,6 +1,6 @@
 import React from "react";
 import { api, isAbortError } from "../../api/client";
-import type { AccessEvent, ExpectedPresenceSummary, Presence, RealtimeMessage } from "../../api/types";
+import type { AccessEvent, ExpectedPresenceOverview, PresenceSummary, RealtimeMessage } from "../../api/types";
 import { ReadSignalsContext } from "../../lib/readSignals";
 import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
 import { auditResource } from "../../lib/realtime";
@@ -19,9 +19,8 @@ function useDashboardRead<T>(path: string, initial: T) {
   return { value, setValue, error, refresh };
 }
 export function useDashboardReads() {
-  // Presence retains the current unpaged contract until the P7 bounded summary migration.
-  const presence = useDashboardRead<Presence[]>("/api/v1/presence", []);
-  const expected = useDashboardRead<ExpectedPresenceSummary | null>("/api/v1/presence/expected-today", null);
+  const presence = useDashboardRead<PresenceSummary>("/api/v1/presence/summary", { counts: { total: 0, present: 0, exited: 0, unknown: 0 }, inside: { people: [], hidden: 0 } });
+  const expected = useDashboardRead<ExpectedPresenceOverview | null>("/api/v1/presence/expected-today/summary", null);
   const events = useDashboardRead<AccessEvent[]>("/api/v1/events?limit=40", []);
   const signals = React.useContext(ReadSignalsContext);
   React.useLayoutEffect(() => signals?.subscribe((signal) => {
@@ -34,5 +33,5 @@ export function useDashboardReads() {
     const failure = results.find((result) => result.status === "rejected");
     if (failure?.status === "rejected") throw failure.reason;
   }, [presence.refresh, expected.refresh, events.refresh]);
-  return { refresh, presence: presence.value, expectedPresence: expected.value, events: events.value, error: presence.error || expected.error || events.error };
+  return { refresh, presence: presence.value.inside.people, presenceCounts: presence.value.counts, insideHidden: presence.value.inside.hidden, expectedPresence: expected.value, events: events.value, error: presence.error || expected.error || events.error };
 }

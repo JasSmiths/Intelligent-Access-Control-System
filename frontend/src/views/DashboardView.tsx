@@ -40,7 +40,7 @@ function DashboardSession({
   navigateToView: NavigateToView;
   onMaintenanceStatusChanged: (status: MaintenanceStatus) => void;
 }) {
-  const { presence, expectedPresence, events, error: readError, refresh: refreshData } = useDashboardReads();
+  const { presence, presenceCounts, insideHidden, expectedPresence, events, error: readError, refresh: refreshData } = useDashboardReads();
   const { people, vehicles, activeVehicleCount, error: directoryError, refresh: refreshDirectory } = useDashboardDirectory({
     presence, expectedPresence, events
   });
@@ -66,7 +66,7 @@ function DashboardSession({
   const [hoverSnapshotEventId, setHoverSnapshotEventId] = React.useState<string | null>(null);
   const maintenanceActive = maintenanceStatus?.is_active === true;
   const isAdmin = currentUser.role === "admin";
-  const exited = presence.filter((item) => item.state === "exited").length;
+  const exited = presenceCounts.exited;
   const actionableAlerts = anomalies.filter(isActionableAlert);
   const critical = actionableAlerts.filter((item) => item.severity === "critical").length;
   const warning = actionableAlerts.filter((item) => item.severity === "warning").length;
@@ -88,8 +88,8 @@ function DashboardSession({
     [expectedPresence?.people, peopleById]
   );
   const insideNowPeople = insideNowRoster(presence, peopleById, now);
-  const present = insideNowPeople.length;
-  const unknown = Math.max(presence.length - present - exited, 0);
+  const present = presenceCounts.present;
+  const unknown = presenceCounts.unknown;
   const exitedTodayPeople = exitedTodayRoster(events, vehicles, people, now);
   const activeVehicles = activeVehicleCount;
   const eventSources = new Set(events.map((event) => event.source).filter(Boolean)).size;
@@ -241,7 +241,8 @@ function DashboardSession({
               label="Inside Now"
               tooltip={(
                 <PresenceRosterTooltip
-                  countLabel={personCountLabel(insideNowPeople.length)}
+                  countLabel={personCountLabel(present)}
+                  hidden={insideHidden}
                   emptyLabel="Nobody is inside right now."
                   moreLabel={(hidden) => `+${hidden} more inside`}
                   people={insideNowPeople}
@@ -259,6 +260,7 @@ function DashboardSession({
               tooltip={(
                 <ExpectedPresenceTooltip
                   count={expected}
+                  hidden={expectedPresence?.hidden ?? 0}
                   learning={expectedPresence?.learning === true}
                   people={expectedTooltipPeople}
                 />
@@ -286,9 +288,9 @@ function DashboardSession({
             />
           </div>
           <div className="presence-bar" aria-label="Presence mix">
-            <span className="residents" style={{ width: `${presenceSegmentWidth(present, presence.length)}%` }} />
-            <span className="staff" style={{ width: `${presenceSegmentWidth(exited, presence.length)}%` }} />
-            <span className="visitors" style={{ width: `${presenceSegmentWidth(unknown, presence.length)}%` }} />
+            <span className="residents" style={{ width: `${presenceSegmentWidth(present, presenceCounts.total)}%` }} />
+            <span className="staff" style={{ width: `${presenceSegmentWidth(exited, presenceCounts.total)}%` }} />
+            <span className="visitors" style={{ width: `${presenceSegmentWidth(unknown, presenceCounts.total)}%` }} />
           </div>
           <div className="presence-legend">
             <LegendDot className="residents" label="Present" value={String(present)} />

@@ -18,6 +18,10 @@ export type Presence = {
   state: "present" | "exited" | "unknown";
   last_changed_at: string | null;
 };
+export type PresenceSummary = {
+  counts: { total: number; present: number; exited: number; unknown: number };
+  inside: { people: Presence[]; hidden: number };
+};
 export type ExpectedPresencePerson = {
   person_id: string;
   display_name: string;
@@ -41,6 +45,7 @@ export type ExpectedPresenceSummary = {
   };
   people: ExpectedPresencePerson[];
 };
+export type ExpectedPresenceOverview = ExpectedPresenceSummary & { hidden: number };
 export type AccessEvent = {
   id: string;
   registration_number: string;
