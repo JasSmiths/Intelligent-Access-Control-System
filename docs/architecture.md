@@ -84,6 +84,26 @@ receipt or local business completion. Committed-fact delivery has no optional
 five-minute expiry. Runtime replacement and the matching frontend update behavior
 remain part of the incomplete P6 stage.
 
+The separate [completion repository](../backend/app/services/access/completion_store.py)
+reserves four closed optional stages in the core event transaction. Its
+[contracts](../backend/app/services/access/completion_contracts.py) retain the
+exact chosen ingest/window identity and earliest immutable receipt, or the
+explicit code-owned original external observation. Capture time and webhook trace
+metadata do not establish the five-minute provider deadline. Duplicate reservation
+cannot renew it. Claims scan at most 32 IDs and lease only the two currently free
+media slots; no database connection survives the returned operation budget.
+
+Stage applicators acquire event/domain rows before the completion checkpoint,
+then flush all result, audit and receipt writes before their final fresh database
+clock check. The origin revision is separate from the public event revision, so
+independent media stages can merge without repeating provider I/O. A visitor-link
+checkpoint may hydrate a result accepted within the original deadline after
+canonical admission arrives later. This link is a bounded database projection,
+not new provider work or admission authority. Its envelope alone does not prove
+an accepted result or arrival: the applicator must lock and validate the retained
+result, exact reservation/current arrival, plate and field ownership. These
+applicators and runtime composition remain pending in P6.
+
 ## Other application flows
 
 People, groups, vehicles, schedules, and visitor passes provide identity and access

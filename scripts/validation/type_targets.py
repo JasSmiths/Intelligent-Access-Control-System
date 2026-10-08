@@ -77,6 +77,8 @@ TYPE_OWNERS = (
         ('observation_tokens.py', 'strict'),
         ('publication.py', 'strict'),
         ('publication_worker.py', 'strict'),
+        ('completion_contracts.py', 'strict'),
+        ('completion_store.py', 'strict'),
         ('__init__.py', 'legacy'),
         ('authorization.py', 'legacy'),
         ('delivery.py', 'legacy'),

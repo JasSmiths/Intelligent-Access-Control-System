@@ -372,3 +372,22 @@ attempted identities. The disposable PostgreSQL notification-activation suite
 also proves a test-only new transactional action reserves domain work with its
 mutation, receipt and audit in one commit, rolls them all back on audit failure,
 preserves retry identity and forbids expired claims and external ports.
+
+
+### Completion repository checkpoints
+
+The isolated [completion persistence suite](../scripts/validation/test_access_completion_persistence.py)
+checks immutable window/ingest receipt provenance, explicit no-ingest external
+origins, bounded ID selection/free-slot leasing, expired-prefix continuation,
+origin versus public revision, caller rollback, lease expiry after blocked locks,
+clean final flush and retained-link envelope readiness. Forged future diagnostic
+trace times do not extend optional provider authority. Boolean JSON corruption
+fixtures explicitly mark the JSONB attribute modified because Python otherwise
+compares `True` equal to `1` and can suppress the intended test UPDATE.
+
+These focused repository checks do not substitute for the full harness or prove
+stage-specific provider result acceptance, canonical visitor-link mutation,
+frontend revisions or composed lifecycle behavior. Those remain required P6
+runtime/applicator gates. Retain failed setup/progress runs and exact source
+mappings when correcting a fixture; never describe replacement output as the
+original run.

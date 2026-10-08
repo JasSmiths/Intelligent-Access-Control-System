@@ -55,20 +55,27 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   run; every other full-gate check passed. All 727 committed source hashes equal
   the approved candidate, with clean source/cleanup and unchanged operational state.
   Retention dispositions were accepted; E4 integrated conformance remains pending.
-- Current integrated checkpoint: `ef1647b23289ede8daf174e9d4e54e272dac6327`
+- Current integrated checkpoint: `4445db74bfe1a556103647bd2bddce112b2c6646`
   includes approved P3, P4 frontend and P5, plus the separately approved P6
   foundation (`876deec32b2da8559585c5333964af211f3d2308`) and immutable intake
   (`f9e1dba7d043bed9d378de6205a05cbb8c047856`) owner checkpoints. The integration
   preserves all 259 approved frontend files and 501 nonfrontend/nondocs intake
   sources; `p4-intake-integration-mapping.json` and its Astra approval retain the
   exact source mapping. The durable window/evidence store is separately approved
-  and committed at the current checkpoint, with source
+  and committed at `ef1647b23289ede8daf174e9d4e54e272dac6327`, with source
   `d143653c85797e1fb9ac5fef026a8a94ed8a3620b117b8d7fed2207e9e77a4a0` and patch
   `cbf55317abb1826f1fb63c98286553def95f154a3d1e48f276f3f2028b872c96`.
   Its receipt is `p6-window-astra-approval.json`; archive equivalence is retained in
-  `p6-window-commit-equivalence.json`. P6 remains incomplete: the RAM/runtime
-  handoff, completion, HA, historical,
-  chart, lifecycle and final integrated validation remain required.
+  `p6-window-commit-equivalence.json`. The publication owner is separately
+  approved and committed at the current checkpoint, with source
+  `6f1761640bf4c7622941033ecf48669004eade768f12af23ff2438470f333d75`
+  and patch `c9d0a7c192df0651493bf210b35df97c6cb17e465d9ca7c8ea9d2a9fe67a0f07`.
+  Its 18 PostgreSQL/Redis and 37 unit cases, checked/strict 73/56, host 22/29,
+  migration/source/cleanup/operational evidence are retained in
+  `p6-publication-candidate.json`, `p6-publication-astra-approval.json` and
+  `p6-publication-commit-equivalence.json`. P6 remains incomplete: the RAM/runtime
+  handoff, completion applicators, HA, historical, chart, lifecycle, matching
+  frontend changes and final integrated validation remain required.
   The brief initial shared-checkout editing period was separated before the first
   validation checkpoint; integration remains sequential and separately reviewed.
 - Retained evidence: `p0-p1-validation/iacs-validation-smbqtetg`,
@@ -354,7 +361,7 @@ above. No new production action is shipped.
 The pure access plan no longer carries the discarded command field or its unused
 hardware inputs. The execution result exposes only consumed fields, with named
 construction; execution locals, persisted saga/journal/outcome payloads and the
-separate resident-recovery command requirement remain authoritative. Repository
+persisted resident-recovery movement saga command requirement remain authoritative. Repository
 consumer traces found no supported readers of the removed result fields.
 
 The automation no-op realtime subscription and notification visitor fallback are
@@ -384,7 +391,7 @@ Astra accepted these explicit retention decisions in the exact P5 review; they
 are not claims of deletion or completed final integrated conformance.
 
 
-## P6 publication owner candidate
+## P6 approved publication owner
 
 The independent committed-facts lane uses the same completion-work table, one
 owned processing slot and a compact current-event projection. Event creation,
@@ -413,3 +420,34 @@ metadata-only claim pages, cancellation rollback, actual send/renewal settlement
 and one active send. Runtime composition, frontend update predicates/revision
 handling, provider shutdown order and the complete integrated harness remain
 required before P6 approval.
+
+
+## P6 completion repository candidate
+
+The origin/readiness repository is a separate partial owner checkpoint. Core
+transactions reserve deterministic per-event/stage work; the original receipt,
+chosen member identity and deadline are immutable. An explicit typed external
+observation port is available only to the code-owned no-ingest origin path;
+existing ingest association prevents that fallback. Missing or malformed origin
+is held rather than replaced by a recovery clock or diagnostic trace timestamp.
+The work revision fences the origin contract independently of public event
+revisions. Domain mutations, accepted-result records, required audit and the
+completion receipt must share the caller transaction and final fresh-clock fence.
+
+Media claims expire at the original five-minute deadline. Visitor linking has a
+separate retained-result readiness contract and short database operation bound:
+results accepted on time may be linked after later verified admission or restart,
+without provider work or renewed authority. Current repository fixtures prove
+only origin/readiness envelopes and caller transaction fences. Actual accepted
+result identities, canonical consumed arrival (including USED/closed-window
+cases), per-kind applied receipts, field ownership and runtime cancellation must
+be proved by the next applicator checkpoint. Full P6 remains open.
+
+The reports full run exposed inherited simulation and access-pipeline fixtures
+that still supplied retired raw observation/authority flags. Their corrections
+are explicitly test-only sequential handoffs, reviewed separately by Astra;
+they use typed fixture-owned observation input and real session/camera matching,
+retain the closed-gate domain no-command guard, and add forged raw-tag denial.
+The original failures remain retained. No runtime compatibility bypass is added,
+and the programme fixtures remain unchanged until the approved report mapping
+is integrated.

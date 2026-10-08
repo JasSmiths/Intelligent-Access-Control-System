@@ -83,6 +83,8 @@ class CompletionClaim:
     token: uuid.UUID
     origin_at: datetime | None
     deadline: datetime | None
+    expected_revision: int
+    origin_identity: tuple[str, ...]
 
 
 @dataclass(frozen=True)
