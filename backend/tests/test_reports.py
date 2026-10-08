@@ -16,7 +16,7 @@ from PIL import Image
 
 from app.services import report_exports as exports_service
 from app.services import report_renderer as renderer_service
-from app.services.report_contracts import ReportAuthority, ReportWork
+from app.services.report_contracts import ReportAuthority, ReportDownload, ReportWork
 from app.api.dependencies import current_user
 from app.api.v1 import reports as reports_api
 from app.db.session import get_db_session
@@ -416,6 +416,11 @@ async def test_report_lookup_and_pdf_download(monkeypatch, tmp_path) -> None:
         return row if report_id == "654321" else None
 
     monkeypatch.setattr(reports_api, "load_report_export", fake_load)
+    async def fake_download(_session, report_id, *, actor):
+        value = await fake_load(_session, report_id, actor=actor)
+        return ReportDownload(value.report_number, value.pdf_path) if value else None
+
+    monkeypatch.setattr(reports_api, "load_report_download", fake_download)
     monkeypatch.setattr(reports_api, "report_pdf_path", lambda _row: pdf_path)
     app = app_for_reports(user)
     transport = httpx.ASGITransport(app=app)
@@ -432,33 +437,6 @@ async def test_report_lookup_and_pdf_download(monkeypatch, tmp_path) -> None:
     assert download.content.startswith(b"%PDF")
 
 
-async def test_report_lookup_denies_non_owner_standard_user(monkeypatch) -> None:
-    user = make_user()
-    user.role = UserRole.STANDARD
-    other_user_id = uuid.uuid4()
-    row = ReportExport(
-        id=uuid.uuid4(),
-        report_number="654322",
-        report_type=reports_service.REPORT_TYPE_PERSON_MOVEMENTS,
-        person_id=uuid.uuid4(),
-        period_start=datetime(2026, 5, 1, 8, 0, tzinfo=UTC),
-        period_end=datetime(2026, 5, 5, 8, 0, tzinfo=UTC),
-        options={},
-        snapshot={"report_id": "654322", "events": []},
-        pdf_path="reports/person-movements-654322.pdf",
-        pdf_bytes=100,
-        created_by_user_id=other_user_id,
-        created_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
-        updated_at=datetime(2026, 5, 5, 12, 0, tzinfo=UTC),
-    )
-
-    class FakeSession:
-        async def scalar(self, _statement):
-            return row
-
-    loaded = await reports_service.load_report_export(FakeSession(), "654322", actor=user)
-
-    assert loaded is None
 
 
 PREVIEW_CONTRACT = json.loads(

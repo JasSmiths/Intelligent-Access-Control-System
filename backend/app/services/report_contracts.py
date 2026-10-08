@@ -44,6 +44,12 @@ class ReportOutcomeUnknown(ReportExportError):
 
 
 @dataclass(frozen=True)
+class ReportDownload:
+    report_number: str
+    pdf_path: str
+
+
+@dataclass(frozen=True)
 class ReportAuthority:
     user_id: uuid.UUID
     token: str = field(repr=False)

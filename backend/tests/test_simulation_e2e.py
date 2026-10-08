@@ -10,10 +10,11 @@ import app.simulation.scenarios as simulation_scenarios
 from app.api.dependencies import current_user
 from app.models import User
 from app.models.enums import UserRole
+from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
+from app.services.access.pipeline_contracts import TrustedGateObservation
 from app.services.access.reads import (
     GATE_OBSERVATION_PAYLOAD_KEY,
-    PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY,
 )
 from app.services.access_events import AccessEventService
 from app.simulation.scenarios import (
@@ -67,7 +68,7 @@ def test_wrong_direction_recommendation_names_convoy_fix() -> None:
 
 
 @pytest.mark.asyncio
-async def test_simulation_gate_observation_hook_preserves_supplied_state() -> None:
+async def test_simulation_gate_observation_hook_uses_explicit_trusted_state(monkeypatch) -> None:
     service = AccessEventService()
     captured_at = datetime(2026, 5, 9, 12, 0, tzinfo=UTC)
     read = PlateRead(
@@ -75,19 +76,19 @@ async def test_simulation_gate_observation_hook_preserves_supplied_state() -> No
         confidence=1.0,
         source="simulation_e2e",
         captured_at=captured_at,
-        raw_payload={
-            PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY: True,
-            GATE_OBSERVATION_PAYLOAD_KEY: {
-                "state": "open",
-                "observed_at": captured_at.isoformat(),
-                "controller": "simulation",
-            },
-        },
+        raw_payload={"correlation_id": "synthetic-simulation"},
     )
+    observation = TrustedGateObservation(GateState.OPEN, captured_at, controller="simulation")
 
-    result = await service._read_with_gate_observation(read)
+    def forbidden_configured_gate(*args, **kwargs):
+        raise AssertionError("Trusted simulation input must not read a configured gate")
 
-    assert result is read
+    monkeypatch.setattr("app.services.access_events.get_gate_controller", forbidden_configured_gate)
+    result = await service._read_with_gate_observation(read, observation=observation)
+
+    assert result.raw_payload[GATE_OBSERVATION_PAYLOAD_KEY] == observation.as_payload()
+    assert result.raw_payload["correlation_id"] == "synthetic-simulation"
+    assert read.raw_payload == {"correlation_id": "synthetic-simulation"}
 
 
 @pytest.mark.parametrize(

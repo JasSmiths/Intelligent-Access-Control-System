@@ -9,13 +9,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.config import settings
 from app.models import AccessEvent, Presence, ReportExport, User, VisitorPass
 from app.models.enums import AccessDecision, AccessDirection, UserRole
-from app.services.report_contracts import ReportExportError
+from app.services.report_contracts import ReportDownload, ReportExportError
 from app.services.report_durations import (
     MovementPoint,
     MovementRecord,
@@ -149,17 +150,27 @@ async def build_movement_report_snapshot(
     )
 
 
+def _report_export_visibility(actor: User) -> ColumnElement[bool]:
+    return true() if actor.role == UserRole.ADMIN else ReportExport.created_by_user_id == actor.id
+
+
 async def load_report_export(session: AsyncSession, report_number: str, *, actor: User) -> ReportExport | None:
     if not REPORT_ID_RE.fullmatch(report_number.strip()):
         return None
-    row = await session.scalar(
-        select(ReportExport).where(ReportExport.report_number == report_number.strip())
+    return await session.scalar(
+        select(ReportExport).where(ReportExport.report_number == report_number.strip(), _report_export_visibility(actor))
     )
-    if not row:
+
+
+async def load_report_download(session: AsyncSession, report_number: str, *, actor: User) -> ReportDownload | None:
+    if not REPORT_ID_RE.fullmatch(report_number.strip()):
         return None
-    if actor.role == UserRole.ADMIN or row.created_by_user_id == actor.id:
-        return row
-    return None
+    row = (await session.execute(
+        select(ReportExport.report_number, ReportExport.pdf_path).where(
+            ReportExport.report_number == report_number.strip(), _report_export_visibility(actor),
+        )
+    )).one_or_none()
+    return ReportDownload(row.report_number, row.pdf_path) if row else None
 
 
 def report_export_payload(row: ReportExport) -> dict[str, Any]:
@@ -189,7 +200,7 @@ def public_report_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
-def report_pdf_path(row: ReportExport) -> Path:
+def report_pdf_path(row: ReportDownload) -> Path:
     return _resolve_report_path(row.pdf_path, must_exist=True)
 
 
