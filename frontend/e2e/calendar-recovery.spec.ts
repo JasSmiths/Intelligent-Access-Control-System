@@ -80,7 +80,12 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
     await close.focus(); await page.keyboard.press("Shift+Tab");
     await expect(modal.getByRole("button", { name: "Done", exact: true })).toBeFocused();
     await page.keyboard.press("Tab"); await expect(close).toBeFocused();
+    const bounds = await modal.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height + 1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`calendar-viewport-${viewport.width}.png`) });
     await page.screenshot({ path: testInfo.outputPath(`calendar-recovery-${viewport.width}.png`), fullPage: true });
   });
 }

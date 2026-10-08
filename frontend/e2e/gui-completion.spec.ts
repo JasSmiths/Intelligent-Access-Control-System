@@ -38,6 +38,7 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
       case "/api/v1/schedules": body = [schedule]; break;
       case "/api/v1/schedules/schedule-1/dependencies": body = { people: [person], vehicles: [vehicle], doors: [] }; break;
       case "/api/v1/visitor-passes": body = [pass]; break;
+      case `/api/v1/visitor-passes/${pass.id}`: body = pass; break;
       case "/api/v1/integrations/gate/status": body = { configured: false, connected: false, gate_entity_id: null, default_media_player: null, last_gate_state: "unknown", garage_door_entities: [] }; break;
       case "/api/v1/integrations/gate/commands": body = { items: [], next_cursor: null }; break;
       case "/api/v1/missed-exit-recovery/attempts": body = { items: [], total: 0, offset: 0, limit: 25 }; break;
@@ -613,7 +614,9 @@ test("creates manual duration passes with a normalized plate and optional phone 
     expect(created.at(-1)).toMatchObject({ pass_type: "duration", number_plate: "AB12CDE", visitor_phone: null, confirmation_token: "fixture-only-confirmation" });
     expect(confirmations.at(-1)).toMatchObject({ action: "visitor_pass.create", payload: { number_plate: "AB12CDE", visitor_phone: null } });
   }
+  const selectedRead = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/visitor-passes/${pass.id}` && response.request().method() === "GET");
   await page.locator(".visitor-pass-card").first().click();
+  expect(await (await selectedRead).json()).toMatchObject({ id: pass.id, status: pass.status });
   const tabs = page.getByRole("tablist", { name: "Visitor Pass details", exact: true });
   await expect(tabs.getByRole("tab")).toHaveText(["Details", "Log"]);
   expect(unexpected).toEqual([]);
