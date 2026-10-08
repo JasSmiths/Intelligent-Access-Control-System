@@ -463,3 +463,11 @@ Final core wiring must reserve the job in the decision transaction instead. The 
 information claim/failure/renewal/slot/shutdown shell and old RAM optional access
 runtime are not approved by this applicator checkpoint; their bounded lifetime,
 fresh database-time fences and composition remain required P6 work.
+
+
+HA target/effect URL and entity identity columns retain full TEXT values, matching
+the existing settings and Person JSONB contract. Their bounded target keys and
+fingerprints remain separate from the exact identity; nonindexed identity values
+are never truncated to a URL/entity length assumption. UNKNOWN effects and physical
+target barriers remain retained independently of originating Person/event lifetime.
+This is schema compatibility for the pending HA owner, not runtime authority.

@@ -1,6 +1,8 @@
 """Durable foundation contracts on the explicitly disposable PostgreSQL namespace."""
 import asyncio
+import hashlib
 import importlib.util
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,7 +12,7 @@ import pytest_asyncio
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import CheckConstraint, Column, MetaData, Table, func, inspect, select, text
+from sqlalchemy import CheckConstraint, Column, MetaData, Table, Text, func, inspect, select, text
 from sqlalchemy.schema import CreateTable
 from test_recovery_boundaries import isolated_resources as isolated_resources
 
@@ -21,6 +23,8 @@ from app.models import (
     AccessCompletionWork,
     AccessEvent,
     AuditLog,
+    HaPresenceEffect,
+    HaPresenceTarget,
     LprCoordinatorState,
     LprDebounceWindow,
     LprIngestEvent,
@@ -297,3 +301,80 @@ async def test_window_outcome_and_required_writes_share_caller_commit():
         assert all(row.status=='succeeded' and row.access_event_id==event_id and row.movement_saga_id==saga_id for row in rows)
         assert await observer.scalar(select(func.count()).select_from(AccessCompletionWork))==1
         assert await observer.scalar(select(func.count()).select_from(AuditLog))==1
+
+
+@pytest.mark.parametrize('long_field', ['url', 'entity_id', 'both'])
+async def test_ha_full_identity_text_preserves_long_same_prefix_targets_and_unknown_attempts(long_field):
+    original = []
+    async with AsyncSessionLocal() as session:
+        for suffix in ('A', 'B'):
+            url = 'https://synthetic.invalid/' + ('x' * 3000 if long_field in {'url', 'both'} else 'short') + suffix
+            entity = 'input_boolean.' + ('y' * 600 if long_field in {'entity_id', 'both'} else 'short') + suffix
+            key = hashlib.sha256(json.dumps([url, entity], separators=(',', ':')).encode()).hexdigest()
+            attempt = uuid.uuid4()
+            target = HaPresenceTarget(target_key=key, url=url, entity_id=entity, generation=1,
+                person_id=uuid.uuid4(),event_id=uuid.uuid4(),action='turn_off',
+                binding_fingerprint='b'*64,config_fingerprint='c'*64,origin_at=NOW,
+                deadline=NOW+timedelta(seconds=300),state='unknown',barrier_version=1,
+                barrier_attempt_id=attempt,updated_at=NOW)
+            session.add(target)
+            await session.flush()
+            session.add(HaPresenceEffect(id=attempt,target_key=key,generation=1,
+                person_id=target.person_id,event_id=target.event_id,url=url,entity_id=entity,
+                action='turn_off',binding_fingerprint='b'*64,config_fingerprint='c'*64,
+                state='unknown',owner_token=uuid.uuid4(),owner_epoch=1,lease_until=NOW,
+                attempted_at=NOW,completed_at=NOW,outcome='provider_outcome_unknown'))
+            original.append((key,url,entity,attempt))
+        await session.commit()
+    async with AsyncSessionLocal() as session:
+        for key,url,entity,attempt in original:
+            target=await session.get(HaPresenceTarget,key)
+            effect=await session.get(HaPresenceEffect,attempt)
+            assert (target.url,target.entity_id,effect.url,effect.entity_id)==(url,entity,url,entity)
+            assert target.barrier_attempt_id==effect.id and effect.state=='unknown'
+        assert original[0][0]!=original[1][0]
+        if long_field in {'url', 'both'}:
+            assert len(original[0][1]) > 2048
+            assert original[0][1][:2048] == original[1][1][:2048]
+        if long_field in {'entity_id', 'both'}:
+            assert len(original[0][2]) > 255
+            assert original[0][2][:255] == original[1][2][:255]
+    async with engine.connect() as connection:
+        def columns(sync):
+            inspector=inspect(sync)
+            for name in ('ha_presence_targets','ha_presence_effects'):
+                actual={column['name']:column for column in inspector.get_columns(name)}
+                assert all(isinstance(actual[field]['type'],Text) for field in ('url','entity_id'))
+                assert actual['target_key']['type'].length==64
+                assert all(not {'url','entity_id'}.intersection(index['column_names']) for index in inspector.get_indexes(name))
+        await connection.run_sync(columns)
+        with pytest.raises(RuntimeError,match='verified matching backup'):
+            await connection.run_sync(lambda sync:migrate(sync,'downgrade'))
+        assert set(NEW_TABLES).issubset(await connection.run_sync(lambda sync:set(inspect(sync).get_table_names())))
+
+
+@pytest.mark.parametrize('accepted_field', ['accepted_result_revision','accepted_result_at','accepted_result'])
+async def test_information_accepted_fact_alone_refuses_lossy_downgrade_before_ddl(accepted_field):
+    async with engine.connect() as connection:
+        transaction=await connection.begin()
+        try:
+            identity=uuid.uuid4()
+            await connection.execute(text("""INSERT INTO access_events
+                (id,registration_number,direction,decision,confidence,source,occurred_at,timing_classification,created_at,updated_at,resource_revision)
+                VALUES (:id,'AB12CDE','ENTRY','GRANTED',1,'synthetic',:now,'UNKNOWN',:now,:now,0)"""),{'id':identity,'now':NOW})
+            # Legacy origin/readiness, no new pipeline rows and revision0 isolate
+            # the accepted-result loss predicate from every other refusal reason.
+            await connection.execute(text("""INSERT INTO vehicle_information_jobs
+                (event_id,registration_number,created_at,deadline,status,readiness)
+                VALUES (:id,'AB12CDE',:now,:now,'completed','legacy')"""),{'id':identity,'now':NOW})
+            values={'accepted_result_revision':'1','accepted_result_at':'CURRENT_TIMESTAMP',
+                    'accepted_result':'CAST(:accepted_payload AS jsonb)'}
+            parameters={'id':identity}
+            if accepted_field == 'accepted_result':
+                parameters['accepted_payload']=json.dumps({'make':'Synthetic','colour':None})
+            await connection.execute(text('UPDATE vehicle_information_jobs SET '+accepted_field+'='+values[accepted_field]+' WHERE event_id=:id'),parameters)
+            with pytest.raises(RuntimeError,match='verified matching backup'):
+                await connection.run_sync(lambda sync:migrate(sync,'downgrade'))
+            assert set(NEW_TABLES).issubset(await connection.run_sync(lambda sync:set(inspect(sync).get_table_names())))
+        finally:
+            await transaction.rollback()

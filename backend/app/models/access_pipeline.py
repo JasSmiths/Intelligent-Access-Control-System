@@ -233,8 +233,8 @@ class HaPresenceDesired(Base):
 class HaPresenceTarget(Base):
     __tablename__ = "ha_presence_targets"
     target_key: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
-    url: Mapped[str] = mapped_column(String(2048), nullable=False)
-    entity_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(Text(), nullable=False)
+    entity_id: Mapped[str] = mapped_column(Text(), nullable=False)
     generation: Mapped[int] = mapped_column(BigInteger(), nullable=False)
     person_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
     event_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
@@ -261,8 +261,8 @@ class HaPresenceEffect(Base):
     generation: Mapped[int] = mapped_column(BigInteger(), nullable=False)
     person_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
     event_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
-    url: Mapped[str] = mapped_column(String(2048), nullable=False)
-    entity_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(Text(), nullable=False)
+    entity_id: Mapped[str] = mapped_column(Text(), nullable=False)
     action: Mapped[str] = mapped_column(String(20), nullable=False)
     binding_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)

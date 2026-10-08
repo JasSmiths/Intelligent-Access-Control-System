@@ -450,3 +450,11 @@ must become named durable holds. Their negative fixtures verify accepted source
 results remain retained and no SQL conversion or exception/requeue loop substitutes
 for the hold. Earlier passing snapshots remain evidence of their exact source;
 corrected-source results are mapped explicitly.
+
+
+The [pipeline foundation suite](../scripts/validation/test_access_pipeline_persistence.py)
+also checks HA URLs longer than 2,048 characters and entities longer than 255,
+including equal prefixes with distinct full identities and retained UNKNOWN effects.
+It verifies TEXT/nonindexed identity columns alongside bounded target keys, and
+refuses downgrade before DDL when any accepted information revision, timestamp or
+projection alone would be lost. These are inert schema tests, without provider I/O.

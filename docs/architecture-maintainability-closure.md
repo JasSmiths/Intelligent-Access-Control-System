@@ -545,8 +545,11 @@ foundation and information owner bytes map the other 59 PostgreSQL cases from th
 94-case run; this is carried evidence, not a new combined 104-case invocation.
 The final closure paragraph is a separately mapped documentation-only follow-up.
 Evidence remains under `/private/tmp/iacs-maintainability-programme/p6-result-*`;
-this bounded candidate awaits exact Astra review, and worker/core/full-P6 obligations
-below remain open.
+Astra approved this bounded owner on source `e491c609…` / patch `7d531a02…`;
+commit `710655362174334ba76468e4aeedfe198b9f6606` archives all 792 selected hashes
+unchanged. The approval and archive equivalence are retained in
+`p6-result-v2-astra-approval.json` and `p6-result-v2-commit-equivalence.json`.
+Worker/core/full-P6 obligations below remain open.
 
 The information result path now retires Job-to-Event locking and inline visitor
 mutation together. The current postcommit enqueue bridge derives original receipt
@@ -557,3 +560,22 @@ actual slot/renewal/cancellation ownership and shutdown in the still-old informa
 worker shell remain explicit runtime obligations. Old RAM optional enrichment also
 remains pending, along with HA/historical/chart owners, frontend revisions, complete
 runtime performance/lifecycle evidence and the full integrated harness.
+
+
+### P6 HA schema compatibility and migration-parent checkpoint
+
+The four nonindexed HA target/effect URL and entity columns now use TEXT. Existing
+settings/Person JSONB accepted values are not newly restricted during atomic
+reservation. Bounded 64-character target keys/fingerprints, exact full identities,
+RESTRICT retention and UNKNOWN barriers remain intact. The inert schema fixture
+uses controlled identity hashes; it does not claim the future HA runtime owner has
+been implemented. Long URL/entity same-prefix distinctions and accepted-information
+loss-only downgrade refusal are added to the foundation suite. The complete 15-case
+foundation PostgreSQL suite passes at
+`p6-ha-schema-persistence/iacs-validation-oihsdgqb`, with zero migration drift,
+clean source/cleanup/operational checks, exact checked/strict types 82/65, host 22/29,
+Ruff/F821 and documentation/diff checks. The first run `iacs-validation-cbx98asc`
+retains 14 passes and one new JSONB fixture-binding failure, corrected without a
+runtime/schema change before rerunning all 15. This bounded schema candidate awaits
+exact Astra review. After approval and commit, migration `20261007_0013` will be handed off as the frozen parent for calendar
+`0014`; later changes require a new migration or an explicitly reviewed parent rebase.
