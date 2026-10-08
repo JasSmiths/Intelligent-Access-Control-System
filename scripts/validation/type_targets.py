@@ -23,6 +23,7 @@ PROTECTED_PACKAGES = (
     'app/services/workflows', 'app/modules/dvsa', 'app/modules/icloud_calendar',
 )
 TYPE_OWNERS = (
+    TypeOwner('app/services/action_confirmations.py', 'strict'),
     TypeOwner('app/modules/icloud_calendar', 'strict'),
     TypeOwner('app/services/auth_root.py', 'strict'),
     TypeOwner('app/services/calendar_accounts.py', 'strict'),

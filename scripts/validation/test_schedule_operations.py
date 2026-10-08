@@ -32,7 +32,6 @@ BLOCKS = {'0': [{'start': '08:00', 'end': '09:00'}, {'start': '08:30', 'end': '1
 async def isolated_test(monkeypatch):
     # Confirmation telemetry queue is not started by the harness. CRUD audit
     # remains real and is queried from a new SQL session below.
-    monkeypatch.setattr(action_confirmations, 'emit_audit_log', lambda **_kwargs: None)
     yield
     await engine.dispose()
 

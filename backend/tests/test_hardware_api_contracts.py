@@ -106,9 +106,8 @@ async def test_changed_or_legacy_hardware_confirmation_requires_fresh_preview(mo
         expires_at=datetime.now(tz=UTC) + timedelta(minutes=1), metadata_={"hardware_plan": saved})
     monkeypatch.setattr(action_confirmations, "find_action_confirmation", AsyncMock(return_value=row))
     monkeypatch.setattr(action_confirmations, "confirmation_token_hash", lambda _: "synthetic")
-    monkeypatch.setattr(action_confirmations, "emit_audit_log", lambda **_: None)
     with pytest.raises(action_confirmations.ActionConfirmationError, match="fresh confirmation"):
-        await action_confirmations.consume_action_confirmation(SimpleNamespace(commit=AsyncMock()), user=user,
+        await action_confirmations.consume_action_confirmation(AsyncMock(spec=AsyncSession), user=user,
             action="gate.open", payload={"reason": "test"}, confirmation_token="synthetic",
             expected_hardware_plan={"targets": ["current"]})
     assert row.outcome == "rejected"

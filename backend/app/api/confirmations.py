@@ -4,7 +4,11 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ActionConfirmation, User
-from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
+from app.services.action_confirmations import (
+    ActionConfirmationError,
+    consume_action_confirmation,
+    persist_confirmation_rejection,
+)
 from app.services.mutation_context import MutationError
 
 
@@ -46,6 +50,7 @@ async def send_confirmed_notification(
         await session.commit()
     except ActionConfirmationError as exc:
         await session.rollback()
+        await persist_confirmation_rejection(exc.rejection)
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except MutationError as exc:
         await session.rollback()
