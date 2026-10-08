@@ -52,7 +52,7 @@ async def resources(isolated_resources, monkeypatch):
     runtime = config()
     monkeypatch.setattr(recovery, "get_runtime_config_for_session", AsyncMock(return_value=runtime))
     monkeypatch.setattr(AccessDeviceConfiguration, "preview_gate_open", AsyncMock(return_value=target_plan()))
-    from app.modules.home_assistant.client import home_assistant_connection_fingerprint
+    from app.modules.home_assistant.input_boolean_contracts import home_assistant_connection_fingerprint
     recovery.invalidate_connection(connected=True, connection_binding=home_assistant_connection_fingerprint(runtime))
     yield runtime
     recovery.invalidate_connection()

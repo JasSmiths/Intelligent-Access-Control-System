@@ -14,8 +14,6 @@ class PipelineLeaseLost(RuntimeError):
     """A fenced owner cannot mutate or attempt after claim loss/expiry."""
 
 
-class HaCoordinationBusy(RuntimeError):
-    """Retry the complete caller transaction, preserving its original authority."""
 
 
 @dataclass(frozen=True)
@@ -59,20 +57,6 @@ class WindowSummary:
     anchor_ingest_id: uuid.UUID | None
 
 
-@dataclass(frozen=True)
-class HaPresenceReservation:
-    """Proposed current presence projection, not an external-attempt checkpoint.
-
-    Outer owners flush the bounded ordered proposals once after every domain
-    lock/mutation. Historical proposals only invalidate; origin never renews.
-    """
-
-    person_id: uuid.UUID
-    event_id: uuid.UUID
-    presence_event_id: uuid.UUID
-    presence_state: Literal["present", "exited"]
-    origin_at: datetime | None
-    live_eligible: bool
 
 
 @dataclass(frozen=True)

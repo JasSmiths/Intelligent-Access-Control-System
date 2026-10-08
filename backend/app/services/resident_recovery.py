@@ -105,7 +105,9 @@ async def observe_tracker(entity_id: str, new_state: dict, old_state: dict) -> N
         return
     async with AsyncSessionLocal() as session:
         config = await get_runtime_config_for_session(session)
-        from app.modules.home_assistant.client import home_assistant_connection_fingerprint
+        from app.modules.home_assistant.input_boolean_contracts import (
+            home_assistant_connection_fingerprint,
+        )
         if not config.missed_exit_recovery_enabled or _connection_binding != home_assistant_connection_fingerprint(config):
             return
         ids = list((await session.scalars(select(Person.id).where(Person.is_active.is_(True),

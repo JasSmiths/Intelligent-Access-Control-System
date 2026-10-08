@@ -549,3 +549,45 @@ Standalone consumption (`commit=True`) owns its same-session rejection audit and
 Audit failure remains visible; no detached task substitutes for required evidence.
 The fresh audit's active SQL is cancellable while its actual session close is owned
 through completion.
+
+
+The dormant [HA presence repository](../backend/app/services/ha_presence_attempts.py)
+separates latest desired state from immutable physical attempts and retained UNKNOWN
+barriers. Its last-flush participant uses the auth owner's nonblocking root fence,
+locked scalar Person bindings and only the two relevant HA settings. Profile photos
+and unrelated settings are excluded. The setting fence uses the existing settings
+writer's `iacs:setting:{key}` advisory namespace, including when the setting row has
+not yet been created. Pure binding policy preserves ordered entity
+IDs and the existing turn_off defaults for both entry and exit; it uses final Presence,
+not a stale incoming direction. The vendor contract owns the single connection
+fingerprint and action vocabulary.
+
+New attempts require current authority, maintenance clearance, original receipt
+budget and exact full physical identity beside its bounded hash. A later desired
+state cannot discard an earlier owned delivery receipt or clear a replacement barrier.
+A terminal receipt retains the global capacity token through actual operation,
+session and dedicated-client cleanup. Renewal then preserves capacity only; an
+explicit exact-token release follows settlement. The final release transaction owns
+its actual close, although its commit necessarily exposes capacity before that final
+connection cleanup returns. UNKNOWN barriers survive idle capacity release.
+
+These repository ports are not started or called by the production access owners.
+The existing person-presence sender remains the active authority until the reviewed
+cutover. The dormant [single-slot worker](../backend/app/services/ha_presence_worker.py)
+starts renewal only after confirmed attempt commit, before actual claim-session close.
+Its fixed send deadline includes that close. Delivery settles after the I/O timer
+exits; renewal loss cancels the actual receipt once and cannot terminate the service.
+The vendor call uses a dedicated existing HA client with the exact frozen connection
+for both POST and optional observation. Accepted POST truth survives observation failure.
+
+The dormant [settlement owner](../backend/app/services/ha_presence_resolutions.py)
+returns sanitized exact-attempt previews and performs confirmed, audited no-send
+acknowledgement. It preserves the original UNKNOWN attempt and only releases its
+matching barrier. Matching committed retries return the immutable receipt before
+new-resolution eligibility checks, so a later generation or active attempt cannot
+invalidate that receipt. New acknowledgement rejects live durable capacity or actual
+local cleanup. Retired origin Persons do not prevent settlement. Root-first current
+Admin authority and typed rollback-before-rejection-audit are explicit owner ports.
+Coherent auth-root ciphertext writers, every proposal/invalidation caller and
+integrated validation are required before activation; importing the inert root/auth
+ports alone proves no rotation freshness for the running application.

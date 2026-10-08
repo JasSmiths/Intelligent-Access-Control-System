@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import re
 from collections.abc import AsyncIterator
@@ -12,15 +11,13 @@ import httpx
 import websockets
 
 from app.core.logging import get_logger
+from app.modules.home_assistant.input_boolean_contracts import (
+    HaConnection,
+    home_assistant_connection_fingerprint,
+)
 from app.services.settings import RuntimeConfig, get_runtime_config
 
 logger = get_logger(__name__)
-
-
-def home_assistant_connection_fingerprint(config: Any) -> str:
-    """Opaque provenance for the actual authenticated socket configuration."""
-    material = [str(config.home_assistant_url).rstrip("/"), str(config.home_assistant_token)]
-    return hashlib.sha256(json.dumps(material, separators=(",", ":")).encode()).hexdigest()
 
 
 class HomeAssistantError(RuntimeError):
@@ -83,7 +80,8 @@ class HomeAssistantClient:
         service_name: str,
         service_data: dict[str, Any],
         *,
-        runtime_config: RuntimeConfig | None = None,
+        runtime_config: HaConnection | None = None,
+        start_deadline: float | None = None,
     ) -> dict[str, Any]:
         domain, service = self._split_service_name(service_name)
         return await self._request(
@@ -91,12 +89,15 @@ class HomeAssistantClient:
             f"/api/services/{domain}/{service}",
             json=service_data,
             runtime_config=runtime_config,
+            start_deadline=start_deadline,
         )
 
     async def get_state(
-        self, entity_id: str, *, runtime_config: RuntimeConfig | None = None
+        self, entity_id: str, *, runtime_config: HaConnection | None = None,
+        start_deadline: float | None = None,
     ) -> HomeAssistantState:
-        data = await self._request("GET", f"/api/states/{entity_id}", runtime_config=runtime_config)
+        data = await self._request("GET", f"/api/states/{entity_id}",
+            runtime_config=runtime_config, start_deadline=start_deadline)
         return HomeAssistantState(
             entity_id=data["entity_id"],
             state=data["state"],
@@ -335,7 +336,8 @@ class HomeAssistantClient:
         path: str,
         *,
         json: dict[str, Any] | None = None,
-        runtime_config: RuntimeConfig | None = None,
+        runtime_config: HaConnection | None = None,
+        start_deadline: float | None = None,
     ) -> dict[str, Any]:
         config = runtime_config if runtime_config is not None else await self.config()
         base_url = config.home_assistant_url.rstrip("/")
@@ -352,6 +354,8 @@ class HomeAssistantClient:
                 "Home Assistant request client is unavailable.", delivery="not_sent"
             ) from exc
 
+        if start_deadline is not None and asyncio.get_running_loop().time() >= start_deadline:
+            raise HomeAssistantError("Home Assistant request start budget expired.", delivery="not_sent")
         try:
             response = await client.request(
                 method,

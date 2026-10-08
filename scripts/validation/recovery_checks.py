@@ -9,6 +9,8 @@ import re
 
 
 PERSISTENCE_TESTS = [
+    "scripts/validation/test_ha_presence_store.py",
+    "scripts/validation/test_ha_presence_resolutions.py",
     "scripts/validation/test_confirmation_rejections.py",
     "scripts/validation/test_access_media_persistence.py",
     "scripts/validation/test_vehicle_information_worker.py",

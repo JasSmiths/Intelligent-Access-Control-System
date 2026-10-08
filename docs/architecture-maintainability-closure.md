@@ -724,7 +724,7 @@ with equivalent-output burst/many-window performance evidence. Crash/unknown-out
 claim files may be retained on disk; this owner does not invent a sweep.
 
 
-### Confirmation rejection audit prerequisite candidate
+### Approved confirmation rejection audit prerequisite
 
 This bounded early P8 audit slice supports the pending P6 HA acknowledgement owner.
 The approved design is `59c93424ed944d24cfc40adc394d683052cb409408e8dd12e6afe25dd5e26d6e`.
@@ -758,8 +758,84 @@ participants. They must adopt the same rollback-before-audit contract with real
 actor-lock and audit-failure tests before integration; this checkpoint covers the
 existing programme consumers and does not claim that unintegrated caller migrated.
 
-Exact-source Astra review of this candidate is still required. This is no HA send
-or settlement implementation, no production activation and no P6/P8 completion.
+Astra approved exact source
+`df7ecbe13d27b2d8b44581cdb0a409d9c3938123374e8ce6896881c2b24ee6f3`
+and full patch `cd27694b4464d292c801ba36cff651f04258dc6c91663527149fa13e816c471e`.
+Commit `77e1384a684e9deaa201ca9bae896f79bcf1283d`, tree
+`f364a8a24b3a2a6e22ce6fe63be5754639f53e73`, matches all 802 selected source
+hashes. Archive SHA `d1c889df5247f5ffafa58fc767c1a121cfb42cb29c2e14bbce83fcde8cb83473`
+has 804 files with only the two established policy exclusions. Verbatim approval and
+mapping are retained in `p6-confirmation-astra-approval.json` and
+`p6-confirmation-commit-equivalence.json`. This is no HA send or settlement
+implementation, no production activation and no P6/P8 completion.
 Atomic core reservations, RAM retirement, HA/historical/chart owners, frontend
 consumer revisions, full lifecycle composition and integrated performance/full
 harness gates remain pending.
+
+
+### Dormant HA reservation/attempt store progress candidate
+
+Design v3 SHA `01fd70e37dcfd68940112cc96f270969ce84620bb1c930da2975f1db8479e397`
+is approved for implementation. The current partial source has typed desired/attempt
+ports, pure binding policy, one canonical vendor connection fingerprint, locked scalar
+Person authority, auth-root/setting fencing, original absolute budgets, immutable
+certainty and UNKNOWN barrier handling. Global capacity remains owned through terminal
+receipt and actual cleanup, with capacity-only renewal and explicit exact-token release.
+The exact approved inert auth-root dependency is copied; the coherent running writer
+boundary is still pending integration. Frozen 0013 and model bytes are unchanged.
+
+The original source-only snapshots and the stopped-daemon limitation are retained.
+After root verified the already-running runtime, focused run `iacs-validation-dkfy1aiw`
+passed 100 real PostgreSQL cases: foundation15, resident26, store40 and settlement19.
+Migration parity, isolation, selected-SQL/actual-close cases, unchanged source, empty
+cleanup and equal operational snapshots pass. The settlement suite retains 13
+SQLAlchemy transaction-reset warnings following the explicit original connection
+rollback and ORM reset. The immutable source-only store snapshot remains retained
+separately. Subsequent
+dormant worker/vendor and preview/acknowledgement source now exists with explicit
+post-commit/pre-close ownership notification, actual receipt/client cleanup, safe
+frozen transport certainty and exact immutable resolution retries. A renewal-loss
+receipt cancellation escape found in source review is corrected and its dedicated
+inert fixtures now pass. The exact approved auth.py dependency is mapped
+in `p6-ha-auth-prerequisite-copy.json`, without claiming its coherent writer boundary
+is integrated. The new settlement service requires an explicit local-capacity read
+and is not registered with API/startup. Both old and new sender contracts remain
+transitional source until their atomic cutover; the old sender is the sole active
+authority. A subsequent acknowledgement review found cleanup could hide frozen
+rejection evidence or a known receipt. The corrected owner retains one whole
+rollback/actual-close/audit child, proves rollback of the observed original live
+transaction, and never treats local invalidation as that proof. Unresolved cleanup
+carries the frozen outcome; confirmed resolution survives a late close fault with
+bounded owned fallback cleanup and safe error reporting.
+
+Supplemental socket-denied macOS checks use copied exact manifests, pinned uv0.12.13
+and Python3.12.14. The first snapshot passed53 focused units; its literal-typing and
+import-order failures are retained. The corrected snapshots passed 57 and then 215
+focused units, 100 checked/83 strict targets and Ruff/F821. These supplemental checks
+remain separate from the genuine Linux evidence. The corrected immutable Linux run
+passes 1,375 backend tests with 29 expected skips, 100 checked/83 strict targets,
+preflight and Ruff/F821. Its earlier attempt retains the wrong synthetic database-name
+prefix and missing results-parent setup failures, plus the stale auth FakeSession.get
+keyword signature failure. Only that fixture signature changed after the 100-case
+PostgreSQL run; runtime, schema and dependency hashes are unchanged, and the complete
+Linux rerun passes. The full integrated harness and exact-source Astra approval
+remain pending. Host source/harness checks pass
+22/29; AST and frozen0013/model hash checks pass. The first AST attempt used unsupported
+host Python3.9 and is retained as a tooling setup failure; bundled Python parsed the
+unchanged PEP695 source. No additional programme completion is claimed.
+
+The dormant HA candidate `bef76a28e73b39a6f4a2aa493e2f281836ec69c130972742ffc262292bdbd64d`
+received bounded exact-source approval, with activation and full P6 still pending.
+Before commit, a cross-owner source check found that its setting fence used plain
+keys while `settings.update_settings` uses `iacs:setting:{key}`. The original source,
+approval and execution evidence are preserved. The narrow correction aligns those
+keys and adds a missing-row contention fixture through the actual settings writer,
+including whole-caller rollback and original-budget retry. Corrected run
+`iacs-validation-ogybyege` passes the whole affected 41-case store group, migration
+parity, isolation, unchanged source, empty cleanup and operational comparison.
+The corrected Linux checks pass 215 affected units, types100/83 and Ruff/F821.
+Host22/29, links and full staged/unstaged diff checks pass. The unchanged 60
+PostgreSQL cases and original 1,375 backend tests remain mapped evidence, not a
+newly executed combined run. Renewed exact-source approval remains pending. No
+schema, auth-root writer, active sender or production startup change is part of
+this correction.

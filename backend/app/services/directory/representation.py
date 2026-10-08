@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models import AccessEvent, Group, Person, Vehicle
 from app.modules.dvla.vehicle_enquiry import friendly_vehicle_text
-from app.services.person_presence_input_booleans import (
+from app.services.ha_presence_policy import (
     normalize_input_boolean_action,
     normalize_input_boolean_entity_ids,
 )

@@ -539,3 +539,50 @@ feature and schedule suites run with it; their old detached-audit monkeypatches
 are retired. [Confirmation units](../backend/tests/test_action_confirmations.py)
 include actual session-close ownership under repeated cancellation. This prerequisite
 does not activate HA effects or close the integrated P6/P8 gates.
+
+
+The dormant [HA store persistence suite](../scripts/validation/test_ha_presence_store.py)
+uses the existing fail-closed disposable PostgreSQL guard. It exercises participant
+rollback, current Person/settings/maintenance authority, original receipt budgets,
+shared-target ordering, immutable old receipts, UNKNOWN barriers, required-audit
+failure, complete terminal-page continuation and fresh post-lock/post-flush lease
+checks. A blocked accepted-receipt close must prevent a second owner claiming until
+actual cleanup and exact-token release; terminal renewal cannot rewrite the receipt.
+Selected SQL with a large profile photo proves the binding projection excludes that
+blob. Long complete identities remain lossless. The complete resident recovery suites
+check the canonical fingerprint extraction, and foundation checks retain the frozen
+0013/model contract. These source fixtures do not imply HA startup, live provider I/O
+or completion of the pending core/runtime gate.
+
+Focused runners may mount the retained exact-lock dependency directory read-only at
+/deps after checking the manifest hashes and immutable tooling image. Their receipts
+record the concrete dependency path and that no duplicate copy was created. Source,
+runtime, results and disposable database binds remain isolated. The full harness's
+dependency preparation contract is unchanged.
+
+The dormant [worker lifetime fixtures](../backend/tests/test_ha_presence_worker.py)
+cover receipt ownership loss during SQL and actual close, confirmed-claim close,
+original send deadlines, accepted POST truth during cancelled optional observation,
+repeated stop and dedicated-client cleanup. The
+[acknowledgement PostgreSQL suite](../scripts/validation/test_ha_presence_resolutions.py)
+prepares exact preview/confirmation/audit/barrier atomicity, retired origins,
+matching receipt retry after newer active work, live local/durable capacity rejection,
+stale projections, revoked Admin authority and rollback-before-rejection-audit cases.
+Focused run `iacs-validation-dkfy1aiw` passes 100 PostgreSQL cases: foundation 15,
+resident 26, store 40 and acknowledgement 19, with migration parity, isolation,
+unchanged source, empty cleanup and equal operational snapshots. The acknowledgement
+tests retain 13 SQLAlchemy transaction-reset warnings after the explicit original
+transaction rollback. A subsequent one-line auth fake signature correction leaves
+all runtime, schema and dependency bytes unchanged. The corrected immutable Linux
+run passes 1,375 backend tests with 29 expected skips, types 100/83 and Ruff/F821.
+The earlier helper setup failures and stale fake failure remain retained. These
+focused checks do not replace the full integrated harness or approve HA activation.
+
+The HA setting-creation regression pauses the actual `settings.update_settings`
+writer after its advisory lock is acquired and before a missing URL row is created.
+The reservation participant must report `ha_setting_busy`, roll back the complete
+owning transaction, and on retry retain its original origin/deadline while reading
+the writer's committed connection. It must reach the setting fence rather than
+pass solely because an auth-root lock is busy. This corrects a namespace mismatch
+found after the dormant owner's original focused checks; that evidence remains
+retained separately from the affected store rerun.

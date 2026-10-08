@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import GroupCategory
-from app.services.person_presence_input_booleans import DEFAULT_INPUT_BOOLEAN_ACTION
+from app.services.ha_presence_policy import DEFAULT_INPUT_BOOLEAN_ACTION
 from app.services.vehicle_information_contracts import ProviderOutcome
 
 

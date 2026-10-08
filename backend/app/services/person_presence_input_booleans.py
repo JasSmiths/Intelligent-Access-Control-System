@@ -3,13 +3,15 @@ from typing import Any
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, Person
-from app.models.enums import AccessDirection
 from app.modules.home_assistant.client import get_home_assistant_client
 from app.modules.home_assistant.input_booleans import (
-    INPUT_BOOLEAN_ACTIONS,
     command_input_boolean,
 )
 from app.services.event_bus import event_bus
+from app.services.ha_presence_policy import (
+    person_input_boolean_action_for_direction,
+    person_input_boolean_entity_ids,
+)
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -18,40 +20,6 @@ from app.services.telemetry import (
 )
 
 logger = get_logger(__name__)
-
-DEFAULT_INPUT_BOOLEAN_ACTION = "turn_off"
-
-
-def normalize_input_boolean_entity_ids(entity_ids: list[str] | None) -> list[str]:
-    selected = list(dict.fromkeys(str(entity_id).strip() for entity_id in entity_ids or [] if str(entity_id).strip()))
-    for entity_id in selected:
-        if not entity_id.startswith("input_boolean."):
-            raise ValueError("Home Assistant presence entity IDs must start with input_boolean.")
-    return selected
-
-
-def normalize_input_boolean_action(action: str | None) -> str:
-    if not action:
-        return DEFAULT_INPUT_BOOLEAN_ACTION
-    if action not in INPUT_BOOLEAN_ACTIONS:
-        raise ValueError("Home Assistant presence input_boolean action must be turn_on or turn_off.")
-    return action
-
-
-def person_input_boolean_entity_ids(person: Person) -> list[str]:
-    return normalize_input_boolean_entity_ids(
-        getattr(person, "home_assistant_presence_input_boolean_entity_ids", None)
-    )
-
-
-def person_input_boolean_action_for_direction(person: Person, direction: AccessDirection) -> str:
-    action = (
-        getattr(person, "home_assistant_presence_input_boolean_entry_action", None)
-        if direction == AccessDirection.ENTRY
-        else getattr(person, "home_assistant_presence_input_boolean_exit_action", None)
-    )
-    return normalize_input_boolean_action(action)
-
 
 async def apply_person_presence_input_boolean_actions(
     person: Person,

@@ -118,7 +118,7 @@ class Harness:
 
 async def connect(runtime):
     # Vendor lifecycle binds the authenticated socket to the current transport.
-    from app.modules.home_assistant.client import home_assistant_connection_fingerprint
+    from app.modules.home_assistant.input_boolean_contracts import home_assistant_connection_fingerprint
     recovery.invalidate_connection(connected=True,
         connection_binding=home_assistant_connection_fingerprint(runtime))
 

@@ -16,7 +16,7 @@ class FakeSession:
     def __init__(self, user: User) -> None:
         self.user = user
 
-    async def get(self, _model, user_id):
+    async def get(self, _model, user_id, *, populate_existing=False):
         return self.user if user_id == self.user.id else None
 
     async def scalars(self, _statement):
