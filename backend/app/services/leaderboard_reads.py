@@ -70,7 +70,7 @@ class UnknownLeader(TypedDict):
     read_count: int
     first_seen_at: str | None
     last_seen_at: str | None
-    snapshot: Snapshot | None
+    latest_snapshot: Snapshot | None
     vehicle_information: PendingInformation
 
 
@@ -215,7 +215,7 @@ async def unknown_leaders_in_session(session: AsyncSession, limit: int) -> list[
         "read_count": int(row["read_count"] or 0),
         "first_seen_at": _datetime_iso(row["first_seen_at"]),
         "last_seen_at": _datetime_iso(row["last_seen_at"]),
-        "snapshot": snapshot_payload(event_id=row["snapshot_event_id"],
+        "latest_snapshot": snapshot_payload(event_id=row["snapshot_event_id"],
             captured_at=row["snapshot_captured_at"], relative_path=row["snapshot_path"],
             byte_count=row["snapshot_bytes"], width=row["snapshot_width"],
             height=row["snapshot_height"], camera=row["snapshot_camera"]),

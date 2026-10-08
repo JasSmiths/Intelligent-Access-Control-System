@@ -618,6 +618,12 @@ preserve recorded identity and distinct single-current-person fallback with only
 required scalar columns. Dashboard uses bounded presence/expected-name summaries
 and explicit hidden counts; Exited Today retains recent-event semantics.
 
+The first source-only P7 freeze (`16c6d81`) is superseded by a narrow public DTO
+correction: unknown chart rows retain `latest_snapshot`, as consumed by Top Charts.
+The correction adds public-service and real chart-consumer image regressions,
+updates prepared PG assertions, and records complete public response keys in the
+before/after probe. Neither source freeze implies implementation approval.
+
 Host Node 24 matched-lock TypeScript and 40 affected frontend tests provide
 supplemental progress only. A separate exact-calendar-lock macOS Python 3.12
 environment, with socket connections denied before imports, passes 12 existing

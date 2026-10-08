@@ -183,6 +183,14 @@ async def run(args: argparse.Namespace) -> None:
                     assert actual_rows == expected_rows, (actual_rows, expected_rows, sql)
                 plans.append({"sql": sql, "executed_parameters": parameter_value(parameters),
                               "actual_root_rows": actual_rows, "plan": plan})
+        # Compare the entire public response, including all unknown-row keys;
+        # a renamed latest_snapshot must fail even when every image file is absent.
+        public_keys = None
+        if args.suite == "charts":
+            public_keys = {"response": sorted(output),
+                           "known": [sorted(row) for row in output["known"]],
+                           "unknown": [sorted(row) for row in output["unknown"]]}
+            assert all("latest_snapshot" in row and "snapshot" not in row for row in output["unknown"])
         encoded = json.dumps(output, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
         path = Path(args.output)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,6 +199,7 @@ async def run(args: argparse.Namespace) -> None:
             "fixture_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "workload": workload, "samples": samples, "queries_and_plans": plans,
             "output_bytes": len(encoded), "output_sha256": hashlib.sha256(encoded).hexdigest(),
+            "public_response_keys": public_keys,
             "limits": "Python allocation only; same supported public output, generated_at removed for charts only. Full-history chart aggregation and population/density-dependent prediction/public presence remain. Source SQL plans are actual driver statement+parameters."})
     finally:
         await engine.dispose()

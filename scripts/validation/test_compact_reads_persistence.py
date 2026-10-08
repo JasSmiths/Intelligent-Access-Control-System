@@ -139,13 +139,38 @@ async def test_unknown_rank_then_selected_snapshot_preserves_null_bytes_and_miss
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", listener)
     assert [item["registration_number"] for item in result] == ["TOP", "SECOND"]
-    assert result[0]["snapshot"] is None
-    assert result[1]["snapshot"]["event_id"] == str(uuid.UUID(int=210))
-    assert result[1]["snapshot"]["bytes"] is None
+    assert result[0]["latest_snapshot"] is None
+    assert result[1]["latest_snapshot"]["event_id"] == str(uuid.UUID(int=210))
+    assert result[1]["latest_snapshot"]["bytes"] is None
     assert paths == ["latest-missing", "null-byte-exists"]
     sql = statements[0][0].lower()
     assert "lateral" in sql and "row_number" not in sql and "raw_payload" not in sql
     assert len(statements) == 1
+
+
+async def test_public_chart_keeps_present_latest_snapshot_contract(tmp_path, monkeypatch):
+    event_id = uuid.UUID(int=301)
+    relative_path = "snapshots/public-chart.jpg"
+    snapshot_file = tmp_path / relative_path
+    snapshot_file.parent.mkdir(parents=True)
+    snapshot_file.write_bytes(b"synthetic-existing-snapshot")
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
+    await save(observations=[observation(301, plate="PUBLIC", decision=AccessDecision.DENIED,
+               snapshot_path=relative_path, snapshot_bytes=None, snapshot_captured_at=NOW,
+               snapshot_width=320, snapshot_height=180, snapshot_camera="camera.synthetic")])
+
+    result = await leaderboard.LeaderboardService().get_leaderboard(enrich_unknowns=False)
+
+    assert set(result) == {"known", "unknown", "top_known", "generated_at"}
+    assert result["known"] == [] and result["top_known"] is None
+    assert result["unknown"] == [{
+        "rank": 1, "registration_number": "PUBLIC", "read_count": 1,
+        "first_seen_at": NOW.isoformat(), "last_seen_at": NOW.isoformat(),
+        "latest_snapshot": {"event_id": str(event_id),
+            "url": f"/api/v1/events/{event_id}/snapshot", "captured_at": NOW.isoformat(),
+            "bytes": None, "width": 320, "height": 180, "camera": "camera.synthetic"},
+        "vehicle_information": {"status": "skipped", "information": None, "label": ""},
+    }]
 
 
 async def test_unknown_exact_timestamp_tie_uses_documented_id_order(monkeypatch):
@@ -154,7 +179,7 @@ async def test_unknown_exact_timestamp_tie_uses_documented_id_order(monkeypatch)
     monkeypatch.setattr(leaderboard_reads, "snapshot_path_available", lambda _path: True)
     async with AsyncSessionLocal() as session:
         result = await unknown_leaders_in_session(session, 1)
-    assert result[0]["snapshot"]["event_id"] == str(uuid.UUID(int=2))
+    assert result[0]["latest_snapshot"]["event_id"] == str(uuid.UUID(int=2))
 
 
 async def test_presence_public_population_order_and_internal_global_counts_one_snapshot():

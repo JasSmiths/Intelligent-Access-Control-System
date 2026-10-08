@@ -182,6 +182,53 @@ async def test_get_leaderboard_returns_shape_and_enriches_unknowns(monkeypatch) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enrich_unknowns", [False, True])
+async def test_public_chart_preserves_latest_snapshot_from_real_projection(tmp_path, monkeypatch, enrich_unknowns):
+    event_id = uuid.UUID(int=301)
+    now = datetime(2026, 10, 8, 12, tzinfo=UTC)
+    relative_path = "snapshots/public-chart.jpg"
+    snapshot_file = tmp_path / relative_path
+    snapshot_file.parent.mkdir(parents=True)
+    snapshot_file.write_bytes(b"synthetic-existing-snapshot")
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
+    row = {"registration_number": "PUBLIC", "read_count": 1, "first_seen_at": now,
+           "last_seen_at": now, "snapshot_event_id": event_id, "snapshot_captured_at": now,
+           "snapshot_path": relative_path, "snapshot_bytes": None, "snapshot_width": 320,
+           "snapshot_height": 180, "snapshot_camera": "camera.synthetic"}
+    # Keep the actual unknown scalar projection/serializer and public composition.
+    # Only the SQL transport is inert here; real SQL parity is covered by the PG fixture.
+    session = SimpleNamespace(
+        execute=AsyncMock(return_value=SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [row]))),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(leaderboard_module, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(leaderboard_module, "known_leaders_in_session", AsyncMock(return_value=[]))
+    service = LeaderboardService()
+    information = {"status": "ok", "information": None, "label": "Synthetic"}
+    lookup = AsyncMock(return_value=information)
+    monkeypatch.setattr(service, "_lookup_unknown_vehicle", lookup)
+
+    result = await service.get_leaderboard(enrich_unknowns=enrich_unknowns)
+
+    assert set(result) == {"known", "unknown", "top_known", "generated_at"}
+    assert result["known"] == [] and result["top_known"] is None
+    assert result["unknown"] == [{
+        "rank": 1, "registration_number": "PUBLIC", "read_count": 1,
+        "first_seen_at": now.isoformat(), "last_seen_at": now.isoformat(),
+        "latest_snapshot": {"event_id": str(event_id),
+            "url": f"/api/v1/events/{event_id}/snapshot", "captured_at": now.isoformat(),
+            "bytes": None, "width": 320, "height": 180, "camera": "camera.synthetic"},
+        "vehicle_information": information if enrich_unknowns else {
+            "status": "skipped", "information": None, "label": ""},
+    }]
+    session.close.assert_awaited_once()
+    if enrich_unknowns:
+        lookup.assert_awaited_once_with("PUBLIC")
+    else:
+        lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_unknown_information_uses_only_shared_cache(monkeypatch) -> None:
     from unittest.mock import AsyncMock
 
