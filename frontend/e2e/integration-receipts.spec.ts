@@ -13,7 +13,8 @@ for (const scenario of ["settings", "apprise", "calendar", "rejected-settings"] 
         accepted = true; await route.fulfill({ json: [] }); return;
       }
       if (request.method() === "DELETE" && path === "/api/v1/integrations/apprise/urls/0") { mutations += 1; accepted = true; await route.fulfill({ json: { urls: [] } }); return; }
-      if (request.method() === "POST" && path === "/api/v1/integrations/icloud-calendar/sync") { mutations += 1; accepted = true; await route.fulfill({ json: { status: "ok", account_count: 1, events_scanned: 0, passes_created: 0, passes_updated: 0, passes_cancelled: 0, passes_skipped: 0 } }); return; }
+      if (request.method() === "POST" && path === "/api/v1/integrations/icloud-calendar/sync") { mutations += 1; accepted = true; await route.fulfill({ json: { id: request.postDataJSON().run_id, status: "ok", account_count: 1, events_scanned: 0, events_matched: 0, passes_created: 0, passes_updated: 0, passes_cancelled: 0, passes_skipped: 0, account_results: [] } }); return; }
+      if (request.method() === "GET" && path.startsWith("/api/v1/integrations/icloud-calendar/sync/")) { await route.fulfill({ status: accepted ? 503 : 404, json: { detail: accepted ? "Calendar run read offline" : "Run not admitted yet" } }); return; }
       if (request.method() !== "GET") { unexpected.push(`${request.method()} ${path}`); await route.abort("blockedbyclient"); return; }
       let body: unknown;
       switch (path) {

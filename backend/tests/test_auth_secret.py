@@ -5,14 +5,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-import app.core.auth_secret as auth_secret
-import app.services.auth as auth_service
 import app.services.actionable_notifications as actionable
-import app.services.auth_secret_management as auth_secret_management
+import app.services.auth as auth_service
 import app.services.settings as settings_service
+from app.core import auth_secret
 from app.core.auth_secret import DEFAULT_AUTH_SECRET_KEY, AuthSecretError
-from app.core.crypto import decrypt_secret, encrypt_secret
-from app.models import ICloudCalendarAccount, NotificationActionContext, SystemSetting, User
+from app.models import SystemSetting
 
 
 class FakeScalars:
@@ -169,64 +167,5 @@ def test_jwts_and_actionable_hashes_are_bound_to_current_auth_secret(tmp_path, m
     assert actionable._token_hash("token") != old_action_hash
 
 
-@pytest.mark.asyncio
-async def test_rotation_reencrypts_payloads_and_invalidates_action_contexts(tmp_path, monkeypatch) -> None:
-    old_secret = "a" * 48
-    new_secret = "b" * 48
-    path = tmp_path / "auth-secret.key"
-    auth_secret.write_auth_secret_file(path, old_secret)
-    setting = SystemSetting(
-        key="gemini_api_key",
-        category="llm",
-        value={"encrypted": encrypt_secret("gemini-secret", secret=old_secret)},
-        is_secret=True,
-        description="Gemini API key.",
-    )
-    account = ICloudCalendarAccount(
-        apple_id="owner@example.com",
-        encrypted_session_bundle=encrypt_secret('{"session":"old"}', secret=old_secret),
-    )
-    context = NotificationActionContext(
-        token_hash="a" * 64,
-        action="gate.open",
-        notify_service="notify.mobile_app_owner",
-        registration_number="AB12CDE",
-        expires_at=datetime.now(tz=UTC) + timedelta(minutes=5),
-    )
-    fake_session = FakeSession([setting], [account], [context])
-
-    monkeypatch.setattr(auth_secret_management, "get_auth_secret", lambda: old_secret)
-    monkeypatch.setattr(
-        auth_secret_management,
-        "get_auth_secret_status",
-        lambda: {
-            "source": "file",
-            "environment": "development",
-            "file_path": str(path),
-            "env_configured": False,
-            "env_default_configured": False,
-            "rotation_required": False,
-            "ui_rotation_available": True,
-            "detail": "file",
-        },
-    )
-    monkeypatch.setattr(auth_secret_management, "reset_auth_secret_cache", lambda: None)
-    monkeypatch.setattr(auth_secret_management, "clear_previous_auth_secret", lambda *_args: None)
-    monkeypatch.setattr(auth_secret_management, "invalidate_runtime_config_cache", lambda: None)
-    monkeypatch.setattr(auth_secret_management, "emit_audit_log", lambda **_kwargs: None)
-    monkeypatch.setattr(auth_secret_management, "AsyncSessionLocal", lambda: fake_session)
-
-    result = await auth_secret_management.rotate_auth_secret(
-        user=User(id=uuid.uuid4(), username="admin", full_name="Admin"),
-        confirmed=True,
-        new_secret=new_secret,
-    )
-
-    assert path.read_text().strip() == new_secret
-    assert decrypt_secret(setting.value["encrypted"], secret=new_secret) == "gemini-secret"
-    assert decrypt_secret(account.encrypted_session_bundle, secret=new_secret) == '{"session":"old"}'
-    assert context.outcome == "invalidated"
-    assert context.consumed_at is not None
-    assert result["settings_reencrypted"] == 1
-    assert result["icloud_accounts_reencrypted"] == 1
-    assert result["action_contexts_invalidated"] == 1
+# Rotation ciphertext/action-context parity and required atomic audit are covered
+# against PostgreSQL in scripts/validation/test_calendar_auth_root_persistence.py.

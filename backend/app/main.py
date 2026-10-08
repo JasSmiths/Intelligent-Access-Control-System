@@ -23,6 +23,7 @@ from app.services.automations import get_automation_service
 from app.services.event_bus import event_bus
 from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.home_assistant import get_home_assistant_service
+from app.services.icloud_calendar import get_icloud_calendar_service
 from app.services.lpr_webhook_security import verify_lpr_webhook_request
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.movement_reconciliation import get_movement_reconciliation_service
@@ -117,6 +118,7 @@ async def lifespan(app: FastAPI):
                 ("automations", get_automation_service()),
                 ("visitor_passes", get_visitor_pass_service()),
                 ("access_devices", get_access_device_service()),
+                ("icloud_calendar", get_icloud_calendar_service()),
                 ("vehicle_information", get_vehicle_information_worker()),
                 ("report_exports", report_exports),
                 ("access_events", get_access_event_service()),

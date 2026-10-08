@@ -6,6 +6,7 @@ import json
 import secrets
 import string
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -207,7 +208,19 @@ async def clear_session_cookie(response: Response) -> None:
     response.delete_cookie(key=runtime.auth_cookie_name, path="/", samesite="lax")
 
 
+@dataclass(frozen=True)
+class VerifiedAuthToken:
+    user: User
+    # Unix seconds from the same signature/expiry/user/version/JTI validation.
+    expires_at: int
+
+
 async def authenticate_token(session: AsyncSession, token: str | None) -> User | None:
+    verified = await authenticated_token(session, token)
+    return verified.user if verified is not None else None
+
+
+async def authenticated_token(session: AsyncSession, token: str | None) -> VerifiedAuthToken | None:
     if not token:
         return None
     payload = _decode_jwt(token)
@@ -222,14 +235,17 @@ async def authenticate_token(session: AsyncSession, token: str | None) -> User |
     except ValueError:
         return None
 
-    user = await session.get(User, user_id)
+    user = await session.get(User, user_id, populate_existing=True)
     if not user or not user.is_active:
         return None
     if int(payload.get("ver") or 0) != int(user.auth_session_version or 0):
         return None
     if await token_is_revoked(session, payload):
         return None
-    return user
+    expires_at = payload.get("exp")
+    if not isinstance(expires_at, int):
+        return None
+    return VerifiedAuthToken(user, expires_at)
 
 
 async def token_is_revoked(session: AsyncSession, payload: dict[str, Any]) -> bool:

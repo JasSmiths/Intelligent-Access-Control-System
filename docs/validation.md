@@ -96,6 +96,35 @@ synthetic; it does not register or actuate a live provider. Backend provider-pol
 extension evidence and final integrated E1 conformance remain separate gates.
 
 
+## Calendar ownership checks
+
+The [calendar persistence inventory](../scripts/validation/recovery_checks.py)
+registers store, authority, reconciliation, auth-root writers, SDK/account engine,
+authentication and actual ASGI adapters separately. Fixtures prove real PostgreSQL
+locks/flush fences, logout serialization, current workflow execution, same-run
+recovery, required audit rollback, uncertain acceptance and actual cleanup.
+The [SDK tests](../backend/tests/test_icloud_calendar_boundary.py) use installed
+locked pyicloud with inert transport; transport tests include actual local TLS
+backpressure, eight retained receivers, stale abort callbacks and close/join.
+The rejected kernel send-timeout probe remains failed evidence; it is not a
+transport implementation guarantee.
+
+[Calendar browser fixtures](../frontend/e2e/calendar-recovery.spec.ts) inspect a
+workflow run without implicit mutation, confirm adoption of its exact UUID,
+retain an original lost-response request and a dirty auth draft, and replay the
+same UUID after remount. [Selected-pass owner tests](../frontend/src/features/passes/selectedMetadata.test.tsx)
+cover filtered aggregate invalidation and old GET after authoritative full-row
+replacement. Required browser checks remain Chromium/WebKit with `CI=1`, owned
+5174 and no backend proxy. Host Node24 progress is supplemental; the final locked
+Node22 build/unit and complete isolated harness remain mandatory.
+
+Calendar WIP is not a full-stage validation claim. Bounded primitives have exact
+Astra approvals recorded in the closure ledger; later API/editor/lifecycle and
+session-cleanup changes require current real gates. Keep original setup/test
+failures and copied source identities. Migration checks include empty down/re-up
+and refusal of populated ownership downgrade. No live calendar requests or
+mixed-version operational cutover is exercised by these inert checks.
+
 ## Final runtime PDF capability
 
 The [runtime PDF smoke](../scripts/validation/runtime_pdf_smoke.py) checks the final

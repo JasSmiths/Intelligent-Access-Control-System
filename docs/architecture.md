@@ -167,6 +167,45 @@ Top Charts query recorded activity; Investigations uses structured filters and
 retained evidence. Missed Exit Recovery is an optional bounded admission-recovery
 flow; its policy and safety limits are in [integrations](integrations.md).
 
+### Calendar operation ownership
+
+[Account/auth transactions](../backend/app/services/calendar_accounts.py),
+[authentication orchestration](../backend/app/services/calendar_authentication.py),
+[run storage](../backend/app/services/calendar_sync_store.py),
+[account acceptance](../backend/app/services/calendar_sync_commit.py) and
+[reconciliation](../backend/app/services/calendar_reconciliation.py) have distinct
+transaction responsibilities. The [engine](../backend/app/services/calendar_sync_engine.py)
+keeps one original attempt deadline and one renewal child across detached vendor
+work. Account/domain/intents precede final current requester/workflow authority
+and the run checkpoint lock. All writes flush before a final fresh clock and
+exact lease/generation/authority-expiry check; no pending writes follow it.
+
+The [SDK admission owner](../backend/app/services/icloud_calendar_sdk.py) owns
+actual native work and pending clients. Bounded postaccept metadata/publication
+runs inside that same admitted child, so process stop drains it before database
+or provider disposal. [API adapters](../backend/app/api/v1/icloud_calendar.py)
+authenticate in a short owned read and carry detached canonical authority; no
+request-yield auth transaction spans SDK work. The existing checked workflow
+execution reaches a narrow [current-authority participant](../backend/app/services/calendar_workflow_authority.py),
+with final NOWAIT locks rather than a second permission policy.
+
+[Auth-root coordination](../backend/app/services/auth_root.py) fences participating
+settings seed/update, calendar ciphertext writers and secret rotation/migration.
+Rotation retains its dedicated session-level lock across file/DB outcome and
+cleanup; short writers reload under the same transaction-level fence before
+actor/domain locks. Required audit UUIDs provide positive outcome evidence.
+An unresolved outcome preserves recovery keys; it never blindly restores an old
+key based on an absent receipt. This finite writer boundary does not globally
+repair unrelated cached JWT/configuration readers.
+
+The calendar editor owns exact-run read/acceptance generations and two UUID-only
+recovery references. Passes owns at most the open detail/editor IDs; aggregate
+calendar cancellation invalidates their metadata, while full row replacement
+fences older selected GETs. Fresh status/errors can disable dependent actions
+without resetting dirty fields. Calendar behavior extensions change the
+reconciliation owner and its fixtures; protocol-envelope changes belong to the
+vendor module, not the shared facade or editor frame.
+
 ## Frontend ownership
 
 [App](../frontend/src/app/App.tsx) composes authentication, navigation, account-scoped

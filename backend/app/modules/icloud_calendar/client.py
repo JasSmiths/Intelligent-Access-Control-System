@@ -179,7 +179,7 @@ class ICloudCalendarClient:
             api.authenticate()
             operation.work.check()
             return auth_session
-        except BaseException as exc:  # noqa: BLE001 - Observe every acquired handle before propagating cleanup failure.
+        except BaseException as exc:
             if auth_session is not None:
                 try:
                     self.cleanup_auth_session(auth_session)

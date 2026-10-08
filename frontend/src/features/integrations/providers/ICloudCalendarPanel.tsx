@@ -12,10 +12,13 @@ import { useEditorLifetime } from "../../../ui/useEditorLifetime";
 import { useCoordinatedRead } from "../../../lib/useCoordinatedRead";
 import type { ProviderEditorProps } from "../editorTypes";
 import { integrationEventMatches } from "../invalidation";
+import { useCalendarRunRecovery } from "./useCalendarRunRecovery";
+import { isMutationNotStarted } from "../../../api/integrations";
 
 export function ICloudCalendarEditor(props: ProviderEditorProps) {
   const lifetime = useEditorLifetime();
   const canManage = props.currentUser.role === "admin";
+  const recovery = useCalendarRunRecovery(props.currentUser.id, props.currentUser.role);
   const [payload, setPayload] = React.useState<ICloudCalendarPayload>({ accounts: [], recent_sync_runs: [] });
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
@@ -103,22 +106,38 @@ export function ICloudCalendarEditor(props: ProviderEditorProps) {
     } catch (error) { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "Verification failed", detail: error instanceof Error ? error.message : "Unable to verify that code." }); }
     finally { finish(); }
   };
-  const syncNow = async () => {
+  const syncNow = async (fresh = false) => {
     if (!begin("sync")) return;
-    setFeedback({ tone: "progress", title: "Syncing calendars", detail: "Scanning connected accounts for Open Gate events.", activeStep: 1 });
+    setFeedback({ tone: "progress", title: "Syncing calendars", detail: "Scanning the fixed account manifest for Open Gate events.", activeStep: 1 });
     try {
-      const run = await integrationsApi.syncICloudCalendar(); if (!lifetime.isCurrent()) return;
+      const identity = fresh || !recovery.originalId ? recovery.prepareNew() : recovery.originalId;
+      if (!fresh && recovery.originalId) recovery.select(identity);
+      const run = await integrationsApi.syncICloudCalendar(identity); if (!lifetime.isCurrent()) return;
+      recovery.accept(run);
       setPayload((current) => ({ ...current, recent_sync_runs: [run, ...current.recent_sync_runs.filter((item) => item.id !== run.id)].slice(0, 5) }));
-      setFeedback({ tone: run.status === "ok" ? "success" : "info", title: run.status === "ok" ? "Calendar sync complete" : "Calendar sync complete with notes", detail: icloudSyncRunSummary(run) });
+      setFeedback({ tone: run.status === "ok" ? "success" : "info", title: run.status === "ok" ? "Calendar sync complete" : "Calendar sync receipt retained", detail: icloudSyncRunSummary(run) });
       refreshAccepted();
-    } catch (error) { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "Calendar sync failed", detail: error instanceof Error ? error.message : "Unable to sync iCloud Calendars." }); }
+    } catch (error) { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "Calendar sync response unavailable", detail: `${error instanceof Error ? error.message : "Unable to read the response."} Read the saved run before recovery; no new run will be started automatically.` }); }
+    finally { finish(); }
+  };
+  const resumeRun = async () => {
+    const run = recovery.run, context = run?.recovery;
+    if (!run || !context || !context.can_resume || recovery.error || pending.current || !lifetime.isCurrent()) return;
+    if (!window.confirm(`Resume calendar run ${run.id}? Original origin: ${context.original_origin}. ${context.completed_account_ids.length} completed accounts will be skipped; ${context.remaining_account_ids.length} remaining accounts use the original ${context.coverage.start_date} to ${context.coverage.end_date} range (${context.coverage.vendor_timezone}).${context.original_origin === "workflow" ? " This Admin recovery leaves the original workflow result unchanged." : ""}`) || !begin("sync")) return;
+    try {
+      const result = await integrationsApi.resumeICloudCalendar(run.id, lifetime.isCurrent);
+      if (isMutationNotStarted(result) || !lifetime.isCurrent()) return;
+      recovery.accept(result);
+      setFeedback({ tone: result.status === "ok" ? "success" : "info", title: "Calendar recovery receipt retained", detail: icloudSyncRunSummary(result) });
+      refreshAccepted();
+    } catch (error) { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "Calendar recovery response unavailable", detail: `${error instanceof Error ? error.message : "Unable to read recovery response."} The same run ID is retained. Read its checkpoints before retrying.` }); }
     finally { finish(); }
   };
   const removeAccount = async (account: ICloudCalendarAccount) => {
     if (pending.current || !canManage || !lifetime.isCurrent() || !window.confirm(`Remove iCloud Calendar account ${account.display_name}? Future unused calendar passes from this account will be cancelled.`) || !begin("remove")) return;
     setRemovingId(account.id);
     try {
-      await integrationsApi.removeICloudAccount(account.id); if (!lifetime.isCurrent()) return;
+      const removed = await integrationsApi.removeICloudAccount(account.id, lifetime.isCurrent); if (isMutationNotStarted(removed) || !lifetime.isCurrent()) return;
       setPayload((current) => ({ ...current, accounts: current.accounts.filter((item) => item.id !== account.id) }));
       setFeedback({ tone: "success", title: "Account removed", detail: `${account.display_name} is no longer connected.` });
       refreshAccepted();
@@ -134,7 +153,7 @@ export function ICloudCalendarEditor(props: ProviderEditorProps) {
         </div>
         <div className="icloud-overview-copy">
           <strong>Automated Visitor Passes</strong>
-          <span>Events with Open Gate in their notes create or update Visitor Passes for the next 14 days.</span>
+          <span>Events with Open Gate in their notes create or update Visitor Passes within the captured calendar date range.</span>
         </div>
         <Badge tone={error ? "red" : hasAttention ? "amber" : activeAccounts.length ? "green" : "gray"}>
           {error ? "Error" : hasAttention ? "Needs Attention" : activeAccounts.length ? `${activeAccounts.length} Connected` : "Not Configured"}
@@ -144,11 +163,27 @@ export function ICloudCalendarEditor(props: ProviderEditorProps) {
         <button className="primary-button" onClick={startAddFlow} disabled={!canManage || busy || loading || Boolean(error)} type="button">
           <Plus size={15} /> {adding && !isReconnectFlow ? "Close Add Account" : "Add Account"}
         </button>
-        <button className="secondary-button" onClick={syncNow} disabled={!canManage || loading || busy || Boolean(error) || !activeAccounts.length} type="button">
+        <button className="secondary-button" onClick={() => void syncNow()} disabled={!canManage || loading || busy || Boolean(error) || !activeAccounts.length} type="button">
           {syncing ? <Loader2 className="spin" size={15} /> : <RefreshCcw size={15} />}
-          {syncing ? "Syncing..." : "Sync Calendars Now"}
+          {syncing ? "Syncing..." : recovery.originalId ? "Check Original Sync Request" : "Sync Calendars Now"}
         </button>
       </div>
+      {recovery.originalId ? <button className="secondary-button" type="button" disabled={!canManage || busy || loading || Boolean(error) || !activeAccounts.length} onClick={() => {
+        const complete = recovery.knownId === recovery.originalId && recovery.run?.recovery?.remaining_account_ids.length === 0;
+        if (complete || window.confirm("Start a separate calendar sync with a new request ID? The previous request will not be resumed. Read its retained checkpoints before starting separate work.")) void syncNow(true);
+      }}>Start New Calendar Sync</button> : null}
+      {payload.recent_sync_runs.length ? <section className="icloud-section" aria-label="Recent calendar runs">
+        <strong>Read a Recent Run</strong>{payload.recent_sync_runs.map((run) => <button className="secondary-button icloud-run-reference" type="button" key={run.id} disabled={busy} onClick={() => recovery.select(run.id)}>Read run {run.id}</button>)}
+      </section> : null}
+      {recovery.originalId && recovery.originalId !== recovery.knownId ? <button className="secondary-button" type="button" disabled={busy} onClick={() => recovery.select(recovery.originalId)}>Read Original Request</button> : null}
+      {recovery.knownId ? <section className="icloud-section" aria-label="Saved calendar run">
+        <strong>Saved Calendar Run</strong><p className="icloud-run-reference">{recovery.knownId}</p>
+        {recovery.run ? <p>Original origin: {recovery.run.recovery?.original_origin || recovery.run.trigger_source}. {recovery.run.recovery?.completed_account_ids.length ?? 0} completed; {recovery.run.recovery?.remaining_account_ids.length ?? 0} remaining. {icloudSyncRunSummary(recovery.run)}</p> : null}
+        {recovery.run?.recovery ? <p>Original coverage: {recovery.run.recovery.coverage.start_date} to {recovery.run.recovery.coverage.end_date}, inclusive ({recovery.run.recovery.coverage.vendor_timezone}).{recovery.run.recovery.original_origin === "workflow" ? " Admin recovery preserves the original workflow outcome." : ""}</p> : null}
+        {recovery.error ? <p role="alert">{recovery.error} The saved ID and accepted receipts are retained.</p> : null}
+        <button className="secondary-button" type="button" disabled={busy || recovery.reading} onClick={() => void recovery.refresh().catch(() => undefined)}>Read Saved Sync</button>
+        {recovery.run?.recovery?.can_resume ? <button className="secondary-button" type="button" disabled={!canManage || busy || recovery.reading || Boolean(recovery.error)} onClick={() => void resumeRun()}>Resume This Sync</button> : null}
+      </section> : null}
       {error ? <div className="auth-error inline-error">{error}<button className="secondary-button" onClick={() => void reload().catch(() => undefined)} type="button">Try again</button></div> : null}
       {feedback ? <IntegrationFeedbackPanel feedback={feedback} /> : null}
       {adding ? (

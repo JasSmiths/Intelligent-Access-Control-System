@@ -92,6 +92,12 @@ export type ICloudCalendarSyncRun = {
   trigger_source: string; triggered_by_user_id: string | null; account_count: number;
   events_scanned: number; events_matched: number; passes_created: number; passes_updated: number;
   passes_cancelled: number; passes_skipped: number; account_results: Record<string, unknown>[]; error: string | null;
+  interrupted?: boolean; cleanup_pending?: boolean;
+  recovery?: { original_origin: "ui" | "workflow"; original_actor_user_id: string | null;
+    workflow_operation_id: string | null; account_ids: string[]; completed_account_ids: string[];
+    remaining_account_ids: string[]; busy: boolean; can_resume: boolean; recovery_actor_user_id: string | null;
+    coverage: { requested_start: string; requested_end: string; start_date: string; end_date: string;
+      vendor_timezone: string; effective_start: string; effective_end: string } } | null;
 };
 export type ICloudCalendarPayload = { accounts: ICloudCalendarAccount[]; recent_sync_runs: ICloudCalendarSyncRun[] };
 export type ICloudAuthStartResponse = {
@@ -164,8 +170,10 @@ export const integrationsApi = {
   getICloudCalendar: (options: ApiRequestOptions = {}) => api.get<ICloudCalendarPayload>("/api/v1/integrations/icloud-calendar/accounts", options),
   startICloudAuth: (appleId: string, password: string) => api.post<ICloudAuthStartResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/start", { apple_id: appleId, password }),
   verifyICloudAuth: (handshakeId: string, code: string) => api.post<ICloudAuthVerifyResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/verify", { handshake_id: handshakeId, code }),
-  syncICloudCalendar: () => api.post<ICloudCalendarSyncRun>("/api/v1/integrations/icloud-calendar/sync"),
-  removeICloudAccount: (accountId: string) => api.delete<ICloudCalendarAccount>(`/api/v1/integrations/icloud-calendar/accounts/${accountId}`),
+  syncICloudCalendar: (runId: string) => api.post<ICloudCalendarSyncRun>("/api/v1/integrations/icloud-calendar/sync", { run_id: runId }),
+  getICloudCalendarRun: (runId: string, options: ApiRequestOptions = {}) => api.get<ICloudCalendarSyncRun>(`/api/v1/integrations/icloud-calendar/sync/${encodeURIComponent(runId)}`, options),
+  resumeICloudCalendar: (runId: string, beforeWrite: MutationStartGuard) => confirmedPost<ICloudCalendarSyncRun>(`/api/v1/integrations/icloud-calendar/sync/${encodeURIComponent(runId)}/resume`, "icloud_calendar.sync.resume", { run_id: runId }, { target_entity: "ICloudCalendarSyncRun", target_id: runId, reason: "Explicit same-run calendar recovery" }, {}, beforeWrite),
+  removeICloudAccount: (accountId: string, beforeWrite: MutationStartGuard) => confirmedDelete<ICloudCalendarAccount>(`/api/v1/integrations/icloud-calendar/accounts/${encodeURIComponent(accountId)}`, "icloud_calendar.account.remove", { account_id: accountId }, { target_entity: "ICloudCalendarAccount", target_id: accountId, reason: "Remove calendar account and cancel eligible source passes" }, {}, beforeWrite),
   getAppriseUrls: async (options: ApiRequestOptions = {}) => {
     const result = await api.get<{ urls: AppriseUrlSummary[] }>("/api/v1/integrations/apprise/urls", options);
     return result.urls;

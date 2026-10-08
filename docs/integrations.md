@@ -61,6 +61,63 @@ admission update can now fail during that conversion; repair it in the same upda
 or explicitly unset the admission key. The unset-key path returns before conversion
 and leaves automatic admission disabled.
 
+## Calendar synchronization and recovery
+
+The [calendar facade](../backend/app/services/icloud_calendar.py) composes account
+transactions, sync attempts and the SDK owner. Authentication/start, verification
+and synchronization share one nonwaiting process slot; busy requests return 503
+with `Retry-After: 5`. At most eight pending 2FA clients are retained for the
+existing ten-minute logical TTL. Expired or retiring handshakes cannot be used;
+actual thread, socket, receiver and cookie cleanup finishes before capacity is
+released. DNS/TLS acquisition may run until its finite opening timeout before a
+socket can be registered for abort. Connect/read limits are not a hard total
+native-thread deadline. Stop/disconnect forbids a new stage, while owned cleanup
+may outlive the original 120-second attempt.
+
+Each new sync has a client-known UUID, fixed account-ID manifest, and fixed
+coverage. Site-local today and today+15-day midnights are converted to requested
+UTC instants; the locked SDK serializes those UTC dates with a captured vendor
+`usertz`. The run retains both requested instants and actual inclusive vendor
+coverage, including site/host timezone and DST differences. Explicit resume uses
+that same coverage even on a different host. A repeated ordinary start reads its
+existing receipt; it never resumes unfinished work implicitly.
+
+Use the provider editor's bounded recent-run list or saved exact UUID to inspect
+origin, coverage and completed/remaining accounts. The browser retains only the
+original UI request UUID and selected inspection UUID, scoped to the signed-in
+account/role. Inspecting a workflow run does not replace the original lost-response
+request. Explicit confirmed Admin recovery may adopt an interrupted workflow run,
+recording the recovery actor while preserving its original operation and workflow
+outcome. Completed/terminal accounts never repeat. Live run/account leases are
+not stolen. Reconnect/secret rotation allows a pending account to fetch its fresh
+session on explicit resume; changed site-timezone semantics or removed accounts
+produce terminal checkpoints requiring a deliberate new run where appropriate.
+
+Only the supported full-refresh envelope (`Event` list, optional validated
+`Collection`/`Invitee` lists) authorizes absence reconciliation. Unknown control
+fields, malformed rows and unsupported/truncated shapes cause an incomplete
+checkpoint without account effects. This conservative protocol may reject new
+legitimate vendor metadata; fixtures use the installed SDK and inert HTTP, and
+no live Apple envelope validation is claimed. Intentional all-day/nonmatching
+exclusions remain distinct from malformed input. Sync absence cancellation is
+limited to calendar ACTIVE/SCHEDULED passes with aware stored `event_start`
+inside proven coverage. Explicit account removal instead cancels all eligible
+source-prefixed passes, including out-of-horizon/malformed historical metadata.
+USED, CANCELLED and EXPIRED passes are preserved. Existing 255-character source
+references and their collision limitation are unchanged.
+
+Account effects, required audit and durable per-pass intents commit together.
+Known accepted receipts survive later metadata/listener failure or cancellation;
+unresolved commits remain unknown and require exact-state inspection before a
+fresh explicit attempt. Rejected remove/resume confirmations are audited by the
+admitted outer owner only after positive rollback and actual cleanup; missing
+confirmation remains 428 without rejection audit. Unproved settlement does not
+open a potentially self-blocking audit transaction. Migration 0014 requires
+coordinated stop/drain and version cutover because old workers ignore fences.
+Downgrade refuses before DDL when new generations, leases or run contexts exist;
+use a verified matching backup/compatible-image fix-forward plan. These changes
+do not authorize deployment, operational migration or live provider requests.
+
 ## LPR ingress
 
 UniFi webhook input enters at `POST /api/v1/webhooks/ubiquiti/lpr`.

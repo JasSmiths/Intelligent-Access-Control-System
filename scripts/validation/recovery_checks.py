@@ -9,6 +9,16 @@ import re
 
 
 PERSISTENCE_TESTS = [
+    "scripts/validation/test_calendar_api_persistence.py",
+    "scripts/validation/test_calendar_auth_root_persistence.py",
+    "scripts/validation/test_calendar_authentication_persistence.py",
+    "scripts/validation/test_calendar_reconciliation_persistence.py",
+    "scripts/validation/test_calendar_request_authority_persistence.py",
+    "scripts/validation/test_calendar_sync_commit_persistence.py",
+    "scripts/validation/test_calendar_sync_engine_persistence.py",
+    "scripts/validation/test_calendar_sync_sessions_persistence.py",
+    "scripts/validation/test_calendar_sync_store_persistence.py",
+    "scripts/validation/test_calendar_workflow_authority_persistence.py",
     "scripts/validation/test_access_result_persistence.py",
     "scripts/validation/test_report_persistence.py",
     'scripts/validation/test_access_completion_persistence.py',

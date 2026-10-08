@@ -17,11 +17,12 @@ from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRun
 from app.services.workflows.action_definitions import ACTION_BY_TYPE, pending_action_error
+from app.services.workflows.execution_contracts import AutomationExecution, checked_execution
 
 LEASE_SECONDS = 300
 MAX_CLAIM_SCAN = 50
@@ -92,7 +93,7 @@ def frozen_action_plan(run_id: uuid.UUID, planned: list[dict[str, Any]]) -> list
 
 
 class AutomationRunStore:
-    def __init__(self, session_factory=AsyncSessionLocal):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal) -> None:
         self.sessions = session_factory
 
     async def reserve(
@@ -268,15 +269,14 @@ class AutomationRunStore:
         return None
 
     async def owned(
-        self, session: AsyncSession, run_id: uuid.UUID, token: uuid.UUID
+        self, session: AsyncSession, run_id: uuid.UUID, token: uuid.UUID,
+        *, lock: bool = True, nowait: bool = False,
     ) -> tuple[AutomationRun, datetime]:
-        """Lock after the caller's actor/rule preflight locks, before action state."""
-        row = await session.scalar(
-            select(AutomationRun)
-            .where(AutomationRun.id == run_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+        """Blocking by default; participants may read early or lock NOWAIT late."""
+        query = select(AutomationRun).where(AutomationRun.id == run_id)
+        if lock:
+            query = query.with_for_update(nowait=nowait)
+        row = await session.scalar(query.execution_options(populate_existing=True))
         now = await self._now(session)
         if (
             row is None
@@ -289,6 +289,22 @@ class AutomationRunStore:
         ):
             raise AutomationClaimLost("Automation claim expired or changed.")
         return row, now
+
+    async def attempting(
+        self, session: AsyncSession, execution: AutomationExecution,
+        *, lock: bool = True, nowait: bool = False,
+    ) -> tuple[AutomationRun, datetime, dict[str, Any]]:
+        checked_execution(execution)
+        identity, token = uuid.UUID(execution["run_id"]), uuid.UUID(execution["claim_token"])
+        current, now = await self.owned(session, identity, token, lock=lock, nowait=nowait)
+        index = execution["index"]
+        if index >= len(current.action_plan):
+            raise ValueError("Automation action no longer owns this attempted operation.")
+        item = current.action_plan[index]
+        if (item["state"] != "attempting" or item["operation_id"] != execution["operation_id"]
+            or item["idempotency_key"] != execution["idempotency_key"] or item["index"] != index):
+            raise ValueError("Automation action no longer owns this attempted operation.")
+        return current, now, item
 
     async def begin_action(
         self, session: AsyncSession, run_id: uuid.UUID, token: uuid.UUID, index: int

@@ -16,6 +16,7 @@ import { visitorPassStatuses, defaultVisitorPassFilters, visitorPassMatches, vis
 import { PassFilterBar, VisitorPassCard } from "../features/passes/components";
 import { VisitorPassDetailsModal } from "../features/passes/PassDetails";
 import { VisitorPassModal } from "../features/passes/PassEditor";
+import { useSelectedPassMetadata } from "../features/passes/useSelectedPassMetadata";
 
 export function PassesView({ query }: { query: string }) {
   const [passes, setPasses] = React.useState<VisitorPass[]>([]);
@@ -26,6 +27,7 @@ export function PassesView({ query }: { query: string }) {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [saved, setSaved] = React.useState("");
+  const selectedMetadata = useSelectedPassMetadata(detailPass?.id, modalOpen ? modalPass?.id : undefined, setDetailPass, setModalPass);
   const deferredQuery = React.useDeferredValue(query);
   const signals = React.useContext(ReadSignalsContext);
   const read = React.useCallback(async (signal: AbortSignal) => {
@@ -154,6 +156,7 @@ export function PassesView({ query }: { query: string }) {
       </div>
 
       {error ? <ErrorState title="Visitor passes need attention" description={error} onRetry={() => void loadPasses().catch(() => undefined)} retrying={loading} /> : null}
+      {selectedMetadata.detailError || selectedMetadata.editorError ? <ErrorState title="Selected Visitor Pass needs attention" description={selectedMetadata.detailError || selectedMetadata.editorError} onRetry={() => void selectedMetadata.refresh().catch(() => undefined)} /> : null}
       {saved ? <div className="success-note" role="status">{saved}</div> : null}
 
       {loading ? (
@@ -186,6 +189,7 @@ export function PassesView({ query }: { query: string }) {
             try { await loadPasses(); } catch { setError("Pass saved, but the list could not be refreshed. Refresh to see the latest data."); }
           }}
           visitorPass={modalPass}
+          metadataError={selectedMetadata.editorError || (modalPass && !["active", "scheduled"].includes(modalPass.status) ? "This Visitor Pass is no longer editable. Your draft is retained; close it when ready." : "")}
         />
       ) : null}
 
@@ -199,6 +203,7 @@ export function PassesView({ query }: { query: string }) {
             openEdit(visitorPass);
           }}
           visitorPass={detailPass}
+          metadataError={selectedMetadata.detailError}
         />
       ) : null}
     </section>

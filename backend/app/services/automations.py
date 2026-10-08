@@ -8,6 +8,7 @@ from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import (
     AccessEvent,
@@ -29,9 +30,11 @@ from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.access_devices import get_access_device_service
 from app.services.automation_actions import (
     AutomationActionExecutor,
-    action_paused_by_maintenance_mode,
 )
-from app.services.automation_authorization import current_rule_denial, evaluate_current_condition
+from app.services.automation_authorization import (
+    evaluate_automation_condition,
+    preflight_current_action,
+)
 from app.services.automation_dispatch import AutomationDispatcher
 from app.services.automation_execution import AutomationActionWait, AutomationRunStore
 from app.services.automation_intake import (
@@ -82,7 +85,6 @@ from app.services.workflows.automation_definition import (
     build_context_variables,
     captured_automation_context,
     context_missing_references,
-    normalize_conditions,
     normalize_rule_payload,
     restored_automation_context,
 )
@@ -460,40 +462,16 @@ class AutomationService:
                 **extra,
             )
 
-        rule_denial = current_rule_denial(rule, run.context.get("rule_fingerprint"))
-        if rule_denial:
-            return skip(
-                "rule_not_active"
-                if rule_denial == "rule_inactive"
-                else "rule_changed_since_occurrence",
-                review=rule_denial == "rule_changed",
-            )
-        if rule is None:
-            return skip("rule_not_active")
+        authority = await preflight_current_action(
+            session, run, item, rule=rule,
+            maintenance_active=is_maintenance_mode_active,
+            evaluate_condition=self._evaluate_condition,
+        )
+        if authority.condition_results is not None:
+            run.condition_results = authority.condition_results
+        if authority.denial is not None:
+            return authority.denial
         context = restored_automation_context(run.context)
-        denial = hardware_action_denial(action["type"], context.provenance)
-        if denial:
-            return skip(
-                denial,
-                detail=HARDWARE_DENIAL_DETAILS[denial],
-                requires_confirmation=denial == REQUESTER_CONFIRMATION_REQUIRED,
-            )
-        missing = context_missing_references(context, action)
-        if missing:
-            return skip("context_missing", missing_variables=missing)
-        if (
-            await is_maintenance_mode_active()
-            and action["type"] != "maintenance_mode.disable"
-            and action_paused_by_maintenance_mode(action["type"])
-        ):
-            return skip("maintenance_mode")
-        conditions = [
-            await self._evaluate_condition(session, condition, context)
-            for condition in normalize_conditions(rule.conditions)
-        ]
-        run.condition_results = conditions
-        if any(not result.get("passed") for result in conditions):
-            return skip("condition_failed")
         if action["type"] in HARDWARE_ACTION_TYPES:
             if run.trigger_key == "visitor_pass.used":
                 return skip("visitor_already_admitted")
@@ -711,7 +689,14 @@ class AutomationService:
             await session.flush()
             attempted = await self.run_store.begin_action(session, run.id, token, index)
             await session.commit()
-        execution = {**attempted, **deadlines, "run_id": str(run.id), "claim_token": str(token)}
+        # The durable plan also contains action/state/timestamps. Pass only the
+        # existing canonical execution contract; target plans and deadlines are
+        # retained directly, without creating a second identity namespace.
+        execution = {
+            key: value for key, value in {
+                **attempted, **deadlines, "run_id": str(run.id), "claim_token": str(token)
+            }.items() if key in AutomationExecution.__annotations__
+        }
         if rule is None:
             raise LookupError("A prepared automation action needs its current rule.")
         return PreparedAutomationAction(
@@ -723,7 +708,8 @@ class AutomationService:
     ) -> AutomationActionResult:
         # Some integration/domain adapters need an explicit transaction participant;
         # it is not opened until after the durable attempted checkpoint committed.
-        async with AsyncSessionLocal() as session:
+        session = AsyncSessionLocal()
+        try:
             outcome = await self._execute_action(
                 session,
                 dict(prepared.action),
@@ -732,11 +718,13 @@ class AutomationService:
                 execution=prepared.execution,
             )
             return AutomationActionResult.from_payload(outcome, action=prepared.action)
+        finally:
+            await drain_owned(session.close())
 
     async def authorize_hardware_dispatch(
         self, session: AsyncSession, execution: AutomationExecution
     ) -> None:
-        identity, token = uuid.UUID(execution["run_id"]), uuid.UUID(execution["claim_token"])
+        identity = uuid.UUID(execution["run_id"])
         # P04 invokes this after target/parent locks. No other path holds a rule
         # lock while taking a target lock, so this does not invert dispatch order.
         snapshot = await session.get(AutomationRun, identity)
@@ -750,10 +738,7 @@ class AutomationService:
             if snapshot and snapshot.rule_id
             else None
         )
-        current, now = await self.run_store.owned(session, identity, token)
-        item = current.action_plan[execution["index"]]
-        if item["state"] != "attempting" or item["operation_id"] != execution["operation_id"]:
-            raise ValueError("Automation action no longer owns this hardware attempt.")
+        current, now, item = await self.run_store.attempting(session, execution)
         denial = await self._preflight(session, current, item, now=now, rule=rule)
         if isinstance(denial, AutomationActionWait):
             raise ValueError(denial.reason)  # noqa: TRY004 - command owners treat policy denial as definitely not sent.
@@ -973,16 +958,7 @@ class AutomationService:
         condition: dict[str, Any],
         context: AutomationContext,
     ) -> dict[str, Any]:
-        missing = context_missing_references(context, condition)
-        if missing:
-            return {
-                "id": condition["id"],
-                "type": condition["type"],
-                "passed": False,
-                "reason": "context_missing",
-                "missing_variables": missing,
-            }
-        return await evaluate_current_condition(session, condition, context.entities)
+        return await evaluate_automation_condition(session, condition, context)
 
     async def _execute_action(
         self,

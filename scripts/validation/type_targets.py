@@ -20,9 +20,26 @@ class TypeOwner:
 # registration is removed. New cohesive owners belong here and in TYPE_OWNERS.
 PROTECTED_PACKAGES = (
     'app/services/directory', 'app/services/access',
-    'app/services/workflows', 'app/modules/dvsa',
+    'app/services/workflows', 'app/modules/dvsa', 'app/modules/icloud_calendar',
 )
 TYPE_OWNERS = (
+    TypeOwner('app/modules/icloud_calendar', 'strict'),
+    TypeOwner('app/services/auth_root.py', 'strict'),
+    TypeOwner('app/services/calendar_accounts.py', 'strict'),
+    TypeOwner('app/services/calendar_authentication.py', 'strict'),
+    TypeOwner('app/services/calendar_reconciliation.py', 'strict'),
+    TypeOwner('app/services/calendar_request_authority.py', 'strict'),
+    TypeOwner('app/services/calendar_sync_commit.py', 'strict'),
+    TypeOwner('app/services/calendar_sync_contracts.py', 'strict'),
+    TypeOwner('app/services/calendar_sync_engine.py', 'strict'),
+    TypeOwner('app/services/calendar_sync_sessions.py', 'strict'),
+    TypeOwner('app/services/calendar_sync_store.py', 'strict'),
+    TypeOwner('app/services/calendar_workflow_authority.py', 'strict'),
+    TypeOwner('app/services/icloud_calendar_sdk.py', 'strict'),
+    TypeOwner('app/services/icloud_calendar.py', 'strict'),
+    TypeOwner('app/services/automation_policy.py', 'strict'),
+    TypeOwner('app/services/automation_execution.py', 'strict'),
+    TypeOwner('app/api/v1/icloud_calendar.py', 'strict'),
     TypeOwner('tools/report_pdf_smoke.py', 'strict'),
     TypeOwner('app/models/access_pipeline.py', 'strict'),
     TypeOwner('app/modules/access_devices/binding_policies.py', 'strict'),

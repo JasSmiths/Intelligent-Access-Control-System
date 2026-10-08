@@ -375,6 +375,8 @@ async def test_integration_icloud_sync_action_routes_to_service(monkeypatch) -> 
     )
     context.variables = build_context_variables(context)
 
+    execution = {"run_id": str(uuid.uuid4()), "claim_token": str(uuid.uuid4()), "index": 0,
+        "operation_id": str(uuid.uuid4()), "idempotency_key": "inert-calendar-action"}
     result = await AutomationService()._execute_action(
         SimpleNamespace(),
         {
@@ -384,15 +386,18 @@ async def test_integration_icloud_sync_action_routes_to_service(monkeypatch) -> 
             "reason_template": "",
         },
         context,
-        rule=rule,
+        rule=rule, execution=execution,
     )
 
     assert result["status"] == "success"
     assert result["integration_provider"] == "icloud_calendar"
     assert result["integration_action"] == "sync_calendars"
     assert result["passes_created"] == 1
-    assert calls[0]["trigger_source"] == "automation"
-    assert str(calls[0]["triggered_by_user_id"]) == rule.created_by_user_id
+    assert calls[0]["origin"] == "workflow"
+    assert calls[0]["execution"] is execution
+    assert str(calls[0]["run_id"]) == execution["operation_id"]
+    assert callable(calls[0]["authorize"])
+    assert str(calls[0]["actor_user_id"]) == rule.created_by_user_id
     assert calls[0]["actor"] == "Automation Engine"
 
 
@@ -857,3 +862,47 @@ async def test_automation_lifecycle_has_no_realtime_bridge_subscription(monkeypa
     unsubscribe.assert_not_called()
     service.dispatcher.start.assert_called_once()
     service.dispatcher.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_prepared_external_action_keeps_canonical_targets_and_deadline_without_plan_metadata(monkeypatch):
+    from app.services.workflows.execution_contracts import AutomationExecution
+    service = AutomationService()
+    token, run_id, operation_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    action = {"id": "synthetic-open", "type": "gate.open", "config": {}, "reason_template": "Synthetic"}
+    target = {"provider": "synthetic", "nested": {"entity": "gate"}}
+    targets = [target, {"provider": "secondary"}]
+    deadline = datetime.now(UTC) + timedelta(seconds=20)
+    item = {"action": action, "state": "pending", "index": 0,
+            "operation_id": str(operation_id), "idempotency_key": "synthetic-plan"}
+    current = SimpleNamespace(action_plan=[item], context={})
+    rule = SimpleNamespace(id=uuid.uuid4())
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        scalar = AsyncMock(return_value=rule)
+        flush = AsyncMock()
+        commit = AsyncMock()
+    session = Session()
+    monkeypatch.setattr(automations, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(automations, "restored_automation_context", lambda snapshot: AutomationContext(trigger_key="time.every_x", subject="Synthetic", trigger_payload={}))
+    service.run_store.owned = AsyncMock(return_value=(current, datetime.now(UTC)))
+    attempted = {**item, "state": "attempting", "attempted_at": "synthetic-history",
+                 "result": {"status": "unrelated"}, "target_plan": target, "target_plans": targets}
+    service.run_store.begin_action = AsyncMock(return_value=attempted)
+    async def preflight(*args, deadlines, **kwargs):
+        deadlines.update(expires_at=deadline, automatic_entry_policy=True)
+    monkeypatch.setattr(service, "_preflight", preflight)
+    prepared = await service.prepare_action_dispatch(SimpleNamespace(id=run_id, rule_id=rule.id), token, 0)
+    assert prepared is not None
+    assert set(prepared.execution) == set(AutomationExecution.__annotations__)
+    assert prepared.execution["target_plan"] is target
+    assert prepared.execution["target_plans"] is targets
+    assert prepared.execution["expires_at"] is deadline
+    assert prepared.execution["automatic_entry_policy"] is True
+    assert prepared.execution["run_id"] == str(run_id)
+    assert prepared.execution["claim_token"] == str(token)
+    assert prepared.execution["operation_id"] == str(operation_id)
+    assert prepared.execution["idempotency_key"] == "synthetic-plan"
+    assert attempted["state"] == "attempting" and "attempted_at" in attempted
+    session.commit.assert_awaited_once()

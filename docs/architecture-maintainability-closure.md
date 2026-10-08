@@ -579,3 +579,29 @@ retains 14 passes and one new JSONB fixture-binding failure, corrected without a
 runtime/schema change before rerunning all 15. This bounded schema candidate awaits
 exact Astra review. After approval and commit, migration `20261007_0013` will be handed off as the frozen parent for calendar
 `0014`; later changes require a new migration or an explicitly reviewed parent rebase.
+
+
+## P8 calendar candidate (implementation in progress)
+
+Calendar design v3 `36ba560bc422195813456a4e92fce6db3858a9b29dcfeb17d79a831f264431b7`
+and bounded SDK/auth-root/schema, current-authority and real workflow-engine
+checkpoints have Astra Ultra approval. The current-authority receipt is
+`90d7c571bf5dd8f6bc0255f94ee7782c2d39efe572bea97bf4db0c689961e3e5`
+(61 real PG cases plus affected auth/workflow units). The engine receipt is
+`f91eae4a50d6a9ae0c4e073966b976cc8f11dc3383e31f54584ee9fff5beee69`
+(17 real PG cases and final 140 affected workflow cases). The nonblocking root
+handoff is separately approved at `cf60ea85e0ad411aa47667e898d9e79b6d2c3acd1f55b275c9275c99836cb642`.
+These approvals bind their copied source only.
+
+Later account-auth/removal, actual API/disconnect/rejection settlement, exact-run
+editor recovery, selected-pass metadata and process lifetime composition remain
+unapproved WIP. A supplemental matched-lock host Node24.19 run passed tsc and 32
+selected tests at `p8-calendar-frontend-host-progress/run-1791451362289659000`;
+it does not replace Node22, browser or full-harness gates. API progress attempt
+`u3oczads` stopped before tests during dependency-copy disk exhaustion. Scoped
+completed-run dependency copies were retired with manifest bodies/reference
+identities retained; `p8-calendar-duplicate-dependencies-retired.json` records all
+38 exact paths and the direct-replay limitation. Canonical `uu6ccsow` preparation,
+source snapshots, logs/results and immutable approved evidence remain retained.
+Docker was stopped afterward; no restart or successful later runtime gate is
+assumed in this candidate record. Full calendar/AM-08/E3/P9 remain pending.

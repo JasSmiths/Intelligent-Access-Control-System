@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from pyicloud.exceptions import PyiCloudTrustedDevicePromptException
 from websockets.client import ClientProtocol
 from websockets.sync.client import ClientConnection, reconnect
+from websockets.typing import Origin
 
 from app.modules.icloud_calendar.native import CalendarNativeOwner, CalendarSocketRegistration
 
@@ -109,7 +110,7 @@ class CalendarBridgeSocket:
                 acquired.append(self)
 
         connector = _NoRedirectConnection(
-            url, origin=origin, user_agent_header=user_agent, proxy=None,
+            url, origin=Origin(origin), user_agent_header=user_agent, proxy=None,
             compression=None, ping_interval=None, ping_timeout=None, close_timeout=1.0,
             open_timeout=min(timeout, remaining), max_size=BRIDGE_MAX_MESSAGE_BYTES,
             max_queue=BRIDGE_MAX_QUEUED_FRAMES, create_connection=BoundConnection,

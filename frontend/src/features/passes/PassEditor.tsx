@@ -19,12 +19,14 @@ export function VisitorPassModal({
   mode,
   visitorPass,
   onClose: finishClose,
-  onSaved: finishSaved
+  onSaved: finishSaved,
+  metadataError = ""
 }: {
   mode: "create" | "edit";
   visitorPass: VisitorPass | null;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  metadataError?: string;
 }) {
   const modalRef = React.useRef<HTMLFormElement>(null);
   const onClose = useModalClose(modalRef, finishClose);
@@ -58,6 +60,7 @@ export function VisitorPassModal({
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (metadataError) { setError(metadataError); return; }
     setError("");
     const normalizedPlate = numberPlate.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
     if (isDuration && (mode === "create" || visitorPass?.pass_type !== "duration" || Boolean(visitorPass?.number_plate)) && !normalizedPlate) {
@@ -228,7 +231,7 @@ export function VisitorPassModal({
 
         <div className="modal-actions">
           <button className="secondary-button" onClick={requestClose} type="button">Cancel</button>
-          <button className="primary-button" disabled={submitting} type="submit">
+          <button className="primary-button" disabled={submitting || Boolean(metadataError)} type="submit">
             <Save size={16} />
             {submitting ? "Saving..." : mode === "edit" ? "Save Pass" : "Create Pass"}
           </button>
