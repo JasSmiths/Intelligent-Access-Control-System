@@ -16,6 +16,7 @@ from app.core.recovery_hold import is_recovery_hold
 from app.db.bootstrap import init_database
 from app.db.session import AsyncSessionLocal, engine
 from app.recovery_hold import RecoveryHoldMiddleware, verify_readable_schema
+from app.services import vehicle_information as vehicle_information_resources
 from app.services.access_devices import get_access_device_service
 from app.services.access_events import get_access_event_service
 from app.services.auth import authenticate_request, count_users
@@ -113,6 +114,7 @@ async def lifespan(app: FastAPI):
             # Register before start so a partially started service is also closed.
             for name, service in (
                 ("realtime", event_bus),
+                ("vehicle_information_clients", vehicle_information_resources),
                 ("notifications", get_notification_service()),
                 ("automations", get_automation_service()),
                 ("visitor_passes", get_visitor_pass_service()),

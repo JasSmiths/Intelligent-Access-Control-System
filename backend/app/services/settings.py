@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.crypto import decrypt_secret, encrypt_secret
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import AccessDevice, AccessDeviceProviderBinding, SystemSetting, User
 from app.modules.access_devices.base import (
@@ -480,8 +481,13 @@ async def get_runtime_config() -> RuntimeConfig:
     ):
         return _RUNTIME_CONFIG_CACHE
 
-    async with AsyncSessionLocal() as session:
+    session = AsyncSessionLocal()
+    try:
         config = await get_runtime_config_for_session(session)
+    finally:
+        # Cancel active SQL normally, but retain the actual connection/session
+        # close even when a caller is cancelled during a normal context exit.
+        await drain_owned(session.close())
     _RUNTIME_CONFIG_CACHE = config
     _RUNTIME_CONFIG_CACHE_LOADED_AT = now
     return config

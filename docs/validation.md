@@ -458,3 +458,36 @@ including equal prefixes with distinct full identities and retained UNKNOWN effe
 It verifies TEXT/nonindexed identity columns alongside bounded target keys, and
 refuses downgrade before DDL when any accepted information revision, timestamp or
 projection alone would be lost. These are inert schema tests, without provider I/O.
+
+
+The [information-worker PostgreSQL suite](../scripts/validation/test_vehicle_information_worker.py)
+checks actual free-capacity leases, competing owners, terminal-page continuation,
+original retry/deadline provenance, fresh renewal/failure clocks after a blocked
+lock, clean-flush final expiry, takeover and conservative malformed-origin holds.
+Accepted information projections survive those outcomes. Provider fixtures verify
+no database connection over I/O and no result write from a lost claim. These are
+correctness checks, without a performance claim.
+
+[Shared-client lifetime tests](../backend/tests/test_vehicle_information_lifecycle.py)
+exercise sibling provider failure, repeated cancellation of lookup/connection tests,
+two occupied worker slots during blocked cleanup, result-transaction cleanup and
+concurrent stop/close. Real main lifespan fixtures cross its shortened outer stop
+timeout, keep clients open for notification enrichment, and distinguish an admitted
+ASGI lookup's completion from its parent's later unrelated work. Both client close
+attempts remain owned. Actual AsyncSession close barriers cover settings cache
+misses, normal/cancelled worker exits and main claim/preparation shutdown. Genuine
+PostgreSQL fixtures keep the event row locked through an active-work timeout or
+stop, proving SQL cancellation finishes without starting a provider or renewing
+authority. Claim, renewal, failure and result normal-close barriers remain owned
+through first and repeated cancellation. Provider responses are inert; this does
+not test a live DVLA/DVSA account or the deployment server's general request-drain
+behavior. The before/after history-growth read fixture supplies one real runtime
+outside both measurements so the independent two-second settings cache cannot
+change the measured query count; actual measured SQL is retained.
+
+When the local validation backend image changes, prepare exact-lock dependencies
+again with `--allow-downloads` and the explicitly selected
+`IACS_VALIDATION_BACKEND_IMAGE`, then retain the resulting immutable image IDs and
+dependency manifests. Matching Python versions alone does not satisfy the harness's
+reuse guard. Historical image/setup failures and prior results remain attached to
+their original evidence; replacement runs receive distinct identities.

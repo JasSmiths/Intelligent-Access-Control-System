@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.core.config import settings
+from app.core.task_lifecycle import drain_owned
 from app.modules.dvla.vehicle_enquiry import (
     DvlaVehicleEnquiryClient,
     DvlaVehicleEnquiryError,
@@ -61,15 +62,55 @@ def next_midnight(now: datetime, timezone: str) -> datetime:
     return (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
 
 
+class VehicleInformationClosed(RuntimeError):
+    """The shared process resource no longer admits provider/cache work."""
+
+
 class VehicleInformationService:
     def __init__(self, cache: Redis | None = None, dvsa: DvsaClient | None = None) -> None:
         self.cache = cache or Redis.from_url(settings.redis_url, decode_responses=True,
                                              socket_connect_timeout=1, socket_timeout=1)
         self.dvsa = dvsa or DvsaClient()
+        self._closing = False
+        self._closed = False
+        self._calls: set[asyncio.Future[None]] = set()
+        self._cleanup: asyncio.Task[None] | None = None
+
+    def _admit(self) -> asyncio.Future[None]:
+        if self._closing:
+            raise VehicleInformationClosed("vehicle_information_closed")
+        receipt = asyncio.get_running_loop().create_future()
+        self._calls.add(receipt)
+        return receipt
+
+    def _complete(self, receipt: asyncio.Future[None]) -> None:
+        self._calls.discard(receipt)
+        if not receipt.done():
+            receipt.set_result(None)
 
     async def close(self) -> None:
-        await self.dvsa.close()
-        await self.cache.aclose()
+        if self._cleanup is None:
+            self._closing = True
+            self._cleanup = asyncio.create_task(
+                self._close_owned(), name="vehicle-information-clients-close"
+            )
+        await drain_owned(self._cleanup)
+
+    async def _close_owned(self) -> None:
+        # Per-call receipts finish after actual provider children settle. Their
+        # dispatcher/request parents may remain alive doing unrelated work.
+        errors: list[BaseException] = []
+        try:
+            await asyncio.gather(*tuple(self._calls))
+            for close in (self.dvsa.close, self.cache.aclose):
+                try:
+                    await close()
+                except BaseException as exc:  # noqa: BLE001 - both client resources must be attempted
+                    errors.append(exc)
+        finally:
+            self._closed = True
+        if errors:
+            raise errors[0]
 
     async def _cached(self, key: str) -> ProviderResult | None:
         value = await self.cache.get(key)
@@ -168,19 +209,63 @@ class VehicleInformationService:
 
     async def lookup(self, registration: str, *, force: bool = False, cached_only: bool = False,
                      config: RuntimeConfig | None = None) -> VehicleLookup:
+        receipt = self._admit()
+        operation = asyncio.create_task(
+            self._lookup_owned(registration, force=force, cached_only=cached_only, config=config),
+            name="vehicle-information-lookup",
+        )
+        try:
+            return await asyncio.shield(operation)
+        finally:
+            if not operation.done() and not operation.cancelling():
+                operation.cancel()
+            try:
+                await drain_owned(asyncio.gather(operation, return_exceptions=True))
+            finally:
+                self._complete(receipt)
+
+    async def _lookup_owned(self, registration: str, *, force: bool, cached_only: bool,
+                            config: RuntimeConfig | None) -> VehicleLookup:
         plate = normalize_registration_number(registration)
         if not plate or len(plate) > 32:
             raise ValueError("Vehicle registration number is required")
         started = datetime.now(UTC)
         runtime = config or await get_runtime_config()
         providers: tuple[Provider, Provider] = ("dvla", "dvsa")
-        fetched = await asyncio.gather(*(self._provider(provider, plate, runtime, force=force,
-                                       cached_only=cached_only, started=started) for provider in providers))
+        children = [asyncio.create_task(
+            self._provider(provider, plate, runtime, force=force,
+                           cached_only=cached_only, started=started),
+            name=f"vehicle-information-{provider}",
+        ) for provider in providers]
+        joined = asyncio.gather(*children)
+        try:
+            # Caller cancellation enters our one cancel-and-drain boundary;
+            # repeated cancellation cannot cancel provider cleanup twice.
+            fetched = await asyncio.shield(joined)
+        finally:
+            for child in children:
+                if not child.done() and not child.cancelling():
+                    child.cancel()
+            await drain_owned(asyncio.gather(joined, *children, return_exceptions=True))
         results = dict(zip(providers, fetched, strict=True))
         return VehicleLookup(requested_at=started, information=resolve_information(plate, results, now=datetime.now(UTC),
                                                              timezone=runtime.site_timezone), results=results)
 
     async def test_connection(self, values: dict[str, Any]) -> None:
+        receipt = self._admit()
+        operation = asyncio.create_task(self._test_connection_owned(values),
+                                        name="vehicle-information-test-connection")
+        try:
+            await asyncio.shield(operation)
+        finally:
+            if not operation.done() and not operation.cancelling():
+                operation.cancel()
+            try:
+                await drain_owned(asyncio.gather(operation, return_exceptions=True))
+            finally:
+                self._complete(receipt)
+
+    async def _test_connection_owned(self, values: dict[str, Any]) -> None:
         config = await get_runtime_config()
         credential = DvsaCredentials(
             str(values.get("dvsa_client_id") or config.dvsa_client_id),
@@ -197,6 +282,31 @@ class VehicleInformationService:
             raise DvsaError("coordination_unavailable") from exc
 
 
+_resource_closing = False
+
+
 @lru_cache
 def get_vehicle_information_service() -> VehicleInformationService:
+    if _resource_closing:
+        raise VehicleInformationClosed("vehicle_information_closed")
     return VehicleInformationService()
+
+
+async def start() -> None:
+    """Inert shared-client lifetime, composed before its producer/notice users."""
+    global _resource_closing
+    if get_vehicle_information_service.cache_info().currsize:
+        previous = get_vehicle_information_service()
+        if previous._closing and not previous._closed:
+            raise VehicleInformationClosed("vehicle_information_cleanup_in_progress")
+        if previous._closed:
+            get_vehicle_information_service.cache_clear()
+    _resource_closing = False
+
+
+async def stop() -> None:
+    """No cache miss may construct a client after shared-resource closing starts."""
+    global _resource_closing
+    _resource_closing = True
+    if get_vehicle_information_service.cache_info().currsize:
+        await get_vehicle_information_service().close()

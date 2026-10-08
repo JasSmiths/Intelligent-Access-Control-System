@@ -556,8 +556,8 @@ mutation together. The current postcommit enqueue bridge derives original receip
 from persisted linked ingests; missing/inconsistent provenance holds and replay does
 not refresh authority. This transition gap must disappear when core reservation is
 wired atomically. Fresh database-time claim/failure fences, remaining-lease budget,
-actual slot/renewal/cancellation ownership and shutdown in the still-old information
-worker shell remain explicit runtime obligations. Old RAM optional enrichment also
+actual slot/renewal/cancellation ownership and shutdown are addressed by the separate
+worker/shared-client candidate below, whose approval is independent. Old RAM optional enrichment also
 remains pending, along with HA/historical/chart owners, frontend revisions, complete
 runtime performance/lifecycle evidence and the full integrated harness.
 
@@ -576,6 +576,67 @@ foundation PostgreSQL suite passes at
 clean source/cleanup/operational checks, exact checked/strict types 82/65, host 22/29,
 Ruff/F821 and documentation/diff checks. The first run `iacs-validation-cbx98asc`
 retains 14 passes and one new JSONB fixture-binding failure, corrected without a
-runtime/schema change before rerunning all 15. This bounded schema candidate awaits
-exact Astra review. After approval and commit, migration `20261007_0013` will be handed off as the frozen parent for calendar
-`0014`; later changes require a new migration or an explicitly reviewed parent rebase.
+runtime/schema change before rerunning all 15. Astra approved exact source
+`7083184a…` / patch `01cff788…`; commit
+`a09eea32b31e0d6a8b999765f89190f074578401` preserves all 792 selected hashes.
+The approval/archive receipts are `p6-ha-schema-astra-approval.json` and
+`p6-ha-schema-commit-equivalence.json`. Migration `20261007_0013` is now the frozen
+parent handed to calendar `0014` in `p6-calendar-0013-parent-handoff.json`;
+later changes require a new migration or an explicitly reviewed parent rebase.
+
+
+### P6 information-worker/shared-client candidate
+
+The bounded worker checkpoint implements the approved v3 design
+`cff937dc8de2f1e68485b2310a1a6dd2e1e6c4c4853daf234cc681aee26d0025`
+on `a09eea32`. Two actual worker slots include provider/result cleanup, the scalar
+32-candidate scan leases only free capacity, and fresh database clocks fence claim,
+renewal and failure after locks and writes. Shared lookup/connection-test children
+have a single cancel-and-drain boundary. Per-call receipts and one whole-service
+cleanup task keep clients open through late admitted notification/request work;
+main closes this resource after those consumers and before database disposal.
+Normal parallel provider results and accepted-result receipts retain their semantics.
+Migration `0013` and schema/model bytes are unchanged.
+
+The resumed daemon no longer contained the historical validation image. Its exit125
+setup failure is retained; no tests ran under that invocation. Explicitly selected
+immutable backend image `sha256:40d52f1d4d6ca22933eb8a73a5b699dc03963a420b5e38f5fa3a5ff150198ea1`
+received fresh exact-lock preparation through the unchanged harness at
+`p6-resumed-dependencies/iacs-validation-d25e173x`. Offline lock/tree verification,
+version identities, cleanup/source integrity and unchanged operational state passed.
+Prior dependency receipts were not rewritten or reused across differing image IDs.
+
+The first candidate passed 59 focused units, 1,268 backend units/29 expected skips,
+types 82/65 and a corrected 89-case PostgreSQL matrix. Its immutable candidate
+`c2f405d1…` and receipts remain retained, but Astra found a real session-close
+ownership gap during final review: SQLAlchemy's normal context exit could leave
+its shielded close child running after cancellation. That source is superseded.
+The correction preserves the settings getter's cache/conversions, explicitly drains
+close at that owner and all worker transaction boundaries, and owns whole lookup/job
+children so repeated cancellation cannot abandon active SQL cleanup. No generic
+session framework or schema change was introduced.
+
+The corrected runtime passes 67 focused lifetime units and all 1,276 backend units,
+with 29 expected skips, types 82/65, Ruff/F821 and host 22/29. Genuine PostgreSQL
+run `iacs-validation-qch_j0jg` passes all 23 worker, 45 result/link and 15 foundation
+cases. Its whole 95 selection has one inherited small read-cost fixture failure:
+public output is equal, but a settings-cache expiry adds a query to only one
+measurement (5 versus 4). The measurement-only repair supplies the same real fixture
+runtime outside both reads and retains exact payload/query-count/no-snapshot-SQL
+assertions plus measured SQL. The whole 12-case information suite then passes at
+`iacs-validation-0r565j41`, with migration parity, isolation, cleanup, source integrity
+and operational equality clean. The other 83 cases carry by exact unchanged hashes
+from `qch_j0jg`; this is not a new combined 95-pass invocation. The repaired tested
+source maps to the final candidate through three documentation files only.
+
+Earlier setup/failed evidence remains retained: unavailable old image exit125,
+nonexistent unit selection with no tests, missing fixture test registration before
+its cancellation barrier, and `iacs-validation-5no4w3a3` 88/89 with a cached
+PostgreSQL activity-observer snapshot. The activity poll repair and original corrected
+89 run `iacs-validation-0hg5ac9x` remain part of that superseded candidate history.
+Exact-source Astra approval of the final corrected worker owner is still pending.
+
+This is not P6 completion. The temporary postcommit information enqueue bridge must
+still move into the core decision transaction. Old RAM runtime replacement, media,
+HA effects/resolution, historical candidates, charts, frontend revisions and the
+full integrated runtime/lifecycle/performance harness remain outstanding.

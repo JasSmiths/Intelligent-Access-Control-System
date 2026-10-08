@@ -43,6 +43,7 @@ def owned_resources(monkeypatch):
     monkeypatch.setattr(main, "engine", SimpleNamespace(dispose=service("database").stop))
     monkeypatch.setattr(main, "event_bus", service("realtime"))
     monkeypatch.setattr(main, "report_exports", service("reports"))
+    monkeypatch.setattr(main, "vehicle_information_resources", service("vehicle_information_clients"))
     for name in SERVICE_NAMES:
         instance = service(name)
         monkeypatch.setattr(main, f"get_{name}_worker" if name == "vehicle_information" else f"get_{name}_service", lambda instance=instance: instance)
@@ -61,7 +62,7 @@ def owned_resources(monkeypatch):
     return events, controls
 
 
-@pytest.mark.parametrize("failure", ("realtime", "reports", *SERVICE_NAMES))
+@pytest.mark.parametrize("failure", ("realtime", "vehicle_information_clients", "reports", *SERVICE_NAMES))
 async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_resources, failure):
     events, controls = owned_resources
     controls["fail_start"] = failure

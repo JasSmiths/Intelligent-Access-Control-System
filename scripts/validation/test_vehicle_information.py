@@ -19,6 +19,7 @@ from app.db.session import AsyncSessionLocal, engine
 from app.models import AccessEvent, AccessCompletionWork, GateCommandRecord, LprIngestEvent, MovementSagaRecord, NotificationRun, Vehicle, VehicleInformationJob, VehicleInformationSnapshot
 from app.models.enums import AccessDecision, AccessDirection
 from app.services import vehicle_information_jobs as jobs
+from app.services.directory import reads as directory_reads
 from app.services.directory.reads import list_vehicles
 from app.services.settings import get_runtime_config
 from app.services.vehicle_information import VehicleInformationService
@@ -168,8 +169,12 @@ async def test_real_shared_redis_throttle_and_unknown_cache():
 
 
 @pytest.mark.parametrize("size", [20, 2000])
-async def test_summary_cost_is_independent_of_stored_histories(records, size, tmp_path):
+async def test_summary_cost_is_independent_of_stored_histories(records, size, tmp_path, monkeypatch):
     vehicle, _ = records
+    # This comparison isolates history growth, not the independent two-second
+    # settings-cache lifecycle. Both reads receive one real fixture runtime.
+    runtime = await get_runtime_config()
+    monkeypatch.setattr(directory_reads, "get_runtime_config", AsyncMock(return_value=runtime))
     ids = [uuid.uuid4() for _ in range(size)]
     captured = []
     def collect(conn, cursor, statement, parameters, context, executemany):
@@ -187,7 +192,7 @@ async def test_summary_cost_is_independent_of_stored_histories(records, size, tm
             sql_event.remove(engine.sync_engine, "before_cursor_execute", collect)
             tracemalloc.stop()
         assert not any("vehicle_information_snapshots" in sql for sql in captured)
-        return payload, {"queries": len(captured), "rows": len(page.items), "payload_bytes": len(payload.encode()), "peak_python_bytes": peak}
+        return payload, {"queries": len(captured), "rows": len(page.items), "payload_bytes": len(payload.encode()), "peak_python_bytes": peak, "statements": list(captured)}
     try:
         async with AsyncSessionLocal() as session:
             await session.execute(insert(Vehicle), [{"id": value, "registration_number": "SYN"+value.hex[:16].upper()} for value in ids])

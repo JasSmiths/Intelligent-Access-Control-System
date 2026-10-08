@@ -400,10 +400,34 @@ completed delivery history is preserved.
 DVLA/DVSA cache and requests; [pure contracts](../backend/app/services/vehicle_information_contracts.py)
 own normalization and MOT precedence. The DVSA module owns HTTP/token I/O only.
 The [arrival worker](../backend/app/services/vehicle_information_jobs.py) owns a
-small leased database queue and post-lookup transactions. It runs outside the
-serial LPR worker and never holds a database connection over provider I/O.
-Required access notifications, admission, presence and hardware keep their owners.
-MOT/tax notice handoffs use stable event identities and the originating job deadline.
+small leased database queue and post-lookup transactions. Its two process-local
+slots remain occupied until actual provider/result cancellation cleanup settles.
+A metadata-only page of 32 candidates leases only free slots; terminal prefixes
+continue without treating the remaining backlog as empty. Claims, renewal and
+failure writes use fresh database time after blocking row locks, flush before their
+last lease check, and preserve earlier accepted results. The 90-second operation
+budget is clipped to the original receipt deadline and remaining lease; renewal
+cannot revive an expired claim. It runs outside the serial LPR worker and never
+holds a database connection over provider I/O. Required access notifications,
+admission, presence and hardware keep their owners. MOT/tax notice handoffs use
+stable event identities and the originating job deadline.
+
+The shared vehicle-information service owns each lookup's two parallel provider
+children and drains both after an unexpected failure or cancellation. Connection
+tests use the same single-cancel ownership boundary. Per-call completion receipts
+track actual lookup cleanup without waiting for unrelated request/dispatcher parent
+work. One retained cleanup task drains admitted calls and attempts both client
+closes, even if one fails. The worker stops only its own work; main closes the
+shared service after producer and notification consumers drain and before the
+database. Closing rejects new calls and cannot construct a replacement cached
+client. The ASGI server still owns general request draining; the shared service
+independently retains every already-admitted lookup through client settlement.
+Whole lookup/job children receive one cancellation. Settings cache misses and the
+worker's claim/preparation/result/journal transactions cancel active SQL normally,
+then explicitly drain their actual session close. A normal context-exit close is
+also owned when cancellation first arrives there; a shielded but abandoned close
+task cannot outlive the receipt, occupied slot or database resource. Settings cache
+and conversion behavior remain with their existing owner.
 
 The [snapshot owner](../backend/app/services/vehicle_information_store.py) stores
 allowlisted results separately from vehicle rows and pages history on the server.
@@ -460,9 +484,10 @@ it calls the one participant reservation using the minimum genuinely linked inge
 receipt with consistent event/saga/plate provenance. Missing provenance is held;
 replay cannot renew a deadline, and already expired original work stays expired.
 Final core wiring must reserve the job in the decision transaction instead. The old
-information claim/failure/renewal/slot/shutdown shell and old RAM optional access
-runtime are not approved by this applicator checkpoint; their bounded lifetime,
-fresh database-time fences and composition remain required P6 work.
+information claim/failure/renewal/slot/shutdown shell is addressed by its separate
+worker/shared-client checkpoint; the applicator approval alone does not cover it.
+Old RAM optional access runtime replacement, atomic core reservation and the
+remaining P6 owners still require integrated evidence and review.
 
 
 HA target/effect URL and entity identity columns retain full TEXT values, matching
