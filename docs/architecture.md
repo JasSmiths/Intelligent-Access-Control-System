@@ -591,3 +591,20 @@ Admin authority and typed rollback-before-rejection-audit are explicit owner por
 Coherent auth-root ciphertext writers, every proposal/invalidation caller and
 integrated validation are required before activation; importing the inert root/auth
 ports alone proves no rotation freshness for the running application.
+
+
+### UniFi stream runtime
+
+The [UniFi runtime](../backend/app/services/unifi_protect_runtime.py) owns bounded
+optional callback/probe processing and runtime counters. Existing timing and
+visual/presence extractors still own observation interpretation; concrete scalar
+[contracts](../backend/app/services/unifi_protect_contracts.py) preserve each
+extractor's camera/event precedence without retaining SDK objects. Cached stream
+observations reference only a tiny generation cell, so invalidated evidence cannot
+retain old clients or runtimes. Contracts import no integration, recorder or bus.
+
+[Operation scopes](../backend/app/services/unifi_protect_operations.py) own actual
+operation admission/completion, independently of the calling request's remaining
+lifetime. The service detaches under its lock and drains outside it, allowing
+reentrant status/read observers. Application shutdown must stop UniFi before
+stopping event delivery/diagnostics or disposing the database.

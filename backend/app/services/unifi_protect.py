@@ -1,10 +1,13 @@
 import asyncio
-from collections.abc import Callable, Coroutine
+import json
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import asdict
 from datetime import UTC, datetime
 from functools import lru_cache
 from time import monotonic
-from typing import Any
+from typing import Any, TypeVar
 
 from app.core.logging import get_logger
 from app.core.task_lifecycle import drain_owned
@@ -15,6 +18,7 @@ from app.modules.unifi_protect.client import (
     get_unifi_protect_event_thumbnail,
     get_unifi_protect_event_video,
     get_unifi_protect_snapshot,
+    get_unifi_protect_track,
     is_unifi_protect_configured,
     is_unifi_protect_stream_metadata_only,
     list_bootstrap_cameras,
@@ -28,19 +32,34 @@ from app.modules.unifi_protect.client import (
 )
 from app.services.event_bus import event_bus
 from app.services.lpr_timing import (
+    extract_unifi_protect_lpr_observations,
     extract_unifi_protect_track_observations,
-    get_lpr_timing_recorder,
+    unifi_protect_timing_fields,
 )
 from app.services.settings import get_runtime_config
+from app.services.unifi_protect_contracts import (
+    ProtectEvidenceGeneration,
+    ProtectProbeContext,
+    ProtectWorkValidity,
+)
+from app.services.unifi_protect_operations import ProtectOperations, ProtectOperationUnavailable
+from app.services.unifi_protect_runtime import (
+    ProtectCallbackWork,
+    ProtectRuntimeCounters,
+    UnifiProtectRuntime,
+)
 from app.services.vehicle_visual_detections import (
-    get_vehicle_presence_tracker,
-    get_vehicle_visual_detection_recorder,
+    extract_unifi_protect_vehicle_visual_observations,
+    extract_unifi_realtime_presence_observations,
+    unifi_protect_visual_fields,
 )
 
+T = TypeVar("T")
+_current_connection: ContextVar["UnifiProtectIntegrationService | None"] = ContextVar(
+    "protect_connection", default=None
+)
 logger = get_logger(__name__)
 
-PROTECT_UPDATE_PUBLISH_MIN_INTERVAL_SECONDS = 5.0
-LPR_TRACK_PROBE_DELAYS_SECONDS = (0.0, 0.5, 0.5, 1.0, 2.0, 4.0, 4.0, 6.0, 7.0)
 GATE_LPR_CAMERA_NAME = "gate lpr"
 GATE_LPR_CAMERA_DEVICE = "942A6FD09D64"
 PROTECT_WEBSOCKET_CHANNELS = ("private", "events", "devices")
@@ -52,23 +71,31 @@ class UnifiProtectIntegrationService:
     def __init__(self) -> None:
         self._api: Any | None = None
         self._lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
         self._media_semaphore = asyncio.Semaphore(4)
         self._unsubscribers: list[Callable[[], None]] = []
         self._last_error: str | None = None
         self._connected = False
         self._websocket_states = {channel: "unknown" for channel in PROTECT_WEBSOCKET_CHANNELS}
-        self._last_update_publish_at: dict[str, float] = {}
-        self._lpr_track_probe_event_ids: set[str] = set()
-        self._lpr_track_probe_finished_event_ids: set[str] = set()
-        self._lpr_track_probe_semaphore = asyncio.Semaphore(4)
-        self._background_tasks: set[asyncio.Task] = set()
         self._stopped = False
-        self._accept_background = True
+        self._stopping = False
+        self._stop_done = asyncio.Event()
+        self._stop_done.set()
+        self._provider_generation = 0
+        self._evidence = ProtectEvidenceGeneration()
+        self._counters = ProtectRuntimeCounters()
+        self._runtime: UnifiProtectRuntime | None = None
+        self._operations: ProtectOperations | None = None
+        self._draining_runtime: UnifiProtectRuntime | None = None
+        self._draining_operations: ProtectOperations | None = None
+        self._runtime_status: dict[str, Any] = {}
 
     async def configured(self) -> bool:
         return is_unifi_protect_configured(await get_runtime_config())
 
     async def start(self) -> None:
+        if self._stopping:
+            raise UnifiProtectError("UniFi Protect is stopping.")
         self._stopped = False
         if not await self.configured():
             logger.info("unifi_protect_not_configured")
@@ -83,22 +110,121 @@ class UnifiProtectIntegrationService:
                 {"configured": True, "connected": False, "error": self._last_error},
             )
 
+    def _reject_reentrant_lifecycle(self) -> None:
+        if _current_connection.get() is self:
+            raise UnifiProtectError(
+                "UniFi Protect lifecycle cannot drain its own connection operation."
+            )
+        for runtime in (self._runtime, self._draining_runtime):
+            if runtime is not None and runtime.owns_current():
+                raise UnifiProtectError("UniFi Protect lifecycle cannot drain its own worker.")
+        for operations in (self._operations, self._draining_operations):
+            if operations is not None and operations.owns_current():
+                raise UnifiProtectError("UniFi Protect lifecycle cannot drain its own operation.")
+
     async def stop(self) -> None:
+        # Preserve caller identity and reject before changing any lifecycle state.
+        self._reject_reentrant_lifecycle()
         self._stopped = True
         await drain_owned(self._stop())
 
+    async def restart(self) -> None:
+        self._reject_reentrant_lifecycle()
+        if self._stopped:
+            raise UnifiProtectError("UniFi Protect is shutting down.")
+        await drain_owned(self._stop())
+        if self._stopped:
+            raise UnifiProtectError("UniFi Protect is shutting down.")
+        await self.start()
+
     async def _stop(self) -> None:
         async with self._lock:
-            await self._stop_locked()
+            if self._stopping:
+                wait = True
+                runtime = operations = api = None
+                unsubscribers = []
+            else:
+                wait = False
+                self._stopping = True
+                self._stop_done.clear()
+                self._provider_generation += 1
+                self._evidence.invalidate()
+                api, self._api = self._api, None
+                runtime, self._runtime = self._runtime, None
+                operations, self._operations = self._operations, None
+                unsubscribers, self._unsubscribers = self._unsubscribers, []
+                self._draining_runtime, self._draining_operations = runtime, operations
+                if runtime is not None:
+                    runtime.close_admission()
+                if operations is not None:
+                    operations.close_admission()
+                self._connected = False
+        if wait:
+            await self._stop_done.wait()
+            return
+        try:
+            for unsubscribe in unsubscribers:
+                try:
+                    unsubscribe()
+                except Exception as exc:  # noqa: BLE001 - Unsubscription failure must not abandon actual cleanup.
+                    logger.debug("unifi_protect_unsubscribe_failed", extra={"error": str(exc)})
+            if runtime is not None:
+                await runtime.stop()
+                self._runtime_status = runtime.status()
+            if operations is not None:
+                await operations.drain()
+            # An in-progress bootstrap owns its own rejected client close. It
+            # cannot publish/subscribe a replacement while stopping is true.
+            async with self._connect_lock:
+                pass
+            if api is not None:
+                await close_unifi_protect_client(api)
+        finally:
+            async with self._lock:
+                self._draining_runtime = self._draining_operations = None
+                self._websocket_states = {
+                    channel: "unknown" for channel in PROTECT_WEBSOCKET_CHANNELS
+                }
+                self._stopping = False
+                self._stop_done.set()
 
-    async def restart(self) -> None:
-        async with self._lock:
-            if self._stopped:
-                raise UnifiProtectError("UniFi Protect is shutting down.")
-            await drain_owned(self._stop_locked())
-            if self._stopped:
-                raise UnifiProtectError("UniFi Protect is shutting down.")
-        await self.start()
+    async def _run_current(
+        self,
+        operation: Callable[[Any], Awaitable[T]],
+        *,
+        media: bool = False,
+        preserve_outcome: bool = False,
+    ) -> T:
+        api = await self._ensure_api(subscribe=True)
+        if media:
+            await self._media_semaphore.acquire()
+        try:
+            async with self._lock:
+                if (
+                    self._stopped
+                    or self._stopping
+                    or self._api is not api
+                    or self._operations is None
+                ):
+                    raise UnifiProtectError("UniFi Protect provider changed or is stopping.")
+                operations = self._operations
+            try:
+                result = await operations.run(lambda: operation(api))
+                if not preserve_outcome:
+                    async with self._lock:
+                        if (
+                            self._stopped
+                            or self._stopping
+                            or self._api is not api
+                            or self._operations is not operations
+                        ):
+                            raise UnifiProtectError("UniFi Protect read became obsolete.")
+                return result
+            except ProtectOperationUnavailable as exc:
+                raise UnifiProtectError(str(exc)) from exc
+        finally:
+            if media:
+                self._media_semaphore.release()
 
     async def status(self, *, refresh: bool = False) -> dict[str, Any]:
         config = await get_runtime_config()
@@ -110,6 +236,8 @@ class UnifiProtectIntegrationService:
             "realtime_error": self._realtime_error(),
             "last_error": self._last_error,
             "camera_count": 0,
+            "runtime": self._runtime.status() if self._runtime else self._runtime_status,
+            "provider_generation": self._provider_generation,
         }
         if not is_unifi_protect_configured(config):
             return status
@@ -125,6 +253,8 @@ class UnifiProtectIntegrationService:
                     "realtime_error": self._realtime_error(),
                     "last_error": None,
                     "camera_count": len(cameras),
+                    "runtime": self._runtime.status() if self._runtime else self._runtime_status,
+                    "provider_generation": self._provider_generation,
                 }
             )
         except UnifiProtectError as exc:
@@ -177,19 +307,22 @@ class UnifiProtectIntegrationService:
         since=None,
         until=None,
     ) -> list[dict[str, Any]]:
-        api = await self._ensure_api(subscribe=True)
-        events = await list_unifi_protect_events(
-            api,
-            camera_id=camera_id,
-            event_type=event_type,
-            limit=limit,
-            since=since,
-            until=until,
+        events = await self._run_current(
+            lambda api: list_unifi_protect_events(
+                api,
+                camera_id=camera_id,
+                event_type=event_type,
+                limit=limit,
+                since=since,
+                until=until,
+            )
         )
         return [serialize_unifi_event(event) for event in events]
 
     async def event_lpr_track(self, event_id: str) -> dict[str, Any]:
-        api = await self._ensure_api(subscribe=True)
+        return await self._run_current(lambda api: self._event_lpr_track(api, event_id))
+
+    async def _event_lpr_track(self, api: Any, event_id: str) -> dict[str, Any]:
         event = None
         try:
             event = await api.get_event(event_id)
@@ -215,7 +348,23 @@ class UnifiProtectIntegrationService:
         }
 
     async def send_alarm_webhook_test(self, trigger_id: str) -> dict[str, Any]:
-        api = await self._ensure_api(subscribe=True)
+        # A completed provider receipt remains the test outcome even if teardown
+        # or caller cancellation occurred while the actual operation drained.
+        receipt: dict[str, Any] | None = None
+
+        async def send(api: Any) -> dict[str, Any]:
+            nonlocal receipt
+            receipt = await self._send_alarm_webhook_test(api, trigger_id)
+            return receipt
+
+        try:
+            return await self._run_current(send, preserve_outcome=True)
+        except asyncio.CancelledError:
+            if receipt is None:
+                raise
+            return receipt
+
+    async def _send_alarm_webhook_test(self, api: Any, trigger_id: str) -> dict[str, Any]:
         method = getattr(api, "send_alarm_webhook_public", None)
         if not callable(method):
             raise UnifiProtectError(
@@ -235,25 +384,27 @@ class UnifiProtectIntegrationService:
         height: int | None = None,
         channel: str | None = None,
     ):
-        api = await self._ensure_api(subscribe=True)
-        async with self._media_semaphore:
-            return await get_unifi_protect_snapshot(
+        return await self._run_current(
+            lambda api: get_unifi_protect_snapshot(
                 api, camera_id, width=width, height=height, channel=channel
-            )
+            ),
+            media=True,
+        )
 
     async def event_thumbnail(
         self, event_id: str, *, width: int | None = None, height: int | None = None
     ):
-        api = await self._ensure_api(subscribe=True)
-        async with self._media_semaphore:
-            return await get_unifi_protect_event_thumbnail(
+        return await self._run_current(
+            lambda api: get_unifi_protect_event_thumbnail(
                 api, event_id, width=width, height=height
-            )
+            ),
+            media=True,
+        )
 
     async def event_video(self, event_id: str):
-        api = await self._ensure_api(subscribe=True)
-        async with self._media_semaphore:
-            return await get_unifi_protect_event_video(api, event_id)
+        return await self._run_current(
+            lambda api: get_unifi_protect_event_video(api, event_id), media=True
+        )
 
     async def test_connection(self, values: dict[str, Any] | None = None) -> dict[str, Any]:
         runtime = await get_runtime_config()
@@ -272,157 +423,173 @@ class UnifiProtectIntegrationService:
                 "cameras": [serialize_unifi_camera(camera) for camera in cameras[:5]],
             }
         finally:
-            await close_unifi_protect_client(api)
+            await drain_owned(close_unifi_protect_client(api))
+
+    @asynccontextmanager
+    async def _connection_scope(self) -> AsyncIterator[None]:
+        async with self._connect_lock:
+            token = _current_connection.set(self)
+            try:
+                yield
+            finally:
+                _current_connection.reset(token)
 
     async def _ensure_api(self, *, subscribe: bool, refresh: bool = False) -> Any:
-        async with self._lock:
-            if self._stopped:
-                raise UnifiProtectError("UniFi Protect is shutting down.")
-            if self._api is not None:
-                if refresh:
-                    await load_unifi_protect_bootstrap(self._api)
-                    self._last_error = None
-                    self._connected = True
-                return self._api
-
+        if _current_connection.get() is self:
+            if self._api is None or refresh or self._stopped or self._stopping:
+                raise UnifiProtectError("UniFi Protect connection operation is in progress.")
+            return self._api
+        async with self._connection_scope():
+            async with self._lock:
+                if self._stopped or self._stopping:
+                    raise UnifiProtectError("UniFi Protect is shutting down.")
+                api, operations = self._api, self._operations
+            if api is not None:
+                if refresh and operations is not None:
+                    await operations.run(lambda: load_unifi_protect_bootstrap(api))
+                    async with self._lock:
+                        if (
+                            self._stopped
+                            or self._stopping
+                            or self._api is not api
+                            or self._operations is not operations
+                        ):
+                            raise UnifiProtectError("UniFi Protect refresh became obsolete.")
+                        self._last_error = None
+                        self._connected = True
+                return api
             config = await get_runtime_config()
             api = await build_unifi_protect_client(config)
             try:
                 await load_unifi_protect_bootstrap(api)
-            except BaseException:
-                await drain_owned(close_unifi_protect_client(api))
-                raise
-            if self._stopped:
-                await drain_owned(close_unifi_protect_client(api))
-                raise UnifiProtectError("UniFi Protect is shutting down.")
-            self._api = api
-            self._connected = True
-            self._last_error = None
-            if subscribe:
-                self._accept_background = True
-                self._unsubscribers = subscribe_unifi_protect(
-                    api,
-                    self._handle_websocket_message,
-                    self._handle_websocket_state,
-                )
-            await event_bus.publish(
-                "protect.connection.changed",
-                {
-                    **self._connection_payload(),
-                    "camera_count": len(list_bootstrap_cameras(api)),
-                },
-            )
-            return api
-
-    async def _stop_locked(self) -> None:
-        self._accept_background = False
-        for unsubscribe in self._unsubscribers:
-            try:
-                unsubscribe()
-            except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
-                logger.debug("unifi_protect_unsubscribe_failed", extra={"error": str(exc)})
-        self._unsubscribers.clear()
-
-        background_tasks = list(self._background_tasks)
-        for task in background_tasks:
-            task.cancel()
-        if background_tasks:
-            await asyncio.gather(*background_tasks, return_exceptions=True)
-        self._background_tasks.difference_update(background_tasks)
-
-        if self._api is not None:
-            await close_unifi_protect_client(self._api)
-        self._api = None
-        self._connected = False
-        self._websocket_states = {channel: "unknown" for channel in PROTECT_WEBSOCKET_CHANNELS}
-
-    def _handle_websocket_message(self, message: Any) -> None:
-        received_at = datetime.now(tz=UTC)
-        stream_metadata_only = is_unifi_protect_stream_metadata_only(message)
-        if not stream_metadata_only:
-            try:
-                self._spawn_background(
-                    get_lpr_timing_recorder().record_unifi_protect_message(
-                        message, received_at=received_at
-                    ),
-                    name="unifi-protect-lpr-timing-message",
-                )
-                self._spawn_background(
-                    get_vehicle_visual_detection_recorder().record_unifi_protect_message(
-                        message,
-                        received_at=received_at,
-                    ),
-                    name="unifi-protect-vehicle-visual-message",
-                )
-                event_id = self._lpr_track_probe_event_id(message)
-                if (
-                    event_id
-                    and event_id not in self._lpr_track_probe_event_ids
-                    and event_id not in self._lpr_track_probe_finished_event_ids
-                ):
-                    self._lpr_track_probe_event_ids.add(event_id)
-                    self._spawn_background(
-                        self._probe_lpr_track(event_id, getattr(message, "new_obj", None)),
-                        name=f"unifi-protect-lpr-track-probe:{event_id}",
+                async with self._lock:
+                    rejected = self._stopped or self._stopping
+                    if not rejected:
+                        self._provider_generation += 1
+                        generation = self._provider_generation
+                        self._api = api
+                        self._connected = True
+                        self._last_error = None
+                        operations = ProtectOperations(
+                            lambda: self._api is api and self._provider_generation == generation
+                        )
+                        self._operations = operations
+                        runtime = UnifiProtectRuntime(
+                            _ProtectTrackPort(api, operations), self._evidence, self._counters
+                        )
+                        self._runtime = runtime
+                        runtime.start()
+                if rejected:
+                    raise UnifiProtectError("UniFi Protect is shutting down.")
+                if subscribe:
+                    self._unsubscribers = subscribe_unifi_protect(
+                        api,
+                        lambda message: self._handle_websocket_message(
+                            message, provider_generation=generation
+                        ),
+                        lambda channel, state: self._handle_websocket_state(
+                            channel, state, provider_generation=generation
+                        ),
                     )
-            except RuntimeError:
-                logger.debug("unifi_protect_lpr_timing_without_loop")
-            except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
-                logger.debug("unifi_protect_lpr_timing_failed", extra={"error": str(exc)})
+            except BaseException:
+                # Rejected bootstrap resources are not yet owned by stop.
+                if self._api is not api:
+                    await drain_owned(close_unifi_protect_client(api))
+                raise
+        # Observers can call status/read/lifecycle APIs; never hold either lock.
+        await event_bus.publish(
+            "protect.connection.changed",
+            {
+                **self._connection_payload(),
+                "camera_count": len(list_bootstrap_cameras(api)),
+            },
+        )
+        return api
 
-        try:
-            payload = websocket_message_payload(message)
-        except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
-            logger.debug("unifi_protect_ws_payload_failed", extra={"error": str(exc)})
+    def _handle_websocket_message(
+        self, message: Any, *, provider_generation: int | None = None
+    ) -> None:
+        runtime = self._runtime
+        if self._stopped or self._stopping or runtime is None:
             return
-        if not stream_metadata_only:
-            try:
-                self._spawn_background(
-                    get_vehicle_presence_tracker().record_unifi_realtime_payload(
+        if provider_generation is not None and provider_generation != self._provider_generation:
+            return
+        received_at, admitted_at = datetime.now(tz=UTC), monotonic()
+        try:
+            metadata_only = is_unifi_protect_stream_metadata_only(message)
+            payload = websocket_message_payload(message)
+            probe_id = None if metadata_only else self._lpr_track_probe_event_id(message)
+            event = getattr(message, "new_obj", None)
+            probe = (
+                ProtectProbeContext(
+                    event_id=probe_id,
+                    received_at=received_at,
+                    admitted_at=admitted_at,
+                    deadline=admitted_at + 90.0,
+                    timing=unifi_protect_timing_fields(event, received_at),
+                    visual=unifi_protect_visual_fields(event, received_at),
+                )
+                if probe_id
+                else None
+            )
+            event_type = (
+                "protect.event.detected"
+                if payload.get("event")
+                else ("protect.camera.updated" if payload.get("camera") else "protect.updated")
+            )
+            runtime.admit(
+                ProtectCallbackWork(
+                    admitted_at=admitted_at,
+                    validity=ProtectWorkValidity(self._evidence.stamp()),
+                    timing=()
+                    if metadata_only
+                    else tuple(
+                        extract_unifi_protect_lpr_observations(message, received_at=received_at)
+                    ),
+                    visual=()
+                    if metadata_only
+                    else tuple(
+                        extract_unifi_protect_vehicle_visual_observations(
+                            message, received_at=received_at
+                        )
+                    ),
+                    presence=()
+                    if metadata_only
+                    else extract_unifi_realtime_presence_observations(
                         payload, received_at=received_at
                     ),
-                    name="unifi-protect-vehicle-presence-message",
+                    event_type=event_type,
+                    payload=json.dumps(payload, separators=(",", ":")).encode(),
+                    probe=probe,
                 )
-            except RuntimeError:
-                logger.debug("unifi_protect_vehicle_presence_without_loop")
-
-        event_type = "protect.updated"
-        if payload.get("camera"):
-            event_type = "protect.camera.updated"
-        if payload.get("event"):
-            event_type = "protect.event.detected"
-        if event_type in {
-            "protect.updated",
-            "protect.camera.updated",
-        } and not self._should_publish_update(event_type, payload):
-            return
-        try:
-            self._spawn_background(
-                event_bus.publish(event_type, payload), name=f"unifi-protect-publish:{event_type}"
             )
-        except RuntimeError:
-            logger.debug("unifi_protect_ws_without_loop")
+        except Exception as exc:  # noqa: BLE001 - Failed optional extraction creates an immediate evidence gap.
+            runtime.gap("callback_extraction")
+            logger.debug(
+                "unifi_protect_ws_extraction_failed", extra={"error_type": type(exc).__name__}
+            )
 
-    def _handle_websocket_state(self, channel: str, state: Any) -> None:
+    def _handle_websocket_state(
+        self, channel: str, state: Any, *, provider_generation: int | None = None
+    ) -> None:
+        if provider_generation is not None and provider_generation != self._provider_generation:
+            return
+        if self._stopped or self._stopping:
+            return
         normalized_state = _websocket_state_name(state)
+        if normalized_state not in {"connected", "disconnected", "auth_failed"}:
+            normalized_state = "unknown"
         if channel not in self._websocket_states:
-            logger.debug("unifi_protect_unknown_websocket_channel", extra={"channel": channel})
             return
+        previous = self._websocket_states[channel]
         self._websocket_states[channel] = normalized_state
-        try:
-            self._spawn_background(
-                event_bus.publish(
-                    "protect.connection.changed",
-                    {
-                        **self._connection_payload(),
-                        "channel": channel,
-                        "state": normalized_state,
-                    },
-                ),
-                name="unifi-protect-publish:connection",
+        runtime = self._runtime
+        if runtime is not None:
+            if normalized_state != "connected" and normalized_state != previous:
+                runtime.gap(f"websocket_{normalized_state}")
+            runtime.connection_changed(
+                {**self._connection_payload(), "channel": channel, "state": normalized_state}
             )
-        except RuntimeError:
-            logger.debug("unifi_protect_state_without_loop")
 
     def _realtime_connected(self) -> bool:
         return all(
@@ -445,73 +612,6 @@ class UnifiProtectIntegrationService:
             "websocket_states": dict(self._websocket_states),
             "realtime_error": self._realtime_error(),
         }
-
-    def _spawn_background(self, coro: Coroutine[Any, Any, Any], *, name: str) -> None:
-        if self._stopped or not self._accept_background:
-            coro.close()
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            coro.close()
-            raise
-        task = loop.create_task(coro, name=name)
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-        task.add_done_callback(_log_background_task_error)
-
-    def _should_publish_update(self, event_type: str, payload: dict[str, Any]) -> bool:
-        object_id = str(payload.get("object_id") or payload.get("model") or "global")
-        key = f"{event_type}:{object_id}"
-        now = monotonic()
-        previous = self._last_update_publish_at.get(key, 0.0)
-        if now - previous < PROTECT_UPDATE_PUBLISH_MIN_INTERVAL_SECONDS:
-            return False
-        self._last_update_publish_at[key] = now
-        return True
-
-    async def _probe_lpr_track(self, event_id: str, event: Any) -> None:
-        try:
-            async with self._lpr_track_probe_semaphore:
-                api = await self._ensure_api(subscribe=True)
-                for attempt, delay in enumerate(LPR_TRACK_PROBE_DELAYS_SECONDS, start=1):
-                    if delay:
-                        await asyncio.sleep(delay)
-                    try:
-                        track = await api.api_request_obj(f"events/{event_id}/smartDetectTrack")
-                    except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
-                        logger.debug(
-                            "unifi_protect_lpr_track_probe_failed",
-                            extra={"event_id": event_id, "attempt": attempt, "error": str(exc)},
-                        )
-                        continue
-
-                    count = await get_lpr_timing_recorder().record_unifi_protect_track(
-                        track,
-                        event=event,
-                        event_id=event_id,
-                        received_at=datetime.now(tz=UTC),
-                        probe_attempt=attempt,
-                    )
-                    await get_vehicle_visual_detection_recorder().record_unifi_protect_track(
-                        track,
-                        event=event,
-                        event_id=event_id,
-                        received_at=datetime.now(tz=UTC),
-                        probe_attempt=attempt,
-                    )
-                    await get_vehicle_presence_tracker().record_unifi_protect_track(
-                        track,
-                        event=event,
-                        event_id=event_id,
-                        received_at=datetime.now(tz=UTC),
-                        probe_attempt=attempt,
-                    )
-                    if count:
-                        self._lpr_track_probe_finished_event_ids.add(event_id)
-                        return
-        finally:
-            self._lpr_track_probe_event_ids.discard(event_id)
 
     def _lpr_track_probe_event_id(self, message: Any) -> str | None:
         new_obj = getattr(message, "new_obj", None)
@@ -564,6 +664,18 @@ class UnifiProtectIntegrationService:
             "licenseplate" in changed_text
             or "detectedthumbnails" in changed_text
             or "detected_thumbnails" in changed_text
+        )
+
+
+class _ProtectTrackPort:
+    def __init__(self, api: Any, operations: ProtectOperations) -> None:
+        self._api = api
+        self._operations = operations
+
+    async def fetch_track(self, event_id: str, deadline: float) -> Any:
+        return await self._operations.run(
+            lambda: get_unifi_protect_track(self._api, event_id),
+            deadline=deadline,
         )
 
 
@@ -762,15 +874,6 @@ def _enum_value(value: Any) -> str | None:
     if value is None:
         return None
     return str(getattr(value, "value", value))
-
-
-def _log_background_task_error(task: asyncio.Task) -> None:
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logger.exception("unifi_protect_background_task_failed")
 
 
 @lru_cache

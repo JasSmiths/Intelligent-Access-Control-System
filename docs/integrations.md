@@ -207,3 +207,35 @@ registration, and lookup results still respect shared caching and backoff.
 Enabling the integration does not sweep existing vehicles. They refresh on the
 next eligible arrival, setup lookup or manual action. Deployment, production
 migration, enabling credentials and live provider tests require separate authorization.
+
+## UniFi optional stream evidence and capacity
+
+UniFi SDK callbacks enter a single consumer with at most 256 retained records and
+16 MiB, including its active record. Four fixed probe workers share 64 pending
+IDs and a separate 16 MiB budget for pending and active scalar contexts. Finished
+IDs and update-publication keys each expire after ten minutes and retain at most
+4,096 entries. These are engineering defaults, not production sizing measurements.
+
+The integration status includes capacities, current count/bytes, oldest ages,
+coalesced updates, drops and stream gaps. Oversized work is rejected as a whole.
+Overflow, failed extraction, disconnect or provider replacement immediately
+invalidates cached SDK stream evidence through an inert generation stamp; no
+missing update becomes evidence of absence. Fresh observations from the current
+provider remain eligible after a gap. The authenticated durable webhook intake
+uses its existing independent path.
+
+Probes preserve the original observation receipt and captured timestamps and one
+90-second deadline across queue waits and retries. Obsolete or late results cannot
+revive current evidence. Shutdown closes admission, detaches the provider under
+the service lock, then drains fixed workers and actual client operations and
+awaits client close outside that lock. Replacement waits for cleanup. Public
+stop/restart rejects calls from its own worker, connection or operation scope
+before changing state; application/settings lifecycle callers run externally.
+
+Operation scopes check admission, provider identity and the original deadline
+inside the actual child immediately before I/O, then drain started I/O. Stream
+and read consumers reject obsolete results. A confirmed Alarm Manager test keeps
+its completed provider receipt across concurrent stop/replacement or repeated
+caller cancellation, after actual cleanup; a provider rejection remains a failure.
+Reads retain normal caller cancellation. Shutdown cannot replace an accepted test
+outcome with a stale-generation read error or trigger a retry.

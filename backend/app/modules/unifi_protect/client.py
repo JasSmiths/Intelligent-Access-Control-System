@@ -1,4 +1,3 @@
-import asyncio
 import inspect
 import re
 from collections.abc import Callable
@@ -256,6 +255,13 @@ async def get_event_by_id(api: Any, event_id: str) -> Any:
         return await api.get_event(event_id)
     except Exception as exc:
         raise UnifiProtectError(f"UniFi Protect event not found: {event_id}") from exc
+
+
+async def get_unifi_protect_track(api: Any, event_id: str) -> Any:
+    try:
+        return await api.api_request_obj(f"events/{event_id}/smartDetectTrack")
+    except Exception as exc:
+        raise UnifiProtectError(_protect_error_message(exc)) from exc
 
 
 async def list_unifi_protect_events(
@@ -586,11 +592,3 @@ def _uiprotect_import_error_message(exc: ImportError) -> str:
             f"{missing_module!r} is missing from the backend environment."
         )
     return "The uiprotect package is not installed in the backend environment."
-
-
-def run_coroutine_threadsafe(coro: Any) -> None:
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(coro)
-    except RuntimeError:
-        logger.debug("unifi_protect_callback_without_running_loop")
