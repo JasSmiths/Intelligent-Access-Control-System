@@ -32,7 +32,6 @@ pytestmark = pytest.mark.asyncio
 @pytest_asyncio.fixture(autouse=True)
 async def _isolated_owner(monkeypatch):
     monkeypatch.setattr(events, 'get_runtime_config', _site_config)
-    monkeypatch.setattr(confirmation_owner, 'emit_audit_log', lambda **_kwargs: None)
     yield
     await engine.dispose()
 
