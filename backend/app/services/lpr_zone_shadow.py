@@ -1,10 +1,15 @@
+import copy
+import math
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import LprZoneShadowObservation
 from app.modules.lpr.base import PlateRead
@@ -27,6 +32,150 @@ class ZoneShadowDecision:
     actual_outcome: str = "shadow_zone_filter_allowed"
 
 
+def compact_zone_shadow_read(read: PlateRead) -> dict[str, Any]:
+    """Only mapper-consumed fields; preserve recursive Protect-ID selection once."""
+    metadata = _smart_zone_metadata(read)
+    projected: dict[str, Any] = {key: copy.deepcopy(metadata[key]) for key in (
+        "zone_statuses", "smart_zones", "raw_smart_zones", "time_of_day", "time_of_day_source"
+    ) if key in metadata}
+    evidence = metadata.get("smart_zone_evidence")
+    if isinstance(evidence, dict):
+        projected["smart_zone_evidence"] = {key: copy.deepcopy(evidence[key]) for key in (
+            "camera_id", "camera_name", "camera_identifier"
+        ) if key in evidence}
+    raw: dict[str, Any] = {SMART_ZONE_EVIDENCE_PAYLOAD_KEY: projected}
+    for key in (KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY, VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY,
+                "registrationNumber", "registration_number", "plate", "value"):
+        if key in read.raw_payload:
+            raw[key] = copy.deepcopy(read.raw_payload[key])
+    protect_id = _first_protect_event_id(read.raw_payload)
+    if protect_id is not None:
+        raw["eventId"] = protect_id
+    return {"registration_number": read.registration_number, "confidence": read.confidence,
+            "source": read.source, "captured_at": read.captured_at.isoformat(), "raw_payload": raw}
+
+
+def zone_shadow_read_from_payload(value: object) -> PlateRead | None:
+    if not isinstance(value, dict) or set(value) != {
+        "registration_number", "confidence", "source", "captured_at", "raw_payload"
+    }:
+        return None
+    confidence = value.get("confidence")
+    if (not isinstance(value.get("registration_number"), str)
+            or not value["registration_number"] or not isinstance(value.get("source"), str)
+            or not isinstance(confidence, (float, int)) or isinstance(confidence, bool)
+            or not math.isfinite(confidence) or not isinstance(value.get("captured_at"), str)
+            or not isinstance(value.get("raw_payload"), dict)):
+        return None
+    try:
+        captured = datetime.fromisoformat(value["captured_at"])
+    except ValueError:
+        return None
+    if captured.tzinfo is None:
+        return None
+    return PlateRead(value["registration_number"], float(confidence), value["source"],
+                     captured, value["raw_payload"])
+
+
+def build_zone_shadow_rows(
+    read: PlateRead,
+    *,
+    access_event_id: uuid.UUID | None,
+    actual_decision: str | None,
+    actual_direction: str | None,
+    actual_outcome: str | None = None,
+    person_id: uuid.UUID | None = None,
+    vehicle_id: uuid.UUID | None = None,
+    visitor_pass_id: uuid.UUID | None = None,
+    mode: str = "shadow",
+    decision_override: ZoneShadowDecision | None = None,
+) -> list[LprZoneShadowObservation]:
+    """The existing row policy, shared by standalone and completion transactions."""
+    metadata = _smart_zone_metadata(read)
+    known_vehicle = bool(_known_vehicle_match(read) or vehicle_id)
+    visitor = bool(_visitor_pass_match(read) or visitor_pass_id)
+    zone_entries = _zone_entries(metadata)
+    filter_decision = decision_override or evaluate_lpr_zone_filter_decision(
+        metadata.get("zone_statuses"),
+        mode=mode,
+    )
+    protect_event_id = _first_protect_event_id(read.raw_payload or {})
+    rows: list[LprZoneShadowObservation] = []
+    for zone in zone_entries:
+        status = _optional_text(zone.get("status"))
+        row = LprZoneShadowObservation(
+            access_event_id=access_event_id,
+            registration_number=read.registration_number,
+            detected_registration_number=_detected_registration_number(read),
+            source=read.source,
+            protect_event_id=protect_event_id,
+            camera_id=_metadata_text(metadata, ("smart_zone_evidence", "camera_id")),
+            camera_name=_metadata_text(metadata, ("smart_zone_evidence", "camera_name")),
+            camera_identifier=_metadata_text(
+                metadata, ("smart_zone_evidence", "camera_identifier")
+            ),
+            observed_at=read.captured_at,
+            time_of_day=_time_of_day(metadata),
+            time_of_day_source=_metadata_text(metadata, ("time_of_day_source",)) or "unknown",
+            zone_id=_optional_text(zone.get("zone_id") or zone.get("zone")),
+            zone_name=_optional_text(zone.get("zone_name") or zone.get("zone")),
+            zone_status=status,
+            zone_level=_float_or_none(zone.get("level")),
+            actual_decision=actual_decision,
+            actual_direction=actual_direction,
+            actual_outcome=actual_outcome or filter_decision.actual_outcome,
+            shadow_decision=filter_decision.shadow_decision,
+            shadow_reason=filter_decision.shadow_reason,
+            would_suppress=filter_decision.would_suppress,
+            details={
+                "mode": _normalize_zone_filter_mode(mode),
+                "known_vehicle": known_vehicle,
+                "visitor": visitor,
+                "person_id": str(person_id) if person_id else None,
+                "vehicle_id": str(vehicle_id) if vehicle_id else None,
+                "visitor_pass_id": str(visitor_pass_id) if visitor_pass_id else None,
+                "target_zone_id": LPR_ZONE_FILTER_TARGET_ZONE_ID,
+                "accepted_statuses": sorted(LPR_ZONE_FILTER_ACCEPTED_STATUSES),
+                "should_suppress_live": filter_decision.should_suppress_live,
+                "smart_zones": metadata.get("smart_zones")
+                if isinstance(metadata.get("smart_zones"), list)
+                else [],
+                "raw_smart_zones": metadata.get("raw_smart_zones")
+                if isinstance(metadata.get("raw_smart_zones"), list)
+                else [],
+            },
+        )
+        rows.append(row)
+
+    return rows
+
+
+async def record_zone_shadow_in_session(
+    session: AsyncSession,
+    read: PlateRead,
+    *,
+    access_event_id: uuid.UUID | None,
+    actual_decision: str | None,
+    actual_direction: str | None,
+    actual_outcome: str | None = None,
+    person_id: uuid.UUID | None = None,
+    vehicle_id: uuid.UUID | None = None,
+    visitor_pass_id: uuid.UUID | None = None,
+    mode: str = "shadow",
+    decision_override: ZoneShadowDecision | None = None,
+) -> list[LprZoneShadowObservation]:
+    """Participates in the caller's transaction; no commit, audit or publication."""
+    rows = build_zone_shadow_rows(
+        read, access_event_id=access_event_id, actual_decision=actual_decision,
+        actual_direction=actual_direction, actual_outcome=actual_outcome,
+        person_id=person_id, vehicle_id=vehicle_id, visitor_pass_id=visitor_pass_id,
+        mode=mode, decision_override=decision_override,
+    )
+    session.add_all(rows)
+    await session.flush()
+    return rows
+
+
 class LprZoneShadowService:
     async def record_decision(
         self,
@@ -42,65 +191,17 @@ class LprZoneShadowService:
         mode: str = "shadow",
         decision_override: ZoneShadowDecision | None = None,
     ) -> list[dict[str, Any]]:
-        metadata = _smart_zone_metadata(read)
-        known_vehicle = bool(_known_vehicle_match(read) or vehicle_id)
-        visitor = bool(_visitor_pass_match(read) or visitor_pass_id)
-        zone_entries = _zone_entries(metadata)
-        filter_decision = decision_override or evaluate_lpr_zone_filter_decision(
-            metadata.get("zone_statuses"),
-            mode=mode,
-        )
-        protect_event_id = _first_protect_event_id(read.raw_payload or {})
-        rows: list[LprZoneShadowObservation] = []
-        for zone in zone_entries:
-            status = _optional_text(zone.get("status"))
-            row = LprZoneShadowObservation(
-                access_event_id=access_event_id,
-                registration_number=read.registration_number,
-                detected_registration_number=_detected_registration_number(read),
-                source=read.source,
-                protect_event_id=protect_event_id,
-                camera_id=_metadata_text(metadata, ("smart_zone_evidence", "camera_id")),
-                camera_name=_metadata_text(metadata, ("smart_zone_evidence", "camera_name")),
-                camera_identifier=_metadata_text(
-                    metadata, ("smart_zone_evidence", "camera_identifier")
-                ),
-                observed_at=read.captured_at,
-                time_of_day=_time_of_day(metadata),
-                time_of_day_source=_metadata_text(metadata, ("time_of_day_source",)) or "unknown",
-                zone_id=_optional_text(zone.get("zone_id") or zone.get("zone")),
-                zone_name=_optional_text(zone.get("zone_name") or zone.get("zone")),
-                zone_status=status,
-                zone_level=_float_or_none(zone.get("level")),
-                actual_decision=actual_decision,
-                actual_direction=actual_direction,
-                actual_outcome=actual_outcome or filter_decision.actual_outcome,
-                shadow_decision=filter_decision.shadow_decision,
-                shadow_reason=filter_decision.shadow_reason,
-                would_suppress=filter_decision.would_suppress,
-                details={
-                    "mode": _normalize_zone_filter_mode(mode),
-                    "known_vehicle": known_vehicle,
-                    "visitor": visitor,
-                    "person_id": str(person_id) if person_id else None,
-                    "vehicle_id": str(vehicle_id) if vehicle_id else None,
-                    "visitor_pass_id": str(visitor_pass_id) if visitor_pass_id else None,
-                    "target_zone_id": LPR_ZONE_FILTER_TARGET_ZONE_ID,
-                    "accepted_statuses": sorted(LPR_ZONE_FILTER_ACCEPTED_STATUSES),
-                    "should_suppress_live": filter_decision.should_suppress_live,
-                    "smart_zones": metadata.get("smart_zones")
-                    if isinstance(metadata.get("smart_zones"), list)
-                    else [],
-                    "raw_smart_zones": metadata.get("raw_smart_zones")
-                    if isinstance(metadata.get("raw_smart_zones"), list)
-                    else [],
-                },
+        session = AsyncSessionLocal()
+        try:
+            rows = await record_zone_shadow_in_session(
+                session, read, access_event_id=access_event_id,
+                actual_decision=actual_decision, actual_direction=actual_direction,
+                actual_outcome=actual_outcome, person_id=person_id, vehicle_id=vehicle_id,
+                visitor_pass_id=visitor_pass_id, mode=mode, decision_override=decision_override,
             )
-            rows.append(row)
-
-        async with AsyncSessionLocal() as session:
-            session.add_all(rows)
             await session.commit()
+        finally:
+            await drain_owned(session.close())
 
         payloads = [serialize_lpr_zone_shadow_observation(row) for row in rows]
         for payload in payloads:

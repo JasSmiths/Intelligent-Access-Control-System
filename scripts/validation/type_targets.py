@@ -72,6 +72,7 @@ TYPE_OWNERS = (
     TypeOwner('app/services/workflow_session.py', 'strict'),
     TypeOwner('app/services/automation_dispatch.py', 'strict'),
     TypeOwner('app/services/automation_scheduling.py', 'strict'),
+    TypeOwner('app/services/lpr_zone_shadow.py', 'strict'),
     TypeOwner('app/services/directory', 'strict'),
     TypeOwner('app/services/access', 'checked', (
         ('pipeline_contracts.py', 'strict'),
@@ -83,6 +84,10 @@ TYPE_OWNERS = (
         ('publication.py', 'strict'),
         ('publication_worker.py', 'strict'),
         ('completion_contracts.py', 'strict'),
+        ('completion_database.py', 'strict'),
+        ('snapshot_identity.py', 'strict'),
+        ('completion_worker.py', 'strict'),
+        ('completion_media.py', 'strict'),
         ('completion_store.py', 'strict'),
         ('completion_results.py', 'strict'),
         ('visitor_link.py', 'strict'),

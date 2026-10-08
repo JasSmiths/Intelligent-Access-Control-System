@@ -320,6 +320,7 @@ class VehicleInformationWorker:
             claim = InformationClaim(
                 event_id, token, plate, job.vehicle_id, job.origin_at, job.deadline
             )
+            sampled = asyncio.get_running_loop().time()
             now = await database_now(session)
             check_information_claim(job, claim, now)
             if (
@@ -331,7 +332,7 @@ class VehicleInformationWorker:
                 raise PipelineLeaseLost("information_registration_changed")
             if job.lease_until is None:
                 raise PipelineLeaseLost("information_lease_lost")
-            return claim, min(float(INFORMATION_TIMEOUT_SECONDS),
+            return claim, sampled + min(float(INFORMATION_TIMEOUT_SECONDS),
                               (claim.deadline - now).total_seconds(),
                               (job.lease_until - now).total_seconds())
 
@@ -354,10 +355,13 @@ class VehicleInformationWorker:
         error: Exception | None = None
         claim: InformationClaim | None = None
         try:
-            async with asyncio.timeout(INFORMATION_TIMEOUT_SECONDS):
+            operation_deadline = asyncio.get_running_loop().time() + INFORMATION_TIMEOUT_SECONDS
+            async with asyncio.timeout_at(operation_deadline) as timeout:
                 config = await get_runtime_config()
-                claim, budget = await self._prepare(event_id, token, plate)
-                operation = asyncio.create_task(self._execute(claim, budget, config),
+                claim, deadline = await self._prepare(event_id, token, plate)
+                deadline = min(operation_deadline, deadline)
+                timeout.reschedule(deadline)
+                operation = asyncio.create_task(self._execute(claim, deadline, config),
                                                 name="vehicle-information-result")
                 renewal = asyncio.create_task(self._renew(claim, operation, lost),
                                               name="vehicle-information-renew")
@@ -381,148 +385,149 @@ class VehicleInformationWorker:
                            extra={"event_id": str(event_id), "exception_class": type(error).__name__})
             await self._fail(event_id, token, plate, error, claim)
 
-    async def _execute(self, claim: InformationClaim, budget: float, config: RuntimeConfig) -> None:
+    async def _execute(self, claim: InformationClaim, deadline: float, config: RuntimeConfig) -> None:
         event_id, plate = claim.event_id, claim.registration_number
-        async with asyncio.timeout(budget):
-            # The short current-identity transaction has closed before I/O.
-            lookup = await get_vehicle_information_service().lookup(plate, config=config)
-            async with _worker_session() as session:
-                event = await session.get(
-                    AccessEvent, event_id, with_for_update=True, populate_existing=True
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError("information_start_deadline_expired")
+        # The original DB-sampled deadline includes session close and child scheduling.
+        lookup = await get_vehicle_information_service().lookup(plate, config=config, not_after=deadline)
+        async with _worker_session() as session:
+            event = await session.get(
+                AccessEvent, event_id, with_for_update=True, populate_existing=True
+            )
+            vehicle = (
+                await session.scalar(
+                    select(Vehicle)
+                    .options(defer(Vehicle.vehicle_photo_data_url))
+                    .where(Vehicle.id == claim.vehicle_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
                 )
-                vehicle = (
-                    await session.scalar(
-                        select(Vehicle)
-                        .options(defer(Vehicle.vehicle_photo_data_url))
-                        .where(Vehicle.id == claim.vehicle_id)
-                        .with_for_update()
-                        .execution_options(populate_existing=True)
-                    )
-                    if claim.vehicle_id
-                    else None
+                if claim.vehicle_id
+                else None
+            )
+            job = await session.get(
+                VehicleInformationJob,
+                event_id,
+                with_for_update=True,
+                populate_existing=True,
+            )
+            now = await database_now(session)
+            job = check_information_claim(job, claim, now)
+            old_until = job.lease_until
+            if old_until is None:
+                raise PipelineLeaseLost("information_lease_lost")
+            if (
+                event is None
+                or event.registration_number != plate
+                or event.vehicle_id != claim.vehicle_id
+                or (
+                    claim.vehicle_id
+                    and (vehicle is None or vehicle.registration_number != plate)
                 )
-                job = await session.get(
-                    VehicleInformationJob,
-                    event_id,
-                    with_for_update=True,
-                    populate_existing=True,
+            ):
+                job.status, job.outcome, job.completed_at = (
+                    "skipped",
+                    "registration_changed",
+                    now,
                 )
-                now = await database_now(session)
-                job = check_information_claim(job, claim, now)
-                old_until = job.lease_until
-                if old_until is None:
-                    raise PipelineLeaseLost("information_lease_lost")
-                if (
-                    event is None
-                    or event.registration_number != plate
-                    or event.vehicle_id != claim.vehicle_id
-                    or (
-                        claim.vehicle_id
-                        and (vehicle is None or vehicle.registration_number != plate)
-                    )
-                ):
-                    job.status, job.outcome, job.completed_at = (
-                        "skipped",
-                        "registration_changed",
-                        now,
-                    )
-                    job.lease_token, job.lease_until = None, None
-                    await session.flush()
-                    if min(old_until, claim.deadline) <= await database_now(session):
-                        raise PipelineLeaseLost("information_lease_lost")
-                    await session.commit()
-                    return
-                info = lookup.information
-                if vehicle is not None:
-                    info = await apply_information(
-                        session, vehicle, lookup, timezone=config.site_timezone
-                    )
-                event.raw_payload = {
-                    **(event.raw_payload or {}),
-                    "vehicle_information": info.model_dump(mode="json"),
-                }
-                await accept_information_in_session(
-                    session, event, job, claim, make=info.make, colour=info.colour
-                )
-                retry_times = [
-                    result.retry_at or now + timedelta(seconds=60)
-                    for result in info.providers.values()
-                    if result.status in {"failed", "deferred"}
-                ]
-                retry_at = min(retry_times) if retry_times else None
-                if retry_at and now < retry_at < job.deadline:
-                    job.status, job.outcome = "queued", "deferred"
-                    job.lease_token, job.lease_until = None, retry_at
-                    await assert_information_before_commit(
-                        session, event, job, claim, lease_until=old_until
-                    )
-                    await session.commit()
-                    return
-                person = (
-                    await session.scalar(
-                        select(Person)
-                        .options(selectinload(Person.group))
-                        .where(Person.id == event.person_id)
-                    )
-                    if event.person_id
-                    else None
-                )
-                notices: list[tuple[str, str]] = []
-                if info.mot_freshness == "fresh" and info.mot_status in {"Expired", "Overdue"}:
-                    notices.append(
-                        (
-                            "expired_mot_detected",
-                            f"{(info.mot_source or 'MOT').upper()} reports MOT {info.mot_status.lower()} for {plate}.",
-                        )
-                    )
-                dvla = info.providers.get("dvla")
-                if (
-                    dvla
-                    and dvla.status == "found"
-                    and info.last_dvla_lookup_date
-                    == now.astimezone(ZoneInfo(config.site_timezone)).date()
-                    and info.tax_status
-                    and info.tax_status.casefold() not in {"taxed", "sorn", "unknown"}
-                ):
-                    notices.append(
-                        (
-                            "expired_tax_detected",
-                            f"DVLA reports tax status {info.tax_status} for {plate}.",
-                        )
-                    )
-                for event_type, message in notices:
-                    facts = notification_facts(
-                        event,
-                        person,
-                        vehicle,
-                        message,
-                        vehicle_information=info.model_dump(mode="json"),
-                    )
-                    facts["vehicle_information_event_id"] = str(event.id)
-                    await get_notification_service().enqueue_in_session(
-                        session,
-                        NotificationContext(
-                            event_type=event_type,
-                            subject=message,
-                            severity="warning",
-                            facts=facts,
-                        ),
-                        dispatch_id=uuid.uuid5(event.id, event_type),
-                    )
-                job.status, job.outcome, job.completed_at = "completed", "enriched", now
                 job.lease_token, job.lease_until = None, None
+                await session.flush()
+                if min(old_until, claim.deadline) <= await database_now(session):
+                    raise PipelineLeaseLost("information_lease_lost")
+                await session.commit()
+                return
+            info = lookup.information
+            if vehicle is not None:
+                info = await apply_information(
+                    session, vehicle, lookup, timezone=config.site_timezone
+                )
+            event.raw_payload = {
+                **(event.raw_payload or {}),
+                "vehicle_information": info.model_dump(mode="json"),
+            }
+            await accept_information_in_session(
+                session, event, job, claim, make=info.make, colour=info.colour
+            )
+            retry_times = [
+                result.retry_at or now + timedelta(seconds=60)
+                for result in info.providers.values()
+                if result.status in {"failed", "deferred"}
+            ]
+            retry_at = min(retry_times) if retry_times else None
+            if retry_at and now < retry_at < job.deadline:
+                job.status, job.outcome = "queued", "deferred"
+                job.lease_token, job.lease_until = None, retry_at
                 await assert_information_before_commit(
                     session, event, job, claim, lease_until=old_until
                 )
                 await session.commit()
-            get_notification_service().dispatcher.wake()
-            await event_bus.publish(
-                "vehicle_information.updated",
-                {
-                    "event_id": str(event_id),
-                    "vehicle_id": str(job.vehicle_id) if job.vehicle_id else None,
-                },
+                return
+            person = (
+                await session.scalar(
+                    select(Person)
+                    .options(selectinload(Person.group))
+                    .where(Person.id == event.person_id)
+                )
+                if event.person_id
+                else None
             )
+            notices: list[tuple[str, str]] = []
+            if info.mot_freshness == "fresh" and info.mot_status in {"Expired", "Overdue"}:
+                notices.append(
+                    (
+                        "expired_mot_detected",
+                        f"{(info.mot_source or 'MOT').upper()} reports MOT {info.mot_status.lower()} for {plate}.",
+                    )
+                )
+            dvla = info.providers.get("dvla")
+            if (
+                dvla
+                and dvla.status == "found"
+                and info.last_dvla_lookup_date
+                == now.astimezone(ZoneInfo(config.site_timezone)).date()
+                and info.tax_status
+                and info.tax_status.casefold() not in {"taxed", "sorn", "unknown"}
+            ):
+                notices.append(
+                    (
+                        "expired_tax_detected",
+                        f"DVLA reports tax status {info.tax_status} for {plate}.",
+                    )
+                )
+            for event_type, message in notices:
+                facts = notification_facts(
+                    event,
+                    person,
+                    vehicle,
+                    message,
+                    vehicle_information=info.model_dump(mode="json"),
+                )
+                facts["vehicle_information_event_id"] = str(event.id)
+                await get_notification_service().enqueue_in_session(
+                    session,
+                    NotificationContext(
+                        event_type=event_type,
+                        subject=message,
+                        severity="warning",
+                        facts=facts,
+                    ),
+                    dispatch_id=uuid.uuid5(event.id, event_type),
+                )
+            job.status, job.outcome, job.completed_at = "completed", "enriched", now
+            job.lease_token, job.lease_until = None, None
+            await assert_information_before_commit(
+                session, event, job, claim, lease_until=old_until
+            )
+            await session.commit()
+        get_notification_service().dispatcher.wake()
+        await event_bus.publish(
+            "vehicle_information.updated",
+            {
+                "event_id": str(event_id),
+                "vehicle_id": str(job.vehicle_id) if job.vehicle_id else None,
+            },
+        )
 
 
 @lru_cache

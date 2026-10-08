@@ -491,3 +491,39 @@ again with `--allow-downloads` and the explicitly selected
 dependency manifests. Matching Python versions alone does not satisfy the harness's
 reuse guard. Historical image/setup failures and prior results remain attached to
 their original evidence; replacement runs receive distinct identities.
+
+
+The [media persistence suite](../scripts/validation/test_access_media_persistence.py)
+is registered in the full harness. It verifies snapshot event/anomaly/checkpoint/
+publication atomicity, final expiry rollback, exact thumbnail identity, immutable
+compact input, current registration and pre-I/O deadline guards. It also covers
+startup completion-owner exclusion, claim-specific artifact cleanup versus unknown
+commit retention, postcommit zone signals and no duplicate inserts after signal
+failure. The original five-second camera window uses immutable receipt provenance;
+forged future trace metadata cannot renew it.
+
+[Media artifact tests](../backend/tests/test_access_completion_media.py) retain
+legacy/claim-specific restore and exact deletion contracts, actual compact/write/
+archive thread cleanup, a delayed actual camera child, hydrated alert projection,
+and full large relevant zone arrays. [Lifetime tests](../backend/tests/test_access_completion_lifecycle.py)
+prove two occupied slots during cleanup, independent publication, single cancellation
+after renewal loss, actual session close, deadline consumption and an injected owner
+through real main lifespan before DB disposal. That injection is composition proof,
+not production activation or final provider shutdown-order approval.
+
+The conservative absolute start deadline is sampled before the awaited DB clock
+response and survives actual close/preparation/scheduling. Both completion and
+information have one retained parent timer rescheduled only downward; nested timers
+must not cancel an already-cleaning child again. A fresh final DB fence still decides
+acceptance. Publication's start guard uses lease expiry independently of optional
+five-minute work. These are inert correctness fixtures, without live providers or
+new production timing/memory claims. Exact run identities, failed snapshots and
+carried-source mappings live in the closure/candidate receipts.
+
+The whole [publication unit file](../backend/tests/test_access_publication.py)
+also characterizes renewal loss after slow preparation and before the send
+window expires, with blocked actual transport cleanup. Crossing that deadline
+and repeatedly cancelling stop cannot deliver a second cancellation, release
+the lane, ACK/retry lost ownership or admit another identifier. A stalled actual
+transport child cannot start after its original deadline. Its complete18-case
+PG/Redis suite is rerun for the corresponding runtime correction.

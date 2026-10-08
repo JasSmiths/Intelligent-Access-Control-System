@@ -146,7 +146,7 @@ class VehicleInformationService:
             record.mot_due, record.mot_expiry = record.mot_expiry, None
         return record
 
-    async def _provider(self, provider: Provider, plate: str, config: RuntimeConfig, *, force: bool, cached_only: bool, started: datetime) -> ProviderResult:
+    async def _provider(self, provider: Provider, plate: str, config: RuntimeConfig, *, force: bool, cached_only: bool, started: datetime, not_after: float | None = None) -> ProviderResult:
         if (provider == "dvsa" and not config.dvsa_enabled) or (provider == "dvla" and not config.dvla_api_key):
             return ProviderResult(status="disabled")
         key = _key(provider, plate, config)
@@ -176,6 +176,8 @@ class VehicleInformationService:
                 if current and current.checked_at and current.checked_at >= started:
                     return current
                 try:
+                    if not_after is not None and asyncio.get_running_loop().time() >= not_after:
+                        raise TimeoutError("information_start_deadline_expired")
                     record = await self._fetch(provider, plate, config)
                     now = datetime.now(UTC)
                     result = ProviderResult(status="found", record=record, checked_at=now,
@@ -208,10 +210,10 @@ class VehicleInformationService:
                                   checked_at=previous.checked_at if previous else None)
 
     async def lookup(self, registration: str, *, force: bool = False, cached_only: bool = False,
-                     config: RuntimeConfig | None = None) -> VehicleLookup:
+                     config: RuntimeConfig | None = None, not_after: float | None = None) -> VehicleLookup:
         receipt = self._admit()
         operation = asyncio.create_task(
-            self._lookup_owned(registration, force=force, cached_only=cached_only, config=config),
+            self._lookup_owned(registration, force=force, cached_only=cached_only, config=config, not_after=not_after),
             name="vehicle-information-lookup",
         )
         try:
@@ -225,7 +227,9 @@ class VehicleInformationService:
                 self._complete(receipt)
 
     async def _lookup_owned(self, registration: str, *, force: bool, cached_only: bool,
-                            config: RuntimeConfig | None) -> VehicleLookup:
+                            config: RuntimeConfig | None, not_after: float | None = None) -> VehicleLookup:
+        if not_after is not None and asyncio.get_running_loop().time() >= not_after:
+            raise TimeoutError("information_start_deadline_expired")
         plate = normalize_registration_number(registration)
         if not plate or len(plate) > 32:
             raise ValueError("Vehicle registration number is required")
@@ -234,7 +238,7 @@ class VehicleInformationService:
         providers: tuple[Provider, Provider] = ("dvla", "dvsa")
         children = [asyncio.create_task(
             self._provider(provider, plate, runtime, force=force,
-                           cached_only=cached_only, started=started),
+                           cached_only=cached_only, started=started, not_after=not_after),
             name=f"vehicle-information-{provider}",
         ) for provider in providers]
         joined = asyncio.gather(*children)

@@ -55,7 +55,7 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   run; every other full-gate check passed. All 727 committed source hashes equal
   the approved candidate, with clean source/cleanup and unchanged operational state.
   Retention dispositions were accepted; E4 integrated conformance remains pending.
-- Current approved backend checkpoint: `d079bb04a12d927084acee9b2f4d013ddfe2e2f4`
+- Historical approved completion-repository checkpoint: `d079bb04a12d927084acee9b2f4d013ddfe2e2f4`
   includes approved P3, P4 frontend and P5, plus the separately approved P6
   foundation (`876deec32b2da8559585c5333964af211f3d2308`) and immutable intake
   (`f9e1dba7d043bed9d378de6205a05cbb8c047856`) owner checkpoints. The integration
@@ -74,7 +74,7 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   migration/source/cleanup/operational evidence are retained in
   `p6-publication-candidate.json`, `p6-publication-astra-approval.json` and
   `p6-publication-commit-equivalence.json`. The origin/readiness completion
-  repository is separately approved and committed at the current backend
+  repository is separately approved and committed at that historical
   checkpoint, with source
   `2ac90b93086842221c130a4a5ae92422b9fa2043a1128e37c75969427f4c0d1d`
   and patch `4a1cc4a4db9dcb5c73e09e62b658186b84b30621875d98af527d369351558891`.
@@ -634,9 +634,82 @@ nonexistent unit selection with no tests, missing fixture test registration befo
 its cancellation barrier, and `iacs-validation-5no4w3a3` 88/89 with a cached
 PostgreSQL activity-observer snapshot. The activity poll repair and original corrected
 89 run `iacs-validation-0hg5ac9x` remain part of that superseded candidate history.
-Exact-source Astra approval of the final corrected worker owner is still pending.
+Astra approved the exact corrected worker source
+`830146f3e67824cf6ef0a41fe27b29d8224ca552899d70e94ddcd79e63de7a12`
+and patch `4738d696ace3e83570cee4c8f9ab5e459aee1de56a919427824e0036c8578435`.
+Commit `893614f909a995170c685a0b87af1bf40378ebd8` preserves all 794 selected hashes;
+its archive has only the two established policy exclusions. Verbatim approval and
+archive equivalence remain in `p6-information-worker-v2-astra-approval.json` and
+`p6-information-worker-v2-commit-equivalence.json`. Those immutable receipts are
+not rewritten by the later pre-I/O deadline correction below.
 
 This is not P6 completion. The temporary postcommit information enqueue bridge must
 still move into the core decision transaction. Old RAM runtime replacement, media,
 HA effects/resolution, historical candidates, charts, frontend revisions and the
 full integrated runtime/lifecycle/performance harness remain outstanding.
+
+
+### P6 media/link/zone owner candidate
+
+The latest approved backend base is `893614f909a995170c685a0b87af1bf40378ebd8`.
+This bounded candidate implements the separate approved media design
+`d9791fc9f2834cee57ac0df5aade8c55dc5557cb0c0e3765a5e91decb2180175`.
+It defines two actual optional-work slots and an independent publication lifetime,
+explicit closed stage ports, owned session/provider/thread cleanup, immutable
+snapshot claim keys and compact frozen stage input. It preserves late provider-free
+visitor linkage and the existing postcommit zone feature signal. Nothing starts
+these new owners in production yet: the atomic core and matching frontend-consumer
+cutover remain mandatory. Existing RAM/optional paths are retired at that cutover.
+
+Review found a relative-budget boundary in the preceding information checkpoint:
+slow session close or scheduling could extend a provider start past its original
+deadline. The follow-up uses a conservative loop-time anchor before the DB-time
+query, passes an absolute minimum through preparation/close/actual invocation, and
+keeps one original parent operation timeout. Fresh DB fences remain authoritative;
+cleanup can outlive the deadline without granting fresh work. Publication uses
+its current lease, independently of optional enrichment's five-minute deadline.
+The whole backend gate then exposed a competing nested timeout cancelling already
+active lease-loss cleanup. That 1,313-pass/one-failure snapshot is retained; the
+corrected single-parent timer and shielded actual visual child pass all 1,315
+backend units with 29 expected skips in that retained run. Camera metadata records the actual local
+provider receipt time before its later DB proof, rather than file-storage time.
+
+The first media PG run `iacs-validation-lv1i2053` retains 20/24: three new fixtures
+omitted the explicit committed resource revision and one omitted required job
+creation time. After correcting those fixtures, `iacs-validation-gjxxmj0m` passes
+all 180 cases: media29, completion38, publication18, worker23, information12,
+result/link45 and foundation15. The first final timing run `iacs-validation-0fmuzlzw`
+passes 65 but is superseded by the demonstrated competing-timeout source correction.
+`iacs-validation-fqej9r5d` passes the complete media30, worker23 and information12
+suites. Review of the first frozen media candidate then reproduced an analogous
+publication failure: renewal loss cancelled transport cleanup, and its inline
+send timer cancelled it a second time. The failing reproducer/source and original
+candidate `3b90eb149ca438e5b41ff273bb4d3c92a48bb8281fe0abe55f0f5dc7c4a00ffe`
+remain immutable. A shielded actual transport child now exits its timer before
+single cancellation/drain, checks the same original deadline at invocation, and
+retains its sole lane until cleanup settles. It cannot ACK/retry on renewal loss
+or claim a second identifier while the first child remains occupied.
+
+Final `iacs-validation-cp4j2oh2` passes the whole18 publication PG/Redis suite.
+The unchanged65 media/worker/information cases carry from `fqej9r5d`, and unchanged98
+completion/result/foundation cases carry from `gjxxmj0m` by exact source/dependency
+mapping. Publication18 is no longer claimed as carried, and there is no claimed
+combined181-pass invocation. All three namespaces have clean source/cleanup,
+migration parity and identical operational snapshots. Final whole backend passes
+1,317 units with29 expected skips; types87/70, host22/29 and Ruff/F821 pass.
+
+Filesystem tests cover legacy and claim-specific primary/archive/manifest restore,
+all three actual thread stages, exact unlinked cleanup and retention after commit
+uncertainty. PG tests prove event/anomaly/result/revision atomicity and expiry rollback,
+immutable compact inputs, current plate guards, no late provider start after DB/close
+delays, exact thumbnail fallback and postcommit zone signals without reinsertion on
+delivery failure. Large relevant zone arrays remain complete and can themselves be
+large; unused vendor blobs are excluded. This is correctness/allocation-boundary
+evidence, not a new end-to-end performance or production-throughput claim.
+
+Exact-source Astra approval is required for this uncommitted media owner candidate.
+P6 still needs the atomic decision/reservation/window terminalization and RAM switch,
+HA desired effects/settlement, historical candidates, charts, frontend revision
+consumers, real production lifecycle composition and the complete integrated harness
+with equivalent-output burst/many-window performance evidence. Crash/unknown-outcome
+claim files may be retained on disk; this candidate does not invent a sweep.

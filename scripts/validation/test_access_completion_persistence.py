@@ -166,7 +166,7 @@ async def test_original_receipt_controls_every_stage_despite_ancient_capture_and
     assert all(items[stage].state == "queued" for stage in ["visual", "snapshot", "zone_shadow"])
     claims = await AccessCompletionStore().claim(2)
     assert len(claims) == 2 and all(claim.stage != "visitor_link" for claim in claims)
-    budgets = [await AccessCompletionStore().assert_owned(claim) for claim in claims]
+    budgets = [await AccessCompletionStore().assert_owned(claim) - asyncio.get_running_loop().time() for claim in claims]
     assert all(0 < budget <= 90 for budget in budgets)
 
 
@@ -490,7 +490,7 @@ async def test_waiting_visitor_link_keeps_original_provenance_after_provider_exp
         await session.commit()
     claim = (await AccessCompletionStore().claim(1))[0]
     assert claim.stage == "visitor_link" and claim.deadline == work.deadline
-    assert await AccessCompletionStore().assert_owned(claim) == 5
+    assert 4 < await AccessCompletionStore().assert_owned(claim) - asyncio.get_running_loop().time() <= 5
 
 
 async def test_result_first_accepted_after_original_deadline_cannot_create_runnable_link():
@@ -605,7 +605,7 @@ async def test_retry_preserves_origin_and_clips_due_time_without_authority_refre
     store = AccessCompletionStore()
     claim = (await store.claim(1))[0]
     original = (await works(identity))["visual"]
-    assert 0 < await store.assert_owned(claim) < 10
+    assert 0 < await store.assert_owned(claim) - asyncio.get_running_loop().time() < 10
     await store.retry(claim, delay_seconds=90)
     current = (await works(identity))["visual"]
     assert (

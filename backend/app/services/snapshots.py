@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -15,6 +16,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.services.unifi_protect import get_unifi_protect_service
 
 logger = get_logger(__name__)
@@ -33,9 +35,24 @@ NOTIFICATION_SNAPSHOT_ROOT = "notification-snapshots"
 NOTIFICATION_SNAPSHOT_TTL = timedelta(hours=24)
 ALERT_SNAPSHOT_CONTEXT_KEY = "snapshot"
 ACCESS_EVENT_SNAPSHOT_FILENAME_PATTERN = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.jpg$"
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"(?:\.[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?\.jpg$"
 )
 NOTIFICATION_SNAPSHOT_FILENAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{24,80}\.(?:jpg|jpeg|png)$")
+
+
+async def _snapshot_thread[T, **P](operation: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    """The actual thread must finish before a caller releases its media slot.
+
+    Cancelling a to_thread wrapper does not stop its function. Never cancel this
+    child: discard its result only after it has settled, including file cleanup.
+    """
+    child = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs),
+                                name="access-snapshot-thread")
+    try:
+        return await asyncio.shield(child)
+    finally:
+        await drain_owned(asyncio.gather(child, return_exceptions=True))
 
 
 class SnapshotError(RuntimeError):
@@ -187,7 +204,7 @@ class SnapshotManager:
             self.delete_alert_snapshot(row)
 
     def ensure_access_event_archive(self, metadata: SnapshotMetadata) -> bool:
-        event_id = _access_event_snapshot_id(metadata.relative_path)
+        event_id = _access_event_snapshot_key(metadata.relative_path)
         if not event_id:
             return False
         path = self.resolve_path(metadata.relative_path, must_exist=True)
@@ -220,7 +237,7 @@ class SnapshotManager:
         captured_at: datetime | None = None,
     ) -> SnapshotMetadata:
         path = self.resolve_path(relative_path, must_exist=False)
-        compacted, width, height = await asyncio.to_thread(self._compact_jpeg, content)
+        compacted, width, height = await _snapshot_thread(self._compact_jpeg, content)
         captured = captured_at or datetime.now(tz=UTC)
         metadata = SnapshotMetadata(
             relative_path=relative_path,
@@ -232,10 +249,26 @@ class SnapshotManager:
             width=width,
             height=height,
         )
-        await asyncio.to_thread(self._write_snapshot, path, compacted)
-        if _access_event_snapshot_id(relative_path):
-            await asyncio.to_thread(self._write_access_event_archive, relative_path, compacted, metadata)
+        await _snapshot_thread(self._write_snapshot, path, compacted)
+        if _access_event_snapshot_key(relative_path):
+            await _snapshot_thread(self._write_access_event_archive, relative_path, compacted, metadata)
         return metadata
+
+    async def delete_access_snapshot_claim(self, event_id: uuid.UUID, claim_token: uuid.UUID) -> None:
+        """Caller proved this settled claim unlinked; never remove legacy keys.
+
+        The completion owner keeps unknown-commit files. This method has no DB
+        authority and only removes the three paths derived from these exact IDs.
+        """
+        key = f"{event_id}.{claim_token}"
+        paths = (
+            access_event_snapshot_relative_path(event_id, claim_token=claim_token),
+            access_event_snapshot_archive_relative_path(key),
+            access_event_snapshot_manifest_relative_path(key),
+        )
+        for relative in paths:
+            await _snapshot_thread(self.resolve_path(relative, must_exist=False).unlink,
+                                   missing_ok=True)
 
     def resolve_path(self, relative_path: str, *, must_exist: bool = True) -> Path:
         normalized = PurePosixPath(relative_path)
@@ -304,7 +337,7 @@ class SnapshotManager:
         content: bytes,
         metadata: SnapshotMetadata,
     ) -> None:
-        event_id = _access_event_snapshot_id(relative_path)
+        event_id = _access_event_snapshot_key(relative_path)
         if not event_id:
             return
         digest = hashlib.sha256(content).hexdigest()
@@ -321,7 +354,7 @@ class SnapshotManager:
         self._write_json(manifest_path, manifest)
 
     def _restore_access_event_snapshot(self, relative_path: str, destination: Path) -> bool:
-        event_id = _access_event_snapshot_id(relative_path)
+        event_id = _access_event_snapshot_key(relative_path)
         if not event_id:
             return False
         try:
@@ -349,7 +382,7 @@ class SnapshotManager:
             return False
 
     def _access_event_snapshot_needs_restore(self, relative_path: str, path: Path) -> bool:
-        event_id = _access_event_snapshot_id(relative_path)
+        event_id = _access_event_snapshot_key(relative_path)
         if not event_id:
             return False
         manifest = self._read_access_event_manifest(event_id)
@@ -390,8 +423,11 @@ class SnapshotManager:
             os.close(descriptor)
 
 
-def access_event_snapshot_relative_path(event_id: uuid.UUID) -> str:
-    return f"{ACCESS_EVENT_SNAPSHOT_ROOT}/{event_id}.jpg"
+def access_event_snapshot_relative_path(
+    event_id: uuid.UUID, *, claim_token: uuid.UUID | None = None
+) -> str:
+    key = f"{event_id}.{claim_token}" if claim_token is not None else str(event_id)
+    return f"{ACCESS_EVENT_SNAPSHOT_ROOT}/{key}.jpg"
 
 
 def access_event_snapshot_archive_relative_path(event_id: uuid.UUID | str) -> str:
@@ -514,7 +550,7 @@ def snapshot_path_available(relative_path: str | None) -> bool:
     return True
 
 
-def _access_event_snapshot_id(relative_path: str | None) -> str | None:
+def _access_event_snapshot_key(relative_path: str | None) -> str | None:
     if not relative_path:
         return None
     normalized = PurePosixPath(relative_path)
@@ -523,7 +559,8 @@ def _access_event_snapshot_id(relative_path: str | None) -> str | None:
     if not ACCESS_EVENT_SNAPSHOT_FILENAME_PATTERN.fullmatch(normalized.name):
         return None
     try:
-        return str(uuid.UUID(normalized.stem))
+        # Both identities are exact UUIDs; legacy event-only keys remain readable.
+        return ".".join(str(uuid.UUID(part)) for part in normalized.stem.split("."))
     except ValueError:
         return None
 

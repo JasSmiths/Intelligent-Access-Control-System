@@ -4,14 +4,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import selectinload
 
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal
-from app.models import AccessEvent, Anomaly
+from app.models import AccessCompletionWork, AccessEvent, Anomaly
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.unifi_protect.client import UnifiProtectError
+from app.services.access.snapshot_identity import protect_event_id_from_payload
 from app.services.snapshots import (
     ALERT_SNAPSHOT_CONTEXT_KEY,
     SNAPSHOT_CONTENT_TYPE,
@@ -76,6 +77,10 @@ async def recover_missing_access_event_snapshots(
         events = (
             await session.scalars(
                 select(AccessEvent)
+                .where(~exists(select(AccessCompletionWork.id).where(
+                    AccessCompletionWork.event_id == AccessEvent.id,
+                    AccessCompletionWork.stage == "snapshot",
+                )))
                 .options(selectinload(AccessEvent.anomalies))
                 .order_by(AccessEvent.occurred_at.desc())
                 .limit(limit)
@@ -200,33 +205,6 @@ async def recover_missing_access_event_snapshots_safely() -> None:
 def protect_event_id_from_access_event(event: AccessEvent) -> str | None:
     raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
     return protect_event_id_from_payload(raw_payload)
-
-
-def protect_event_id_from_payload(raw_payload: dict[str, Any]) -> str | None:
-    if not isinstance(raw_payload, dict):
-        return None
-    candidates = [
-        _nested_value(raw_payload, ("best", "alarm", "triggers", 0, "eventId")),
-        _nested_value(raw_payload, ("best", "alarm", "triggers", 0, "event_id")),
-        _nested_value(raw_payload, ("best", "alarm", "eventId")),
-        _nested_value(raw_payload, ("best", "alarm", "event_id")),
-        _nested_value(raw_payload, ("best", "eventId")),
-        _nested_value(raw_payload, ("best", "event_id")),
-        _nested_value(raw_payload, ("protect_evidence", "event_id")),
-        _nested_value(raw_payload, ("backfill", "protect_event_id")),
-        _nested_value(raw_payload, ("snapshot_recovery", "protect_event_id")),
-    ]
-    vehicle_session = raw_payload.get("vehicle_session")
-    if isinstance(vehicle_session, dict):
-        protect_event_ids = vehicle_session.get("protect_event_ids")
-        if isinstance(protect_event_ids, list):
-            candidates.extend(protect_event_ids)
-
-    for candidate in candidates:
-        text = str(candidate or "").strip()
-        if text:
-            return text
-    return None
 
 
 async def protect_snapshot_evidence_for_access_event(
@@ -416,18 +394,6 @@ def _attach_protect_snapshot_evidence(
         if value is not None
     }
     event.raw_payload = raw_payload
-
-
-def _nested_value(value: Any, path: tuple[Any, ...]) -> Any:
-    current = value
-    for key in path:
-        if isinstance(current, dict):
-            current = current.get(key)
-        elif isinstance(current, list) and isinstance(key, int) and 0 <= key < len(current):
-            current = current[key]
-        else:
-            return None
-    return current
 
 
 def _event_might_have_lpr(event: dict[str, Any]) -> bool:

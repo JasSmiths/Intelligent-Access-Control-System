@@ -496,3 +496,44 @@ fingerprints remain separate from the exact identity; nonindexed identity values
 are never truncated to a URL/entity length assumption. UNKNOWN effects and physical
 target barriers remain retained independently of originating Person/event lifetime.
 This is schema compatibility for the pending HA owner, not runtime authority.
+
+
+The inert [completion lifetime](../backend/app/services/access/completion_worker.py)
+supplies two actual optional-work slots through explicit visual, snapshot,
+visitor-link and zone-shadow ports, separate from committed-facts publication.
+Its [stage owner](../backend/app/services/access/completion_media.py) prepares
+scalar current identity and saved compact input without hydrating arbitrary raw
+evidence before provider I/O. Input is captured once at reservation; later malformed
+input holds rather than rebuilding it from changed evidence. Relevant zone arrays
+remain complete and are not assumed to have a tiny fixed size.
+
+One operation deadline is captured before preparation. The fresh DB-derived
+remaining lease/origin budget is anchored to loop time before the query and may
+only shorten that deadline. Explicit stage arguments preserve it across session
+close and delayed child execution. Actual provider/visual children and all three
+snapshot threads remain owned through cleanup; expiry permits no late work or
+result authority. Information lookup uses the same conservative start boundary;
+publication is bounded by its current lease and does not acquire optional-work expiry.
+
+Snapshot files use immutable event/claim primary, archive and manifest keys, while
+the stable event URL resolves the committed `snapshot_path`. Legacy event UUID keys
+still restore. Event/anomaly metadata, the stage receipt and public revision share
+the acceptance transaction. A settled precommit failure may delete only its exact
+unreferenced claim files after serialized Event→work checks. Commit uncertainty or
+unresolved writer settlement retains them; an unlocked absent pointer proves nothing.
+Hydrated alerts use the event's exact stored path; legacy eventless alert files keep
+their existing fallback. Startup legacy recovery excludes completion-owned events
+before loading the full event or fetching provider media.
+
+Zone mapping has one pure mapper and an in-session participant. The completion
+receipt and rows share commit; existing `lpr_zone_shadow.observed` payloads publish
+afterward. Delivery failure never reopens succeeded work or inserts rows again.
+The standalone suppression owner drains its own session close. These new completion
+and publication lifetimes stay inactive until the atomic core/frontend-consumer
+cutover; importing them grants no alternate admission or hardware authority.
+
+Publication also owns one actual transport child. Its send timer exits before
+single cancellation and drain, so renewal loss followed by the send deadline
+cannot interrupt an already-running cleanup. The lane remains occupied until
+that child settles; no ACK or retry is created after ownership loss. The actual
+transport invocation checks the conservative original lease/start deadline too.

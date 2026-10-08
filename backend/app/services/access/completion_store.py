@@ -7,6 +7,7 @@ repository has no provider port, dispatcher, or participant commit.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -24,6 +25,7 @@ from app.models import (
     LprIngestEvent,
     LprWindowMember,
 )
+from app.modules.lpr.base import PlateRead
 from app.services.access.completion_contracts import (
     COMPLETION_STAGES,
     CompletionStage,
@@ -31,8 +33,11 @@ from app.services.access.completion_contracts import (
     RetainedResultReference,
     VisitorCompletionTarget,
 )
+from app.services.access.completion_database import completion_session
 from app.services.access.pipeline_contracts import CompletionClaim, PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
+from app.services.access.snapshot_identity import protect_event_id_from_payload
+from app.services.lpr_zone_shadow import compact_zone_shadow_read
 
 COMPLETION_SCAN_SIZE = 32
 COMPLETION_ACTIVE_SLOTS = 2
@@ -223,6 +228,7 @@ async def _reserve(
     origin_at: datetime | None,
     window_id: uuid.UUID | None,
     visitor_target: VisitorCompletionTarget | None = None,
+    zone_mode: str = "shadow",
 ) -> None:
     now = await database_now(session)
     visitor = (event.raw_payload or {}).get("visitor_pass")
@@ -237,6 +243,14 @@ async def _reserve(
         outcome = None if valid else "original_origin_unavailable"
         readiness = "committed_decision"
         result: dict[str, Any] = {}
+        if stage == "snapshot":
+            result["input"] = {"protect_event_id": protect_event_id_from_payload(event.raw_payload or {})}
+        if stage == "zone_shadow":
+            best = (event.raw_payload or {}).get("best")
+            result["input"] = {"read": compact_zone_shadow_read(PlateRead(
+                event.registration_number, event.confidence, event.source, event.occurred_at,
+                best if isinstance(best, dict) else {},
+            )), "mode": zone_mode}
         if stage == "visitor_link" and valid:
             state = "waiting" if waiting else "skipped"
             readiness = "canonical_arrival_and_result" if waiting else "no_arrival_target"
@@ -284,6 +298,7 @@ async def reserve_window_completion_in_session(
     window_id: uuid.UUID,
     ingest_id: uuid.UUID,
     visitor_target: VisitorCompletionTarget | None = None,
+    zone_mode: str = "shadow",
 ) -> None:
     event = await session.get(AccessEvent, event_id, with_for_update=True, populate_existing=True)
     if event is None:
@@ -337,6 +352,7 @@ async def reserve_window_completion_in_session(
         origin_at=window.min_received_at if valid and window is not None else None,
         window_id=window_id if window is not None else None,
         visitor_target=visitor_target,
+        zone_mode=zone_mode,
     )
 
 
@@ -346,6 +362,7 @@ async def reserve_external_completion_in_session(
     event_id: uuid.UUID,
     origin: ExternalCompletionOrigin,
     visitor_target: VisitorCompletionTarget | None = None,
+    zone_mode: str = "shadow",
 ) -> None:
     event = await session.get(AccessEvent, event_id, with_for_update=True, populate_existing=True)
     if event is None:
@@ -380,6 +397,7 @@ async def reserve_external_completion_in_session(
         origin_at=origin.observed_at,
         window_id=None,
         visitor_target=visitor_target,
+        zone_mode=zone_mode,
     )
 
 
@@ -397,7 +415,7 @@ class AccessCompletionStore:
         if available_slots == 0:
             return []
         while True:
-            async with self.session_factory() as session:
+            async with completion_session(self.session_factory) as session:
                 now = await database_now(session)
                 ids = list(
                     await session.scalars(
@@ -511,7 +529,7 @@ class AccessCompletionStore:
                 # continue to real ready work without retaining a large lock set.
 
     async def renew(self, claim: CompletionClaim) -> None:
-        async with self.session_factory() as session:
+        async with completion_session(self.session_factory) as session:
             work = await session.get(
                 AccessCompletionWork, claim.work_id, with_for_update=True, populate_existing=True
             )
@@ -527,18 +545,23 @@ class AccessCompletionStore:
             await session.commit()
 
     async def assert_owned(self, claim: CompletionClaim) -> float:
-        """Returns remaining operation budget; no open connection survives I/O."""
-        async with self.session_factory() as session:
+        """Returns a conservative absolute loop deadline, including close latency."""
+        async with completion_session(self.session_factory) as session:
             work = await session.get(
                 AccessCompletionWork, claim.work_id, with_for_update=True, populate_existing=True
             )
+            sampled = asyncio.get_running_loop().time()
             now = await database_now(session)
-            _check_claim(work, claim, now)
+            checked = _check_claim(work, claim, now)
+            if checked.lease_until is None:
+                raise PipelineLeaseLost("completion_lease_lost")
+            remaining_lease = (checked.lease_until - now).total_seconds()
             if claim.stage == "visitor_link":
-                return float(COMPLETION_LINK_TIMEOUT_SECONDS)
+                return sampled + min(float(COMPLETION_LINK_TIMEOUT_SECONDS), remaining_lease)
             if claim.deadline is None:
                 raise PipelineLeaseLost("completion_origin_changed")
-            return min(float(COMPLETION_TIMEOUT_SECONDS), (claim.deadline - now).total_seconds())
+            return sampled + min(float(COMPLETION_TIMEOUT_SECONDS), remaining_lease,
+                       (claim.deadline - now).total_seconds())
 
     async def retry(self, claim: CompletionClaim, *, delay_seconds: int = 1) -> None:
         if (
@@ -547,7 +570,7 @@ class AccessCompletionStore:
             or not 0 <= delay_seconds <= COMPLETION_TIMEOUT_SECONDS
         ):
             raise ValueError("Completion retry delay must stay bounded")
-        async with self.session_factory() as session:
+        async with completion_session(self.session_factory) as session:
             work = await session.get(
                 AccessCompletionWork, claim.work_id, with_for_update=True, populate_existing=True
             )

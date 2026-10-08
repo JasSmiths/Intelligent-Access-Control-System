@@ -6,6 +6,7 @@ here publishes, commits a participant session, or treats realtime as audit histo
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
 from app.models import AccessCompletionWork, AccessEvent, Anomaly
+from app.services.access.completion_database import completion_session
 from app.services.access.pipeline_contracts import PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
 from app.services.snapshots import access_event_snapshot_url, snapshot_path_available
@@ -280,7 +282,7 @@ class AccessPublicationStore:
         self.session_factory = session_factory
 
     async def claim(self) -> PublicationClaim | None:
-        async with self.session_factory() as session:
+        async with completion_session(self.session_factory) as session:
             now = await database_now(session)
             identities = list(
                 await session.scalars(
@@ -330,7 +332,7 @@ class AccessPublicationStore:
             return None
 
     async def renew(self, claim: PublicationClaim) -> None:
-        async with self.session_factory() as session:
+        async with completion_session(self.session_factory) as session:
             work = await session.get(
                 AccessCompletionWork, claim.work_id, with_for_update=True, populate_existing=True
             )
@@ -344,12 +346,21 @@ class AccessPublicationStore:
                 raise PipelineLeaseLost("publication_lease_lost")
             await session.commit()
 
-    async def assert_owned(self, claim: PublicationClaim) -> None:
-        async with self.session_factory() as session:
-            await _lock_claim(session, claim)
+    async def assert_owned(self, claim: PublicationClaim) -> float:
+        """Transport start is bounded by this lease, including session close."""
+        async with completion_session(self.session_factory) as session:
+            work = await session.get(
+                AccessCompletionWork, claim.work_id, with_for_update=True, populate_existing=True
+            )
+            sampled = asyncio.get_running_loop().time()
+            now = await database_now(session)
+            checked = _check_claim(work, claim, now)
+            if checked.lease_until is None:
+                raise PipelineLeaseLost("publication_lease_lost")
+            return sampled + (checked.lease_until - now).total_seconds()
 
     async def load_message(self, claim: PublicationClaim) -> PublicationMessage:
-        async with self.session_factory() as session:
+        async with completion_session(self.session_factory) as session:
             work = await _lock_claim(session, claim)
             published = _published_revision(work)
             payload = await _current_projection(session, claim.event_id)
@@ -384,7 +395,7 @@ class AccessPublicationStore:
     async def acknowledge(self, claim: PublicationClaim, revision: int) -> bool:
         if isinstance(revision, bool) or revision < 1:
             raise ValueError("Publication acknowledgement requires a positive loaded revision")
-        async with self.session_factory() as session:
+        async with completion_session(self.session_factory) as session:
             work = await _lock_claim(session, claim)
             if (
                 work.expected_revision is None
@@ -408,7 +419,7 @@ class AccessPublicationStore:
             return trailing
 
     async def retry(self, claim: PublicationClaim) -> None:
-        async with self.session_factory() as session:
+        async with completion_session(self.session_factory) as session:
             work = await _lock_claim(session, claim)
             work.state, work.due_at = "queued", await database_now(session) + timedelta(seconds=1)
             work.outcome = "transport_retry"

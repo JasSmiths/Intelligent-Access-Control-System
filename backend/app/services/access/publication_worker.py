@@ -12,8 +12,9 @@ from app.services.access.publication import (
     PUBLICATION_TIMEOUT_SECONDS,
     AccessPublicationStore,
     PublicationClaim,
+    PublicationMessage,
 )
-from app.services.realtime_contracts import PublicationTransport
+from app.services.realtime_contracts import PublicationTransport, RealtimePublishReceipt
 
 logger = get_logger(__name__)
 
@@ -30,9 +31,13 @@ class AccessPublicationLane:
         self._task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._stopping = False
+        self._cleanup: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self._task is None:
+            if self._cleanup is not None and not self._cleanup.done():
+                raise RuntimeError("publication_cleanup_in_progress")
+            self._cleanup = None
             self._stopping = False
             self._task = asyncio.create_task(self._run(), name="access-publication")
 
@@ -41,12 +46,15 @@ class AccessPublicationLane:
 
     async def stop(self) -> None:
         self._stopping = True
-        await drain_owned(self._stop_owned())
+        if self._cleanup is None:
+            self._cleanup = asyncio.create_task(self._stop_owned(), name="access-publication-stop")
+        await drain_owned(self._cleanup)
 
     async def _stop_owned(self) -> None:
         task = self._task
         if task is not None:
-            task.cancel()
+            if not task.done() and not task.cancelling():
+                task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             self._task = None
 
@@ -71,22 +79,32 @@ class AccessPublicationLane:
 
     async def deliver(self, claim: PublicationClaim) -> None:
         """One owned operation; IDs/claims only, no ORM state over transport I/O."""
+        child = asyncio.create_task(self._deliver_owned(claim), name="access-publication-delivery")
+        try:
+            await asyncio.shield(child)
+        finally:
+            if not child.done() and not child.cancelling():
+                child.cancel()
+            await drain_owned(asyncio.gather(child, return_exceptions=True))
+
+    async def _deliver_owned(self, claim: PublicationClaim) -> None:
         operation = asyncio.create_task(self._send(claim), name="access-publication-send")
         lost = asyncio.Event()
         renewal = asyncio.create_task(
             self._renew(claim, operation, lost), name="access-publication-renew"
         )
         try:
-            await operation
+            await asyncio.shield(operation)
         except asyncio.CancelledError:
             parent = asyncio.current_task()
             if lost.is_set() and (parent is None or not parent.cancelling()):
                 raise PipelineLeaseLost("publication_lease_lost") from None
             raise
         finally:
-            operation.cancel()
-            renewal.cancel()
-            await asyncio.gather(operation, renewal, return_exceptions=True)
+            for child in (operation, renewal):
+                if not child.done() and not child.cancelling():
+                    child.cancel()
+            await drain_owned(asyncio.gather(operation, renewal, return_exceptions=True))
 
     async def _renew(
         self, claim: PublicationClaim, operation: asyncio.Task[None], lost: asyncio.Event
@@ -100,14 +118,17 @@ class AccessPublicationLane:
             raise
         except Exception:  # noqa: BLE001 - losing DB ownership must cancel the admitted transport operation
             lost.set()
-            operation.cancel()
+            if not operation.done() and not operation.cancelling():
+                operation.cancel()
 
     async def _send(self, claim: PublicationClaim) -> None:
         try:
             message = await self.store.load_message(claim)
-            await self.store.assert_owned(claim)
-            async with asyncio.timeout(PUBLICATION_TIMEOUT_SECONDS):
-                receipt = await self.transport.publish(message.event_type, message.payload)
+            lease_deadline = await self.store.assert_owned(claim)
+            if asyncio.get_running_loop().time() >= lease_deadline:
+                raise PipelineLeaseLost("publication_lease_lost")
+            deadline = min(lease_deadline, asyncio.get_running_loop().time() + PUBLICATION_TIMEOUT_SECONDS)
+            receipt = await self._publish(message, deadline)
             if receipt.accepted:
                 await self.store.acknowledge(claim, message.revision)
             else:
@@ -118,3 +139,19 @@ class AccessPublicationLane:
             raise
         except Exception:  # noqa: BLE001 - transport/projection failures retain current facts for retry
             await self.store.retry(claim)
+
+    async def _publish(self, message: PublicationMessage, deadline: float) -> RealtimePublishReceipt:
+        """Keep transport cleanup outside its timer and retain its actual child."""
+        async def invoke() -> RealtimePublishReceipt:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("publication_start_deadline_expired")
+            return await self.transport.publish(message.event_type, message.payload)
+
+        child = asyncio.create_task(invoke(), name="access-publication-transport")
+        try:
+            async with asyncio.timeout_at(deadline):
+                return await asyncio.shield(child)
+        finally:
+            if not child.done() and not child.cancelling():
+                child.cancel()
+            await drain_owned(asyncio.gather(child, return_exceptions=True))

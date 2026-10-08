@@ -241,7 +241,7 @@ def worker_fixture(monkeypatch, owner, count=4):
 
     async def prepare(event_id, token, plate):
         now = datetime.now(UTC)
-        return InformationClaim(event_id, token, plate, None, now, now + timedelta(seconds=300)), 90
+        return InformationClaim(event_id, token, plate, None, now, now + timedelta(seconds=300)), asyncio.get_running_loop().time()+90
 
     async def execute(claim, _budget, _config):
         await owner.lookup(claim.registration_number, config=config())
@@ -535,8 +535,9 @@ def blocked_real_session(monkeypatch):
 @pytest.mark.parametrize("entry", ["lookup", "connection"])
 @pytest.mark.parametrize("phase", ["normal_exit", "cancelled_query"])
 async def test_real_settings_session_cleanup_keeps_admitted_receipt_and_shared_clients(monkeypatch, entry, phase):
-    from app.services import settings as setting_owner
     from test_vehicle_information import config as full_config
+
+    from app.services import settings as setting_owner
     owner = service()
     session, closing, release, settled = blocked_real_session(monkeypatch)
     querying = asyncio.Event()
@@ -627,7 +628,7 @@ async def test_main_lifespan_waits_real_database_close_before_disposal(owned_res
         async def prepare(event_id, token, plate):
             async with jobs._worker_session():
                 now = datetime.now(UTC)
-                return InformationClaim(event_id, token, plate, None, now, now+timedelta(seconds=300)), 90
+                return InformationClaim(event_id, token, plate, None, now, now+timedelta(seconds=300)), asyncio.get_running_loop().time()+90
         monkeypatch.setattr(worker, "_prepare", prepare)
     monkeypatch.setattr(main, "get_vehicle_information_worker", lambda: worker)
     monkeypatch.setattr(main, "vehicle_information_resources", SimpleNamespace(start=AsyncMock(), stop=owner.close))
@@ -645,3 +646,50 @@ async def test_main_lifespan_waits_real_database_close_before_disposal(owned_res
     await shutdown
     assert settled.is_set() and owner._closed and not worker._operations
     assert events[-1] == ("stop", "database")
+
+
+async def test_information_execution_cannot_start_after_preparation_close_consumes_deadline(monkeypatch):
+    worker = jobs.VehicleInformationWorker()
+    now = datetime.now(UTC)
+    claim = InformationClaim(uuid.uuid4(), uuid.uuid4(), "AB12CDE", None, now, now+timedelta(seconds=300))
+    provider = AsyncMock()
+    monkeypatch.setattr(jobs, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=provider))
+    with pytest.raises(TimeoutError):
+        await worker._execute(claim, asyncio.get_running_loop().time()-.01, config())
+    provider.assert_not_awaited()
+
+
+async def test_lookup_child_delayed_past_original_start_deadline_never_starts_providers(monkeypatch):
+    import time
+    owner = service()
+    provider = AsyncMock()
+    monkeypatch.setattr(owner, "_provider", provider)
+    original = asyncio.create_task
+    def delayed(coroutine, **kwargs):
+        task = original(coroutine, **kwargs)
+        time.sleep(.02)
+        return task
+    monkeypatch.setattr(asyncio, "create_task", delayed)
+    with pytest.raises(TimeoutError):
+        await owner.lookup("AB12CDE", config=config(), not_after=asyncio.get_running_loop().time()+.01)
+    provider.assert_not_awaited()
+    assert not owner._calls
+    await owner.close()
+
+
+async def test_information_preparation_cannot_renew_original_outer_operation_budget(monkeypatch):
+    import time
+    monkeypatch.setattr(jobs, "INFORMATION_TIMEOUT_SECONDS", .01)
+    worker = jobs.VehicleInformationWorker()
+    now = datetime.now(UTC)
+    claim = InformationClaim(uuid.uuid4(), uuid.uuid4(), "AB12CDE", None, now, now+timedelta(seconds=300))
+    async def prepare(*args):
+        time.sleep(.03)
+        return claim, asyncio.get_running_loop().time()+90
+    lookup = AsyncMock()
+    monkeypatch.setattr(jobs, "get_runtime_config", AsyncMock(return_value=config()))
+    monkeypatch.setattr(worker, "_prepare", prepare)
+    monkeypatch.setattr(worker, "_fail", AsyncMock())
+    monkeypatch.setattr(jobs, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=lookup))
+    await worker._process(claim.event_id, claim.token, claim.registration_number)
+    lookup.assert_not_awaited()
