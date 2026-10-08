@@ -11,6 +11,7 @@ from fastapi import WebSocket
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.services.realtime_contracts import RealtimePublishReceipt
 
 logger = get_logger(__name__)
 
@@ -211,30 +212,41 @@ class EventBus:
             "stream_maxlen": self._stream_maxlen if self._redis_enabled else None,
         }
 
-    async def publish(self, event_type: str, payload: dict[str, Any]) -> None:
+    async def publish(self, event_type: str, payload: dict[str, Any]) -> RealtimePublishReceipt:
         event = RealtimeEvent(
             type=event_type,
             payload=payload,
             created_at=datetime.now(tz=UTC).isoformat(),
         )
         await self._dispatch(event, listener_scopes={"local", "all_workers"})
-        if self._started and self._redis_enabled:
-            await self._publish_to_redis(event)
+        # Existing observational callers may ignore the receipt. Durable owners
+        # must inspect it: local delivery is never configured-Redis acceptance.
+        transport: Literal["redis_stream", "in_process"] = (
+            "redis_stream" if self._redis_enabled else "in_process"
+        )
+        if not self._started:
+            return RealtimePublishReceipt(transport, False, reason="bus_closed")
+        if self._redis_enabled:
+            return await self._publish_to_redis(event)
+        return RealtimePublishReceipt("in_process", True)
 
-    async def _publish_to_redis(self, event: RealtimeEvent) -> None:
+    async def _publish_to_redis(self, event: RealtimeEvent) -> RealtimePublishReceipt:
         redis = await self._ensure_redis()
         if redis is None:
-            return
+            return RealtimePublishReceipt("redis_stream", False, reason="redis_unavailable")
         try:
-            await redis.xadd(
+            stream_id = await redis.xadd(
                 self._stream_key,
                 {"event": _event_json(event), "origin": self._origin_id},
                 maxlen=self._stream_maxlen,
                 approximate=True,
             )
+            if not isinstance(stream_id, str) or not stream_id:
+                raise ValueError("Redis XADD returned no stream identity")
             self._redis_events_published += 1
             self._redis_connected = True
             self._redis_last_publish_error = None
+            return RealtimePublishReceipt("redis_stream", True, stream_id=stream_id)
         except Exception as exc:  # noqa: BLE001 - Transport failures must preserve reconnection and client isolation.
             self._redis_publish_failures += 1
             self._redis_connected = False
@@ -244,6 +256,7 @@ class EventBus:
                 extra={"event_type": event.type, "error": str(exc)},
             )
             await self._close_redis()
+            return RealtimePublishReceipt("redis_stream", False, reason="redis_rejected")
 
     async def _ensure_redis(self) -> redis_asyncio.Redis | None:
         if not self._redis_enabled or not self._redis_url:
@@ -348,7 +361,9 @@ class EventBus:
                 )
 
         for listener in listeners:
-            task = asyncio.create_task(listener(event), name=f"event-bus-listener:{event.type}")
+            task = asyncio.create_task(
+                _invoke_listener(listener, event), name=f"event-bus-listener:{event.type}"
+            )
             self._listener_tasks.add(task)
             task.add_done_callback(self._listener_tasks.discard)
             task.add_done_callback(_log_listener_error)
@@ -373,6 +388,10 @@ class EventBus:
                     extra={"error": str(exc)},
                 )
                 return
+
+
+async def _invoke_listener(listener: EventListener, event: RealtimeEvent) -> None:
+    await listener(event)
 
 
 def _log_listener_error(task: asyncio.Future) -> None:

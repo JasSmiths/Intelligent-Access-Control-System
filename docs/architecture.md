@@ -73,6 +73,17 @@ enrichment-owned fields into freshly loaded records so an older object cannot
 overwrite newer access or vehicle state. Realtime publication helps the console
 refresh; durable records and audit remain the evidence of what happened.
 
+The P6 publication owner is being introduced separately from the active access
+runtime. Its [store](../backend/app/services/access/publication.py) reserves a
+current compact projection in the caller's transaction; its independent
+[lane](../backend/app/services/access/publication_worker.py) sends one loaded
+revision and retains a trailing revision if the event changes during delivery.
+The shared [transport receipt](../backend/app/services/realtime_contracts.py)
+reports Redis stream acceptance or explicit in-process acceptance, never browser
+receipt or local business completion. Committed-fact delivery has no optional
+five-minute expiry. Runtime replacement and the matching frontend update behavior
+remain part of the incomplete P6 stage.
+
 ## Other application flows
 
 People, groups, vehicles, schedules, and visitor passes provide identity and access

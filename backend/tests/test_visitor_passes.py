@@ -1,3 +1,4 @@
+from app.services.realtime_contracts import RealtimePublishReceipt
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, cast
@@ -82,8 +83,9 @@ async def test_visitor_pass_status_changed_domain_event_preserves_payload_shape(
     published: list[tuple[str, dict]] = []
 
     class FakeBus:
-        async def publish(self, event_type: str, payload: dict) -> None:
+        async def publish(self, event_type: str, payload: dict) -> RealtimePublishReceipt:
             published.append((event_type, payload))
+            return RealtimePublishReceipt("in_process",True)
 
     visitor_payload = {"id": "pass-1", "status": "expired", "visitor_name": "Sarah"}
 

@@ -55,14 +55,19 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   run; every other full-gate check passed. All 727 committed source hashes equal
   the approved candidate, with clean source/cleanup and unchanged operational state.
   Retention dispositions were accepted; E4 integrated conformance remains pending.
-- Current integrated checkpoint: `5e41e2ea8c15c7c2ae517e7a9cd5870b948db04e`
+- Current integrated checkpoint: `ef1647b23289ede8daf174e9d4e54e272dac6327`
   includes approved P3, P4 frontend and P5, plus the separately approved P6
   foundation (`876deec32b2da8559585c5333964af211f3d2308`) and immutable intake
   (`f9e1dba7d043bed9d378de6205a05cbb8c047856`) owner checkpoints. The integration
   preserves all 259 approved frontend files and 501 nonfrontend/nondocs intake
   sources; `p4-intake-integration-mapping.json` and its Astra approval retain the
-  exact source mapping. P6 remains incomplete: the new window/evidence store is
-  awaiting owner review, and the RAM/runtime handoff, completion, HA, historical,
+  exact source mapping. The durable window/evidence store is separately approved
+  and committed at the current checkpoint, with source
+  `d143653c85797e1fb9ac5fef026a8a94ed8a3620b117b8d7fed2207e9e77a4a0` and patch
+  `cbf55317abb1826f1fb63c98286553def95f154a3d1e48f276f3f2028b872c96`.
+  Its receipt is `p6-window-astra-approval.json`; archive equivalence is retained in
+  `p6-window-commit-equivalence.json`. P6 remains incomplete: the RAM/runtime
+  handoff, completion, HA, historical,
   chart, lifecycle and final integrated validation remain required.
   The brief initial shared-checkout editing period was separated before the first
   validation checkpoint; integration remains sequential and separately reviewed.
@@ -276,8 +281,9 @@ a newly created reverse-time marker remains valid until a later applicable prune
 No global capture-time watermark is used. The source-backed reverse-time,
 cross-source, endpoint, restart and exemption fixtures belong to
 `scripts/validation/test_access_window_persistence.py`. Design amendment receipts
-remain separate from the preserved original design/audit; the new store's approval
-and final integrated runtime evidence are still pending.
+remain separate from the preserved original design/audit. Astra approved the exact
+window-store checkpoint recorded above; final integrated runtime evidence remains
+pending.
 
 Window implementation also exposed an unproven 512-character token limit that
 valid provider extras and OCR candidates do not satisfy. The approved amendment
@@ -376,3 +382,34 @@ historical names/checksums/redaction preserve audit interpretation; the prototyp
 screenshots and V2 privacy workflow are separate retained evidence/processes.
 Astra accepted these explicit retention decisions in the exact P5 review; they
 are not claims of deletion or completed final integrated conformance.
+
+
+## P6 publication owner candidate
+
+The independent committed-facts lane uses the same completion-work table, one
+owned processing slot and a compact current-event projection. Event creation,
+public revision increments and dirty publication reservation share the caller's
+transaction. A leased publication acknowledges only its loaded revision; a newer
+committed revision retains one trailing current projection. Publication recovery
+has no enrichment deadline: it delivers durable committed facts without renewing
+any optional or hardware authority. The old RAM access runtime is not switched by
+this owner checkpoint, and full P6 integration remains pending.
+
+The canonical frozen EventBus receipt distinguishes configured transport from
+transport acceptance. A successful Redis XADD includes its stream ID; configured
+Redis failure or a closed bus is non-acceptance. Explicitly disabled Redis can
+accept in-process publication. This receipt does not prove a browser observed the
+message or a local business handler completed. Existing observational wrappers
+may deliberately ignore it; the durable lane checks it before acknowledgement.
+The transport fixture permits only the disposable PostgreSQL/Redis loopback pair
+inside the already validated namespace and rejects HTTP and other destinations.
+The port-1 case is a guard-injected configured-transport failure, not an observed
+TCP refusal. Separate real-Redis fixtures prove stream acceptance, current-state
+restart recovery, and XADD rejection followed by repair without origin refresh.
+
+Unit and PostgreSQL owner fixtures cover caller commit/rollback, current revision
+coalescing, stale claim/lease fences after blocked locks, clean final flush,
+metadata-only claim pages, cancellation rollback, actual send/renewal settlement
+and one active send. Runtime composition, frontend update predicates/revision
+handling, provider shutdown order and the complete integrated harness remain
+required before P6 approval.

@@ -267,3 +267,38 @@ async def _wait_until(predicate, *, timeout: float = 1.0) -> None:
             return
         await asyncio.sleep(0.01)
     assert predicate()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure',[None,'ping','xadd'])
+async def test_publish_receipt_distinguishes_configured_transport_acceptance(failure):
+    server=FakeRedisStreamServer()
+    bus=EventBus(redis_url='redis://test',redis_client_factory=lambda url:FakeRedisClient(server,
+        fail_ping=failure=='ping',fail_xadd=failure=='xadd'),stream_key='test:receipt')
+    try:
+        await bus.start()
+        receipt=await bus.publish('access_event.finalized',{'event_id':'event','resource_revision':1})
+        assert receipt.transport=='redis_stream'
+        assert receipt.accepted is (failure is None)
+        assert bool(receipt.stream_id) is (failure is None)
+        assert receipt.reason==({'ping':'redis_unavailable','xadd':'redis_rejected'}.get(failure))
+    finally:await bus.stop()
+    closed=await bus.publish('access_event.updated',{'event_id':'event','resource_revision':2})
+    assert not closed.accepted and closed.reason=='bus_closed'
+
+
+@pytest.mark.asyncio
+async def test_disabled_redis_acceptance_is_explicit_in_process_only_while_started():
+    bus=EventBus(enable_redis=False)
+    assert not (await bus.publish('test',{})).accepted
+    await bus.start()
+    receipt=await bus.publish('test',{})
+    assert receipt.transport=='in_process' and receipt.accepted and receipt.stream_id is None
+    await bus.stop()
+    assert not (await bus.publish('test',{})).accepted
+
+
+def test_transport_receipt_cannot_claim_redis_acceptance_without_stream_identity():
+    from app.services.realtime_contracts import RealtimePublishReceipt
+    with pytest.raises(ValueError):RealtimePublishReceipt('redis_stream',True)
+    with pytest.raises(ValueError):RealtimePublishReceipt('in_process',True,stream_id='1-0')
