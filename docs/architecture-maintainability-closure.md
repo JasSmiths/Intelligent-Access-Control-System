@@ -513,3 +513,47 @@ retain the closed-gate domain no-command guard, and add forged raw-tag denial.
 The original failures remain retained. No runtime compatibility bypass is added,
 and the programme receives these exact corrected fixtures only through the
 approved report integration mapping.
+
+
+## P6 accepted-result/applicator candidate
+
+The next partial owner implements compact accepted visual/information identities,
+Saga-first canonical visitor hydration and explicit never-owned/owned/protected
+field state. Its exact design v2 was approved by Astra at
+`9a8e58bd7ebb7c84d26523c067f5e6a9181a89c8ebc058a25448aad27f718321`
+on clean report/completion integration `5d735fbe558984e2cbd869e47d8e2796eecf66b6`.
+The previous partial repository commit is `d079bb04a12d927084acee9b2f4d013ddfe2e2f4`;
+its source and archive receipt remain retained independently. No whole P6 or final
+programme approval follows from these bounded owner approvals.
+
+The initial exact candidate passed 94 PostgreSQL cases (35 result/link, 38 completion,
+nine foundation and 12 whole-information), checked/strict types 82/65, 46 affected
+units, host 22/29 and clean migration/source/cleanup/operational checks. JUnit is the
+count authority; earlier receipt prose incorrectly split result/information as 36/11
+while retaining the correct total 94. The predecessor passed 77 cases before compact
+preparers and additional contention fixtures. The initial unit setup command named a
+nonexistent file; no tests ran, and the corrected actual selection passed 46. Those
+results and exact snapshots remain retained.
+
+Final review found malformed retained verification-state/visitor UUID/readiness
+cases that could raise instead of holding. Narrow guards and ten negative fixtures
+supersede the 94-case source. The complete corrected result suite passed 45 cases at
+`p6-result-guard-persistence/iacs-validation-ym6tkxca`, with migration parity,
+F821, source integrity, cleanup and operational equality clean. Exact corrected
+checked/strict types 82/65 and host 22/29 also pass. Unchanged schema, completion,
+foundation and information owner bytes map the other 59 PostgreSQL cases from the
+94-case run; this is carried evidence, not a new combined 104-case invocation.
+The final closure paragraph is a separately mapped documentation-only follow-up.
+Evidence remains under `/private/tmp/iacs-maintainability-programme/p6-result-*`;
+this bounded candidate awaits exact Astra review, and worker/core/full-P6 obligations
+below remain open.
+
+The information result path now retires Job-to-Event locking and inline visitor
+mutation together. The current postcommit enqueue bridge derives original receipt
+from persisted linked ingests; missing/inconsistent provenance holds and replay does
+not refresh authority. This transition gap must disappear when core reservation is
+wired atomically. Fresh database-time claim/failure fences, remaining-lease budget,
+actual slot/renewal/cancellation ownership and shutdown in the still-old information
+worker shell remain explicit runtime obligations. Old RAM optional enrichment also
+remains pending, along with HA/historical/chart owners, frontend revisions, complete
+runtime performance/lifecycle evidence and the full integrated harness.

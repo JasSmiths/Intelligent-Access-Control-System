@@ -16,7 +16,7 @@ from sqlalchemy import delete, event as sql_event, func, insert, select, text
 
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal, engine
-from app.models import AccessEvent, GateCommandRecord, NotificationRun, Vehicle, VehicleInformationJob, VehicleInformationSnapshot
+from app.models import AccessEvent, AccessCompletionWork, GateCommandRecord, LprIngestEvent, MovementSagaRecord, NotificationRun, Vehicle, VehicleInformationJob, VehicleInformationSnapshot
 from app.models.enums import AccessDecision, AccessDirection
 from app.services import vehicle_information_jobs as jobs
 from app.services.directory.reads import list_vehicles
@@ -47,10 +47,20 @@ async def records():
     event = AccessEvent(id=uuid.uuid4(), registration_number=plate, vehicle_id=vehicle.id, direction=AccessDirection.ENTRY,
         decision=AccessDecision.GRANTED, confidence=.99, source="synthetic", occurred_at=datetime.now(UTC), raw_payload={"retained":True})
     async with AsyncSessionLocal() as session:
-        session.add(vehicle); await session.flush(); session.add(event); await session.commit()
+        session.add(vehicle); await session.flush(); session.add(event); await session.flush()
+        saga = MovementSagaRecord(id=uuid.uuid4(), idempotency_key=str(uuid.uuid4()), source="synthetic", access_event_id=event.id,
+            registration_number=event.registration_number, occurred_at=event.occurred_at)
+        session.add(saga); await session.flush()
+        ingest = LprIngestEvent(id=uuid.uuid4(), idempotency_key=str(uuid.uuid4()), source="synthetic",
+            registration_number=event.registration_number, captured_at=event.occurred_at, received_at=event.occurred_at,
+            status="succeeded", access_event_id=event.id, movement_saga_id=saga.id, normalized_payload={})
+        session.add(ingest); await session.commit()
     yield vehicle, event
     async with AsyncSessionLocal() as session:
         await session.execute(delete(NotificationRun).where(NotificationRun.id.in_([uuid.uuid5(event.id, name) for name in ("expired_mot_detected","expired_tax_detected")])))
+        await session.execute(delete(AccessCompletionWork).where(AccessCompletionWork.event_id == event.id))
+        await session.execute(delete(LprIngestEvent).where(LprIngestEvent.access_event_id == event.id))
+        await session.execute(delete(MovementSagaRecord).where(MovementSagaRecord.access_event_id == event.id))
         await session.execute(delete(AccessEvent).where(AccessEvent.id == event.id))
         await session.execute(delete(Vehicle).where(Vehicle.id == vehicle.id))
         await session.commit()

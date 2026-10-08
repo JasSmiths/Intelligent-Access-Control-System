@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,4 +32,7 @@ class VehicleInformationJob(Base):
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     outcome: Mapped[str | None] = mapped_column(String(40))
+    accepted_result_revision: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    accepted_result_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     __table_args__ = (Index("ix_vehicle_information_jobs_ready", "status", "created_at", "event_id"),)

@@ -29,6 +29,7 @@ from app.services.access.completion_contracts import (
     CompletionStage,
     ExternalCompletionOrigin,
     RetainedResultReference,
+    VisitorCompletionTarget,
 )
 from app.services.access.pipeline_contracts import CompletionClaim, PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
@@ -221,6 +222,7 @@ async def _reserve(
     origin: dict[str, Any],
     origin_at: datetime | None,
     window_id: uuid.UUID | None,
+    visitor_target: VisitorCompletionTarget | None = None,
 ) -> None:
     now = await database_now(session)
     visitor = (event.raw_payload or {}).get("visitor_pass")
@@ -240,6 +242,13 @@ async def _reserve(
             readiness = "canonical_arrival_and_result" if waiting else "no_arrival_target"
             outcome = None if waiting else "no_arrival_target"
             result = {"visitor_id": visitor_id, "requested": {}, "applied": {}} if waiting else {}
+            if waiting and visitor_target is not None:
+                if str(visitor_target.visitor_id) != visitor_id:
+                    raise ValueError("Frozen visitor target differs from event annotation")
+                result["fields"] = {
+                    "make": {"state": "never_owned", "baseline": visitor_target.make},
+                    "colour": {"state": "never_owned", "baseline": visitor_target.colour},
+                }
         await session.execute(
             insert(AccessCompletionWork)
             .values(
@@ -269,7 +278,12 @@ async def _reserve(
 
 
 async def reserve_window_completion_in_session(
-    session: AsyncSession, *, event_id: uuid.UUID, window_id: uuid.UUID, ingest_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    event_id: uuid.UUID,
+    window_id: uuid.UUID,
+    ingest_id: uuid.UUID,
+    visitor_target: VisitorCompletionTarget | None = None,
 ) -> None:
     event = await session.get(AccessEvent, event_id, with_for_update=True, populate_existing=True)
     if event is None:
@@ -322,11 +336,16 @@ async def reserve_window_completion_in_session(
         origin=origin,
         origin_at=window.min_received_at if valid and window is not None else None,
         window_id=window_id if window is not None else None,
+        visitor_target=visitor_target,
     )
 
 
 async def reserve_external_completion_in_session(
-    session: AsyncSession, *, event_id: uuid.UUID, origin: ExternalCompletionOrigin
+    session: AsyncSession,
+    *,
+    event_id: uuid.UUID,
+    origin: ExternalCompletionOrigin,
+    visitor_target: VisitorCompletionTarget | None = None,
 ) -> None:
     event = await session.get(AccessEvent, event_id, with_for_update=True, populate_existing=True)
     if event is None:
@@ -360,6 +379,7 @@ async def reserve_external_completion_in_session(
         },
         origin_at=origin.observed_at,
         window_id=None,
+        visitor_target=visitor_target,
     )
 
 

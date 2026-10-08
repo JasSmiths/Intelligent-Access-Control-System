@@ -416,3 +416,50 @@ checks prevent late refreshes overwriting a changed plate or newer data. Existin
 models are preserved; DVSA fills blanks. Editor request cancellation and individual
 field edits remain owned by the directory feature. Source and freshness travel
 with summaries; raw provider responses never become API or audit data.
+
+
+### Accepted optional results and visitor arrival hydration
+
+The [accepted-result participant](../backend/app/services/access/completion_results.py)
+keeps a visual receipt on its existing completion row and the latest make/colour
+receipt on the existing per-event information job. Information acceptance advances
+a result revision independently of the public event revision. Accepted projection,
+event enrichment, link request and publication dirtiness share the caller commit;
+original token, receipt and deadline are checked again after all writes flush.
+Preparers lock only current identity columns before closing the transaction for
+I/O. A result first accepted after the original receipt plus five minutes is refused.
+Later retry, failure or expiry preserves an earlier accepted information projection.
+
+The [provider-free linker](../backend/app/services/access/visitor_link.py) locks the
+exact canonical Saga before Event, then Visitor, consumed reservation, visual
+receipt, information job and link checkpoint. It verifies retained result identities,
+verified consumed intent, current arrival and exact plate; it does not require an
+ACTIVE pass or a still-open admission window. A result accepted on time may hydrate
+a USED arrival verified later. Missing or ambiguous canonical saga, changed target
+or missing frozen field baseline holds the link rather than guessing authority.
+The caller supplies that typed baseline under its existing Visitor lock.
+
+Per-field state is never-owned, owned with its last written value, or protected
+following an observed distinct replacement/clear. Baseline equality is considered
+only before the first owner write. An empty baseline filled Blue, explicitly cleared,
+then offered Green stays empty. A protected field cannot reacquire ownership merely
+because it later equals the initial baseline. Information colour precedes visual
+fallback; absent source values never clear a field. The current Visitor API has no
+direct make/colour setter; the supported plate-update path is also fenced by exact
+plate identity. Unobservable same-value write intent is not claimed as detectable.
+Mutation, required arrival-enriched audit and per-kind applied receipt are atomic.
+
+The origin revision fences the immutable completion contract. A leased linker reads
+the latest coherent requested result set under Event; an acceptance waiting behind
+that lock creates at most one trailing request after commit. It never changes the
+origin revision to represent a later result version.
+
+This partial P6 checkpoint retires the information result path's inverse Job-to-Event
+lock order and inline visitor mutation. Current enqueue still commits afterward:
+it calls the one participant reservation using the minimum genuinely linked ingest
+receipt with consistent event/saga/plate provenance. Missing provenance is held;
+replay cannot renew a deadline, and already expired original work stays expired.
+Final core wiring must reserve the job in the decision transaction instead. The old
+information claim/failure/renewal/slot/shutdown shell and old RAM optional access
+runtime are not approved by this applicator checkpoint; their bounded lifetime,
+fresh database-time fences and composition remain required P6 work.

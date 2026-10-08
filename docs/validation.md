@@ -428,3 +428,25 @@ frontend revisions or composed lifecycle behavior. Those remain required P6
 runtime/applicator gates. Retain failed setup/progress runs and exact source
 mappings when correcting a fixture; never describe replacement output as the
 original run.
+
+
+The [accepted-result PostgreSQL suite](../scripts/validation/test_access_result_persistence.py)
+checks actual compact visual/information receipts, late USED/closed-window arrival
+hydration, rejected late acceptance, immutable origins, canonical saga/reservation
+proof, partial-to-final coherence and field ownership through replacements/clears.
+It exercises required-audit rollback, actual blocked-lock lease/deadline expiry,
+cancellation rollback and no duplicate enrichment audit. Fat event/vehicle fixtures
+assert preparers select identity columns without raw evidence/photo columns; this is
+a SQL selection proof, not an RSS or throughput benchmark. Controlled test clock
+advancement separates T+4-minute acceptance from T+6-minute linking without renewing
+provider or hardware authority. Other expiry fixtures cross actual PostgreSQL time
+while blocked on a lock. Linkers have no provider capability. The temporary enqueue
+bridge is tested with multiple durable receipts, missing provenance, replay and an
+already exhausted original budget. Runtime worker lifecycle, atomic core reservation,
+complete integrated P6 harness and burst/open-window performance remain separate gates.
+
+Malformed retained verification states, visitor UUIDs and result-readiness envelopes
+must become named durable holds. Their negative fixtures verify accepted source
+results remain retained and no SQL conversion or exception/requeue loop substitutes
+for the hold. Earlier passing snapshots remain evidence of their exact source;
+corrected-source results are mapped explicitly.

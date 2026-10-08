@@ -84,6 +84,8 @@ TYPE_OWNERS = (
         ('publication_worker.py', 'strict'),
         ('completion_contracts.py', 'strict'),
         ('completion_store.py', 'strict'),
+        ('completion_results.py', 'strict'),
+        ('visitor_link.py', 'strict'),
         ('__init__.py', 'legacy'),
         ('authorization.py', 'legacy'),
         ('delivery.py', 'legacy'),

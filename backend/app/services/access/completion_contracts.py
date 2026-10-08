@@ -63,3 +63,18 @@ class RetainedResultReference:
             raise ValueError("Retained result revision must be positive")
         if not isinstance(self.accepted_at, datetime) or self.accepted_at.tzinfo is None:
             raise ValueError("Retained result acceptance requires an aware original timestamp")
+
+
+@dataclass(frozen=True)
+class VisitorCompletionTarget:
+    """Frozen under the core owner's Visitor lock; never rebuilt from later fields."""
+
+    visitor_id: uuid.UUID
+    make: str | None
+    colour: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.visitor_id, uuid.UUID) or any(
+            value is not None and not isinstance(value, str) for value in (self.make, self.colour)
+        ):
+            raise ValueError("Visitor completion target requires exact identity and field baseline")

@@ -395,6 +395,9 @@ def upgrade() -> None:
         "vehicle_information_jobs",
         sa.Column("readiness", sa.String(40), server_default="legacy", nullable=False),
     )
+    op.add_column("vehicle_information_jobs", sa.Column("accepted_result_revision", sa.BigInteger(), server_default="0", nullable=False))
+    op.add_column("vehicle_information_jobs", sa.Column("accepted_result_at", sa.DateTime(timezone=True), nullable=True))
+    op.add_column("vehicle_information_jobs", sa.Column("accepted_result", postgresql.JSONB(none_as_null=True), nullable=True))
     # Original payload/timestamps remain byte-identical. Lost RAM order and missing
     # first observation cannot be reconstructed or silently refreshed.
     op.execute(
@@ -415,13 +418,16 @@ def downgrade() -> None:
     connection = op.get_bind()
     if connection.scalar(
         sa.text(
-            "SELECT EXISTS (SELECT 1 FROM lpr_debounce_windows) OR EXISTS (SELECT 1 FROM lpr_window_members) OR EXISTS (SELECT 1 FROM lpr_observation_tokens) OR EXISTS (SELECT 1 FROM movement_session_observations) OR EXISTS (SELECT 1 FROM lpr_coordinator_state) OR EXISTS (SELECT 1 FROM access_completion_work) OR EXISTS (SELECT 1 FROM ha_presence_desired) OR EXISTS (SELECT 1 FROM ha_presence_targets) OR EXISTS (SELECT 1 FROM ha_presence_effects) OR EXISTS (SELECT 1 FROM ha_presence_effect_resolutions) OR EXISTS (SELECT 1 FROM ha_presence_coordinator) OR EXISTS (SELECT 1 FROM access_chart_dirty_state) OR EXISTS (SELECT 1 FROM historical_access_candidates) OR EXISTS (SELECT 1 FROM lpr_ingest_events WHERE observation_state <> 'legacy_terminal' OR original_observation IS NOT NULL OR ready_ordinal IS NOT NULL OR capture_token IS NOT NULL OR capture_until IS NOT NULL OR observation_completed_at IS NOT NULL OR lease_token IS NOT NULL OR lease_until IS NOT NULL OR window_id IS NOT NULL OR terminal_reason IS NOT NULL) OR EXISTS (SELECT 1 FROM vehicle_information_jobs WHERE origin_at IS NOT NULL OR readiness <> 'legacy') OR EXISTS (SELECT 1 FROM access_events WHERE resource_revision <> 0)"
+            "SELECT EXISTS (SELECT 1 FROM lpr_debounce_windows) OR EXISTS (SELECT 1 FROM lpr_window_members) OR EXISTS (SELECT 1 FROM lpr_observation_tokens) OR EXISTS (SELECT 1 FROM movement_session_observations) OR EXISTS (SELECT 1 FROM lpr_coordinator_state) OR EXISTS (SELECT 1 FROM access_completion_work) OR EXISTS (SELECT 1 FROM ha_presence_desired) OR EXISTS (SELECT 1 FROM ha_presence_targets) OR EXISTS (SELECT 1 FROM ha_presence_effects) OR EXISTS (SELECT 1 FROM ha_presence_effect_resolutions) OR EXISTS (SELECT 1 FROM ha_presence_coordinator) OR EXISTS (SELECT 1 FROM access_chart_dirty_state) OR EXISTS (SELECT 1 FROM historical_access_candidates) OR EXISTS (SELECT 1 FROM lpr_ingest_events WHERE observation_state <> 'legacy_terminal' OR original_observation IS NOT NULL OR ready_ordinal IS NOT NULL OR capture_token IS NOT NULL OR capture_until IS NOT NULL OR observation_completed_at IS NOT NULL OR lease_token IS NOT NULL OR lease_until IS NOT NULL OR window_id IS NOT NULL OR terminal_reason IS NOT NULL) OR EXISTS (SELECT 1 FROM vehicle_information_jobs WHERE origin_at IS NOT NULL OR readiness <> 'legacy' OR accepted_result_revision <> 0 OR accepted_result_at IS NOT NULL OR accepted_result IS NOT NULL) OR EXISTS (SELECT 1 FROM access_events WHERE resource_revision <> 0)"
         )
     ):
         raise RuntimeError(
             "Populated access pipeline requires a verified matching backup/source restore"
         )
     op.execute("DROP SEQUENCE lpr_ready_ordinal_seq")
+    op.drop_column("vehicle_information_jobs", "accepted_result")
+    op.drop_column("vehicle_information_jobs", "accepted_result_at")
+    op.drop_column("vehicle_information_jobs", "accepted_result_revision")
     op.drop_column("vehicle_information_jobs", "readiness")
     op.drop_column("vehicle_information_jobs", "origin_at")
     op.drop_constraint("fk_lpr_ingest_window", "lpr_ingest_events", type_="foreignkey")
