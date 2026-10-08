@@ -144,7 +144,7 @@ export function ICloudCalendarEditor(props: ProviderEditorProps) {
     } catch (error) { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "Unable to remove account", detail: error instanceof Error ? error.message : "Unable to remove that iCloud Calendar account." }); }
     finally { finish(); }
   };
-  return <EditorDialog title={props.definition.title} description={props.definition.description} dirty={dirty} busy={busy} onClose={props.onClose} onGuardChange={props.onGuardChange}>
+  return <EditorDialog className="icloud-calendar-modal" title={props.definition.title} description={props.definition.description} dirty={dirty} busy={busy} onClose={props.onClose} onGuardChange={props.onGuardChange}>
     {({ requestClose }) => <>
     <div className="icloud-calendar-panel">
       <section className="icloud-overview">

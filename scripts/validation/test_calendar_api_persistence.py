@@ -1,5 +1,5 @@
 """Actual ASGI routes/middleware and operator removal around inert SDK work."""
-from test_recovery_boundaries import isolated_resources as isolated_resources
+from test_recovery_boundaries import Trace, isolated_resources as isolated_resources
 from test_calendar_sync_store_persistence import calendar_resources as calendar_resources
 from test_calendar_sync_store_persistence import allowed, setup_accounts, work
 from test_calendar_authentication_persistence import InertAuthClient
@@ -26,9 +26,21 @@ from app.services.calendar_accounts import CalendarAccountStore
 from app.services.calendar_request_authority import CalendarConfirmedAuthority, CalendarRequestAuthority
 from app.services.calendar_sync_store import CalendarSyncStore
 from app.services.icloud_calendar import ICloudCalendarService
+from app.services.telemetry import telemetry
 
 pytestmark = pytest.mark.asyncio
 PREFIX = "/api/v1/integrations/icloud-calendar"
+
+
+@pytest.fixture(autouse=True)
+def api_telemetry_port(isolated_resources, monkeypatch):
+    # The shared recovery fixture is domain-only; actual HTTP middleware also
+    # owns a request span. Keep telemetry inert without bypassing that middleware.
+    class ApiTrace(Trace):
+        def start_span(self, *args, **kwargs):
+            return Trace()
+
+    monkeypatch.setattr(telemetry, "start_trace", lambda *args, **kwargs: ApiTrace())
 
 
 def token(actor):
