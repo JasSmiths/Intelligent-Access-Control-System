@@ -82,7 +82,10 @@ async def test_crash_after_receipt_recovers_truthful_garage_outputs_once(state, 
         assert audit.action == "garage_door.open.automatic" and audit.outcome == delivery
         assert audit.metadata_["origin_resolution"] == "retained_event"
         assert audit.metadata_["command_id"] == str(row.id)
-        assert await session.scalar(select(func.count()).select_from(AuditLog)) == 1
+        journal_audit = await session.get(AuditLog, uuid.uuid5(row.id, f"device-command-outcome:{row.state}"))
+        assert journal_audit is not None and journal_audit.target_id == row.device_key
+        assert await session.scalar(select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "garage_door.open.automatic")) == 1
         notices = list((await session.scalars(select(NotificationRun))).all())
         assert len(notices) == int(notice)
         if notice:
@@ -105,7 +108,8 @@ async def test_concurrent_inline_completion_and_recovery_capture_one_output():
     results = await asyncio.wait_for(asyncio.gather(inline(), recover_garage_outcome_outputs()), 8)
     assert sum(results) == 1
     async with AsyncSessionLocal() as session:
-        assert await session.scalar(select(func.count()).select_from(AuditLog)) == 1
+        assert await session.scalar(select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "garage_door.open.automatic")) == 1
         assert await session.scalar(select(func.count()).select_from(NotificationRun)) == 1
 
 
@@ -120,8 +124,12 @@ async def test_failed_notification_reservation_rolls_back_audit_and_output_check
         with pytest.raises(RuntimeError, match="synthetic notification"):
             await recover_garage_outcome_outputs()
     async with AsyncSessionLocal() as session:
-        assert (await session.get(AccessDeviceCommandRecord, operation.claim.record.id)).outcome_recorded_at is None
-        assert await session.scalar(select(func.count()).select_from(AuditLog)) == 0
+        row = await session.get(AccessDeviceCommandRecord, operation.claim.record.id)
+        assert row.outcome_recorded_at is None
+        assert await session.get(AuditLog, uuid.uuid5(row.id, "device-command-outcome:unknown")) is not None
+        assert await session.get(AuditLog, uuid.uuid5(row.id, "access.garage.outcome.audit")) is None
+        assert await session.scalar(select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "garage_door.open.automatic")) == 0
         assert await session.scalar(select(func.count()).select_from(NotificationRun)) == 0
     assert await recover_garage_outcome_outputs() == 1
 
@@ -212,7 +220,9 @@ async def test_historical_unattributed_journal_is_not_reconstructed_or_reported(
         row = await session.get(AccessDeviceCommandRecord, operation.claim.record.id)
         assert row.origin_context is None and row.outcome_recorded_at is None
         assert row.state == "unknown"
-        assert await session.scalar(select(func.count()).select_from(AuditLog)) == 0
+        assert await session.get(AuditLog, uuid.uuid5(row.id, "device-command-outcome:unknown")) is not None
+        assert await session.scalar(select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "garage_door.open.automatic")) == 0
 
 
 async def test_origin_cannot_be_changed_or_added_to_retained_operation():
