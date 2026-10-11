@@ -296,3 +296,10 @@ its completed provider receipt across concurrent stop/replacement or repeated
 caller cancellation, after actual cleanup; a provider rejection remains a failure.
 Reads retain normal caller cancellation. Shutdown cannot replace an accepted test
 outcome with a stale-generation read error or trigger a retry.
+
+Durable access restart and historical repair retain their stored observation and
+original effect deadlines. Exhausted or uncertain work remains held/reconcilable;
+recovery does not renew authority or replay a physical command. A restored
+database can lack receipts for later physical effects, so a matching source/image
+and backup still require uncertainty review before normal workers resume. The
+isolated fixture and restore checks do not authorize deployment or live sends.

@@ -15,9 +15,10 @@ completion have been retired. Astra High approved the focused P6 checkpoint
 and output evidence. Calendar/P7 has its approved full and browser gates.
 E1's provider-setting invariant and E2/E3's real transaction/current-authority
 exercises are source-approved; E2/E3 also passed 42 PostgreSQL cases. E4 now has
-an existing-store mileage/reset exercise awaiting execution. P8 diagnostics and
-required audit changes await composition, including shared-client shutdown and
-parent-journal seams. The combined full harness, affected browser checks and
+an existing-store mileage/reset exercise with real PostgreSQL coverage. P8
+diagnostics and required audits are composed, including shared-client shutdown
+and parent-journal seams; their final integrated review remains open. The combined
+full harness, affected browser checks and
 fresh complete-candidate Astra High review remain required. These focused
 approvals do not close P6, P8 or P9.
 
@@ -275,11 +276,11 @@ conformance and non-report P8 owners remain pending.
 | AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Closed backend / Astra approved P4 exact candidate |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Closed frontend / Astra approved P4 exact candidate |
 | AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Focused 263-case PostgreSQL checkpoint and 4/80-window allocation/output evidence; full composed gate and E4 execution remain | Focused checkpoint approved / integrated full gate pending |
-| AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | P7 compact reads approved; P6 integration pending / Astra High approved P7 |
-| AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Overflow/counters/current evidence, nested publication, shutdown and 20/2,000-input probes | Pending / pending |
+| AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | P7 full/browser gate and P6 focused allocation/output checkpoint approved / final composed P6 gate pending |
+| AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Owner overflow/20–2,000-input evidence and lifetime fixtures; shared-client/parent-audit composition | Astra High approved P8 owner checkpoint; composition implemented / final full gate pending |
 | AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Report/calendar owners approved; P8/P9 integrated gates pending / Astra Ultra report; Astra High calendar |
 | AM-09 runtime PDF support | Shared backend image ancestry and final-image smoke; P1 | Runtime-user PDF from installed actual template with no network/overlays; image identity/size/build time | Closed / Astra approved P1 runtime packaging |
-| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original coverage/flags preserved; package inheritance and negative guards; successful JSON/complete-plan retention and full harness | P0 safeguards and P2/P3/P4/P5 evidence approved; continuous P6–P9 checks pending / Astra approved P0/P2/P3/P4/P5 |
+| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original live coverage floor/flags preserved, retired owner removed explicitly; 141 checked/117 strict, source22/config30; final harness | Earlier stage safeguards approved; current checks pass / integrated full gate pending |
 | AM-11 obsolete authority/bridges | Pure access plan, execution result and durable workflow intake; P5 | Whole-repository consumer trace; authoritative journals retained; no duplicate realtime intake | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
 | AM-12 compact presence/forecast | Presence/predictor reads; P7 | Equivalent output and compact unloaded columns; bounded internal reads; 20/2,000-person density evidence; public-list exception disclosed | Closed P7 / Astra High approved exact candidate |
 | AM-13 provider-information reset | Vehicle information store in-session invalidation; P5 | Plate-change aggregate, stale completion and user-field preservation; E4 conformance | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
@@ -317,7 +318,7 @@ conformance and non-report P8 owners remain pending.
 | E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | P4 stage fixtures approved; configured-setting subset guard source-approved and 34 unit cases pass / final integrated P9 gate pending |
 | E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | Concrete current-vehicle reservation/editor export/atomic audit exercise source and PostgreSQL approved / final integrated P9 gate pending |
 | E3 ACCESS SCHEDULE dated exception | P2/P8/P9: access-schedule ownership, current authority and generated configuration contracts; separate from iCloud calendar sync | Test-only dated rule, precedence/DST and actual edit-before-attempt denial source and PostgreSQL approved / final integrated P9 gate pending |
-| E4 last recorded mileage summary | P5/P6/P9: saved snapshot/read contract, information reset and stale-result fence | Test-only value/unit/source/date and missing/zero/reset fixture implemented / PostgreSQL and integrated review pending |
+| E4 last recorded mileage summary | P5/P6/P9: saved snapshot/read contract, information reset and stale-result fence | Test-only value/unit/source/date, missing/zero and reset/stale completion fixture passes in real PostgreSQL / final integrated P9 review pending |
 | E5 MOT freshness in dashboard activity | P3/P7/P9: bounded summaries, typed updates and no provider I/O | Pending / pending |
 | P9 final integrated candidate | Complete required release-candidate validation, exact source/patch identity, no actionable findings and fresh Astra approval | Pending / pending |
 
@@ -1191,3 +1192,24 @@ patch `af37b982ffd3caac646f4bf50900ce8b33499db88c2f77b38d4ce4dbd7dd1738`.
 The commit mapping preserves reviewed runtime/test bytes; only this approval prose
 differs. Core composition and the integrated stage gate remain open. Earlier absent
 raw logs remain historical records as disclosed above.
+
+### Composed shutdown, audit and extension checks (2026-10-11)
+
+The approved P8 owner checkpoint `218d0e0` is integrated at `d481066`.
+Shared HA clients now close after all consumers and notification drain; injected
+private clients retain their own service lifetime. Parent garage expiry and
+standalone reconciliation join required command audits and emit existing full
+refresh hints only after commit and actual close. The existing external-admission
+operation is public without a second implementation. E4 uses existing typed MOT
+history and reset/registration fences; no production mileage field was added.
+
+Affected PostgreSQL evidence maps 76 distinct cases: frozen `a2760dd` run
+`p9-focused-yhdq8fri` supplies information/E4 14, standalone reconciliation 5 and
+pipeline 30; corrected `1d359f5` run `p9-focused-7_nw80hv` supplies garage recovery
+27. Both are under the durable programme `validation-evidence` root. The first
+run's nine whole-table audit-count failures remain retained; the correction
+asserts automatic-output audits separately and explicitly preserves the required
+deterministic journal audit and rollback. All cleanup, source/dependency integrity
+and operational-state proof entries pass. Host source22/config30 checks pass.
+These are affected checks; the combined full harness, browser and final review
+remain open. The final evidence index will identify the complete frozen candidate.

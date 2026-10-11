@@ -600,7 +600,7 @@ include actual session-close ownership under repeated cancellation. This prerequ
 does not activate HA effects or close the integrated P6/P8 gates.
 
 
-The dormant [HA store persistence suite](../scripts/validation/test_ha_presence_store.py)
+The originally dormant, now integrated [HA store persistence suite](../scripts/validation/test_ha_presence_store.py)
 uses the existing fail-closed disposable PostgreSQL guard. It exercises participant
 rollback, current Person/settings/maintenance authority, original receipt budgets,
 shared-target ordering, immutable old receipts, UNKNOWN barriers, required-audit
@@ -619,7 +619,7 @@ record the concrete dependency path and that no duplicate copy was created. Sour
 runtime, results and disposable database binds remain isolated. The full harness's
 dependency preparation contract is unchanged.
 
-The dormant [worker lifetime fixtures](../backend/tests/test_ha_presence_worker.py)
+The originally dormant, now integrated [worker lifetime fixtures](../backend/tests/test_ha_presence_worker.py)
 cover receipt ownership loss during SQL and actual close, confirmed-claim close,
 original send deadlines, accepted POST truth during cancelled optional observation,
 repeated stop and dedicated-client cleanup. The
@@ -747,3 +747,13 @@ claims. Near-limit webhook comparisons separately retain complete evidence and
 bounded preview equivalence. Preserve original failing runs and the affected-suite
 correction mappings in the closure record; selected checks do not replace the
 required full composed harness or browser checks.
+
+The final composed gate must use one frozen source snapshot after the P8 and
+E1–E5 fixture integration. Earlier focused approvals retain their stated scope.
+Lifecycle fixtures cover shared HA-client disposal after blocked notification
+drain, private-client ownership and repeated shutdown cancellation. Parent audit
+fixtures verify mandatory expiry rollback, existing deterministic audit recovery
+and full standalone/garage refresh payloads after the actual database close.
+The harness removes only containers whose exact validation label matches its
+owned prefix, including their anonymous image-declared volumes; it never prunes
+unidentified volumes. Source and harness guards protect that cleanup boundary.
