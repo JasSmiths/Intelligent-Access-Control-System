@@ -17,12 +17,16 @@ from app.models.enums import VisitorPassStatus
 from app.modules.icloud_calendar.client import ICLOUD_RECONNECT_REQUIRED_MESSAGE
 from app.modules.icloud_calendar.contracts import CalendarWork
 from app.services.auth_root import reload_auth_root_for_transaction
-from app.services.calendar_sync_contracts import CalendarAccountCheckpoint, CalendarRunContext, checked_calendar_checkpoints
+from app.services.calendar_sync_contracts import (
+    CalendarAccountCheckpoint,
+    CalendarRunContext,
+    checked_calendar_checkpoints,
+)
 from app.services.calendar_sync_store import (
     CalendarAuthorization,
     CalendarSyncStore,
-    calendar_database_clock,
     calendar_close,
+    calendar_database_clock,
     calendar_new_session,
     calendar_rollback,
     calendar_session,

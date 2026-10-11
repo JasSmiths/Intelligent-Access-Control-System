@@ -10,10 +10,21 @@ from app.models import ICloudCalendarSyncRun
 from app.modules.icloud_calendar.client import (
     ICloudCalendarClient,
 )
+from app.modules.icloud_calendar.contracts import (
+    CalendarWork,
+    ICloudCalendarStopped,
+    ICloudCalendarTimeout,
+)
 from app.modules.icloud_calendar.native import CalendarNativeOwner
-from app.modules.icloud_calendar.contracts import CalendarWork, ICloudCalendarStopped, ICloudCalendarTimeout
-from app.services.action_confirmations import ActionConfirmationError, persist_confirmation_rejection
-from app.services.calendar_accounts import CalendarAccountStore, serialize_calendar_checkpoint_receipt, serialize_icloud_sync_run
+from app.services.action_confirmations import (
+    ActionConfirmationError,
+    persist_confirmation_rejection,
+)
+from app.services.calendar_accounts import (
+    CalendarAccountStore,
+    serialize_calendar_checkpoint_receipt,
+    serialize_icloud_sync_run,
+)
 from app.services.calendar_authentication import CalendarAuthentication
 from app.services.calendar_sync_engine import CalendarSyncEngine, CalendarSyncReceipt
 from app.services.calendar_sync_store import (
@@ -108,7 +119,7 @@ class ICloudCalendarService:
             try:
                 await drain_owned(child)
             except (asyncio.CancelledError, Exception):  # noqa: BLE001 - Retrieve actual cleanup before returning known acceptance.
-                pass
+                logger.warning("Calendar observation cleanup interrupted after durable receipt")
             logger.warning("Calendar observation interrupted after durable receipt")
             return receipt
 
@@ -118,6 +129,7 @@ class ICloudCalendarService:
             await event_bus.publish("icloud_calendar.accounts_changed", {})
         except Exception:  # noqa: BLE001 - Realtime cannot reverse durable acceptance.
             logger.warning("Calendar account realtime invalidation failed after acceptance")
+        return None
 
     async def sync_all(
         self, *, run_id: uuid.UUID, origin: Literal["ui", "workflow"],

@@ -20,7 +20,10 @@ from app.modules.icloud_calendar.contracts import (
     ICloudCalendarTimeout,
 )
 from app.modules.icloud_calendar.native import CalendarNativeOwner
-from app.services.action_confirmations import ActionConfirmationError, persist_confirmation_rejection
+from app.services.action_confirmations import (
+    ActionConfirmationError,
+    persist_confirmation_rejection,
+)
 from app.services.calendar_reconciliation import CalendarAccountReconciliation
 from app.services.calendar_sync_commit import CalendarAccountCommit
 from app.services.calendar_sync_contracts import (

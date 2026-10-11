@@ -46,9 +46,14 @@ async def seed(args: argparse.Namespace) -> dict[str, int | str]:
     async with AsyncSessionLocal() as session:
         await session.execute(text("TRUNCATE people, vehicles, access_events CASCADE"))
         await session.execute(text("""
-            INSERT INTO people (id,first_name,last_name,display_name,is_active,profile_photo_data_url,created_at,updated_at)
+            INSERT INTO people (id,first_name,last_name,display_name,is_active,profile_photo_data_url,
+                                garage_door_entity_ids,missed_exit_recovery_enabled,
+                                home_assistant_presence_input_boolean_entity_ids,
+                                home_assistant_presence_input_boolean_entry_action,
+                                home_assistant_presence_input_boolean_exit_action,created_at,updated_at)
             SELECT md5('compact-person-'||n)::uuid,'Synthetic',n::text,'Synthetic '||lpad(n::text,6,'0'),true,
-                   'data:image/png;base64,'||repeat('A',:photo_bytes),CAST(:now AS timestamptz),CAST(:now AS timestamptz)
+                   'data:image/png;base64,'||repeat('A',:photo_bytes),'[]'::jsonb,false,
+                   '[]'::jsonb,'turn_off','turn_off',CAST(:now AS timestamptz),CAST(:now AS timestamptz)
             FROM generate_series(1,CAST(:people AS integer)) n
         """), {"photo_bytes": photo_bytes, "now": NOW, "people": people})
         await session.execute(text("""
@@ -67,14 +72,14 @@ async def seed(args: argparse.Namespace) -> dict[str, int | str]:
         """), {"now": NOW, "people": people})
         if args.suite == "charts":
             await session.execute(text("""
-                INSERT INTO access_events (id,vehicle_id,person_id,registration_number,direction,decision,confidence,source,occurred_at,created_at,updated_at,raw_payload,snapshot_path,snapshot_bytes)
+                INSERT INTO access_events (id,vehicle_id,person_id,registration_number,direction,decision,confidence,source,timing_classification,occurred_at,created_at,updated_at,raw_payload,snapshot_path,snapshot_bytes)
                 SELECT md5('compact-chart-event-'||n)::uuid,
                        CASE WHEN n%2=0 THEN md5('compact-vehicle-'||(1+(n/2)%:people))::uuid ELSE NULL END,
                        CASE WHEN n%2=0 THEN md5('compact-person-'||(1+(n/2)%:people))::uuid ELSE NULL END,
                        CASE WHEN n%2=0 THEN 'KNOWN' ELSE 'UNKNOWN' END||lpad((1+(n/2)%:people)::text,6,'0'),
                        CASE WHEN n%2=0 THEN 'ENTRY'::accessdirection ELSE 'DENIED'::accessdirection END,
                        CASE WHEN n%2=0 THEN 'GRANTED'::accessdecision ELSE 'DENIED'::accessdecision END,
-                       .99,'synthetic-compact',CAST(:now AS timestamptz)-(n||' seconds')::interval,CAST(:now AS timestamptz)-(n||' seconds')::interval,CAST(:now AS timestamptz),
+                       .99,'synthetic-compact','UNKNOWN'::timingclassification,CAST(:now AS timestamptz)-(n||' seconds')::interval,CAST(:now AS timestamptz)-(n||' seconds')::interval,CAST(:now AS timestamptz),
                        jsonb_build_object('unused',repeat('D',:raw_bytes)),
                        CASE WHEN n%17=0 THEN 'synthetic/no-file-'||n||'.jpg' ELSE NULL END,
                        CASE WHEN n%34=0 THEN 100 ELSE NULL END
@@ -84,13 +89,13 @@ async def seed(args: argparse.Namespace) -> dict[str, int | str]:
         elif args.suite == "forecast":
             days, movements = (1, 2) if args.density == "low" else (5, 4)
             await session.execute(text("""
-                INSERT INTO access_events (id,vehicle_id,person_id,registration_number,direction,decision,confidence,source,occurred_at,created_at,updated_at,raw_payload)
+                INSERT INTO access_events (id,vehicle_id,person_id,registration_number,direction,decision,confidence,source,timing_classification,occurred_at,created_at,updated_at,raw_payload)
                 SELECT md5('compact-forecast-'||p||'-'||w||'-'||d||'-'||m)::uuid,
                        md5('compact-vehicle-'||p)::uuid,
                        CASE WHEN p%3=1 THEN md5('compact-person-'||p)::uuid ELSE NULL END,
                        'KNOWN'||lpad(p::text,6,'0'),
                        CASE WHEN m%2=1 THEN 'ENTRY'::accessdirection ELSE 'EXIT'::accessdirection END,
-                       'GRANTED'::accessdecision,.99,'synthetic-compact',
+                       'GRANTED'::accessdecision,.99,'synthetic-compact','UNKNOWN'::timingclassification,
                        CAST(:now AS timestamptz)-(w*7+d||' days')::interval+((m-1)*2-4||' hours')::interval,
                        CAST(:now AS timestamptz),CAST(:now AS timestamptz),jsonb_build_object('unused',repeat('D',:raw_bytes))
                 FROM generate_series(1,CAST(:people AS integer)) p CROSS JOIN generate_series(0,11) w

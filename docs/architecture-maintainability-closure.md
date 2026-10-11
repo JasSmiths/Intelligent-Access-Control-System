@@ -2,19 +2,24 @@
 
 This ledger tracks the [approved programme](architecture-maintainability-plan.md)
 against the preserved [review](architecture-maintainability-review.md). Every row
-requires evidence and Astra Ultra approval before closure. Planned retention is
+requires evidence and Astra High approval before new closure. Prior Astra Ultra
+approvals below remain historical records. Planned retention is
 an explicit disposition requiring approval, not a claim that code was fixed.
 
 ## Source and implementation gates
 
 - Reviewed baseline: original checkout `/Users/jas/Documents/Intelligent Access System`,
   branch `main`, HEAD `65e1b6d070e6327314ca9bd72c01264496b821fb`.
-- Implementation checkout: `/Users/jas/.codex/worktrees/iacs-maintainability-programme/Intelligent Access System`,
+- Initial implementation checkout: `/Users/jas/.codex/worktrees/iacs-maintainability-programme/Intelligent Access System`,
   branch `codex/iacs-maintainability-programme`, starting at that same HEAD.
-- Original untracked audit preserved; isolated copy is byte-for-byte identical.
-- Sol Ultra implements; Astra Ultra advises and reviews each immutable candidate.
-- Evidence root: `/private/tmp/iacs-maintainability-programme`; final candidate
-  source/patch identities and review records are added after validation.
+- Original untracked audit was preserved with a byte-for-byte isolated copy.
+- Sol 6.1 Ultra implements; Astra High advises and reviews each new exact candidate.
+- Historical evidence root: `/private/tmp/iacs-maintainability-programme`; its raw
+  files were lost after restart. The checkpoint facts and prior approval identities
+  below are historical records, not currently available raw evidence. Fresh
+  calendar/P7 evidence uses
+  `/Users/jas/.codex/worktrees/iacs-maintainability-frontend/validation-evidence`,
+  with one final source/patch receipt prepared after validation.
 - Approved P0/P1 backend checkpoint: `0483c6df0433b29371d5718fb2e86ac370bca993`.
   Astra Ultra approved P0 and P1 runtime packaging separately on source
   `de379a8e8be9c91b8008266204b3a37219c24c473a8f408b6831f48cbbb166c2`
@@ -55,7 +60,7 @@ an explicit disposition requiring approval, not a claim that code was fixed.
   run; every other full-gate check passed. All 727 committed source hashes equal
   the approved candidate, with clean source/cleanup and unchanged operational state.
   Retention dispositions were accepted; E4 integrated conformance remains pending.
-- Current approved backend checkpoint: `d079bb04a12d927084acee9b2f4d013ddfe2e2f4`
+- Recorded approved backend checkpoint: `d079bb04a12d927084acee9b2f4d013ddfe2e2f4`
   includes approved P3, P4 frontend and P5, plus the separately approved P6
   foundation (`876deec32b2da8559585c5333964af211f3d2308`) and immutable intake
   (`f9e1dba7d043bed9d378de6205a05cbb8c047856`) owner checkpoints. The integration
@@ -255,13 +260,13 @@ conformance and non-report P8 owners remain pending.
 | AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Closed backend / Astra approved P4 exact candidate |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Closed frontend / Astra approved P4 exact candidate |
 | AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Astra-approved schema/state design; restart/crash/deadline/late-linkage checks; E2/E4 conformance | Pending / pending |
-| AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | Pending / pending |
+| AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | P7 compact reads approved; P6 integration pending / Astra High approved P7 |
 | AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Overflow/counters/current evidence, nested publication, shutdown and 20/2,000-input probes | Pending / pending |
-| AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Pending / pending |
+| AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Report/calendar owners approved; P8/P9 integrated gates pending / Astra Ultra report; Astra High calendar |
 | AM-09 runtime PDF support | Shared backend image ancestry and final-image smoke; P1 | Runtime-user PDF from installed actual template with no network/overlays; image identity/size/build time | Closed / Astra approved P1 runtime packaging |
 | AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original coverage/flags preserved; package inheritance and negative guards; successful JSON/complete-plan retention and full harness | P0 safeguards and P2/P3/P4/P5 evidence approved; continuous P6–P9 checks pending / Astra approved P0/P2/P3/P4/P5 |
 | AM-11 obsolete authority/bridges | Pure access plan, execution result and durable workflow intake; P5 | Whole-repository consumer trace; authoritative journals retained; no duplicate realtime intake | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
-| AM-12 compact presence/forecast | Presence/predictor reads; P7 | Equivalent output and compact unloaded columns; bounded internal reads; 20/2,000-person density evidence; public-list exception disclosed | Pending / pending |
+| AM-12 compact presence/forecast | Presence/predictor reads; P7 | Equivalent output and compact unloaded columns; bounded internal reads; 20/2,000-person density evidence; public-list exception disclosed | Closed P7 / Astra High approved exact candidate |
 | AM-13 provider-information reset | Vehicle information store in-session invalidation; P5 | Plate-change aggregate, stale completion and user-field preservation; E4 conformance | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
 
 ## Simplification candidates
@@ -296,7 +301,7 @@ conformance and non-report P8 owners remain pending.
 | --- | --- | --- |
 | E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | Backend and frontend stage fixtures approved; final integrated P9 exercise pending / Astra approved P4 backend and frontend |
 | E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | P2 conformance approved; P6/P9 integration pending / Astra approved P2 |
-| E3 calendar schedule exception | P2/P8/P9: schedule ownership, current authority and generated configuration contracts | Pending / pending |
+| E3 ACCESS SCHEDULE dated exception | P2/P8/P9: access-schedule ownership, current authority and generated configuration contracts; separate from iCloud calendar sync | Pending / pending |
 | E4 last recorded mileage summary | P5/P6/P9: feature store owns new summary/reset and optional completion | Pending / pending |
 | E5 MOT freshness in dashboard activity | P3/P7/P9: bounded summaries, typed updates and no provider I/O | Pending / pending |
 | P9 final integrated candidate | Complete required release-candidate validation, exact source/patch identity, no actionable findings and fresh Astra approval | Pending / pending |
@@ -581,7 +586,7 @@ exact Astra review. After approval and commit, migration `20261007_0013` will be
 `0014`; later changes require a new migration or an explicitly reviewed parent rebase.
 
 
-## P8 calendar candidate (implementation in progress)
+## P8 calendar owner (approved; integrated gates remain open)
 
 Calendar design v3 `36ba560bc422195813456a4e92fce6db3858a9b29dcfeb17d79a831f264431b7`
 and bounded SDK/auth-root/schema, current-authority and real workflow-engine
@@ -596,18 +601,43 @@ These approvals bind their copied source only.
 Later account-auth/removal, actual API/disconnect/rejection settlement, exact-run
 editor recovery, selected-pass metadata and process lifetime composition remain
 unapproved WIP. A supplemental matched-lock host Node24.19 run passed tsc and 32
-selected tests at `p8-calendar-frontend-host-progress/run-1791451362289659000`;
-it does not replace Node22, browser or full-harness gates. API progress attempt
+selected tests at `p8-calendar-frontend-host-progress/run-1791451362289659000`.
+API progress attempt
 `u3oczads` stopped before tests during dependency-copy disk exhaustion. Scoped
 completed-run dependency copies were retired with manifest bodies/reference
 identities retained; `p8-calendar-duplicate-dependencies-retired.json` records all
 38 exact paths and the direct-replay limitation. Canonical `uu6ccsow` preparation,
 source snapshots, logs/results and immutable approved evidence remain retained.
-Docker was stopped afterward; no restart or successful later runtime gate is
-assumed in this candidate record. Full calendar/AM-08/E3/P9 remain pending.
+After the runtime became available again, frozen `7ebc7cf` passed 95 selected
+Linux calendar/auth/lifecycle units and empty migration down/re-up/parity checks.
+The first actual API run retained 12 passes and 13 fixture failures: its inert
+telemetry port lacked `start_span`. The attributable test-only correction keeps
+the actual middleware and passes all 25 API cases at
+`p8-calendar-api-fixture-corrected-progress/iacs-validation-mk4k826g`. Astra accepted
+that exact fixture/evidence mapping, not full calendar implementation. The cases
+cover checked-out database isolation during SDK work, actual HTTP disconnect,
+same-run recovery, removal/resume rejection audit settlement and owned postaccept
+cleanup. Source/cleanup/operational comparisons pass.
+
+The separate calendar correction commit `e31214d` preserves the frozen candidate
+and adds a calendar-owned scrolling body through the shared dialog's ordinary
+class-name port. The original phone Resume click obstruction remains failed
+browser evidence. Combined corrected runtime `44b06ad` passes locked Node22 build
+and all 371 tests in 60 files. Its broad browser run passes 178 of 180 cases; the
+two failures are the same stale pass-detail fixture in Chromium and WebKit.
+The corrected fixture retains the accepted pass DTO and checks the actual selected
+detail response; its whole-file browser rerun was pending at that checkpoint.
+The resumed current candidate and fresh browser gate are recorded below.
+
+Commit `bf1f2d5` composes the canonical approved `77e1384` confirmation prerequisite,
+including both existing outer callers, fixtures, rejection PG suite and checked
+registrations. Its source mapping is accepted; actual combined consumer/full-harness
+validation remains required. The approved inherited history-fixture retirement is
+separately attributable at `933cda5`. Full calendar/AM-08/P9 remain pending; the E3
+access-schedule exercise is a separate final conformance obligation.
 
 
-### P7 source preparation — unapproved
+### P7 compact reads — approved
 
 The separate compact-read branch starts at the frozen, unapproved calendar WIP
 `7ebc7cf`. Astra approved only the concrete P7 design v2 (`7bc9a84a…ef3be5`).
@@ -629,11 +659,114 @@ supplemental progress only. A separate exact-calendar-lock macOS Python 3.12
 environment, with socket connections denied before imports, passes 12 existing
 chart/predictor units and strict checks for the three new/factored read owners.
 Original stale-fake/import-order and trailing-blank-line failures remain retained.
-These checks do not substitute for Linux/backend/PG/type/lint, locked Node 22
-build/unit, actual browsers,
-before/after plans/allocation/output evidence, complete harness and exact Astra
-implementation approval remain pending while Docker is stopped. New PG/browser/
-measurement fixtures are prepared but unexecuted. AM-06/AM-12, calendar/AM-08, P9
+The corrected `963a4ce` source passes all 11 compact-read PG cases and 14 affected
+Linux units at `p7-compact-persistence-progress/iacs-validation-ach_ipoa`, with
+migration, isolation, source/cleanup and operational comparisons clean. Public
+chart DTO/image tests exercise `get_leaderboard` and the unchanged Top Charts
+consumer, rather than asserting only the internal projection. The combined Node22
+and browser evidence above covers the current compact frontend runtime; whole
+relevant fixture correction, equivalent-output plans/allocation/output probes,
+the complete combined harness and exact Astra implementation approval remain
+pending. AM-06/AM-12, calendar/AM-08, P9
 and the full programme remain open. Full-history chart aggregation, population-sized
 public presence/forecast and density-dependent forecast memory remain limitations;
 no cache, persisted rank/count projection or schema change is introduced by P7.
+
+
+### Calendar/P7 validation resumed on 2026-10-11
+
+The prior `/private/tmp/iacs-maintainability-programme` evidence and dependency
+directories were lost after restart. Earlier entries above are historical recorded
+results; their absent raw logs are not presented as fresh evidence. The original
+P7 `o6ph7jvq` probe failed during raw SQL seeding before measurement because required
+Python-only model defaults were omitted. The corrected fixture supplies those
+values explicitly. No benchmark result is attributed to that failed attempt.
+
+Fresh evidence is retained outside source and operational mounts in the persistent
+`iacs-maintainability-frontend/validation-evidence` sibling. Exact-lock preparation
+`dependency-preparation/iacs-validation-9hyc842c` verifies Python 3.12.14, the locked
+Python environment, pinned Linux Node 22.23.2, npm lock versions and dependency tree.
+The existing immutable backend image is reused without starting its application.
+No tooling image rebuild or operational restart is needed.
+
+`p7-compact-comparison/comparison.json` records all 22 successful phases across the
+same 11 before/after workloads, three samples each, with identical full public
+JSON/SHA outputs, actual driver statements/parameters, complete EXPLAIN ANALYZE
+plans and root row counts. Baseline is `7ebc7cf`; candidate read owners are unchanged
+from `52a187f`. Both run the identical corrected fixture at SHA-256
+`23838b41f1c6e502bcac1443be0af121a4e3203eee9261fdb9146fe32706fd47`
+and share one verified read-only dependency environment. Backend limits are 3 GiB
+RAM and 4 GiB total RAM/swap, with a separate 1 GiB PostgreSQL cap and one CPU each.
+No phase is OOM-killed, owned cleanup is empty and operational state is unchanged.
+
+At 2,000 people, public presence retains its identical 301,334-byte population
+response while median Python allocation falls 10,769,289 to 1,753,281 bytes and
+queries fall five to one. Low-density forecast retains 400,236 output bytes, with
+144,939,124 to 36,972,977 allocation bytes and 15 to one queries. High-density
+forecast seeds 480,000 movements, returns 478,000 after the fixed current-time
+cutoff, and retains the same 400,236-byte response; allocation is 1,373,421,700 to
+308,529,720 bytes and queries 15 to one. Its median measured operation is 40.201 to
+21.935 seconds. These are Python allocations, not process RSS or PostgreSQL memory.
+
+The one-million-event chart retains equal 29,293-byte output and two queries.
+Its median time increases 0.785 to 0.881 seconds despite allocation decreasing
+530,513 to 448,175 bytes. The separate small fat-column chart shows 15,959,471 to
+446,253 allocation bytes. Unknown-chart lookup plans still perform 25 selected
+plate bitmap lookups, each combining roughly 58,823 snapshot-index entries. This
+is selected result hydration, not a bounded-scanned-work or optimal-index claim;
+full-history aggregation, public population reads and forecast density growth
+remain explicit costs. No speculative index, cache or storage projection is added.
+
+Fresh host source-selection checks pass 22 and 29 tests. The first full resumed
+run, `calendar-p7-full/iacs-validation-agwct_s_`, records inherited calendar import
+ordering, cleanup-warning and explicit-None-return source-check failures. Narrow
+repairs preserve known acceptance and add no payload or exception disclosure.
+Its store cancellation fixture also expected definite cancellation after native
+asyncpg cancellation invalidated a previously used connection. Astra High approved
+a narrow assertion correction: only that case expects `CalendarOutcomeUnknown`
+with `CancelledError` as its cause; the ordinary receipt-close case still expects
+`CancelledError`. Repeated cancellation, actual close, zero checked-out connections
+and durable UUID-state assertions remain. Runtime settlement proof is unchanged.
+Two settings-concurrency fixture cases also observed their second writer only
+after actor loading, which now follows the real auth-root fence. Astra High
+approved moving only the observation barrier before that real fence. PostgreSQL
+blocking-graph proof, real authority/lock owners, held audit, final row and both
+old/new audit checks remain. This proves actual writer serialization, not
+independent per-setting-lock coverage.
+The failed run remains retained. The corrected full run
+`calendar-p7-full/iacs-validation-y7dhiral` passes all 205 result entries, including
+1,303 backend tests (29 expected database-free skips), all 371 frontend tests in
+60 files and the pinned Node 22 production build, 109 checked-body/92 strict type
+targets, 55 PostgreSQL suites with 960 cases, migration parity and database restore.
+Source integrity and owned cleanup are clean; operational state is unchanged.
+This includes the 11 compact-read PostgreSQL cases and actual calendar SDK cleanup,
+late acceptance, original-run recovery and authority contention fixtures.
+Astra High exact-candidate approval is recorded below.
+Browser dependency preflight separately
+refuses an installed source-map-js 1.2.1 against lock 1.2.2. Its corrected isolated
+copy uses only the trusted canonical 1.2.2 package, with complete lock verification;
+operational dependencies remain unchanged.
+
+
+`calendar-p7-browser-corrected` passes all 180 affected cases in Chromium and
+WebKit, with one worker and no retries. Its frontend input hashes match the
+corrected full snapshot and remain unchanged after the run. The calendar recovery
+checks cover 390×844, 844×390, 1440×900 and dark 900×1000 layouts, exact original-run
+recovery, lost responses, retained dirty authentication and keyboard/footer access.
+The prior selected-pass fixture failure is superseded by the fresh complete
+affected-file pass. Saved viewport images were inspected. These are inert browser
+fixtures, not physical-device or live-provider tests. Browser execution uses host
+Node 24.19.0; the pinned Linux Node 22 build and unit run remains authoritative.
+The complete copied dependency lock passes before and after execution, the
+original host dependency bytes remain unchanged, and the owned server is closed.
+Only this closure documentation differs from the successful full-run source.
+The final calendar/P7 source and patch identity is recorded in one
+`calendar-p7-final-receipt.json`. Astra High approved the exact candidate with no
+source findings: reviewed receipt SHA-256
+`cb8a2e3a46c42ba8648a307831dc00a41adb6bcb19aae744b1d1042657eb4303`,
+patch `da61d5657aa7a027442a395dc0ed40ed7576262d9fe4bcd44d72910283120288`
+and source fingerprint
+`84d19a053c5d323204e1740309cea1ccdaf705100388049943d498918766c09e`.
+The approved commit mapping adds only this status prose; runtime, fixtures, schema,
+dependencies and harness bytes match the successful evidence. Remaining P6/P8/P9
+owners, final merged validation and integrated conformance are separate gates.

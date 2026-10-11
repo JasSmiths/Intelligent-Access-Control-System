@@ -13,7 +13,7 @@ from app.db.session import AsyncSessionLocal, engine
 from app.models import ICloudCalendarAccount, ICloudCalendarSyncRun, SystemSetting, User
 from app.models.enums import UserRole
 from app.modules.icloud_calendar.contracts import CalendarWork
-from app.services.calendar_sync_contracts import CalendarOwnershipLost, CalendarRunConflict, CalendarRunContext
+from app.services.calendar_sync_contracts import CalendarOutcomeUnknown, CalendarOwnershipLost, CalendarRunConflict, CalendarRunContext
 from app.services.calendar_sync_store import CalendarSyncStore
 from app.services.icloud_calendar_sdk import CalendarSDKBusy
 
@@ -274,8 +274,13 @@ async def test_store_cancellation_drains_actual_session_close_without_disabling_
     task.cancel()
     assert not task.done()
     release_close.set()
-    with pytest.raises(asyncio.CancelledError):
+    expected_error = CalendarOutcomeUnknown if blocked_query else asyncio.CancelledError
+    with pytest.raises(expected_error) as failure:
         await asyncio.wait_for(task, 1)
+    if blocked_query:
+        # Native query cancellation invalidates the original connection, so
+        # local reset cannot prove rollback after tracked database work.
+        assert isinstance(failure.value.__cause__, asyncio.CancelledError)
     assert engine.pool.checkedout() == 0
     async with AsyncSessionLocal() as session:
         durable = await session.get(ICloudCalendarSyncRun, identity)

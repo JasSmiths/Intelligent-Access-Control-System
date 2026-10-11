@@ -508,10 +508,10 @@ migrated disposable database/container; the script refuses other database/networ
 namespaces. Examples within that owned environment:
 
 ```sh
-python scripts/benchmarks/compact_reads.py --phase baseline --suite charts --events 10000 --output /evidence/chart-small.json
-python scripts/benchmarks/compact_reads.py --phase candidate --suite charts --events 1000000 --output /evidence/chart-target.json
-python scripts/benchmarks/compact_reads.py --phase candidate --suite presence --people 2000 --output /evidence/presence-target.json
-python scripts/benchmarks/compact_reads.py --phase candidate --suite forecast --people 2000 --density high --output /evidence/forecast-target-high.json
+python -m scripts.benchmarks.compact_reads --phase baseline --suite charts --events 10000 --output /evidence/chart-small.json
+python -m scripts.benchmarks.compact_reads --phase candidate --suite charts --events 1000000 --output /evidence/chart-target.json
+python -m scripts.benchmarks.compact_reads --phase candidate --suite presence --people 2000 --output /evidence/presence-target.json
+python -m scripts.benchmarks.compact_reads --phase candidate --suite forecast --people 2000 --density high --output /evidence/forecast-target-high.json
 ```
 
 Run **each** workload against **both** source snapshots, using the identical fixture
@@ -527,5 +527,17 @@ complete EXPLAIN ANALYZE plans, plus public output bytes/SHA and JSON. Chart
 has a separate documented fixture. Assert equivalent supported output before
 interpreting cost changes. Python allocations are not process RSS; timings are
 synthetic, full-history aggregation remains, and forecast/public population reads
-are not constant-memory claims. No measurement or mandatory gate is implied merely
-by preparing these fixtures while Docker is stopped.
+are not constant-memory claims. Prepared fixtures and bounded progress checks do
+not substitute for the complete comparison matrix, full isolated harness and
+exact-candidate review. Retain the original failed attempts and map fixture-only
+repairs separately from changes to application behavior.
+
+
+On restart, preserve historical results but disclose absent raw evidence rather
+than treating the ledger as a current gate. The resumed calendar/P7 comparison and
+required checks use the persistent evidence sibling recorded in the
+[closure ledger](architecture-maintainability-closure.md#calendarp7-validation-resumed-on-2026-10-11).
+The complete 11-pair comparison retains equal public outputs and three samples
+per phase. Its target chart is slightly slower and selected unknown-snapshot
+bitmap scans remain material; lower Python allocation does not establish bounded
+scanned work, a general speedup, process RSS or PostgreSQL memory bounds.
