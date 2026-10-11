@@ -1132,3 +1132,23 @@ patch `af37b982ffd3caac646f4bf50900ce8b33499db88c2f77b38d4ce4dbd7dd1738`.
 The commit mapping preserves reviewed runtime/test bytes; only this approval prose
 differs. Core composition and the integrated stage gate remain open. Earlier absent
 raw logs remain historical records as disclosed above.
+
+
+### E5 dashboard consumer conformance
+
+Two fixtures render a consumer of the actual dashboard directory hook. Canonical
+MOT freshness survives a future expiry date, targeted update bursts coalesce into
+bounded saved-directory reads, and an old account cannot restore late metadata.
+They assert selected plate/owner lookups, a one-row server count and no provider
+or full-directory reads. The dashboard read fixture now uses the actual summary
+endpoints and asserts its complete request vocabulary and absence of read errors.
+One inert browser fixture covers access_event.updated invalidation without losing
+the history filter. No application runtime or App composition changed.
+
+Focused Node 22 checks pass all nine dashboard cases and the frontend type check.
+Evidence is retained under
+`/Users/jas/.codex/worktrees/iacs-maintainability-frontend/validation-evidence/p9-dashboard`.
+The two container setup failures are retained and are not counted as test results.
+Astra High approved the exact test-only owner checkpoint. The composed build/
+full-unit gate and the affected Chromium/WebKit subset remain pending; unaffected
+earlier browser evidence requires an explicit final source mapping.

@@ -25,10 +25,15 @@ function deferred<T>() {
 function fetches(read: (signal: AbortSignal) => Promise<AccessEvent[]>) {
   return vi.fn(async (path: string, options: RequestInit) => {
     if (path.startsWith("/api/v1/events?")) return new Response(JSON.stringify(await read(options.signal as AbortSignal)));
-    if (path === "/api/v1/presence") return new Response("[]");
-    if (path === "/api/v1/presence/expected-today") return new Response("null");
+    if (path === "/api/v1/presence/summary") return new Response(JSON.stringify({ counts: { total: 0, present: 0, exited: 0, unknown: 0 }, inside: { people: [], hidden: 0 } }));
+    if (path === "/api/v1/presence/expected-today/summary") return new Response("null");
     throw new Error(`Unexpected URL: ${path}`);
   });
+}
+function expectDashboardRequests(request: ReturnType<typeof fetches>) {
+  expect([...new Set(request.mock.calls.map(([path]) => path.split("?")[0]))].sort()).toEqual([
+    "/api/v1/events", "/api/v1/presence/expected-today/summary", "/api/v1/presence/summary"
+  ]);
 }
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
@@ -36,7 +41,7 @@ it("keeps newer realtime rows through a blocked actual GET, legacy delivery and 
   vi.useFakeTimers();
   const first = deferred<AccessEvent[]>();
   const read = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue([event(1)]);
-  vi.stubGlobal("fetch", fetches(read));
+  const request = fetches(read); vi.stubGlobal("fetch", request);
   const signals = createReadSignals("account");
   const wrapper = ({ children }: { children: React.ReactNode }) => <ReadSignalsContext.Provider value={signals}>{children}</ReadSignalsContext.Provider>;
   const { result } = renderHook(() => useDashboardReads(), { wrapper });
@@ -54,12 +59,13 @@ it("keeps newer realtime rows through a blocked actual GET, legacy delivery and 
   await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
   expect(read).toHaveBeenCalledTimes(2);
   expect(result.current.events.find((row) => row.id === "event")?.resource_revision).toBe(2);
+  expect(result.current.error).toBe(""); expectDashboardRequests(request);
 });
 
 it("cancels the old account GET and drops its bounded revision knowledge on account change", async () => {
   const first = deferred<AccessEvent[]>();
   const read = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue([event(0)]);
-  vi.stubGlobal("fetch", fetches(read));
+  const request = fetches(read); vi.stubGlobal("fetch", request);
   let signals = createReadSignals("first-account");
   const wrapper = ({ children }: { children: React.ReactNode }) => <ReadSignalsContext.Provider value={signals}>{children}</ReadSignalsContext.Provider>;
   const { result, rerender } = renderHook(() => useDashboardReads(), { wrapper });
@@ -74,12 +80,13 @@ it("cancels the old account GET and drops its bounded revision knowledge on acco
   expect(result.current.events[0].resource_revision).toBe(0);
   await act(async () => { first.resolve([event(10)]); });
   expect(result.current.events[0].resource_revision).toBe(0);
+  expect(result.current.error).toBe(""); expectDashboardRequests(request);
 });
 
 it("retains at most40 rows and ignores unrelated realtime types", async () => {
   vi.useFakeTimers();
   const read = vi.fn().mockResolvedValue([]);
-  vi.stubGlobal("fetch", fetches(read));
+  const request = fetches(read); vi.stubGlobal("fetch", request);
   const signals = createReadSignals("account");
   const wrapper = ({ children }: { children: React.ReactNode }) => <ReadSignalsContext.Provider value={signals}>{children}</ReadSignalsContext.Provider>;
   const { result } = renderHook(() => useDashboardReads(), { wrapper });
@@ -90,4 +97,5 @@ it("retains at most40 rows and ignores unrelated realtime types", async () => {
     for (let index = 0; index < 50; index += 1) signals.publish({ type: "realtime", message: realtime(event(1, `event-${index}`)) });
   });
   expect(result.current.events).toHaveLength(40);
+  expect(result.current.error).toBe(""); expectDashboardRequests(request);
 });
