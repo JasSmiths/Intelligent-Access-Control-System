@@ -275,7 +275,7 @@ conformance and non-report P8 owners remain pending.
 | AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Closed / Astra approved P3 exact candidate |
 | AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Closed backend / Astra approved P4 exact candidate |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Closed frontend / Astra approved P4 exact candidate |
-| AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Focused 263-case PostgreSQL checkpoint and 4/80-window allocation/output evidence; full composed gate and E4 execution remain | Focused checkpoint approved / integrated full gate pending |
+| AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Focused 263-case PostgreSQL checkpoint and 4/80-window allocation/output evidence; full composed gate remains | Focused checkpoint approved / integrated full gate pending |
 | AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | P7 full/browser gate and P6 focused allocation/output checkpoint approved / final composed P6 gate pending |
 | AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Owner overflow/20–2,000-input evidence and lifetime fixtures; shared-client/parent-audit composition | Astra High approved P8 owner checkpoint; composition implemented / final full gate pending |
 | AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Report/calendar owners approved; P8/P9 integrated gates pending / Astra Ultra report; Astra High calendar |
@@ -319,7 +319,7 @@ conformance and non-report P8 owners remain pending.
 | E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | Concrete current-vehicle reservation/editor export/atomic audit exercise source and PostgreSQL approved / final integrated P9 gate pending |
 | E3 ACCESS SCHEDULE dated exception | P2/P8/P9: access-schedule ownership, current authority and generated configuration contracts; separate from iCloud calendar sync | Test-only dated rule, precedence/DST and actual edit-before-attempt denial source and PostgreSQL approved / final integrated P9 gate pending |
 | E4 last recorded mileage summary | P5/P6/P9: saved snapshot/read contract, information reset and stale-result fence | Test-only value/unit/source/date, missing/zero and reset/stale completion fixture passes in real PostgreSQL / final integrated P9 review pending |
-| E5 MOT freshness in dashboard activity | P3/P7/P9: bounded summaries, typed updates and no provider I/O | Pending / pending |
+| E5 MOT freshness in dashboard activity | P3/P7/P9: bounded summaries, typed updates and no provider I/O | Astra High approved test-only consumer checkpoint aadf8ac4; focused9 and Node22 types pass / composed browser/full gate pending |
 | P9 final integrated candidate | Complete required release-candidate validation, exact source/patch identity, no actionable findings and fresh Astra approval | Pending / pending |
 
 Public population-sized presence reads remain an approved compatibility exception;
@@ -1213,3 +1213,23 @@ deterministic journal audit and rollback. All cleanup, source/dependency integri
 and operational-state proof entries pass. Host source22/config30 checks pass.
 These are affected checks; the combined full harness, browser and final review
 remain open. The final evidence index will identify the complete frozen candidate.
+
+
+### E5 dashboard consumer conformance
+
+Two fixtures render a consumer of the actual dashboard directory hook. Canonical
+MOT freshness survives a future expiry date, targeted update bursts coalesce into
+bounded saved-directory reads, and an old account cannot restore late metadata.
+They assert selected plate/owner lookups, a one-row server count and no provider
+or full-directory reads. The dashboard read fixture now uses the actual summary
+endpoints and asserts its complete request vocabulary and absence of read errors.
+One inert browser fixture covers access_event.updated invalidation without losing
+the history filter. No application runtime or App composition changed.
+
+Focused Node 22 checks pass all nine dashboard cases and the frontend type check.
+Evidence is retained under
+`/Users/jas/.codex/worktrees/iacs-maintainability-frontend/validation-evidence/p9-dashboard`.
+The two container setup failures are retained and are not counted as test results.
+Astra High approved the exact test-only owner checkpoint. The composed build/
+full-unit gate and the affected Chromium/WebKit subset remain pending; unaffected
+earlier browser evidence requires an explicit final source mapping.

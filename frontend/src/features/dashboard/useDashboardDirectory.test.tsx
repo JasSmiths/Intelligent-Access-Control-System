@@ -1,12 +1,13 @@
 import React from "react";
 import { createReadSignals, ReadSignalsContext } from "../../lib/readSignals";
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import * as directoryApi from "../../api/directory";
+import { api } from "../../api/client";
 import type { AccessEvent, Person, Presence, Vehicle } from "../../api/types";
 import { useDashboardDirectory } from "./useDashboardDirectory";
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 it("reads only visible identities for visible rows and uses the server vehicle count", async () => {
   const person = { id: "person-after-first-page", display_name: "Later Person" } as Person;
@@ -73,4 +74,63 @@ it("refreshes visible plate and owner metadata on vehicle-information invalidati
   await act(async () => { await signals.publish({ type: "realtime", message: { type: "vehicle_information.updated", payload: { vehicle_id: vehicle.id } } }); });
   expect(result.current.vehicles[0]?.make).toBe("After"); expect(vehicles).toHaveBeenCalledTimes(2);
   expect(vehicles.mock.calls[1][0]).toEqual(["REMOTE01"]);
+});
+
+
+function DashboardMOTConsumer() {
+  const directory = useDashboardDirectory({ presence: [], expectedPresence: null,
+    events: [{ id: "event", registration_number: "REMOTE01", direction: "entry" } as AccessEvent] });
+  return <output aria-label="MOT freshness">{directory.vehicles[0]?.mot_freshness ?? "unknown"}</output>;
+}
+
+it("renders canonical MOT freshness and coalesces targeted updates using bounded saved reads", async () => {
+  vi.useFakeTimers(); vi.setSystemTime(0);
+  const signals = createReadSignals("account");
+  const vehicle = { id: "after-page-500", registration_number: "REMOTE01", person_ids: ["owner"],
+    mot_expiry: "2099-01-01", mot_freshness: "stale" } as Vehicle;
+  let settle!: (vehicles: Vehicle[]) => void;
+  const vehicles = vi.spyOn(directoryApi, "lookupVehicleRegistrations")
+    .mockResolvedValueOnce([vehicle]).mockReturnValueOnce(new Promise((resolve) => { settle = resolve; }))
+    .mockResolvedValue([{ ...vehicle, mot_freshness: "fresh" }]);
+  const count = vi.spyOn(directoryApi, "listVehicles").mockResolvedValue({ items: [], total: 2000, next_cursor: null });
+  const people = vi.spyOn(directoryApi, "lookupPeople").mockResolvedValue([{ id: "owner" } as Person]);
+  const fullPeople = vi.spyOn(directoryApi, "listPeople");
+  const get = vi.spyOn(api, "get"); const post = vi.spyOn(api, "post");
+  const view = render(<ReadSignalsContext.Provider value={signals}><DashboardMOTConsumer /></ReadSignalsContext.Provider>);
+  await act(async () => {});
+  expect(view.getByLabelText("MOT freshness")).toHaveTextContent("stale");
+  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  const update = { type: "realtime", message: { type: "vehicle_information.updated", payload: { vehicle_id: vehicle.id } } } as const;
+  await act(async () => { signals.publish(update); });
+  await act(async () => { for (let index = 0; index < 100; index += 1) signals.publish(update); });
+  expect(vehicles).toHaveBeenCalledTimes(2);
+  await act(async () => { settle([{ ...vehicle, mot_freshness: "unknown" }]); });
+  expect(view.getByLabelText("MOT freshness")).toHaveTextContent("unknown");
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(view.getByLabelText("MOT freshness")).toHaveTextContent("fresh");
+  expect(vehicles).toHaveBeenCalledTimes(3);
+  expect(vehicles.mock.calls.every(([plates]) => JSON.stringify(plates) === '["REMOTE01"]')).toBe(true);
+  expect(count.mock.calls.every(([query]) => JSON.stringify(query) === '{"active":true,"limit":1}')).toBe(true);
+  expect(people.mock.calls.every(([ids]) => JSON.stringify(ids) === '["owner"]')).toBe(true);
+  expect(fullPeople).not.toHaveBeenCalled(); expect(get).not.toHaveBeenCalled(); expect(post).not.toHaveBeenCalled();
+});
+
+it("aborts an old account lookup and cannot restore its late MOT summary in the new account", async () => {
+  const first = createReadSignals("first"); const second = createReadSignals("second");
+  const vehicle = { id: "after-page-500", registration_number: "REMOTE01", person_ids: ["owner"], mot_freshness: "fresh" } as Vehicle;
+  let settle!: (vehicles: Vehicle[]) => void;
+  const vehicles = vi.spyOn(directoryApi, "lookupVehicleRegistrations")
+    .mockReturnValueOnce(new Promise((resolve) => { settle = resolve; })).mockResolvedValue([vehicle]);
+  vi.spyOn(directoryApi, "listVehicles").mockResolvedValue({ items: [], total: 2000, next_cursor: null });
+  const people = vi.spyOn(directoryApi, "lookupPeople").mockResolvedValue([{ id: "owner" } as Person]);
+  const view = render(<ReadSignalsContext.Provider value={first}><DashboardMOTConsumer /></ReadSignalsContext.Provider>);
+  const oldSignal = vehicles.mock.calls[0][1]!.signal!;
+  view.rerender(<ReadSignalsContext.Provider value={second}><DashboardMOTConsumer /></ReadSignalsContext.Provider>);
+  await act(async () => {});
+  expect(oldSignal.aborted).toBe(true);
+  expect(view.getByLabelText("MOT freshness")).toHaveTextContent("fresh");
+  await act(async () => { settle([{ ...vehicle, mot_freshness: "stale" }]); });
+  await act(async () => { first.publish({ type: "realtime", message: { type: "vehicle_information.updated", payload: { vehicle_id: vehicle.id } } }); });
+  expect(view.getByLabelText("MOT freshness")).toHaveTextContent("fresh");
+  expect(vehicles).toHaveBeenCalledTimes(2); expect(people).toHaveBeenCalledTimes(1);
 });

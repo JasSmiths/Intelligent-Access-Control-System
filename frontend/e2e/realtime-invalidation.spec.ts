@@ -107,6 +107,17 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
   });
 }
 
+test("an updated access event refreshes filtered history without resetting its filter", async ({ page }) => {
+  const fixture = await fixtures(page);
+  await page.goto("/events");
+  await page.getByRole("combobox", { name: "Decision", exact: true }).selectOption("granted");
+  await expect(page.locator(".events-table-card").getByText("ORIGINAL", { exact: true })).toBeVisible();
+  await fixture.update("access_event.updated", { ...event, event_id: event.id, resource_revision: 2, anomaly_count: 1 });
+  await expect(page.locator(".events-table-card").getByText("LATEST", { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole("combobox", { name: "Decision", exact: true })).toHaveValue("granted");
+  expect(fixture.unexpected).toEqual([]);
+});
+
 for (const kind of ["people", "vehicles"] as const) {
   test(`${kind} distinguishes an initial failed page from empty results and recovers locally`, async ({ page }) => {
     const fixture = await fixtures(page, kind);
