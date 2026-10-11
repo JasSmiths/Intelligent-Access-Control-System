@@ -336,7 +336,9 @@ class HardwareFreeAccessEventService(AccessEventService):
                     await self._finalize_window(immediate)
             while window := await self._pipeline.next_flush_window(
                 coordinator, quiet_seconds=0 if flush else self._runtime.lpr_debounce_quiet_seconds,
-                max_seconds=0 if flush else self._runtime.lpr_debounce_max_seconds,
+                # This explicit inert-fixture flush also handles its synthetic
+                # future timestamps; production always uses configured clocks.
+                max_seconds=float("-inf") if flush else self._runtime.lpr_debounce_max_seconds,
             ):
                 await self._finalize_window(window)
         finally:
@@ -348,7 +350,7 @@ class HardwareFreeAccessEventService(AccessEventService):
             raise FullAccessFlowIsolationError("Synthetic flush requires exclusive coordinator ownership.")
         try:
             while window := await self._pipeline.next_flush_window(
-                coordinator, quiet_seconds=0, max_seconds=0,
+                coordinator, quiet_seconds=0, max_seconds=float("-inf"),
             ):
                 await self._finalize_window(window)
         finally:

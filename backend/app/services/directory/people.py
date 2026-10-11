@@ -6,6 +6,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models import Person, User, Vehicle, VehiclePersonAssignment
 from app.schemas.directory import CreatePersonRequest, PersonResponse, UpdatePersonRequest
+from app.services.ha_presence_policy import person_presence_binding_signature
 from app.services.ha_presence_reservations import invalidate_people_in_session
 from app.services.leaderboard import get_leaderboard_service
 from app.services.settings import get_runtime_config
@@ -127,6 +128,7 @@ async def update_person(
     # Recovery dispatch holds this same owner row through its durable checkpoint.
     await session.refresh(person, with_for_update=True)
     before = person_audit_snapshot(person)
+    prior_ha_binding = person_presence_binding_signature(person)
 
     if "group_id" in request.model_fields_set:
         group = await get_group(session, request.group_id)
@@ -228,11 +230,7 @@ async def update_person(
         diff=audit_diff(before, after),
     )
     await get_leaderboard_service().mark_dirty_in_session(session)
-    if any(before[key] != after[key] for key in (
-        "is_active", "home_assistant_presence_input_boolean_entity_ids",
-        "home_assistant_presence_input_boolean_entry_action",
-        "home_assistant_presence_input_boolean_exit_action",
-    )):
+    if prior_ha_binding != person_presence_binding_signature(person):
         await invalidate_people_in_session(session, [person.id], reason="person_changed")
     await session.commit()
     get_leaderboard_service().wake()

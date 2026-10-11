@@ -919,3 +919,77 @@ async def test_health_reports_durable_queue_window_counts_and_original_oldest_ag
     async with AsyncSessionLocal() as session:
         assert (await session.get(LprIngestEvent, pending)).received_at == NOW + timedelta(seconds=10)
     await pipeline.release_coordinator(coordinator)
+
+
+@pytest.mark.parametrize('count', [4, 80])
+async def test_distinct_pending_windows_keep_vendor_backlog_out_of_retained_work(tmp_path, count):
+    pipeline, windows = AccessPipelineStore(), AccessWindowStore()
+    coordinator = await pipeline.acquire_coordinator()
+    summaries = []
+    for index in range(count):
+        _, _, summary = await append(pipeline, windows, coordinator,
+            value(plate=f'P{index:06d}', irrelevant_vendor_blob='v' * 131072))
+        summaries.append(summary)
+    gc.collect()
+    tracemalloc.start()
+    started = time.perf_counter()
+    async with AsyncSessionLocal() as session:
+        legacy_rows = (await session.execute(select(LprDebounceWindow.id,
+            LprIngestEvent, LprWindowMember.prepared_context)
+            .join(LprWindowMember, LprWindowMember.window_id == LprDebounceWindow.id)
+            .join(LprIngestEvent, LprIngestEvent.id == LprWindowMember.ingest_id)
+            .where(LprDebounceWindow.state == 'open').order_by(LprDebounceWindow.open_ordinal))).all()
+        legacy = [(identity, read_from_member(ingest, context)) for identity, ingest, context in legacy_rows]
+    before_seconds = time.perf_counter() - started
+    _, before_peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    expected_window = next(identity for identity, read in legacy if read.registration_number == f'P{count-1:06d}')
+    before_payload_bytes = sum(len(json.dumps(read.raw_payload).encode()) for _, read in legacy)
+    del legacy_rows, legacy
+    gc.collect()
+    # The new owner holds one current input, while ordered matching pages only
+    # compact durable window summaries. Startup/backlog detail hydrates no input.
+    claim, read = await claim_read(pipeline, coordinator, value(plate=f'P{count-1:06d}', seconds=1, confidence=.1))
+    captured = []
+    def capture(connection, cursor, statement, parameters, context, many):
+        if statement.lstrip().startswith('SELECT'):
+            captured.append((statement, parameters))
+    sql_event.listen(engine.sync_engine, 'before_cursor_execute', capture)
+    tracemalloc.start()
+    started = time.perf_counter()
+    try:
+        backlog = await pipeline.backlog_status()
+        async with AsyncSessionLocal() as session:
+            result = await windows.append_in_session(session, claim, read, threshold=1)
+            await pipeline.begin_flush_in_session(session, claim)
+            await session.commit()
+    finally:
+        after_seconds = time.perf_counter() - started
+        _, after_peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        sql_event.remove(engine.sync_engine, 'before_cursor_execute', capture)
+    assert backlog['pending_windows'] == count and backlog['queue_depth'] == 1
+    assert result.evidence.window_id == expected_window == summaries[-1].evidence.window_id
+    assert result.count == 2 and result.best_ingest_id == summaries[-1].best_ingest_id
+    pages = [(sql, parameters) for sql, parameters in captured
+             if 'FROM lpr_debounce_windows' in sql and 'LIMIT' in sql]
+    assert len(pages) == (count + 49) // 50
+    assert all('normalized_payload' not in sql for sql, _ in pages)
+    if count == 80:
+        assert after_peak < before_peak / 3
+    plans = []
+    async with AsyncSessionLocal() as session:
+        connection = await session.connection()
+        for statement, parameters in pages:
+            plan = (await connection.exec_driver_sql('EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ' + statement, parameters)).scalar_one()
+            plans.append({'sql': statement, 'plan': plan})
+    write_evidence(tmp_path / 'distinct-window-retention-evidence.json', {
+        'kind': 'synthetic-load-phase-comparison', 'distinct_pending_windows': count,
+        'before': {'retained_vendor_rows': count, 'raw_payload_json_bytes': before_payload_bytes,
+                   'load_peak_tracemalloc_bytes': before_peak, 'load_seconds': before_seconds},
+        'after': {'current_input_rows': 1, 'window_page_limit': 50, 'window_page_queries': len(pages),
+                  'load_peak_tracemalloc_bytes': after_peak, 'load_seconds': after_seconds},
+        'equivalent_first_matching_window_and_rank': True, 'plans': plans,
+        'limits': 'Equivalent synthetic pending state and matching result. Python allocation peaks cover load/append only, not input preparation, PostgreSQL memory or process RSS. Timings are local observations, not production guarantees.',
+    })
+    await pipeline.release_coordinator(coordinator)

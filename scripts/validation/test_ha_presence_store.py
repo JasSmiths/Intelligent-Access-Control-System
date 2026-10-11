@@ -749,7 +749,7 @@ async def test_callback_failure_keeps_committed_attempt_and_barrier_recoverable(
 @pytest.mark.parametrize('field,replacement', [
     ('is_active', False),
     ('home_assistant_presence_input_boolean_entity_ids', ['input_boolean.replacement']),
-    ('home_assistant_presence_input_boolean_entry_action', 'turn_off'),
+    ('home_assistant_presence_input_boolean_entry_action', 'turn_on'),
     ('home_assistant_presence_input_boolean_exit_action', 'turn_on'),
 ])
 async def test_actual_person_edit_aba_cannot_revive_queued_ha_authority(field, replacement):
@@ -816,6 +816,11 @@ async def test_noop_person_binding_and_secret_setting_edits_keep_original_genera
         await session.flush()
         await update_person(proposal.person_id, UpdatePersonRequest(
             home_assistant_presence_input_boolean_entity_ids=['input_boolean.synthetic_noop', 'input_boolean.synthetic_noop']), actor, session)
+    async with AsyncSessionLocal() as session:
+        # Production secret settings carry this flag; the general inert seed
+        # deliberately stores plain nonsecret values for unrelated store cases.
+        (await session.get(SystemSetting, 'home_assistant_token')).is_secret = True
+        await session.commit()
     await settings_owner.update_settings({'home_assistant_token': ''})
     async with AsyncSessionLocal() as session:
         desired = await session.get(HaPresenceDesired, proposal.person_id)

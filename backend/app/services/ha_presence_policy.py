@@ -50,6 +50,15 @@ def person_input_boolean_action_for_direction(person: Person, direction: AccessD
 
 
 
+def person_presence_binding_signature(person: Person) -> tuple[bool, tuple[str, ...], str, str]:
+    """Only current eligibility and normalized presence bindings invalidate work."""
+    return (
+        bool(person.is_active), tuple(person_input_boolean_entity_ids(person)),
+        person_input_boolean_action_for_direction(person, AccessDirection.ENTRY),
+        person_input_boolean_action_for_direction(person, AccessDirection.EXIT),
+    )
+
+
 @dataclass(frozen=True)
 class HaBinding:
     entity_ids: tuple[str, ...]
