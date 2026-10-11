@@ -165,8 +165,10 @@ class AccessEventService:
         self._cleanup = None
         self._stop_event.clear()
         self._started_at = self._last_heartbeat_at = datetime.now(tz=UTC)
-        event_bus.subscribe(self._handle_realtime_event, scope="all_workers")
-        event_bus.subscribe(self._handle_local_realtime_event)
+        event_bus.subscribe(self._handle_realtime_event, scope="all_workers",
+            event_types=frozenset({"maintenance_mode.changed"}))
+        event_bus.subscribe(self._handle_local_realtime_event,
+            event_types=frozenset({"gate.state_changed"}))
         self._worker = asyncio.create_task(self._process_queue(), name="lpr-durable-coordinator")
         self._wake.set()
         logger.info("access_event_service_started")
@@ -768,7 +770,7 @@ class AccessEventService:
                 return
             result = await AccessExecution(
                 self._movement_ledger, self._movement_sessions
-            )._persist_external_gate_open_admission(
+            ).persist_external_gate_open_admission(
                 session, match, observed_at=observed_at, gate_payload=event.payload, runtime=runtime
             )
             if result is not None:

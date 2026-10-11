@@ -60,7 +60,8 @@ class HomeAssistantIntegrationService:
     def __init__(self, client: HomeAssistantClient | None = None, *,
                  effects: HomeAssistantEffects | None = None) -> None:
         self._effects = effects
-        self._client = client or get_home_assistant_client()
+        self._owns_client = client is not None
+        self._client = client if client is not None else get_home_assistant_client()
         self._listener: asyncio.Task | None = None
         self._state_refresh_task: asyncio.Task | None = None
         self._state_refresh_lock = asyncio.Lock()
@@ -102,7 +103,8 @@ class HomeAssistantIntegrationService:
         invalidate_connection()
         self._listener = None
         self._state_refresh_task = None
-        await self._client.close()
+        if self._owns_client:
+            await drain_owned(self._client.close())
         logger.info("home_assistant_listener_stopped")
 
     async def status(self, *, refresh: bool = False) -> dict:

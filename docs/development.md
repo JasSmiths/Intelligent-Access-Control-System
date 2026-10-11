@@ -266,3 +266,11 @@ use a matching backup/source restore instead of deleting durable work. DVSA is
 disabled by default. Configure it only through the existing confirmed settings
 workflow; local credential files are not runtime dependencies. Public contracts
 and cache/recovery behaviour are documented in [integrations](integrations.md#vehicle-information-and-mot-history).
+
+Durable access work uses migration `20261007_0013`. Its downgrade refuses
+populated intake, window, completion, publication, HA or chart state; it does not
+turn durable work back into the retired RAM pipeline. Recover with a verified
+matching source/image/schema and database/file backup, or a compatible fix-forward
+image. An old image alone cannot process this state safely. Inspect uncertain
+physical receipts and outstanding original-authority work under recovery hold
+before enabling workers; a restore cannot undo effects that happened after backup.

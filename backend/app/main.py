@@ -16,6 +16,7 @@ from app.core.recovery_hold import is_recovery_hold
 from app.core.task_lifecycle import drain_owned
 from app.db.bootstrap import init_database
 from app.db.session import AsyncSessionLocal, engine
+from app.modules.home_assistant.client import get_home_assistant_client
 from app.recovery_hold import RecoveryHoldMiddleware, verify_readable_schema
 from app.services import vehicle_information as vehicle_information_resources
 from app.services.access.completion_media import AccessCompletionStages
@@ -123,6 +124,10 @@ async def lifespan(app: FastAPI):
                     app.state.startup_complete = False
                 return
             wire_application()
+            # Shared by HA state, access-device providers and notification transports.
+            # Dispose only after their actual work and notification drain have settled.
+            resources.push_async_callback(_stop_owned_service, "home_assistant_client",
+                get_home_assistant_client().close)
             await init_database()
             stages = AccessCompletionStages(visual=get_vehicle_visual_detection_recorder(),
                 snapshots=get_snapshot_manager(), protect=get_unifi_protect_service())

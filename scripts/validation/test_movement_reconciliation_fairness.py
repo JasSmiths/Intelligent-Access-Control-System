@@ -8,8 +8,8 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from app.db.session import AsyncSessionLocal
-from app.models import GateCommandRecord, MovementSagaRecord, Presence
+from app.db.session import AsyncSessionLocal, engine
+from app.models import AuditLog, GateCommandRecord, MovementSagaRecord, Presence
 from app.models.enums import GateCommandState, MovementSagaState
 from app.services import movement_reconciliation as reconciliation_owner
 from app.services.movement_reconciliation import MovementReconciliationService
@@ -103,3 +103,29 @@ async def test_actionable_scan_failure_does_not_block_verified_gate_reconciliati
         parent = await session.get(GateCommandRecord, parent_id)
         assert parent.state == GateCommandState.RECONCILED and parent.mechanically_confirmed
         assert not parent.requires_reconciliation
+
+
+@pytest.mark.parametrize("hint_fails", [False, True])
+async def test_standalone_reconciliation_audit_hint_follows_commit_and_actual_close(monkeypatch, hint_fails):
+    from app.services.telemetry import audit_log_event_payload
+    parent_id = await evidence(None, None, verified=True)
+    observed = []
+    async def publish(event_type, payload):
+        if event_type != "audit.log.created":
+            return
+        assert engine.pool.checkedout() == 0
+        async with AsyncSessionLocal() as observer:
+            row = await observer.get(AuditLog, uuid.UUID(payload["id"]))
+            parent = await observer.get(GateCommandRecord, parent_id)
+            assert row.action == "gate.command.reconciliation" and row.target_id == str(parent_id)
+            assert payload == audit_log_event_payload(row)
+            assert parent.state == GateCommandState.RECONCILED and parent.mechanically_confirmed
+        observed.append(payload)
+        if hint_fails:
+            raise RuntimeError("Synthetic postcommit observer failure")
+    monkeypatch.setattr(reconciliation_owner.event_bus, "publish", publish)
+    service = MovementReconciliationService()
+    assert await service.reconcile_once() == 1
+    assert len(observed) == 1
+    assert await service.reconcile_once() == 0
+    assert len(observed) == 1

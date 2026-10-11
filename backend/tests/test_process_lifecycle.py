@@ -41,6 +41,8 @@ def owned_resources(monkeypatch):
     monkeypatch.setattr(main, "validate_startup_security_config", lambda: None)
     monkeypatch.setattr(main, "init_database", AsyncMock())
     monkeypatch.setattr(main, "engine", SimpleNamespace(dispose=service("database").stop))
+    monkeypatch.setattr(main, "get_home_assistant_client",
+        lambda: SimpleNamespace(close=service("home_assistant_client").stop))
     monkeypatch.setattr(main, "event_bus", service("realtime"))
     monkeypatch.setattr(main, "telemetry", service("telemetry"))
     monkeypatch.setattr(main, "report_exports", service("reports"))
@@ -80,7 +82,7 @@ async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_re
     assert stopped == [
         *[name for name in reversed(started) if name in producers],
         *[name for name in reversed(started) if name not in producers],
-        "database",
+        "home_assistant_client", "database",
     ]
     assert not app.state.startup_complete
     assert not any(action == "task" for action, _ in events)
@@ -92,7 +94,8 @@ async def test_cleanup_failure_preserves_startup_error_and_continues(owned_resou
     with pytest.raises(RuntimeError, match="synthetic startup failure"):
         async with main.lifespan(FastAPI()):
             pytest.fail("Startup failed")
-    assert events[-3:] == [("stop", "realtime"), ("stop", "vehicle_information_clients"), ("stop", "database")]
+    assert events[-4:] == [("stop", "realtime"), ("stop", "vehicle_information_clients"),
+        ("stop", "home_assistant_client"), ("stop", "database")]
     assert ("stop", "access_device") in events
 
 
@@ -113,7 +116,7 @@ async def test_normal_shutdown_drains_owned_tasks_before_services_and_database(o
                                ("access_completion", "unifi_protect"), ("ha_presence", "home_assistant")):
         assert events.index(("stop", caller)) < events.index(("stop", dependency))
     for producer in ({*SERVICE_NAMES, "calendar", "reports", "access_completion", "ha_presence"} - {"notification"}):
-        for sink in ("notification", "telemetry", "realtime", "vehicle_information_clients", "database"):
+        for sink in ("notification", "telemetry", "realtime", "vehicle_information_clients", "home_assistant_client", "database"):
             assert events.index(("stop", producer)) < events.index(("stop", sink))
     for before, after in (("notification", "telemetry"), ("telemetry", "realtime"),
                           ("realtime", "vehicle_information_clients")):
@@ -127,7 +130,7 @@ async def test_database_initialization_failure_disposes_pool(owned_resources, mo
     with pytest.raises(RuntimeError, match="synthetic database failure"):
         async with main.lifespan(FastAPI()):
             pytest.fail("Database initialization failed")
-    assert events == [("stop", "database")]
+    assert events == [("stop", "home_assistant_client"), ("stop", "database")]
 
 
 
@@ -169,7 +172,8 @@ async def test_timed_out_cooperative_cleanup_is_cancelled_before_later_resources
             pytest.fail('Startup failed')
     assert ('cancelled', 'access_device') in events
     assert events.index(('cancelled', 'access_device')) < events.index(('stop', 'notification'))
-    assert events[-3:] == [('stop', 'realtime'), ('stop', 'vehicle_information_clients'), ('stop', 'database')]
+    assert events[-4:] == [('stop', 'realtime'), ('stop', 'vehicle_information_clients'),
+        ('stop', 'home_assistant_client'), ('stop', 'database')]
 
 
 async def test_full_lifespan_retains_calendar_observation_cleanup_before_database_disposal(owned_resources, monkeypatch):
@@ -245,7 +249,7 @@ async def test_repeated_lifespan_cancellation_retains_actual_completion_cleanup_
         assert not shutdown.done() and not operation.done()
         assert cancellations == [1]
         assert not any(("stop", sink) in events for sink in
-            ("notification", "telemetry", "realtime", "vehicle_information_clients", "database"))
+            ("notification", "telemetry", "realtime", "vehicle_information_clients", "home_assistant_client", "database"))
         publication.stop.assert_not_awaited()
     finally:
         release.set()
@@ -253,3 +257,45 @@ async def test_repeated_lifespan_cancellation_retains_actual_completion_cleanup_
     assert operation.done() and not actual._operations
     publication.stop.assert_awaited_once()
     assert events[-1] == ("stop", "database")
+
+
+async def test_shared_ha_client_outlives_blocked_notification_drain_and_private_client_is_owned(owned_resources, monkeypatch):
+    from app.services import home_assistant
+    events, _ = owned_resources
+    shared = SimpleNamespace(close=AsyncMock())
+    private = SimpleNamespace(close=AsyncMock())
+    monkeypatch.setattr(home_assistant, "get_home_assistant_client", lambda: shared)
+    shared_listener = home_assistant.HomeAssistantIntegrationService()
+    private_listener = home_assistant.HomeAssistantIntegrationService(private)
+    await shared_listener.stop()
+    shared.close.assert_not_awaited()
+    await private_listener.stop()
+    private.close.assert_awaited_once()
+    cleaning, release = asyncio.Event(), asyncio.Event()
+    async def notification_stop():
+        cleaning.set()
+        await release.wait()
+        shared.close.assert_not_awaited()
+        events.append(("stop", "notification"))
+    async def close_shared():
+        shared.close.assert_not_awaited()
+        await shared.close()
+        events.append(("stop", "home_assistant_client"))
+    monkeypatch.setattr(main, "get_home_assistant_client", lambda: SimpleNamespace(close=close_shared))
+    monkeypatch.setattr(main, "get_notification_service", lambda: SimpleNamespace(start=AsyncMock(), stop=notification_stop))
+    lifetime = main.lifespan(FastAPI())
+    await lifetime.__aenter__()
+    shutdown = asyncio.create_task(lifetime.__aexit__(None, None, None))
+    try:
+        await cleaning.wait()
+        shutdown.cancel(); await asyncio.sleep(.01)
+        shutdown.cancel(); await asyncio.sleep(.01)
+        assert not shutdown.done()
+        shared.close.assert_not_awaited()
+        assert ("stop", "database") not in events
+    finally:
+        release.set()
+        await shutdown
+    shared.close.assert_awaited_once()
+    assert events.index(("stop", "notification")) < events.index(("stop", "home_assistant_client"))
+    assert events[-2:] == [("stop", "home_assistant_client"), ("stop", "database")]

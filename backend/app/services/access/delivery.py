@@ -25,6 +25,7 @@ from app.models import (
 )
 from app.models.enums import GateCommandState
 from app.modules.notifications.base import NotificationContext
+from app.services.access.completion_database import access_session
 from app.services.access.payloads import (
     access_event_realtime_payload,
     authorized_entry_message,
@@ -33,7 +34,12 @@ from app.services.access.payloads import (
 from app.services.access_device_commands import AccessDeviceCommandJournal, device_command_receipt
 from app.services.automation_intake import reserve_trigger
 from app.services.notification_runs import NotificationRunStore
-from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, write_audit_log
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_INTEGRATIONS,
+    audit_log_event_payload,
+    publish_audit_log_hint,
+    write_audit_log,
+)
 from app.services.workflows.automation_definition import automation_triggers_for_origin
 from app.services.workflows.notification_payloads import notification_context_payload
 from app.services.workflows.vehicle_away import vehicle_time_away_seconds
@@ -193,7 +199,9 @@ async def reserve_gate_outcome_outputs(
     await session.flush()
 
 
-async def reserve_garage_outcome_outputs(session: AsyncSession, *, command_id: uuid.UUID) -> bool:
+async def reserve_garage_outcome_outputs(
+    session: AsyncSession, *, command_id: uuid.UUID, outcome_audits: list[AuditLog] | None = None,
+) -> bool:
     """Capture the initial automatic garage outcome atomically, without I/O.
 
     The journal retains transport/physical evidence and immutable origin. Its
@@ -221,6 +229,7 @@ async def reserve_garage_outcome_outputs(session: AsyncSession, *, command_id: u
     # Expiration can prove a prepared reservation was not sent, or retain an
     # attempted operation as unknown. It never makes an uncertain target retryable.
     AccessDeviceCommandJournal.expire(command, now)
+    journal_audit = await AccessDeviceCommandJournal.record_outcome_in_session(session, command)
     receipt = device_command_receipt(command)
     origin = command.origin_context
     event = await session.get(AccessEvent, uuid.UUID(origin["access_event_id"]))
@@ -242,7 +251,8 @@ async def reserve_garage_outcome_outputs(session: AsyncSession, *, command_id: u
         and not verified_without_send
     )
     audit_id = uuid.uuid5(command.id, "access.garage.outcome.audit")
-    if await session.get(AuditLog, audit_id) is None:
+    audit = await session.get(AuditLog, audit_id)
+    if audit is None:
         audit = await write_audit_log(
             session,
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -313,6 +323,10 @@ async def reserve_garage_outcome_outputs(session: AsyncSession, *, command_id: u
         )
     command.outcome_recorded_at = await session.scalar(select(func.clock_timestamp()))
     await session.flush()
+    if outcome_audits is not None:
+        if journal_audit is not None:
+            outcome_audits.append(journal_audit)
+        outcome_audits.append(audit)
     return True
 
 
@@ -320,7 +334,8 @@ async def recover_garage_outcome_outputs(*, limit: int = 25) -> int:
     """One bounded DB-only batch; active commands cannot starve completed outputs."""
     if not 1 <= limit <= 100:
         raise ValueError("Garage output recovery batch size must be between 1 and 100.")
-    async with AsyncSessionLocal() as session:
+    outcome_audits: list[AuditLog] = []
+    async with access_session(AsyncSessionLocal) as session:
         now = await session.scalar(select(func.clock_timestamp()))
         ids = list(
             (
@@ -345,6 +360,9 @@ async def recover_garage_outcome_outputs(*, limit: int = 25) -> int:
         )
         count = 0
         for identity in ids:
-            count += await reserve_garage_outcome_outputs(session, command_id=identity)
+            count += await reserve_garage_outcome_outputs(session, command_id=identity, outcome_audits=outcome_audits)
         await session.commit()
-        return count
+        payloads = [audit_log_event_payload(row) for row in outcome_audits]
+    for payload in payloads:
+        await publish_audit_log_hint(payload)
+    return count

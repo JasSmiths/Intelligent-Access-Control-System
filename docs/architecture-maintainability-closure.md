@@ -291,7 +291,7 @@ conformance and non-report P8 owners remain pending.
 | Pure plan discarded command field | Remove; P5/AM-11 | Trace internal consumers; preserve persisted saga/receipt semantics | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
 | Automation realtime bridge and notification visitor fallback | Remove; P5/AM-11 | Keep durable mapper and notification wake; negative duplicate-intake fixtures | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
 | AccessExecutionResult unused window/command/skipped/outcome fields | Narrow after tracing; P5/AM-11 | Whole-repository and fixture trace; retain durable fields | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
-| External-admission private method | Explicit supported admission interface; P6 | One admission implementation; preserve execution/admission ordering | Pending / pending |
+| External-admission private method | Explicit supported AccessExecution.persist_external_gate_open_admission interface; P6 | Existing implementation and sole coordinator caller renamed together; execution/admission ordering preserved | Implemented / composed gate and final review pending |
 | Unused shell reads and seeds | Remove with feature ownership; P3 | Actual feature read coverage and invalidation/draft lifetimes | Closed / Astra approved P3 |
 | OAuth placeholder flags/button/import | Remove together; P4 | No implemented OAuth operation; provider editor checks | Closed / Astra approved P4 frontend |
 | Artificial provider progress waits | Remove; P4 | Actual pending work owns feedback; no backend speedup claim | Closed / Astra approved P4 frontend |

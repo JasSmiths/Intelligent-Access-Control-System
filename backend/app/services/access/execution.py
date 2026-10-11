@@ -634,7 +634,7 @@ class AccessExecution:
             observed_at=observed_at,
         )
 
-    async def _persist_external_gate_open_admission(
+    async def persist_external_gate_open_admission(
         self,
         session: AsyncSession,
         match: ExternalVehicleSessionMatch,
@@ -643,6 +643,7 @@ class AccessExecution:
         gate_payload: dict[str, Any],
         runtime: RuntimeConfig,
     ) -> tuple[AccessEvent, list[Anomaly], dict[str, Any]] | None:
+        """Persist an observed external admission in the caller-owned transaction."""
         session_id = str(getattr(match.session, "id", "") or "")
         movement_saga = await self._movement_ledger.create_movement_saga(
             session,

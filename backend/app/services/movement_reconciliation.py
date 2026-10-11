@@ -12,6 +12,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import GateCommandRecord, MovementSagaRecord
 from app.models.enums import GateCommandState, MovementSagaState
 from app.modules.gate.base import GateState
+from app.services.access.completion_database import access_session
 from app.services.access.delivery import recover_garage_outcome_outputs
 from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.actionable_notifications import get_actionable_notification_service
@@ -23,7 +24,11 @@ from app.services.movement.admission import (
     recover_unattempted_visitor_reservations,
 )
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
-from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, write_audit_log
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_INTEGRATIONS,
+    audit_log_event_payload,
+    write_audit_log,
+)
 
 logger = get_logger(__name__)
 
@@ -118,7 +123,7 @@ class MovementReconciliationService:
                 )
             )
         )
-        async with AsyncSessionLocal() as session:
+        async with access_session(AsyncSessionLocal) as session:
             rows = (
                 await session.scalars(
                     select(MovementSagaRecord)
@@ -188,9 +193,15 @@ class MovementReconciliationService:
             self._saga_cursor = next_saga_cursor
             self._standalone_cursor = next_standalone_cursor
             publications, self._pending_events = self._pending_events, []
-            for event_type, payload in publications:
+        for event_type, payload in publications:
+            if event_type == "audit.log.created":
+                try:
+                    await event_bus.publish(event_type, payload)
+                except Exception as exc:  # noqa: BLE001 - A refresh hint cannot undo a committed audit.
+                    logger.warning("reconciliation_audit_hint_failed", extra={"error_class": type(exc).__name__})
+            else:
                 await event_bus.publish(event_type, payload)
-            return count
+        return count
 
     async def _reconcile_standalone_gate_command(self, session, command: GateCommandRecord) -> int:
         if isinstance(session, AsyncSession):
@@ -387,7 +398,7 @@ class MovementReconciliationService:
         *,
         success: bool,
     ) -> None:
-        await write_audit_log(
+        audit = await write_audit_log(
             session,
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
             action="gate.command.reconciliation",
@@ -409,6 +420,9 @@ class MovementReconciliationService:
                 "detail": detail,
             },
         )
+
+        await session.flush()
+        self._pending_events.append(("audit.log.created", audit_log_event_payload(audit)))
 
 
 def _latest_reconciliation_command(commands: list[GateCommandRecord]) -> GateCommandRecord | None:

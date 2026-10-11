@@ -4,6 +4,7 @@ from test_recovery_boundaries import isolated_resources as isolated_resources
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 import uuid
 
 import pytest
@@ -151,6 +152,8 @@ async def test_expired_operation_is_reported_with_retained_delivery_certainty(st
         assert row.state == retained and row.outcome_recorded_at is not None
         assert row.accepted is (False if retained == "not_sent" else None)
         assert row.lease_token is None and row.lease_expires_at is None
+        audit = await session.get(AuditLog, uuid.uuid5(row.id, f"device-command-outcome:{retained}"))
+        assert audit is not None and audit.target_id == row.device_key
 
 
 async def test_active_and_locked_older_commands_do_not_starve_ready_output():
@@ -254,3 +257,46 @@ async def test_origin_on_service_requires_current_access_authorization_participa
     with pytest.raises(ValueError, match="authorization participant"):
         await AccessDeviceService().command_device("synthetic_garage", "open", "Synthetic",
             intent_id="synthetic", idempotency_key="synthetic", origin_context={})
+
+
+@pytest.mark.parametrize("state", ["prepared", "attempting"])
+async def test_expiry_mandatory_journal_audit_failure_rolls_back_outcome(monkeypatch, state):
+    operation = await garage_operation(state)
+    await expire_operation(operation.claim.record.id)
+    original = AccessDeviceCommandJournal.record_outcome_in_session
+    monkeypatch.setattr(AccessDeviceCommandJournal, "record_outcome_in_session", AsyncMock(
+        side_effect=RuntimeError("Synthetic mandatory journal audit failure")))
+    with pytest.raises(RuntimeError, match="mandatory journal audit failure"):
+        await recover_garage_outcome_outputs()
+    async with AsyncSessionLocal() as session:
+        row = await session.get(AccessDeviceCommandRecord, operation.claim.record.id)
+        assert row.state == state and row.outcome_recorded_at is None
+        retained = "not_sent" if state == "prepared" else "unknown"
+        assert await session.get(AuditLog, uuid.uuid5(row.id, f"device-command-outcome:{retained}")) is None
+    monkeypatch.setattr(AccessDeviceCommandJournal, "record_outcome_in_session", staticmethod(original))
+    assert await recover_garage_outcome_outputs() == 1
+
+
+async def test_existing_deterministic_garage_audit_finishes_missing_output_checkpoint(monkeypatch):
+    from app.db.session import engine
+    from app.services.access import delivery
+    from app.services.telemetry import audit_log_event_payload
+    operation = await garage_operation("unknown")
+    assert await recover_garage_outcome_outputs() == 1
+    async with AsyncSessionLocal() as session:
+        row = await session.get(AccessDeviceCommandRecord, operation.claim.record.id)
+        row.outcome_recorded_at = None
+        await session.commit()
+    hints = []
+    async def hint(payload):
+        assert engine.pool.checkedout() == 0
+        async with AsyncSessionLocal() as observer:
+            audit = await observer.get(AuditLog, uuid.UUID(payload["id"]))
+            assert payload == audit_log_event_payload(audit)
+            assert (await observer.get(AccessDeviceCommandRecord, operation.claim.record.id)).outcome_recorded_at
+        hints.append(payload)
+    monkeypatch.setattr(delivery, "publish_audit_log_hint", hint)
+    assert await recover_garage_outcome_outputs() == 1
+    assert {payload["action"] for payload in hints} == {"access_device.command.uncertain", "garage_door.open.automatic"}
+    assert await recover_garage_outcome_outputs() == 0
+    assert len(hints) == 2

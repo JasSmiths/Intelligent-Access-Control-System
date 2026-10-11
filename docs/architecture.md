@@ -781,3 +781,11 @@ information invalidator and registration fence to prevent an old completion
 restoring a reset aggregate. A shipped summary would extend this feature's
 read contract and rendering owner; it needs no new provider fetch on a read.
 No mileage field or summary feature is shipped by the exercise.
+
+The process lifecycle starts diagnostic/realtime sinks before their emitters,
+drains active callers and notification delivery, then diagnostics and the bus.
+Shared provider clients close after their consumers; the HA state listener closes
+only injected private clients itself. Actual child and database cleanup remains
+owned even when shutdown cancellation repeats. Observed external admissions use
+AccessExecution.persist_external_gate_open_admission in the coordinator's existing
+transaction; this supported port does not add a second admission path.
