@@ -643,3 +643,137 @@ Coordinate concrete payload/consumer ownership before frontend edits. P3 product
 request comparisons remain P3 baseline-stage evidence; P9 reruns the equivalent
 integrated fixture if P6/P7 changes those request paths, rather than presenting the
 old stage comparison as a final-candidate guarantee.
+
+
+## Continuation: minimum remaining core cutover proposal
+
+This proposal is based on clean commit `a87115e1184dce902060a3a224676bb16e329a3c`
+(tree `a4583f9930a8d372e1165dd0f69555b5c732bddf`). It needs Astra High design
+approval before consequential source changes. Earlier supplements remain the
+behavior contract; this section narrows the implementation and retirement plan.
+The current 0013 schema and dormant stores already supply the durable identities.
+Do not add another queue, scheduler, persisted event projection or lock framework.
+
+### Existing owners and exact retirement
+
+- Keep `AccessEventService` as the serial intake/classification/debounce owner.
+  Replace its unbounded Queue, pending windows, recent visitor-resolution list and
+  RAM retry list with its existing `AccessPipelineStore`/`AccessWindowStore` and an
+  asyncio wake Event. Claim one read, commit its append/suppression, finish the
+  stored one-read/flush boundary, then claim the next. Window/member pages stay50;
+  one owned coordinator renewal task fences the existing120s lease. A90s boundary
+  watchdog cancels and awaits owned work; it cannot extend hardware authority.
+  Retire the superseded queue recovery/claim, list merge/flush, clear/drop and
+  RAM retry methods and their obsolete tests at cutover.
+- Keep `AccessExecution` as the decision transaction and command dispatch owner.
+  Accept `StoredWindow` plus `WindowClaim`; pass `EvidenceReference` to full-evidence
+  movement/session owners. The three anchor reads and candidate preview are never
+  complete authority. In one transaction commit the event, saga, required outputs,
+  completion/information reservations, initial publication, window/member outcomes
+  and last HA reservation flush. Recheck the existing claim before commit. Resume
+  a committed outcome by its stored IDs; never dispatch hardware a second time.
+- Keep `movement/admission.py`, `movement/sessions.py` and `movement/presence.py`.
+  Replace complete window-read arguments with reference-based association/token
+  queries; retain a finite single-read input for genuinely external observations.
+  Existing token/session-association tables supply complete ordered matching.
+  Suppressed reads attach in the same transaction as ingest terminalization.
+  Legacy session arrays remain decodable; new growing arrays are retired.
+- Activate existing `AccessCompletionOwner`, `AccessPublicationLane`, information
+  worker and dormant HA worker through explicit lifespan/composition wiring.
+  Keep their already-reviewed stage ports, capacities and original deadlines.
+  Retire `AccessEnrichment.run`, its inline visual/snapshot/visitor/zone/HA/realtime/
+  charts callers, the postcommit information enqueue bridge and the old HA sender.
+  Preserve visitor realtime output through its current visitor owner. Trace finish
+  reports the core result; it cannot wait for optional media. Stop producers, then
+  cancel/await every worker and renewal before clients, event bus and DB disposal.
+
+### One canonical public event read and revision scope
+
+The current HTTP DTO is `events.py::_serialize_event`: identity, registration,
+direction/decision/confidence/source/time/timing, anomaly count, visitor/external
+labels, snapshot fields and seven authoritative SagaRecord fields (or None).
+It contains neither person_id nor vehicle_id. Dormant publication currently reads
+movement raw JSON instead, so activation must remove that discrepancy.
+
+Add one small scalar `access/event_reads.py` owner for this cohesive public resource.
+HTTP list/detail and publication use its same event+Saga SQL snapshot and serializer.
+Project only required JSON scalars and counts; do not load photo blobs or histories.
+For an event select at most two linked saga identities ordered by ID: zero means
+None, one supplies exactly the existing seven authoritative fields, two means an
+explicit conflict/held public summary with no selected saga authority. No arbitrary
+latest-row choice, raw fallback, historical deletion or new uniqueness migration.
+The exact conflict representation is part of review, not a claim that legacy rows
+are unique. Realtime-only gate/detail/admission extras remain adapter-owned and
+cannot replace the canonical seven fields or attach to ambiguous links. Both HTTP
+and realtime retain persisted snapshot metadata; the snapshot endpoint owns file
+availability and an unavailable file cannot silently create a different revision.
+Astra High approved this continuation for implementation with these owner and
+snapshot decisions; exact-source and integrated sign-off remain pending.
+
+Add `resource_revision` to that HTTP DTO and actual GET tests, and to frontend
+AccessEvent parsing/replacement. The Dashboard is the only consumer replacing an
+AccessEvent directly from realtime; guard its existing bounded activity rows against
+older revisions, including delayed Redis publication and HTTP refresh. Refetch-only
+features keep existing owned cancellation/coalescing and recognize both finalized
+and updated types. Legacy0 may be read but cannot replace a newer known revision.
+Do not add an account-wide revision cache.
+
+Revision covers mutations of these public replacement fields, not arbitrary raw
+telemetry. Initial creation reserves once after all initial mutations. Later saga
+transitions and direct reconciliation fallback writes, admission changes, accepted
+optional results/snapshot metadata and anomaly-count changes mark the event in their
+own transaction. Keep the already-reviewed completion result bump exactly once.
+Suppressed `vehicle_session` diagnostics do not alter this DTO and need no revision.
+Resident initial writes occur before initial publication; historical/backfill and
+snapshot-recovery creators join their existing transaction owners explicitly.
+
+Manual repair first reads candidate IDs without locks, then locks sorted existing
+sagas before events and revalidates association. A missing-saga repair establishes
+its deterministic repair idempotency authority without holding Event while waiting
+for another Saga insertion/uniqueness result; a nonblocking conflict returns a bounded
+retry. Two real concurrent repair transactions must prove this. Ambiguous legacy
+associations become an explicit held/conflict response, never a selected winner.
+Do not invert the existing Saga→Event→Vehicle order.
+
+Vehicle hard deletion and ORM `passive_deletes` stay unchanged. FK-null identity
+hints are outside this public DTO and Dashboard parser. Directory audit events
+already invalidate Dashboard/directory/reports/Top Charts; verify the chart dirty
+mark joins relevant directory mutations without event-revision churn. A deletion
+lock refactor requires a demonstrated cutover conflict, not cleanup preference.
+
+### Remaining explicit domain plumbing
+
+Admission returns an HA proposal only for an applied current eligible Presence
+transition; historical changes invalidate. Every outer caller collects bounded
+proposals and flushes once last: initial/post-command AccessExecution, both resident
+transactions, movement reconciliation and unattempted reservation recovery, and
+historical backfill. HaCoordinationBusy rolls back the whole owning transaction.
+After hardware commit, retry admission only. No ORM hooks or generic interception.
+Retain auth-root→Person/settings→HA coordination ordering and UNKNOWN barriers.
+The missing-setting regression must pause that exact setting namespace rather than
+all advisory locks now that auth-root fencing precedes it.
+
+Extend `LeaderboardService` with its existing schema's one dirty generation and one
+owned evaluator, rather than a generic scheduler. Preserve2s quiet/10s maximum,
+one trailing generation, aggregation outside source locks and changed leader plus
+notification intent atomicity. Relevant live event/directory transactions mark dirty;
+historical refresh is silent and old origins cannot acquire new notification time.
+
+Use the existing restart/backfill owner to reserve/drain historical candidates in
+pages and bounded original-identity retries; no new background task. Prepare its
+existing thumbnail once outside the retry transaction and retain deterministic
+candidate ownership through rollback. Historical paths never obtain live eligibility
+or call command/provider effect ports. Simulation cleanup accounts for selected
+Event/Saga/Anomaly references plus durable optional/HA uncertainty before deletion;
+cleanup cannot resurrect deleted events. Telemetry purge is not an event purge.
+
+### Acceptance and simplicity gate
+
+Reuse the approved focused store/worker fixtures, then prove actual caller rollback,
+concurrent repairs, bounded full evidence, original ordering/merges, shutdown and
+A-blocked/B-core-progress. Compare equivalent before/after small and target bursts
+and many open windows with SQL plans/rows, query count, memory and payload evidence.
+Run the full isolated harness and source/harness tests only in the coordinated heavy
+validation lane. All new owner/contract code enters current checked/strict coverage;
+never expand a baseline or relax checks to pass. Final source review must find no
+active RAM/inline parallel path, obsolete sender or new generic framework.

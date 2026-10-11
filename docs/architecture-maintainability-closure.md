@@ -839,3 +839,22 @@ PostgreSQL cases and original 1,375 backend tests remain mapped evidence, not a
 newly executed combined run. Renewed exact-source approval remains pending. No
 schema, auth-root writer, active sender or production startup change is part of
 this correction.
+
+
+## Continuation and evidence availability
+
+The continuation checkpoint is clean branch `codex/iacs-maintainability-programme`,
+commit `a87115e1184dce902060a3a224676bb16e329a3c`, tree
+`a4583f9930a8d372e1165dd0f69555b5c732bddf`, in
+`/Users/jas/.codex/worktrees/iacs-maintainability-programme/Intelligent Access System`.
+The operational checkout remains separate. Sol6.1 Ultra continues implementation;
+new advisory/review/final-signoff work uses Astra High by the user's revised setting.
+Historical Ultra approvals above remain historical approvals.
+
+The former `/private/tmp/iacs-maintainability-programme` evidence and canonical
+dependency preparation directories disappeared after the session/reboot. Git source
+and these historical summaries survive; absent raw logs, manifests, artifacts and
+reusable dependencies are not currently inspectable and must not be represented as
+available evidence. Fresh validation will retain its own exact source/dependency
+identities, commands and log paths in the final candidate receipt. This loss and the
+new design preparation do not increase the reported programme completion.

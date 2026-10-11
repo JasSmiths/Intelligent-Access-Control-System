@@ -5,7 +5,7 @@ import type { AccessEvent } from "../api/types";
 import { EventsView } from "./EventsView";
 
 const event = (id: string, registration_number: string): AccessEvent => ({
-  id, registration_number, direction: "entry", decision: "granted", confidence: .9,
+  id, resource_revision: 0, registration_number, direction: "entry", decision: "granted", confidence: .9,
   source: "synthetic", occurred_at: "2026-09-28T12:00:00Z", timing_classification: "normal",
   anomaly_count: 0, visitor_pass_id: null, visitor_name: null, visitor_pass_mode: null,
   external_admission_mode: null, external_admission_source: null, snapshot_url: null,

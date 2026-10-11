@@ -46,7 +46,7 @@ async def persist_historical_event_in_session(session: AsyncSession, event: Acce
         raise ValueError("This historical identity already belongs to another durable event.")
     saga.access_event_id = event.id
     await session.flush()
-    result = await finalize_in_session(session, saga_id=saga.id, mode="historical", historical_evidence=evidence)
+    result = await finalize_in_session(session, saga_id=saga.id, mode="historical", publish_change=False, historical_evidence=evidence)
     # Preserve historical suppression lifetimes; these are not live gate cycles.
     await ledger.upsert_movement_session(session, session_key=f"movement-session:{event.id}", source=event.source,
         access_event_id=event.id, movement_saga_id=saga.id, registration_number=event.registration_number,

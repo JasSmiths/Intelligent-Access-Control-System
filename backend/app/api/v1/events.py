@@ -21,8 +21,9 @@ from app.api.v1.history import (
     write_cursor,
 )
 from app.db.session import AsyncSessionLocal, get_db_session
-from app.models import AccessEvent, Anomaly, MovementSagaRecord, Presence, User
+from app.models import AccessEvent, Anomaly, Presence, User
 from app.models.enums import AccessDecision, AccessDirection, AnomalySeverity, AnomalyType
+from app.services.access.event_reads import public_event_payload, public_event_query
 from app.services.action_confirmations import (
     ActionConfirmationError,
     consume_action_confirmation,
@@ -34,7 +35,6 @@ from app.services.expected_presence import expected_presence_today
 from app.services.profile_photos import compact_image_bytes
 from app.services.settings import get_runtime_config
 from app.services.snapshots import (
-    access_event_snapshot_payload,
     alert_snapshot_metadata,
     alert_snapshot_path,
     get_snapshot_manager,
@@ -68,11 +68,7 @@ async def events_history(
         "decision": decision,
     }
     as_of, after_stamp, after_id = read_cursor(cursor, filters)
-    query = (
-        select(AccessEvent)
-        .options(selectinload(AccessEvent.anomalies))
-        .where(AccessEvent.created_at <= as_of)
-    )
+    query = public_event_query().where(AccessEvent.created_at <= as_of)
     if start:
         query = query.where(AccessEvent.occurred_at >= start)
     if end:
@@ -90,34 +86,17 @@ async def events_history(
         query = query.where(
             older_than(AccessEvent.occurred_at, AccessEvent.id, after_stamp, after_id)
         )
-    rows = (
-        await session.scalars(
-            query.order_by(AccessEvent.occurred_at.desc(), AccessEvent.id.desc()).limit(limit + 1)
-        )
-    ).all()
+    rows = (await session.execute(
+        query.order_by(AccessEvent.occurred_at.desc(), AccessEvent.id.desc()).limit(limit + 1)
+    )).mappings().all()
     page_rows = rows[:limit]
-    movement_rows = (
-        (
-            await session.scalars(
-                select(MovementSagaRecord).where(
-                    MovementSagaRecord.access_event_id.in_([row.id for row in page_rows])
-                )
-            )
-        ).all()
-        if page_rows
-        else []
-    )
-    movement_by_event = {row.access_event_id: row for row in movement_rows}
     next_cursor = (
-        write_cursor(as_of, page_rows[-1].occurred_at, page_rows[-1].id, filters)
+        write_cursor(as_of, page_rows[-1]["occurred_at"], page_rows[-1]["id"], filters)
         if len(rows) > limit
         else None
     )
     return HistoryPage(
-        items=[
-            _serialize_event(row, movement_by_event.get(row.id), verify_snapshot_available=False)
-            for row in page_rows
-        ],
+        items=[dict(public_event_payload(row)) for row in page_rows],
         next_cursor=next_cursor,
         as_of=as_of,
     )
@@ -222,61 +201,11 @@ async def confirm_alert_group(
 @router.get("/events")
 async def list_events(limit: Annotated[int, Query(ge=1, le=250)] = 50) -> list[dict]:
     async with AsyncSessionLocal() as session:
-        events = (
-            await session.scalars(
-                select(AccessEvent)
-                .options(selectinload(AccessEvent.anomalies))
-                .order_by(AccessEvent.occurred_at.desc())
-                .limit(limit)
-            )
-        ).all()
-
-        movement_rows = (
-            (
-                await session.scalars(
-                    select(MovementSagaRecord).where(
-                        MovementSagaRecord.access_event_id.in_([event.id for event in events])
-                    )
-                )
-            ).all()
-            if events
-            else []
-        )
-    movement_by_event_id = {row.access_event_id: row for row in movement_rows}
-
-    return [
-        _serialize_event(event, movement_by_event_id.get(event.id), verify_snapshot_available=False)
-        for event in events
-    ]
-
-
-def _serialize_event(
-    event: AccessEvent,
-    movement_saga: MovementSagaRecord | None = None,
-    *,
-    verify_snapshot_available: bool = True,
-) -> dict:
-    visitor_pass = _event_visitor_pass_payload(event)
-    external_admission = _event_external_admission_payload(event)
-    payload = {
-        "id": str(event.id),
-        "registration_number": event.registration_number,
-        "direction": event.direction.value,
-        "decision": event.decision.value,
-        "confidence": event.confidence,
-        "source": event.source,
-        "occurred_at": event.occurred_at.isoformat(),
-        "timing_classification": event.timing_classification.value,
-        "anomaly_count": len(event.anomalies),
-        "visitor_pass_id": _optional_text(visitor_pass.get("id")),
-        "visitor_name": _optional_text(visitor_pass.get("visitor_name")),
-        "visitor_pass_mode": _optional_text(visitor_pass.get("mode")),
-        "external_admission_mode": _optional_text(external_admission.get("mode")),
-        "external_admission_source": _optional_text(external_admission.get("source")),
-        "movement_saga": _event_movement_saga_payload(event, movement_saga),
-    }
-    payload.update(access_event_snapshot_payload(event, verify_available=verify_snapshot_available))
-    return payload
+        rows = (await session.execute(
+            public_event_query().order_by(AccessEvent.occurred_at.desc(), AccessEvent.id.desc())
+            .limit(limit)
+        )).mappings().all()
+    return [dict(public_event_payload(row)) for row in rows]
 
 
 @router.get("/events/{event_id}")
@@ -285,17 +214,12 @@ async def event_detail(
     _: Annotated[User, Depends(current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict:
-    event = await session.scalar(
-        select(AccessEvent)
-        .options(selectinload(AccessEvent.anomalies))
-        .where(AccessEvent.id == event_id)
-    )
-    if not event:
+    row = (await session.execute(
+        public_event_query().where(AccessEvent.id == event_id)
+    )).mappings().one_or_none()
+    if row is None:
         raise HTTPException(status_code=404, detail="Event was not found.")
-    movement = await session.scalar(
-        select(MovementSagaRecord).where(MovementSagaRecord.access_event_id == event_id)
-    )
-    return _serialize_event(event, movement, verify_snapshot_available=False)
+    return dict(public_event_payload(row))
 
 
 @router.get("/events/{event_id}/snapshot", response_model=None)
@@ -336,37 +260,6 @@ async def event_snapshot(
         media_type=row.snapshot_content_type or "image/jpeg",
         headers={"Cache-Control": "private, no-store"},
     )
-
-
-def _event_visitor_pass_payload(event: AccessEvent) -> dict[str, Any]:
-    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    payload = raw_payload.get("visitor_pass")
-    return payload if isinstance(payload, dict) else {}
-
-
-def _event_external_admission_payload(event: AccessEvent) -> dict[str, Any]:
-    raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
-    payload = raw_payload.get("external_admission")
-    return payload if isinstance(payload, dict) else {}
-
-
-def _event_movement_saga_payload(
-    event: AccessEvent,
-    movement_saga: MovementSagaRecord | None,
-) -> dict[str, Any] | None:
-    if movement_saga:
-        return {
-            "id": str(movement_saga.id),
-            "state": movement_saga.state.value,
-            "reconciliation_required": movement_saga.reconciliation_required,
-            "gate_command_required": movement_saga.gate_command_required,
-            "presence_committed": movement_saga.presence_committed,
-            "failure_detail": movement_saga.failure_detail,
-            "updated_at": movement_saga.updated_at.isoformat()
-            if movement_saga.updated_at
-            else None,
-        }
-    return None
 
 
 def _optional_text(value: Any) -> str | None:

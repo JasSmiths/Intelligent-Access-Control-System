@@ -198,6 +198,7 @@ function directoryPerson(overrides: Partial<Person> & Pick<Person, "id" | "displ
 function accessEvent(overrides: Partial<AccessEvent> & Pick<AccessEvent, "id" | "direction" | "occurred_at" | "registration_number">): AccessEvent {
   return {
     decision: "granted",
+    resource_revision: 0,
     confidence: 1,
     source: "lpr",
     timing_classification: "on_time",

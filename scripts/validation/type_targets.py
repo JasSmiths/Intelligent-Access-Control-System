@@ -101,6 +101,7 @@ TYPE_OWNERS = (
         ('window_store.py', 'strict'),
         ('window_candidates.py', 'strict'),
         ('observation_tokens.py', 'strict'),
+        ('event_reads.py', 'strict'),
         ('publication.py', 'strict'),
         ('publication_worker.py', 'strict'),
         ('completion_contracts.py', 'strict'),

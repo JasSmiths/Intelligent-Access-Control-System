@@ -141,14 +141,21 @@ async def test_acknowledgement_requires_exact_loaded_revision_not_only_current_r
     assert await store.acknowledge(claim,first.revision)
 
 
-async def test_compact_projection_uses_current_columns_and_named_json_never_full_vendor_payload(monkeypatch):
-    monkeypatch.setattr(publication,'snapshot_path_available',lambda path: True)
+async def test_compact_projection_uses_current_columns_and_named_json_never_full_vendor_payload():
+    saga_id = uuid.uuid4()
     identity=await reserve(snapshot_path='synthetic/committed.jpg',snapshot_bytes=123,snapshot_width=640,snapshot_height=480,
         snapshot_camera='camera',snapshot_captured_at=NOW,raw_payload={'vendor_blob':'x'*900000,
         'visitor_pass':{'id':str(uuid.uuid4()),'visitor_name':'Guest','mode':'arrival','unused':'y'*90000},
-        'movement_saga':{'id':str(uuid.uuid4()),'state':'completed','presence_committed':True,'admission_status':'verified',
+        'movement_saga':{'id':str(saga_id),'state':'failed','presence_committed':True,'admission_status':'verified',
             'admission_evidence':{'provider_raw':'z'*90000},'gate':{'command_id':str(uuid.uuid4()),'accepted':True,'state':'open',
                 'mechanically_confirmed':True,'unused':'q'*90000}}})
+    from app.models import MovementSagaRecord
+    from app.models.enums import MovementSagaState
+    async with AsyncSessionLocal() as session:
+        session.add(MovementSagaRecord(id=saga_id, idempotency_key=f"synthetic-{saga_id}",
+            source="synthetic", occurred_at=NOW, access_event_id=identity,
+            state=MovementSagaState.COMPLETED, presence_committed=True))
+        await session.commit()
     store=AccessPublicationStore();claim=await store.claim();captured=[]
     def capture(connection,cursor,statement,parameters,context,many):
         if 'FROM access_events' in statement:captured.append(statement)
@@ -160,6 +167,7 @@ async def test_compact_projection_uses_current_columns_and_named_json_never_full
     assert len(body)<4000 and 'vendor_blob' not in body and 'admission_evidence' not in body and 'unused' not in body
     assert message.payload['visitor_name']=='Guest' and message.payload['snapshot_bytes']==123
     assert message.payload['snapshot_url'].endswith(f'{identity}/snapshot')
+    assert message.payload['movement_saga']['state'] == 'completed'
     assert message.payload['movement_saga']['gate']['mechanically_confirmed'] is True
 
 
@@ -346,3 +354,226 @@ async def test_real_redis_xadd_rejection_and_repair_retain_durable_current_revis
         payload=json.loads(records[0][1]['event'])['payload']
         assert payload['event_id']==str(identity) and payload['resource_revision']==1
     finally:await lane.stop();await bus.stop();await client.aclose()
+
+
+async def test_actual_event_gets_and_publication_share_journal_snapshot_and_persisted_snapshot_metadata(monkeypatch):
+    from fastapi import FastAPI
+    from app.api.dependencies import current_user
+    from app.api.v1 import events
+    from app.models import MovementSagaRecord
+    from app.models.enums import MovementSagaState
+    from types import SimpleNamespace
+    identity = await reserve(snapshot_path="synthetic/missing-file.jpg", snapshot_bytes=123,
+        raw_payload={"movement_saga": {"state": "completed", "presence_committed": True}})
+    async with AsyncSessionLocal() as session:
+        saga = MovementSagaRecord(idempotency_key=f"synthetic-{identity}", source="synthetic",
+            occurred_at=NOW, access_event_id=identity, state=MovementSagaState.FAILED,
+            presence_committed=False, failure_detail="Current journal failure")
+        session.add(saga)
+        await session.commit()
+    async def config(): return SimpleNamespace(site_timezone="Europe/London")
+    monkeypatch.setattr(events, "get_runtime_config", config)
+    app = FastAPI()
+    app.include_router(events.router, prefix="/api/v1")
+    app.dependency_overrides[current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://synthetic") as client:
+        detail = await client.get(f"/api/v1/events/{identity}")
+        listed = await client.get("/api/v1/events?limit=40")
+        history = await client.get("/api/v1/events/history?limit=50")
+        missing = await client.get(f"/api/v1/events/{identity}/snapshot")
+    assert detail.status_code == listed.status_code == history.status_code == 200
+    payload = detail.json()
+    assert payload == listed.json()[0] == history.json()["items"][0]
+    assert payload["resource_revision"] == 1
+    assert payload["movement_saga"]["state"] == "failed"
+    assert payload["movement_saga"]["failure_detail"] == "Current journal failure"
+    assert payload["movement_saga"]["presence_committed"] is False
+    assert set(payload["movement_saga"]) == {"id", "state", "reconciliation_required",
+        "gate_command_required", "presence_committed", "failure_detail", "updated_at"}
+    assert payload["snapshot_url"] and payload["snapshot_bytes"] == 123
+    assert missing.status_code == 404
+    store = AccessPublicationStore()
+    claim = await store.claim()
+    message = await store.load_message(claim)
+    projected = {key: message.payload[key] for key in payload if key != "id"}
+    assert projected == {key: value for key, value in payload.items() if key != "id"}
+
+
+async def test_conflicting_legacy_sagas_are_held_without_raw_fallback_or_repair_winner():
+    from fastapi import FastAPI
+    from app.api.dependencies import admin_user, current_user
+    from app.api.v1 import access, events
+    from app.models import MovementSagaRecord
+    from app.models.enums import MovementSagaState
+    from types import SimpleNamespace
+    identity = await reserve(raw_payload={"movement_saga": {"state": "completed", "gate": {"state": "open"}}})
+    async with AsyncSessionLocal() as session:
+        for _ in range(2):
+            session.add(MovementSagaRecord(idempotency_key=f"synthetic-{uuid.uuid4()}",
+                source="synthetic", occurred_at=NOW, access_event_id=identity,
+                state=MovementSagaState.COMPLETED, presence_committed=True))
+        await session.commit()
+    app = FastAPI()
+    app.include_router(events.router, prefix="/api/v1")
+    app.include_router(access.router, prefix="/api/v1/access")
+    app.dependency_overrides[current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    app.dependency_overrides[admin_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://synthetic") as client:
+        detail = await client.get(f"/api/v1/events/{identity}")
+        repair = await client.post(f"/api/v1/access/events/{identity}/movement-reconciliation", json={"reason": "review"})
+    held = detail.json()["movement_saga"]
+    assert held["id"] is None and held["state"] == "held" and held["reconciliation_required"] is True
+    assert "Conflicting" in held["failure_detail"] and "gate" not in held
+    assert repair.status_code == 409
+    store = AccessPublicationStore()
+    message = await store.load_message(await store.claim())
+    assert message.payload["movement_saga"] == held
+
+
+async def test_two_concurrent_missing_saga_repairs_use_nonblocking_authority_before_event_lock():
+    from app.services.movement_ledger import MovementLedgerRepository
+    from app.models import MovementSagaRecord
+    from app.models.enums import MovementSagaState
+    identity = await reserve()
+    ledger = MovementLedgerRepository()
+    async with AsyncSessionLocal() as first, AsyncSessionLocal() as second:
+        event, saga = await ledger.event_repair_target_in_session(first, identity, detail="first")
+        with pytest.raises(ValueError, match="busy"):
+            await asyncio.wait_for(ledger.event_repair_target_in_session(second, identity, detail="second"), timeout=1)
+        await second.rollback()
+        await ledger.transition_movement_saga(first, saga, MovementSagaState.RECONCILIATION_REQUIRED,
+            access_event_id=event.id, reconciliation_required=True)
+        await first.commit()
+        event2, saga2 = await ledger.event_repair_target_in_session(second, identity, detail="retry")
+        assert saga2.id == saga.id and event2.resource_revision == 2
+        assert len(list(await second.scalars(select(MovementSagaRecord.id).where(
+            MovementSagaRecord.access_event_id == identity)))) == 1
+        await second.rollback()
+
+
+async def test_legacy_zero_saga_mutation_and_publication_checkpoint_roll_back_together():
+    from app.services.movement_ledger import MovementLedgerRepository
+    from app.models import MovementSagaRecord
+    from app.models.enums import MovementSagaState
+    async with AsyncSessionLocal() as session:
+        event = event_value()
+        session.add(event)
+        await session.flush()
+        saga = MovementSagaRecord(idempotency_key=f"synthetic-{event.id}", source="synthetic",
+            occurred_at=NOW, access_event_id=event.id, state=MovementSagaState.COMPLETED)
+        session.add(saga)
+        await session.commit()
+        identity, saga_id = event.id, saga.id
+    async with AsyncSessionLocal() as session:
+        saga = await session.get(MovementSagaRecord, saga_id, with_for_update=True)
+        await MovementLedgerRepository().transition_movement_saga(session, saga,
+            MovementSagaState.RECONCILIATION_REQUIRED, reconciliation_required=True)
+        assert (await session.get(AccessEvent, identity)).resource_revision == 1
+        await session.rollback()
+    async with AsyncSessionLocal() as session:
+        assert (await session.get(AccessEvent, identity)).resource_revision == 0
+        assert (await session.get(MovementSagaRecord, saga_id)).state == MovementSagaState.COMPLETED
+        assert await session.scalar(select(AccessCompletionWork.id)) is None
+
+
+async def test_two_concurrent_actual_repair_requests_commit_one_parent_and_one_audit(monkeypatch):
+    from fastapi import FastAPI
+    from app.api.dependencies import admin_user
+    from app.api.v1 import access
+    from app.models import AuditLog, MovementSagaRecord, User
+    from app.models.enums import UserRole
+    identity = await reserve()
+    actor = User(username=f"synthetic-repair-{uuid.uuid4()}", full_name="Repair Reviewer",
+                 password_hash="unused", role=UserRole.ADMIN, is_active=True)
+    async with AsyncSessionLocal() as session:
+        session.add(actor)
+        await session.commit()
+    reached, release = asyncio.Event(), asyncio.Event()
+    original = access.write_audit_log
+    async def paused_audit(*args, **kwargs):
+        reached.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(access, "write_audit_log", paused_audit)
+    app = FastAPI()
+    app.include_router(access.router, prefix="/api/v1/access")
+    app.dependency_overrides[admin_user] = lambda: actor
+    path = f"/api/v1/access/events/{identity}/movement-reconciliation"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://synthetic") as client:
+        first = asyncio.create_task(client.post(path, json={"reason": "review first"}))
+        try:
+            await asyncio.wait_for(reached.wait(), timeout=3)
+            second = await asyncio.wait_for(client.post(path, json={"reason": "review second"}), timeout=1)
+            assert second.status_code == 409 and "busy" in second.json()["detail"]
+        finally:
+            release.set()
+        result = await asyncio.wait_for(first, timeout=3)
+        assert result.status_code == 200
+    async with AsyncSessionLocal() as session:
+        assert len(list(await session.scalars(select(MovementSagaRecord.id).where(
+            MovementSagaRecord.access_event_id == identity)))) == 1
+        assert len(list(await session.scalars(select(AuditLog.id).where(
+            AuditLog.action == "access_event.movement_reconciliation_requested",
+            AuditLog.target_id == str(identity))))) == 1
+        event = await session.get(AccessEvent, identity)
+        assert event.resource_revision == 2
+
+
+@pytest.mark.parametrize("terminal_state", ["failed", "suppressed"])
+@pytest.mark.parametrize("presence_committed", [False, True])
+async def test_terminal_admission_presence_change_and_revision_share_commit_and_rollback(terminal_state, presence_committed):
+    from app.models import MovementSagaRecord, Person, Presence
+    from app.models.enums import MovementSagaState, PresenceState
+    from app.services.movement.admission import finalize_in_session
+    async with AsyncSessionLocal() as session:
+        person = Person(display_name="Synthetic terminal admission")
+        session.add(person)
+        await session.flush()
+        event = event_value(person_id=person.id)
+        event.direction = AccessDirection.EXIT
+        session.add(event)
+        await session.flush()
+        saga = MovementSagaRecord(idempotency_key=f"synthetic-terminal-{event.id}", source="synthetic",
+            occurred_at=NOW, access_event_id=event.id, state=MovementSagaState(terminal_state),
+            presence_committed=presence_committed, failure_detail="retained terminal evidence", updated_at=NOW)
+        session.add(saga)
+        if presence_committed:
+            session.add(Presence(person_id=person.id, state=PresenceState.EXITED,
+                                 last_event_id=event.id, last_changed_at=event.occurred_at))
+        await reserve_initial_publication_in_session(session, event.id)
+        await session.commit()
+        event_id, saga_id, person_id = event.id, saga.id, person.id
+    async with AsyncSessionLocal() as session:
+        result = await finalize_in_session(session, saga_id=saga_id)
+        assert result.presence_changed is not presence_committed
+        assert result.saga.presence_committed
+        await session.refresh(result.saga)
+        assert result.saga.updated_at > NOW
+        assert result.saga.state == MovementSagaState(terminal_state)
+        assert result.saga.failure_detail == "retained terminal evidence"
+        assert result.event.resource_revision == 2
+        work = await session.scalar(select(AccessCompletionWork).where(AccessCompletionWork.event_id == event_id))
+        assert work.expected_revision == 2
+        await session.rollback()
+    async with AsyncSessionLocal() as session:
+        assert (await session.get(AccessEvent, event_id)).resource_revision == 1
+        assert (await session.get(MovementSagaRecord, saga_id)).presence_committed is presence_committed
+        assert (await session.get(MovementSagaRecord, saga_id)).updated_at == NOW
+        assert bool(await session.get(Presence, person_id)) is presence_committed
+        work = await session.scalar(select(AccessCompletionWork).where(AccessCompletionWork.event_id == event_id))
+        assert work.expected_revision == 1
+        await finalize_in_session(session, saga_id=saga_id)
+        await session.commit()
+    async with AsyncSessionLocal() as session:
+        assert (await session.get(AccessEvent, event_id)).resource_revision == 2
+        assert (await session.get(MovementSagaRecord, saga_id)).state == MovementSagaState(terminal_state)
+        assert (await session.get(MovementSagaRecord, saga_id)).presence_committed
+        assert (await session.get(Presence, person_id)).last_event_id == event_id
+        updated_at = (await session.get(MovementSagaRecord, saga_id)).updated_at
+        await finalize_in_session(session, saga_id=saga_id)
+        await session.commit()
+        await session.refresh(await session.get(MovementSagaRecord, saga_id))
+        assert (await session.get(MovementSagaRecord, saga_id)).updated_at == updated_at
+        assert (await session.get(AccessEvent, event_id)).resource_revision == 2
+        work = await session.scalar(select(AccessCompletionWork).where(AccessCompletionWork.event_id == event_id))
+        assert work.expected_revision == 2

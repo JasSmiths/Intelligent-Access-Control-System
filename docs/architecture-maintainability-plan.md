@@ -9,7 +9,7 @@ Astra Ultra approved the proposed plan. That approval covers the plan only. Ever
 ### Model responsibilities
 
 - Implementation: GPT-6.1 Sol, reasoning effort Ultra, performs all code, test, migration, and documentation changes.
-- Advisor and reviewer: GPT-6 Astra, reasoning effort Ultra, reviews consequential designs before implementation and independently reviews completed changes.
+- Advisor and reviewer: GPT-6 Astra, reasoning effort High, reviews consequential designs before implementation and independently reviews completed changes. This prospective setting supersedes Ultra; historical Ultra approvals below retain their original meaning.
 - Use at most two Sol implementation agents concurrently, with disjoint ownership and isolated checkouts. Integrate their work sequentially.
 - Do not substitute another model silently. If either required model is unavailable, retain the current checkpoint and report the blocker.
 - Astra identifies problems and advises; Sol implements the corrections. Sol cannot approve its own work.
@@ -251,7 +251,7 @@ Calendar:
 - Update architecture, development, integration, and validation guidance.
 - Remove temporary migration paths, duplicate writers, obsolete registrations, and transitional shell ownership.
 - Produce the final implementation report with exact source identity, checks, benchmarks, migration compatibility, limitations, and deployment status.
-- Obtain a fresh Astra Ultra review of the complete integrated candidate.
+- Obtain a fresh Astra High review of the complete integrated candidate.
 
 Acceptance: all in-scope changes pass their gates; every retained exception is explicit; no unresolved actionable review finding or unreviewed final edit remains.
 
@@ -316,4 +316,4 @@ For every stage:
 
 A stage cannot complete with failed or unattempted required checks, unresolved actionable findings, or changes made after its reviewed snapshot. Justified retention requires an explicit rationale and Astra approval; it is not silently relabeled as a fix.
 
-After integration, run the complete release-candidate validation and obtain fresh Astra Ultra sign-off on the exact final candidate. Only then is implementation complete. Deployment, production migration, and live-effect approval remain separate.
+After integration, run the complete release-candidate validation and obtain fresh Astra High sign-off on the exact final candidate. Only then is implementation complete. Deployment, production migration, and live-effect approval remain separate.

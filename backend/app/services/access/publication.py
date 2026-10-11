@@ -11,7 +11,6 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from enum import Enum
 from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select, update
@@ -19,11 +18,11 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
-from app.models import AccessCompletionWork, AccessEvent, Anomaly
+from app.models import AccessCompletionWork, AccessEvent
 from app.services.access.completion_database import completion_session
+from app.services.access.event_reads import public_event_payload, public_event_query
 from app.services.access.pipeline_contracts import PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
-from app.services.snapshots import access_event_snapshot_url, snapshot_path_available
 
 PUBLICATION_SCAN_SIZE = 32
 PUBLICATION_LEASE_SECONDS = 120
@@ -154,54 +153,14 @@ def _bool_json(path: Any) -> Any:
     return case((func.jsonb_typeof(path) == "boolean", path.as_boolean()), else_=False)
 
 
-def _enum_text(value: object) -> str:
-    return str(value.value) if isinstance(value, Enum) else str(value)
-
-
-def _time_text(value: object) -> str | None:
-    return value.isoformat() if isinstance(value, datetime) else None
-
-
 async def _current_projection(session: AsyncSession, event_id: uuid.UUID) -> dict[str, Any]:
     raw = AccessEvent.raw_payload
     movement, gate = raw["movement_saga"], raw["movement_saga"]["gate"]
-    query = select(
-        AccessEvent.id,
+    query = public_event_query().add_columns(
         AccessEvent.person_id,
         AccessEvent.vehicle_id,
-        AccessEvent.registration_number,
-        AccessEvent.direction,
-        AccessEvent.decision,
-        AccessEvent.confidence,
-        AccessEvent.source,
-        AccessEvent.occurred_at,
-        AccessEvent.timing_classification,
-        AccessEvent.resource_revision,
-        AccessEvent.snapshot_path,
-        AccessEvent.snapshot_bytes,
-        AccessEvent.snapshot_width,
-        AccessEvent.snapshot_height,
-        AccessEvent.snapshot_captured_at,
-        AccessEvent.snapshot_camera,
-        select(func.count())
-        .select_from(Anomaly)
-        .where(Anomaly.event_id == AccessEvent.id)
-        .correlate(AccessEvent)
-        .scalar_subquery()
-        .label("anomaly_count"),
-        _text_json(raw["visitor_pass"]["id"], 36).label("visitor_pass_id"),
-        _text_json(raw["visitor_pass"]["visitor_name"], 200).label("visitor_name"),
-        _text_json(raw["visitor_pass"]["mode"], 24).label("visitor_pass_mode"),
-        _text_json(raw["external_admission"]["mode"], 24).label("external_admission_mode"),
-        _text_json(raw["external_admission"]["source"], 120).label("external_admission_source"),
         _text_json(movement["id"], 36).label("movement_id"),
-        _text_json(movement["state"], 64).label("movement_state"),
         _text_json(movement["admission_status"], 24).label("admission_status"),
-        _bool_json(movement["reconciliation_required"]).label("reconciliation_required"),
-        _bool_json(movement["gate_command_required"]).label("gate_command_required"),
-        _bool_json(movement["presence_committed"]).label("presence_committed"),
-        _text_json(movement["failure_detail"], 500).label("failure_detail"),
-        _text_json(movement["updated_at"], 80).label("movement_updated_at"),
         _text_json(movement["detail"], 500).label("movement_detail"),
         _text_json(gate["command_id"], 36).label("gate_command_id"),
         case(
@@ -216,64 +175,30 @@ async def _current_projection(session: AsyncSession, event_id: uuid.UUID) -> dic
     result = (await session.execute(query)).mappings().one_or_none()
     if result is None:
         raise PipelineLeaseLost("publication_event_unavailable")
-    data = dict(result)
-    payload = {
-        key: data[key]
-        for key in (
-            "registration_number",
-            "confidence",
-            "source",
-            "resource_revision",
-            "anomaly_count",
-            "visitor_pass_id",
-            "visitor_name",
-            "visitor_pass_mode",
-            "external_admission_mode",
-            "external_admission_source",
-            "snapshot_bytes",
-            "snapshot_width",
-            "snapshot_height",
-            "snapshot_camera",
-        )
-    }
+    payload: dict[str, Any] = dict(public_event_payload(result))
     payload.update(
-        event_id=str(event_id),
+        event_id=payload.pop("id"),
         access_event_id=str(event_id),
-        person_id=str(data["person_id"]) if data["person_id"] else None,
-        vehicle_id=str(data["vehicle_id"]) if data["vehicle_id"] else None,
-        direction=_enum_text(data["direction"]),
-        decision=_enum_text(data["decision"]),
-        timing_classification=_enum_text(data["timing_classification"]),
-        occurred_at=_time_text(data["occurred_at"]),
-        snapshot_captured_at=_time_text(data["snapshot_captured_at"]),
+        person_id=str(result["person_id"]) if result["person_id"] else None,
+        vehicle_id=str(result["vehicle_id"]) if result["vehicle_id"] else None,
     )
-    payload["movement_saga"] = (
-        {
-            "id": data["movement_id"],
-            "state": data["movement_state"],
-            "admission_status": data["admission_status"],
-            "reconciliation_required": data["reconciliation_required"],
-            "gate_command_required": data["gate_command_required"],
-            "presence_committed": data["presence_committed"],
-            "failure_detail": data["failure_detail"],
-            "updated_at": data["movement_updated_at"],
-            "detail": data["movement_detail"],
-            "gate": {
-                "command_id": data["gate_command_id"],
-                "accepted": data["gate_accepted"],
-                "state": data["gate_state"],
-                "detail": data["gate_detail"],
-                "mechanically_confirmed": data["gate_mechanically_confirmed"],
-                "requires_reconciliation": data["gate_requires_reconciliation"],
-            }
-            if data["gate_command_id"] or data["gate_state"]
-            else None,
-        }
-        if data["movement_state"]
-        else None
-    )
-    # Filesystem availability is checked after the session closes by load_message.
-    payload["_snapshot_path"] = data["snapshot_path"]
+    movement_payload = payload["movement_saga"]
+    # Extras are transport presentation only. Never graft a raw summary from a
+    # different journal, or attach gate authority to an ambiguous legacy link.
+    if (movement_payload is not None and movement_payload["id"] is not None
+            and movement_payload["id"] == result["movement_id"]):
+        movement_payload.update(
+            admission_status=result["admission_status"],
+            detail=result["movement_detail"],
+            gate={
+                "command_id": result["gate_command_id"],
+                "accepted": result["gate_accepted"],
+                "state": result["gate_state"],
+                "detail": result["gate_detail"],
+                "mechanically_confirmed": result["gate_mechanically_confirmed"],
+                "requires_reconciliation": result["gate_requires_reconciliation"],
+            } if result["gate_command_id"] or result["gate_state"] else None,
+        )
     return payload
 
 
@@ -375,18 +300,6 @@ class AccessPublicationStore:
             await session.commit()
         event_type = "access_event.finalized" if published == 0 else "access_event.updated"
         payload["event_type"] = event_type
-        path = payload.pop("_snapshot_path")
-        available = isinstance(path, str) and snapshot_path_available(path)
-        payload["snapshot_url"] = access_event_snapshot_url(claim.event_id) if available else None
-        if not available:
-            for key in (
-                "snapshot_captured_at",
-                "snapshot_bytes",
-                "snapshot_width",
-                "snapshot_height",
-                "snapshot_camera",
-            ):
-                payload[key] = None
         revision = payload["resource_revision"]
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
             raise PipelineLeaseLost("publication_revision_unavailable")

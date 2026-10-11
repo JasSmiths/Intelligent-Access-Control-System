@@ -3,7 +3,7 @@ import { auditResource } from "../../lib/realtime";
 import type { DirectoryKind } from "../../api/directory";
 
 export function directoryEventMatches(kind: DirectoryKind, event: RealtimeMessage) {
-  if (event.type === "vehicle_information.updated" || event.type === "access_event.finalized" || event.type === "access_event.finalize_failed" || event.type.startsWith("schedule.")) return true;
+  if (event.type === "vehicle_information.updated" || event.type === "access_event.finalized" || event.type === "access_event.updated" || event.type === "access_event.finalize_failed" || event.type.startsWith("schedule.")) return true;
   const resource = auditResource(event);
   return ["group", "person", "vehicle", "schedule"].includes(resource) || kind === "people" && resource === "access_device";
 }

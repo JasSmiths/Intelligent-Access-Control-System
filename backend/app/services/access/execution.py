@@ -220,6 +220,7 @@ class AccessExecution:
                 else MovementSagaState.COMPLETED,
                 detail="access_event_persisted",
                 access_event_id=event.id,
+                publish_change=False,
                 gate_command_required=gate_command_required,
                 presence_committed=False,
                 decision_payload=direction_resolution,
@@ -298,7 +299,7 @@ class AccessExecution:
                 await invalidate_owner_in_session(session, person.id, event=event)
             gate_open_skipped = bool(external_admission and direction == AccessDirection.ENTRY)
             admission = await finalize_in_session(session, saga_id=movement_saga.id,
-                mode="external" if external_admission else "live",
+                publish_change=False, mode="external" if external_admission else "live",
                 historical_evidence=external_admission,
                 session_input=AdmissionSessionInput(window.reads, window.first_seen, window.updated_at, read, runtime))
             event, movement_saga = admission.event, admission.saga
@@ -594,6 +595,7 @@ class AccessExecution:
             MovementSagaState.COMPLETED,
             detail="external_gate_open_admission_recorded",
             access_event_id=event.id,
+            publish_change=False,
             gate_command_required=False,
             presence_committed=False,
             decision_payload=direction_resolution,
@@ -608,7 +610,7 @@ class AccessExecution:
                 event=event,
             ),
         }
-        await finalize_in_session(session, saga_id=movement_saga.id, mode="external",
+        await finalize_in_session(session, saga_id=movement_saga.id, mode="external", publish_change=False,
             historical_evidence=external_admission,
             session_input=AdmissionSessionInput(window.reads, window.first_seen, window.updated_at, read, runtime))
         await self._movement_sessions.mark_external_session_superseded(

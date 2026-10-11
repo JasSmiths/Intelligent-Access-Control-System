@@ -1,6 +1,6 @@
 import { useCoordinatedRead } from "../lib/useCoordinatedRead";
 import { auditResource } from "../lib/realtime";
-const chartEventMatches = (event: RealtimeMessage) => event.type === "access_event.finalized" || event.type === "leaderboard_overtake" || event.type === "vehicle_information.updated" || auditResource(event) === "vehicle";
+const chartEventMatches = (event: RealtimeMessage) => event.type === "access_event.finalized" || event.type === "access_event.updated" || event.type === "leaderboard_overtake" || event.type === "vehicle_information.updated" || auditResource(event) === "vehicle";
 import { getUsableViewportBounds, observeOverlayPlacement, placeOverlay, type OverlayPlacement } from "../lib/viewportPlacement";
 import {
 ArrowLeft,

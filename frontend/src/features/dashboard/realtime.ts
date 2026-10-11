@@ -1,7 +1,7 @@
 import type { AccessEvent, MovementSagaSummary, RealtimeMessage } from "../../api/types";
 import { isRecord, numberPayload, stringPayload } from "../../lib/format";
 export function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | null {
-  if (event.type !== "access_event.finalized") return null;
+  if (event.type !== "access_event.finalized" && event.type !== "access_event.updated") return null;
   const eventId = stringPayload(event.payload.event_id);
   const registrationNumber = stringPayload(event.payload.registration_number);
   const direction = stringPayload(event.payload.direction);
@@ -14,6 +14,7 @@ export function accessEventFromRealtime(event: RealtimeMessage): AccessEvent | n
   }
   return {
     id: eventId,
+    resource_revision: resourceRevision(event.payload.resource_revision),
     registration_number: registrationNumber,
     direction,
     decision,
@@ -73,4 +74,8 @@ function isAccessDecision(value: string): value is AccessEvent["decision"] {
 }
 function nullableNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function resourceRevision(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }

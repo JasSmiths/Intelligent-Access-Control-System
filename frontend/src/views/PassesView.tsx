@@ -38,7 +38,7 @@ export function PassesView({ query }: { query: string }) {
     catch (failure) { if (!signal.aborted && !isAbortError(failure)) setError(failure instanceof Error ? failure.message : "Unable to load Visitor Passes"); throw failure; }
     finally { if (!signal.aborted) setLoading(false); }
   }, [deferredQuery, filters]);
-  const eventMatches = React.useCallback((event: RealtimeMessage) => event.type === "access_event.finalized" || auditResource(event) === "person" || isVisitorPassRealtimeEvent(event) && (event.type === "visitor_pass.deleted" || !visitorPassFromRealtime(event)), []);
+  const eventMatches = React.useCallback((event: RealtimeMessage) => event.type === "access_event.finalized" || event.type === "access_event.updated" || auditResource(event) === "person" || isVisitorPassRealtimeEvent(event) && (event.type === "visitor_pass.deleted" || !visitorPassFromRealtime(event)), []);
   const loadPasses = useCoordinatedRead(read, eventMatches);
   React.useLayoutEffect(() => signals?.subscribe((signal) => {
     if (signal.type !== "realtime" || !isVisitorPassRealtimeEvent(signal.message)) return;

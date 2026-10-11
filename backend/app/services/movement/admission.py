@@ -24,6 +24,7 @@ from app.models import (
 from app.models.enums import AccessDecision, AccessDirection, MovementSagaState
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.lpr.base import PlateRead
+from app.services.access.publication import mark_public_event_changed_in_session
 from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.movement.presence import PresenceTransition, apply_eligible_event_in_session
 from app.services.movement.sessions import MovementSessionService
@@ -64,6 +65,7 @@ async def finalize_in_session(
     gate_command_id: uuid.UUID | str | None = None,
     historical_evidence: dict[str, Any] | None = None,
     session_input: AdmissionSessionInput | None = None,
+    publish_change: bool = True,
 ) -> AdmissionResult:
     """Caller commits event/saga/admission/presence/audit together.
 
@@ -85,6 +87,9 @@ async def finalize_in_session(
         raise ValueError("The movement access event is no longer available.")
     if saga.admission_status == "historical" and mode == "live":
         raise ValueError("Historical movement cannot be promoted into live admission.")
+    admission_before = (
+        saga.admission_status, saga.admission_evidence, saga.presence_committed
+    )
     before = (
         saga.admission_status,
         saga.admission_evidence,
@@ -178,17 +183,26 @@ async def finalize_in_session(
     after = (status, evidence, target_state, saga.presence_committed, reconciliation)
     changed = before != after
     if changed:
-        await get_movement_ledger_repository().transition_movement_saga(
+        state_changed = await get_movement_ledger_repository().transition_movement_saga(
             session,
             saga,
             target_state,
             detail=f"admission_{status}:{transition.result}",
             presence_committed=saga.presence_committed,
+            publish_change=publish_change,
             reconciliation_required=reconciliation,
             failure_detail="admission_not_verified"
             if target_state == MovementSagaState.FAILED
             else None,
         )
+        if (
+            publish_change
+            and not state_changed
+            and admission_before != (status, evidence, saga.presence_committed)
+        ):
+            # A terminal state can reject the transition while admission still
+            # changes presence or the journal timestamp through its metadata.
+            await mark_public_event_changed_in_session(session, event.id)
         await write_audit_log(
             session,
             category=TELEMETRY_CATEGORY_ACCESS,

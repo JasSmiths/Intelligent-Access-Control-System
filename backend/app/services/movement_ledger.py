@@ -17,6 +17,7 @@ from app.models import (
     MovementSessionRecord,
 )
 from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState
+from app.services.access.publication import mark_public_event_changed_in_session
 
 MOVEMENT_STATE_RANK = {
     MovementSagaState.OBSERVED: 10,
@@ -203,6 +204,67 @@ class MovementLedgerRepository:
             select(MovementSagaRecord).where(MovementSagaRecord.idempotency_key == idempotency_key)
         )
 
+    async def event_repair_target_in_session(
+        self, session: AsyncSession, event_id: uuid.UUID, *, detail: str,
+    ) -> tuple[AccessEvent, MovementSagaRecord]:
+        """Serialize repair before Saga→Event locks, including missing insertion.
+
+        Insert before locking Event: a competing unique insertion may own Saga
+        while waiting for that Event. The nonblocking authority serializes this
+        route's concurrent repairs without holding Event across uniqueness waits.
+        """
+        event = await session.get(AccessEvent, event_id)
+        if event is None:
+            raise LookupError("Access event was not found.")
+        acquired = await session.scalar(
+            text("SELECT pg_try_advisory_xact_lock(hashtext(:repair_key))"),
+            {"repair_key": f"iacs:movement-repair:event:{event_id}"},
+        )
+        if not acquired:
+            raise ValueError("Movement repair is busy. Retry with current state.")
+        saga_ids = list(await session.scalars(
+            select(MovementSagaRecord.id)
+            .where(MovementSagaRecord.access_event_id == event_id)
+            .order_by(MovementSagaRecord.id).limit(2)
+        ))
+        if len(saga_ids) > 1:
+            raise ValueError("Conflicting movement records require review.")
+        if saga_ids:
+            saga = await session.get(
+                MovementSagaRecord, saga_ids[0], with_for_update=True, populate_existing=True,
+            )
+            if saga is None or saga.access_event_id != event_id:
+                raise ValueError("Movement association changed. Retry with current state.")
+        else:
+            saga = await self.create_movement_saga(
+                session, idempotency_key=f"movement-repair:event:{event_id}",
+                source=event.source, occurred_at=event.occurred_at,
+                registration_number=event.registration_number,
+                person_id=event.person_id, vehicle_id=event.vehicle_id,
+                direction=event.direction, decision=event.decision,
+                state=MovementSagaState.RECONCILIATION_REQUIRED,
+                intent_payload={"source": event.source, "access_event_id": str(event_id),
+                                "historical_repair": True},
+                decision_payload={"reason": detail, "historical_repair": True},
+            )
+            await session.refresh(saga, with_for_update=True)
+            if saga.access_event_id not in {None, event_id}:
+                raise ValueError("Movement association changed. Retry with current state.")
+        event = await session.get(
+            AccessEvent, event_id, with_for_update=True, populate_existing=True,
+        )
+        if event is None:
+            raise LookupError("Access event was not found.")
+        current_ids = list(await session.scalars(
+            select(MovementSagaRecord.id)
+            .where(MovementSagaRecord.access_event_id == event_id)
+            .order_by(MovementSagaRecord.id).limit(2)
+        ))
+        if current_ids != saga_ids:
+            raise ValueError("Movement association changed. Retry with current state.")
+        await session.refresh(saga, attribute_names=["gate_commands"])
+        return event, saga
+
     async def transition_movement_saga(
         self,
         session: AsyncSession,
@@ -216,6 +278,7 @@ class MovementLedgerRepository:
         reconciliation_required: bool | None = None,
         failure_detail: str | None = None,
         decision_payload: dict[str, Any] | None = None,
+        publish_change: bool = True,
     ) -> bool:
         if (
             MOVEMENT_STATE_RANK[state] < MOVEMENT_STATE_RANK[row.state]
@@ -242,6 +305,8 @@ class MovementLedgerRepository:
             self._history_item(state, at=now, detail=detail),
         ][-50:]
         await session.flush()
+        if publish_change and row.access_event_id is not None:
+            await mark_public_event_changed_in_session(session, row.access_event_id)
         return True
 
     async def lock_gate_operation_in_session(

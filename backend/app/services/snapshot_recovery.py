@@ -12,6 +12,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import AccessCompletionWork, AccessEvent, Anomaly
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.unifi_protect.client import UnifiProtectError
+from app.services.access.publication import mark_public_event_changed_in_session
 from app.services.access.snapshot_identity import protect_event_id_from_payload
 from app.services.snapshots import (
     ALERT_SNAPSHOT_CONTEXT_KEY,
@@ -119,6 +120,7 @@ async def recover_missing_access_event_snapshots(
                     captured_at=event.occurred_at or datetime.now(tz=UTC),
                 )
                 apply_snapshot_to_access_event(event, metadata)
+                await mark_public_event_changed_in_session(session, event.id)
                 _attach_protect_snapshot_evidence(event, evidence)
                 _set_recovery_status(
                     event,

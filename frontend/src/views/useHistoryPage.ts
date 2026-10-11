@@ -7,7 +7,7 @@ import { ReadSignalsContext, REALTIME_REFRESH_MIN_INTERVAL_MS } from "../lib/rea
 import { createRefreshCoordinator } from "../lib/refreshCoordinator";
 const EMPTY_ITEMS: never[] = [];
 function historyEventMatches(path: string, event: RealtimeMessage) {
-  if (event.type === "access_event.finalized" || event.type === "access_event.finalize_failed") return true;
+  if (event.type === "access_event.finalized" || event.type === "access_event.updated" || event.type === "access_event.finalize_failed") return true;
   if (path.includes("alerts")) return event.type === "alerts.updated";
   return event.type === "vehicle_information.updated" || event.type.startsWith("visitor_pass.") || ["vehicle", "visitor_pass"].includes(auditResource(event));
 }

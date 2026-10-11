@@ -21,7 +21,7 @@ export type ReportSnapshotPerson = Omit<Person, "missed_exit_recovery_enabled" |
   vehicles: ReportSnapshotVehicle[];
 };
 
-export type ReportSnapshotEvent = Omit<AccessEvent, "external_admission_mode" | "external_admission_source" | "movement_saga"> & {
+export type ReportSnapshotEvent = Omit<AccessEvent, "resource_revision" | "external_admission_mode" | "external_admission_source" | "movement_saga"> & {
   confidence_percent?: number;
   detail?: string;
   duration?: ReportDurationInfo;

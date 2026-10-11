@@ -542,7 +542,7 @@ async def handle_resident_action(action_id: str, *, gate_intent_factory, execute
                 linked_read = PlateRead(vehicle.registration_number, original.confidence, event.source,
                     original.occurred_at, {**original_best, "direction": "entry", "resident_recovery": recovery})
                 session_input = admission_input_factory((linked_read,), original.occurred_at, now, linked_read, config)
-                await finalize_admission(session, saga_id=saga_id, session_input=session_input)
+                await finalize_admission(session, saga_id=saga_id, session_input=session_input, publish_change=False)
                 await reserve_observation_outputs(session, event=event, person=person, vehicle=vehicle,
                     visitor_pass=None, visitor_pass_mode=None, anomalies=[])
                 from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, write_audit_log

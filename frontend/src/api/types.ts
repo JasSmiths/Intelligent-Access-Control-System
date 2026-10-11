@@ -43,6 +43,7 @@ export type ExpectedPresenceSummary = {
 };
 export type AccessEvent = {
   id: string;
+  resource_revision: number;
   registration_number: string;
   direction: "entry" | "exit" | "denied";
   decision: "granted" | "denied";

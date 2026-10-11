@@ -17,8 +17,9 @@ from app.api.v1.history import (
     write_cursor,
 )
 from app.db.session import get_db_session
-from app.models import AccessEvent, GateCommandRecord, MovementSagaRecord, User
+from app.models import GateCommandRecord, MovementSagaRecord, User
 from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState
+from app.services.access.publication import mark_public_event_changed_in_session
 from app.services.event_bus import event_bus
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
 from app.services.settings import get_runtime_config
@@ -207,6 +208,8 @@ async def request_movement_reconciliation(
         select(MovementSagaRecord)
         .options(selectinload(MovementSagaRecord.gate_commands))
         .where(MovementSagaRecord.id == movement_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if not row:
         raise HTTPException(
@@ -226,6 +229,9 @@ async def request_movement_reconciliation(
     if not changed:
         row.reconciliation_required = True
         row.failure_detail = row.failure_detail or detail
+        await session.flush()
+        if row.access_event_id is not None:
+            await mark_public_event_changed_in_session(session, row.access_event_id)
     await write_audit_log(
         session,
         category=TELEMETRY_CATEGORY_ACCESS,
@@ -259,39 +265,15 @@ async def request_event_movement_reconciliation(
     user: Annotated[User, Depends(admin_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, Any]:
-    event = await session.get(AccessEvent, event_id)
-    if not event:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Access event was not found."
-        )
-
-    row = await session.scalar(
-        select(MovementSagaRecord)
-        .options(selectinload(MovementSagaRecord.gate_commands))
-        .where(MovementSagaRecord.access_event_id == event.id)
-        .order_by(MovementSagaRecord.created_at.desc())
-        .limit(1)
-    )
     detail = request.reason or "Operator requested historical movement reconciliation."
-    if not row:
-        row = await movement_ledger.create_movement_saga(
-            session,
-            idempotency_key=f"movement-repair:event:{event.id}",
-            source=event.source,
-            occurred_at=event.occurred_at,
-            registration_number=event.registration_number,
-            person_id=event.person_id,
-            vehicle_id=event.vehicle_id,
-            direction=event.direction,
-            decision=event.decision,
-            state=MovementSagaState.RECONCILIATION_REQUIRED,
-            intent_payload={
-                "source": event.source,
-                "access_event_id": str(event.id),
-                "historical_repair": True,
-            },
-            decision_payload={"reason": detail, "historical_repair": True},
+    try:
+        event, row = await movement_ledger.event_repair_target_in_session(
+            session, event_id, detail=detail,
         )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     before = _movement_payload(row, include_history=True)
     await movement_ledger.transition_movement_saga(
         session,

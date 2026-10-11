@@ -1,6 +1,6 @@
 import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
 import type { RealtimeMessage } from "../../api/types";
-const investigationEventMatches = (event: RealtimeMessage) => event.type === "audit.log.created" || event.type.startsWith("automation.run.") || event.type === "access_event.finalized" || event.type === "access_event.finalize_failed";
+const investigationEventMatches = (event: RealtimeMessage) => event.type === "audit.log.created" || event.type.startsWith("automation.run.") || event.type === "access_event.finalized" || event.type === "access_event.updated" || event.type === "access_event.finalize_failed";
 import React from "react";
 import {
   getActivityEpisode,

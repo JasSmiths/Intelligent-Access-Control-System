@@ -9,7 +9,6 @@ from app.api.v1 import events as events_api
 from app.api.v1.events import (
     AlertActionRequest,
     _apply_alert_action,
-    _serialize_event,
     _serialize_alert,
     _serialize_alerts,
     action_alerts,
@@ -24,6 +23,7 @@ from app.models.enums import (
     AnomalyType,
     TimingClassification,
 )
+from app.services.access.event_reads import public_event_payload
 from app.services.access.execution import AccessExecution
 from app.services.snapshots import access_event_snapshot_relative_path, get_snapshot_manager
 
@@ -188,7 +188,12 @@ def test_access_event_serialization_retains_snapshot_metadata(tmp_path, monkeypa
     snapshot_path.parent.mkdir(parents=True)
     snapshot_path.write_bytes(b"jpeg")
 
-    payload = _serialize_event(event)
+    payload = public_event_payload({
+        **event.__dict__, "resource_revision": 0, "anomaly_count": 0,
+        "visitor_pass_id": None, "visitor_name": None, "visitor_pass_mode": None,
+        "external_admission_mode": None, "external_admission_source": None,
+        "movement_summaries": [],
+    })
 
     assert payload["snapshot_url"] == f"/api/v1/events/{event_id}/snapshot"
     assert payload["snapshot_captured_at"] == captured_at.isoformat()

@@ -1,7 +1,7 @@
 import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
 import { auditResource } from "../../lib/realtime";
 import type { RealtimeMessage } from "../../api/types";
-const recoveryEventMatches = (event: RealtimeMessage) => event.type.startsWith("missed_exit_recovery.") || event.type === "access_event.finalized" || event.type === "access_event.finalize_failed" || ["person", "settings"].includes(auditResource(event));
+const recoveryEventMatches = (event: RealtimeMessage) => event.type.startsWith("missed_exit_recovery.") || event.type === "access_event.finalized" || event.type === "access_event.updated" || event.type === "access_event.finalize_failed" || ["person", "settings"].includes(auditResource(event));
 import { useDirectoryOptions } from "../directory/reads";
 import { DirectoryPagination } from "../directory/DirectoryPagination";
 import { History, RefreshCw, X } from "lucide-react";

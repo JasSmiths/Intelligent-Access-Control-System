@@ -15,7 +15,7 @@ const paths: Record<OperationalDataKey, string> = {
   maintenanceStatus: "/api/v1/maintenance/status"
 };
 function eventMatches(key: OperationalDataKey, event: RealtimeMessage) {
-  if (key === "anomalies") return ["alerts.updated", "access_event.finalized", "access_event.finalize_failed"].includes(event.type);
+  if (key === "anomalies") return ["alerts.updated", "access_event.finalized", "access_event.updated", "access_event.finalize_failed"].includes(event.type);
   const resource = auditResource(event);
   if (key === "maintenanceStatus") return resource === "settings";
   return event.type.startsWith("schedule.") || ["access_device", "esphome", "home_assistant", "schedule", "settings"].includes(resource);
