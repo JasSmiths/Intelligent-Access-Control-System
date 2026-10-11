@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from test_process_lifecycle import owned_resources as owned_resources
 
 from app import main
-from app.services.access import completion_worker, publication_worker
-from app.services.access.completion_database import completion_session
+from app.services.access import completion_worker
+from app.services.access.completion_database import access_session
 from app.services.access.completion_store import AccessCompletionStore
 from app.services.access.completion_worker import AccessCompletionOwner, CompletionStageOwners
 from app.services.access.pipeline_contracts import CompletionClaim, PipelineLeaseLost
@@ -108,7 +108,7 @@ async def test_real_session_close_retained_through_repeated_cancellation(monkeyp
     monkeypatch.setattr(AsyncSession, "close", blocked_close)
 
     async def operation():
-        async with completion_session(AsyncSession):
+        async with access_session(AsyncSession):
             active.set()
             if not normal_exit:
                 await asyncio.Event().wait()
@@ -236,7 +236,7 @@ async def test_cancelled_preparation_never_enters_any_stage_and_retains_actual_c
 
     class PreparingStore(CompletionStore):
         async def assert_owned(self, claimed):
-            async with completion_session(AsyncSession):
+            async with access_session(AsyncSession):
                 query.set()
                 await asyncio.Event().wait()
 
@@ -300,7 +300,7 @@ async def test_session_close_consumes_original_start_deadline_without_dispatch(m
     monkeypatch.setattr(AsyncSession, "close", close)
     class DelayedStore(CompletionStore):
         async def assert_owned(self, claimed):
-            async with completion_session(AsyncSession):
+            async with access_session(AsyncSession):
                 return asyncio.get_running_loop().time()+.01
     store = DelayedStore()
     calls = []
@@ -325,7 +325,7 @@ async def test_publication_close_past_current_lease_never_sends(monkeypatch):
     monkeypatch.setattr(AsyncSession, "close", close)
     class DelayedStore(PublicationStore):
         async def assert_owned(self, claimed):
-            async with completion_session(AsyncSession):
+            async with access_session(AsyncSession):
                 return asyncio.get_running_loop().time()+.01
     class ForbiddenTransport:
         async def publish(self, *_args):
@@ -353,7 +353,7 @@ async def test_injected_completion_owner_main_lifespan_retains_real_close_before
         await original(session)
     monkeypatch.setattr(AsyncSession, "close", close)
     async def stage(claimed, deadline):
-        async with completion_session(AsyncSession):
+        async with access_session(AsyncSession):
             pass
     worker = owner(CompletionStore([claim()]), stage)
     monkeypatch.setattr(main, "get_access_event_service", lambda: worker)

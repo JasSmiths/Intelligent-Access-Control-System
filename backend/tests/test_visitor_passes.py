@@ -1,8 +1,7 @@
-from app.services.realtime_contracts import RealtimePublishReceipt
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as _SimpleNamespace
 from typing import Any, cast
-import uuid
 from unittest.mock import AsyncMock
 
 import pytest
@@ -12,9 +11,10 @@ from app.models import VisitorPass
 from app.models.enums import AccessDecision, AccessDirection, VisitorPassStatus, VisitorPassType
 from app.services.access.execution import AccessExecution
 from app.services.domain_events import publish_visitor_pass_status_changed
+from app.services.realtime_contracts import RealtimePublishReceipt
 from app.services.visitor_passes import (
-    VisitorPassService,
     VisitorPassError,
+    VisitorPassService,
     serialize_visitor_pass,
 )
 
@@ -502,7 +502,7 @@ def test_expired_and_cancelled_passes_do_not_match() -> None:
 
 @pytest.mark.asyncio
 async def test_lpr_visitor_pass_suppresses_unknown_plate_anomaly() -> None:
-    service = AccessExecution(None, None, None)
+    service = AccessExecution(None, None)
     event = SimpleNamespace(registration_number="PE70DHX")
     row = visitor_pass(
         expected_time=datetime(2026, 4, 29, 15, 0, tzinfo=UTC),

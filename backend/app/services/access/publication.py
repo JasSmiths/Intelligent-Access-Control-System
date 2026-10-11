@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
 from app.models import AccessCompletionWork, AccessEvent
-from app.services.access.completion_database import completion_session
+from app.services.access.completion_database import access_session
 from app.services.access.event_reads import public_event_payload, public_event_query
 from app.services.access.pipeline_contracts import PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
@@ -207,7 +207,7 @@ class AccessPublicationStore:
         self.session_factory = session_factory
 
     async def claim(self) -> PublicationClaim | None:
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             now = await database_now(session)
             identities = list(
                 await session.scalars(
@@ -257,7 +257,7 @@ class AccessPublicationStore:
             return None
 
     async def renew(self, claim: PublicationClaim) -> None:
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             work = await session.get(
                 AccessCompletionWork, claim.work_id, with_for_update=True, populate_existing=True
             )
@@ -273,7 +273,7 @@ class AccessPublicationStore:
 
     async def assert_owned(self, claim: PublicationClaim) -> float:
         """Transport start is bounded by this lease, including session close."""
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             work = await session.get(
                 AccessCompletionWork, claim.work_id, with_for_update=True, populate_existing=True
             )
@@ -285,7 +285,7 @@ class AccessPublicationStore:
             return sampled + (checked.lease_until - now).total_seconds()
 
     async def load_message(self, claim: PublicationClaim) -> PublicationMessage:
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             work = await _lock_claim(session, claim)
             published = _published_revision(work)
             payload = await _current_projection(session, claim.event_id)
@@ -308,7 +308,7 @@ class AccessPublicationStore:
     async def acknowledge(self, claim: PublicationClaim, revision: int) -> bool:
         if isinstance(revision, bool) or revision < 1:
             raise ValueError("Publication acknowledgement requires a positive loaded revision")
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             work = await _lock_claim(session, claim)
             if (
                 work.expected_revision is None
@@ -332,7 +332,7 @@ class AccessPublicationStore:
             return trailing
 
     async def retry(self, claim: PublicationClaim) -> None:
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             work = await _lock_claim(session, claim)
             work.state, work.due_at = "queued", await database_now(session) + timedelta(seconds=1)
             work.outcome = "transport_retry"

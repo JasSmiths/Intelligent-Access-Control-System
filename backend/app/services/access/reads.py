@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.services.access.window_store import StoredWindow
 
 from app.models.enums import AccessDirection
 from app.modules.gate.base import GateState
@@ -38,7 +41,6 @@ EXTERNAL_ADMISSION_SOURCE_VEHICLE_SESSION = "external_vehicle_session"
 EXTERNAL_ADMISSION_ORIGINAL_SUPERSEDED_REASON = "external_admission_confirmed"
 EXTERNAL_ADMISSION_DEPARTURE_REASON = "external_departure_recorded"
 GATE_CAMERA_IDENTIFIER = "camera.gate"
-MAX_PLATE_READ_PROCESSING_ATTEMPTS = 3
 PLATE_READ_RETRY_BACKOFF_SECONDS = (0.5, 2.0, 5.0)
 WORKER_STALL_QUEUE_SECONDS = 60.0
 CAMERA_TIEBREAKER_MIN_CONFIDENCE = 0.60
@@ -79,37 +81,6 @@ def _plate_read_with_payload(
         registration_number=registration_number or read.registration_number,
         raw_payload=raw_payload,
     )
-
-
-@dataclass
-class DebounceWindow:
-    first_seen: datetime
-    updated_at: datetime
-    reads: list[PlateRead] = field(default_factory=list)
-
-    @property
-    def best_read(self) -> PlateRead:
-        return max(
-            self.reads,
-            key=lambda read: (
-                1 if _is_exact_known_vehicle_plate_match(read) else 0,
-                1 if _is_visitor_pass_plate_match(read) else 0,
-                1 if _external_admission_from_read(read) else 0,
-                read.confidence,
-                read.captured_at,
-            ),
-        )
-
-    @property
-    def first_read(self) -> PlateRead:
-        return min(self.reads, key=lambda read: read.captured_at)
-
-
-@dataclass(frozen=True)
-class ResolvedPlateWindow:
-    source: str
-    first_seen: datetime
-    debounce_expires_at: datetime
 
 
 def _external_admission_direction_resolution(
@@ -286,14 +257,11 @@ def _visitor_pass_candidate_kind(read: PlateRead) -> str:
     return "arrival"
 
 
-def _webhook_trace_for_window(window: DebounceWindow) -> dict[str, Any]:
-    first_read = getattr(window, "first_read", None)
-    if first_read is None:
-        first_read = min(window.reads, key=lambda read: read.captured_at)
-    trace = _webhook_trace_from_read(first_read)
-    trace["candidate_count"] = len(window.reads)
-    trace["window_first_seen"] = window.first_seen.isoformat()
-    trace["window_updated_at"] = window.updated_at.isoformat()
+def _webhook_trace_for_window(window: StoredWindow) -> dict[str, Any]:
+    trace = _webhook_trace_from_read(window.first_read)
+    trace["candidate_count"] = window.summary.count
+    trace["window_first_seen"] = window.summary.first_seen.isoformat()
+    trace["window_updated_at"] = window.summary.updated_at.isoformat()
     return trace
 
 

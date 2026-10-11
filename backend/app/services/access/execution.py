@@ -35,6 +35,16 @@ from app.services.access.authorization import (
     RecognitionAuthorizationDenied,
     recognition_deadline_for_event,
 )
+from app.services.access.completion_contracts import (
+    ExternalCompletionOrigin,
+    VisitorCompletionTarget,
+)
+from app.services.access.completion_database import access_session
+from app.services.access.completion_results import reserve_information_in_session
+from app.services.access.completion_store import (
+    reserve_external_completion_in_session,
+    reserve_window_completion_in_session,
+)
 from app.services.access.delivery import reserve_observation_outputs
 from app.services.access.evidence import AccessEvidenceResolver
 from app.services.access.hardware import open_gate_for_access_event, publish_gate_open_skipped
@@ -44,33 +54,41 @@ from app.services.access.payloads import (
     _raw_payload_with_movement_saga,
     access_event_realtime_payload,
 )
+from app.services.access.pipeline_contracts import WindowClaim
+from app.services.access.pipeline_store import (
+    assert_window_in_session,
+    hold_window_in_session,
+    terminalize_window_in_session,
+)
+from app.services.access.publication import reserve_initial_publication_in_session
 from app.services.access.reads import (
     EXTERNAL_ADMISSION_DEPARTURE_REASON,
     EXTERNAL_ADMISSION_ORIGINAL_SUPERSEDED_REASON,
     EXTERNAL_ADMISSION_SOURCE_GATE_STATE_CHANGED,
-    DebounceWindow,
     _external_admission_direction_resolution,
     _external_admission_from_read,
     _external_admission_payload,
     _external_gate_open_read,
     _gate_observation_from_gate_event,
     _movement_saga_idempotency_key,
-    _webhook_trace_for_window,
-    lpr_ingest_id_from_read,
+    _webhook_trace_from_read,
 )
+from app.services.access.window_store import AccessWindowStore, StoredWindow
 from app.services.gate_commands import GateCommandOutcome
 from app.services.ha_presence_reservations import reserve_all_in_session
-from app.services.lpr_ingest import LprIngestRepository
 from app.services.movement.admission import AdmissionSessionInput, finalize_in_session
 from app.services.movement.sessions import (
     VEHICLE_SESSION_PAYLOAD_KEY,
     ExternalVehicleSessionMatch,
     MovementSessionService,
+    coerce_gate_state,
+    gate_observation_from_read,
 )
 from app.services.movement_ledger import MovementLedgerRepository
 from app.services.schedules import ScheduleEvaluation
 from app.services.settings import RuntimeConfig, get_runtime_config_for_session
 from app.services.snapshots import alert_snapshot_metadata_from_event
+from app.services.vehicle_information_jobs import eligible_arrival
 from app.services.visitor_passes import VisitorPassReservationConflict, get_visitor_pass_service
 
 logger = get_logger(__name__)
@@ -100,16 +118,15 @@ class AccessExecution:
         self,
         movement_ledger: MovementLedgerRepository,
         movement_sessions: MovementSessionService,
-        ingest: LprIngestRepository,
     ) -> None:
         self._movement_ledger = movement_ledger
         self._movement_sessions = movement_sessions
-        self._ingest = ingest
 
     async def execute(
         self,
-        window: DebounceWindow,
+        window: StoredWindow,
         *,
+        claim: WindowClaim,
         read: PlateRead,
         direction_read: PlateRead,
         runtime: RuntimeConfig,
@@ -124,30 +141,37 @@ class AccessExecution:
         gate_open_skipped = False
         gate_outcome: GateCommandOutcome | None = None
         movement_saga = None
-        async with AsyncSessionLocal() as session:
-            existing = await self._movement_ledger.movement_saga_by_idempotency_key(
-                session, _movement_saga_idempotency_key(read))
-            if existing and existing.access_event_id:
+        async with access_session(AsyncSessionLocal) as session:
+            if await self._reuse_window_in_session(session, window, claim, read):
+                await session.commit()
                 return None
         camera_evidence = await AccessEvidenceResolver(runtime).prepare_camera_evidence(
-            read, direction_read, external_admission, trace)
-        async with AsyncSessionLocal() as session:
-            existing = await self._movement_ledger.movement_saga_by_idempotency_key(
-                session, _movement_saga_idempotency_key(read)
-            )
-            if existing and existing.access_event_id:
+            read, direction_read, external_admission, trace
+        )
+        async with access_session(AsyncSessionLocal) as session:
+            if await self._reuse_window_in_session(session, window, claim, read):
+                await session.commit()
                 return None
             runtime = await get_runtime_config_for_session(session)
             # Serialize owner journeys across concurrent plate reads and all owned vehicles.
             if getattr(runtime, "missed_exit_recovery_enabled", False):
                 from app.models import Vehicle
                 from app.services.resident_recovery import lock_owner
-                candidate_owner = await session.scalar(select(Vehicle.person_id).where(
-                    Vehicle.registration_number == read.registration_number, Vehicle.is_active.is_(True)))
+
+                candidate_owner = await session.scalar(
+                    select(Vehicle.person_id).where(
+                        Vehicle.registration_number == read.registration_number,
+                        Vehicle.is_active.is_(True),
+                    )
+                )
                 if candidate_owner:
                     await lock_owner(session, candidate_owner)
             evidence = await AccessEvidenceResolver(runtime).resolve(
-                session, read, direction_read, external_admission, trace,
+                session,
+                read,
+                direction_read,
+                external_admission,
+                trace,
                 camera_evidence=camera_evidence,
             )
             vehicle, person = evidence.vehicle, evidence.person
@@ -161,7 +185,9 @@ class AccessExecution:
             # Captured gate state is direction evidence, not dispatch authority.
             # Every live authorized entry reaches the audited owner for fresh
             # designated-entry evidence; that owner may issue zero commands.
-            gate_command_required = bool(allowed and direction == AccessDirection.ENTRY and not external_admission)
+            gate_command_required = bool(
+                allowed and direction == AccessDirection.ENTRY and not external_admission
+            )
             movement_saga = await self._movement_ledger.create_movement_saga(
                 session,
                 idempotency_key=_movement_saga_idempotency_key(read),
@@ -180,6 +206,10 @@ class AccessExecution:
             # saga before attaching an event, including pre-existing incomplete rows.
             await session.refresh(movement_saga, with_for_update=True)
             if movement_saga.access_event_id:
+                await terminalize_window_in_session(
+                    session, claim, event_id=movement_saga.access_event_id, saga_id=movement_saga.id
+                )
+                await session.commit()
                 return None
             vehicle_information = None
             vehicle_visual_detection = None
@@ -229,33 +259,30 @@ class AccessExecution:
             event.raw_payload = {
                 **(event.raw_payload or {}),
                 VEHICLE_SESSION_PAYLOAD_KEY: self._movement_sessions.initial_payload(
-                    window.reads,
-                    first_seen=window.first_seen,
-                    updated_at=window.updated_at,
+                    (),
+                    evidence=window.summary.evidence,
+                    first_seen=window.summary.first_seen,
+                    updated_at=window.summary.updated_at,
                     read=read,
                     event=event,
                 ),
             }
 
-            await self._ingest.mark_ids_succeeded_in_session(
-                session,
-                [
-                    ingest_id
-                    for item in window.reads
-                    if (ingest_id := lpr_ingest_id_from_read(item))
-                ],
-                access_event_id=event.id,
-                movement_saga_id=movement_saga.id if movement_saga else None,
+            await terminalize_window_in_session(
+                session, claim, event_id=event.id, saga_id=movement_saga.id
             )
 
             if visitor_pass:
                 visitor_service = get_visitor_pass_service()
                 if visitor_pass_mode == "arrival":
                     try:
-                        await visitor_service.reserve_arrival_in_session(session,
-                            visitor_pass_id=visitor_pass.id, event=event,
+                        await visitor_service.reserve_arrival_in_session(
+                            session,
+                            visitor_pass_id=visitor_pass.id,
+                            event=event,
                             intent_id=uuid.uuid5(event.id, "automatic-gate-open"),
-                            dispatch_deadline=await recognition_deadline_for_event(session, event))
+                            dispatch_deadline=await recognition_deadline_for_event(session, event),
+                        )
                     except (VisitorPassReservationConflict, RecognitionAuthorizationDenied) as exc:
                         # Preserve the observed event and refusal. Never consume a
                         # second pass or retry ingestion to hide this conflict.
@@ -265,8 +292,14 @@ class AccessExecution:
                         movement_saga.decision, movement_saga.direction = decision, direction
                         gate_command_required = False
                         movement_saga.gate_command_required = False
-                        event.raw_payload = {**(event.raw_payload or {}), "visitor_reservation": {
-                            "status": "denied", "reason": str(exc), "pass_id": str(visitor_pass.id)}}
+                        event.raw_payload = {
+                            **(event.raw_payload or {}),
+                            "visitor_reservation": {
+                                "status": "denied",
+                                "reason": str(exc),
+                                "pass_id": str(visitor_pass.id),
+                            },
+                        }
                 elif visitor_pass_mode == "departure":
                     await visitor_service.record_departure(session, visitor_pass, event=event)
             if external_admission:
@@ -290,25 +323,81 @@ class AccessExecution:
 
             recovery = direction_resolution.get("missed_exit_recovery")
             if recovery and person:
-                recovery["duration_ms"] = round((time.monotonic()-execution_started)*1000, 2)
+                recovery["duration_ms"] = round((time.monotonic() - execution_started) * 1000, 2)
                 recovery["checks"]["decision_processing_ms"] = recovery["duration_ms"]
                 from app.services.resident_recovery import record_attempt
-                await record_attempt(session, event=event, saga=movement_saga, person=person,
-                                     recovery=recovery, config=runtime)
-            elif person and decision == AccessDecision.GRANTED and getattr(runtime, "missed_exit_recovery_enabled", False):
+
+                await record_attempt(
+                    session,
+                    event=event,
+                    saga=movement_saga,
+                    person=person,
+                    recovery=recovery,
+                    config=runtime,
+                )
+            elif (
+                person
+                and decision == AccessDecision.GRANTED
+                and getattr(runtime, "missed_exit_recovery_enabled", False)
+            ):
                 from app.services.resident_recovery import invalidate_owner_in_session
+
                 await invalidate_owner_in_session(session, person.id, event=event)
             gate_open_skipped = bool(external_admission and direction == AccessDirection.ENTRY)
-            admission = await finalize_in_session(session, saga_id=movement_saga.id,
-                publish_change=False, mode="external" if external_admission else "live",
+            admission = await finalize_in_session(
+                session,
+                saga_id=movement_saga.id,
+                publish_change=False,
+                mode="external" if external_admission else "live",
                 historical_evidence=external_admission,
-                session_input=AdmissionSessionInput(window.reads, window.first_seen, window.updated_at, read, runtime))
+                session_input=AdmissionSessionInput(
+                    (),
+                    window.summary.first_seen,
+                    window.summary.updated_at,
+                    read,
+                    runtime,
+                    evidence=window.summary.evidence,
+                ),
+            )
             event, movement_saga = admission.event, admission.saga
             presence_updated = admission.presence_changed
-            await reserve_observation_outputs(session, event=event, person=person, vehicle=vehicle,
-                visitor_pass=visitor_pass, visitor_pass_mode=visitor_pass_mode, anomalies=anomalies)
+            await reserve_observation_outputs(
+                session,
+                event=event,
+                person=person,
+                vehicle=vehicle,
+                visitor_pass=visitor_pass,
+                visitor_pass_mode=visitor_pass_mode,
+                anomalies=anomalies,
+            )
 
-            await reserve_all_in_session(session, [admission.ha_reservation] if admission.ha_reservation else [])
+            await reserve_window_completion_in_session(
+                session,
+                event_id=event.id,
+                window_id=window.summary.evidence.window_id,
+                ingest_id=window.summary.best_ingest_id,
+                visitor_target=VisitorCompletionTarget(
+                    visitor_pass.id, visitor_pass.vehicle_make, visitor_pass.vehicle_colour
+                )
+                if visitor_pass is not None and visitor_pass_mode == "arrival"
+                else None,
+                zone_mode=runtime.lpr_zone_filter_mode,
+            )
+            if eligible_arrival(
+                event.direction, coerce_gate_state(gate_observation_from_read(read).get("state"))
+            ):
+                await reserve_information_in_session(
+                    session, event, origin_at=window.summary.min_received_at
+                )
+            await reserve_initial_publication_in_session(session, event.id)
+            if visitor_pass_mode == "departure":
+                await AccessWindowStore().activate_visitor_resolution_in_session(
+                    session, claim, max_seconds=runtime.lpr_debounce_max_seconds
+                )
+            await reserve_all_in_session(
+                session, [admission.ha_reservation] if admission.ha_reservation else []
+            )
+            await assert_window_in_session(session, claim, completed=True)
             await session.commit()
 
         if gate_command_required:
@@ -320,14 +409,26 @@ class AccessExecution:
                 vehicle_information=vehicle_information,
                 movement_saga_id=str(movement_saga.id) if movement_saga else None,
             )
-            async with AsyncSessionLocal() as session:
-                admission = await finalize_in_session(session, saga_id=movement_saga.id,
+            async with access_session(AsyncSessionLocal) as session:
+                admission = await finalize_in_session(
+                    session,
+                    saga_id=movement_saga.id,
                     gate_command_id=gate_outcome.command_id,
-                    session_input=AdmissionSessionInput(window.reads, window.first_seen, window.updated_at, read, runtime))
+                    session_input=AdmissionSessionInput(
+                        (),
+                        window.summary.first_seen,
+                        window.summary.updated_at,
+                        read,
+                        runtime,
+                        evidence=window.summary.evidence,
+                    ),
+                )
                 # Return the canonical transition snapshot even if optional enrichment fails.
                 if visitor_pass is not None:
                     visitor_pass = await session.get(VisitorPass, visitor_pass.id)
-                await reserve_all_in_session(session, [admission.ha_reservation] if admission.ha_reservation else [])
+                await reserve_all_in_session(
+                    session, [admission.ha_reservation] if admission.ha_reservation else []
+                )
                 await session.commit()
                 event, movement_saga = admission.event, admission.saga
                 presence_updated = admission.presence_changed
@@ -358,6 +459,36 @@ class AccessExecution:
             presence_updated=presence_updated,
             movement_saga=movement_saga,
         )
+
+    async def _reuse_window_in_session(
+        self,
+        session: AsyncSession,
+        window: StoredWindow,
+        claim: WindowClaim,
+        read: PlateRead,
+    ) -> bool:
+        await assert_window_in_session(session, claim)
+        existing = await self._movement_ledger.movement_saga_by_idempotency_key(
+            session, _movement_saga_idempotency_key(read)
+        )
+        if existing is None:
+            return False
+        await session.refresh(existing, with_for_update=True)
+        if (existing.source, existing.registration_number, existing.occurred_at) != (
+            read.source,
+            read.registration_number,
+            read.captured_at,
+        ):
+            await hold_window_in_session(session, claim, reason="movement_identity_conflict")
+        elif existing.access_event_id is None:
+            # A retained orphan may have command evidence. Never reinterpret it
+            # as a fresh access or replay hardware after a historical deletion.
+            await hold_window_in_session(session, claim, reason="existing_movement_without_event")
+        else:
+            await terminalize_window_in_session(
+                session, claim, event_id=existing.access_event_id, saga_id=existing.id
+            )
+        return True
 
     async def _build_anomalies(
         self,
@@ -556,7 +687,6 @@ class AccessExecution:
             gate_payload=gate_payload,
             external_admission=external_admission,
         )
-        window = DebounceWindow(first_seen=observed_at, updated_at=observed_at, reads=[read])
         direction, direction_resolution = _external_admission_direction_resolution(
             read, external_admission
         )
@@ -565,7 +695,7 @@ class AccessExecution:
             source="external_admission_arrival",
             reason="Unknown vehicle was admitted by an external gate opening while Protect still showed it present.",
         )
-        webhook_trace = _webhook_trace_for_window(window)
+        webhook_trace = _webhook_trace_from_read(read)
         event = AccessEvent(
             vehicle=None,
             person_id=None,
@@ -577,7 +707,7 @@ class AccessExecution:
             occurred_at=observed_at,
             timing_classification=TimingClassification.UNKNOWN,
             raw_payload=_access_event_raw_payload(
-                window=window,
+                window=None,
                 read=read,
                 schedule_evaluation=schedule_evaluation,
                 direction_resolution=direction_resolution,
@@ -606,16 +736,21 @@ class AccessExecution:
         event.raw_payload = {
             **(event.raw_payload or {}),
             VEHICLE_SESSION_PAYLOAD_KEY: self._movement_sessions.initial_payload(
-                window.reads,
-                first_seen=window.first_seen,
-                updated_at=window.updated_at,
+                (read,),
+                first_seen=observed_at,
+                updated_at=observed_at,
                 read=read,
                 event=event,
             ),
         }
-        await finalize_in_session(session, saga_id=movement_saga.id, mode="external", publish_change=False,
+        admission = await finalize_in_session(
+            session,
+            saga_id=movement_saga.id,
+            mode="external",
+            publish_change=False,
             historical_evidence=external_admission,
-            session_input=AdmissionSessionInput(window.reads, window.first_seen, window.updated_at, read, runtime))
+            session_input=AdmissionSessionInput((read,), observed_at, observed_at, read, runtime),
+        )
         await self._movement_sessions.mark_external_session_superseded(
             session,
             match.session,
@@ -634,8 +769,15 @@ class AccessExecution:
             external_admission=external_admission,
         )
         session.add_all(anomalies)
-        await reserve_observation_outputs(session, event=event, person=None, vehicle=None,
-            visitor_pass=None, visitor_pass_mode=None, anomalies=anomalies)
+        await reserve_observation_outputs(
+            session,
+            event=event,
+            person=None,
+            vehicle=None,
+            visitor_pass=None,
+            visitor_pass_mode=None,
+            anomalies=anomalies,
+        )
         event.raw_payload = _raw_payload_with_movement_saga(
             event.raw_payload,
             state="completed",
@@ -643,6 +785,19 @@ class AccessExecution:
             presence_committed=False,
             movement_saga=movement_saga,
             detail="External gate opening recorded; no IACS hardware command was sent.",
+        )
+        await reserve_external_completion_in_session(
+            session,
+            event_id=event.id,
+            origin=ExternalCompletionOrigin(
+                uuid.uuid5(match.access_event.id, "external-gate-observation"), observed_at
+            ),
+            zone_mode=runtime.lpr_zone_filter_mode,
+        )
+        await reserve_information_in_session(session, event, origin_at=observed_at)
+        await reserve_initial_publication_in_session(session, event.id)
+        await reserve_all_in_session(
+            session, [admission.ha_reservation] if admission.ha_reservation else []
         )
         realtime_payload = access_event_realtime_payload(
             event,

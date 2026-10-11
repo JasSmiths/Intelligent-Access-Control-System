@@ -69,7 +69,7 @@ class FakeAlertSession:
 @pytest.mark.asyncio
 async def test_unknown_plate_anomaly_is_warning(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
-    service = AccessExecution(None, None, None)
+    service = AccessExecution(None, None)
     event_id = uuid4()
     event = AccessEvent(
         id=event_id,

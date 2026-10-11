@@ -35,6 +35,10 @@ async def health() -> dict[str, object]:
     database = await _database_check()
     realtime = _realtime_check()
     access_events = _access_events_check()
+    try:
+        access_events.update(await get_access_event_service().backlog_status())
+    except Exception as exc:  # noqa: BLE001 - Detailed health remains available during a backlog-read outage.
+        access_events.update(status="degraded", backlog_detail=_safe_error(exc))
     maintenance = await _maintenance_check()
     home_assistant = await _home_assistant_check()
     checks = {

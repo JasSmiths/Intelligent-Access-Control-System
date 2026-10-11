@@ -28,7 +28,7 @@ from app.modules.unifi_protect.client import ProtectMedia
 from app.services import snapshot_recovery, vehicle_information_jobs
 from app.services.access import completion_media, completion_store, publication
 from app.services.access.completion_contracts import ExternalCompletionOrigin
-from app.services.access.completion_database import completion_session
+from app.services.access.completion_database import access_session
 from app.services.access.completion_media import (
     AccessCompletionStages,
     PreparedAccessSnapshot,
@@ -134,7 +134,7 @@ async def artifact(claim):
 async def test_snapshot_columns_anomaly_receipt_revision_and_publication_are_atomic(commit):
     claim = await seed(anomaly=True)
     prepared = await artifact(claim)
-    async with completion_session(AsyncSessionLocal) as session:
+    async with access_session(AsyncSessionLocal) as session:
         await accept_snapshot_in_session(session, claim, prepared)
         async with AsyncSessionLocal() as other:
             before = await other.get(AccessEvent, claim.event_id)
@@ -169,7 +169,7 @@ async def test_final_acceptance_expiry_rolls_back_all_snapshot_effects(monkeypat
         await asyncio.sleep(.1)
     monkeypatch.setattr(completion_media, "mark_public_event_changed_in_session", delayed)
     with pytest.raises(PipelineLeaseLost):
-        async with completion_session(AsyncSessionLocal) as session:
+        async with access_session(AsyncSessionLocal) as session:
             await accept_snapshot_in_session(session, claim, prepared)
             await session.commit()
     event, work = await state(claim)
@@ -222,7 +222,7 @@ async def test_compact_snapshot_and_zone_input_are_immutable_and_avoid_raw_hydra
         statements.append(statement)
     sql_event.listen(engine.sync_engine, "before_cursor_execute", capture)
     try:
-        async with completion_session(AsyncSessionLocal) as session:
+        async with access_session(AsyncSessionLocal) as session:
             prepared = await prepare_snapshot_in_session(session, claim)
     finally:
         sql_event.remove(engine.sync_engine, "before_cursor_execute", capture)
@@ -232,7 +232,7 @@ async def test_compact_snapshot_and_zone_input_are_immutable_and_avoid_raw_hydra
         event = await session.get(AccessEvent, claim.event_id)
         event.raw_payload = {"best": {"eventId": "later"}}
         await session.commit()
-    async with completion_session(AsyncSessionLocal) as session:
+    async with access_session(AsyncSessionLocal) as session:
         assert (await prepare_snapshot_in_session(session, claim)).protect_event_id == "first"
 
 
@@ -274,11 +274,11 @@ async def test_old_claim_cleanup_cannot_delete_another_accepted_claim_or_legacy_
         await session.commit()
     new = (await AccessCompletionStore().claim(1))[0]
     accepted = await artifact(new)
-    async with completion_session(AsyncSessionLocal) as session:
+    async with access_session(AsyncSessionLocal) as session:
         await accept_snapshot_in_session(session, new, accepted)
         await session.commit()
     with pytest.raises(PipelineLeaseLost):
-        async with completion_session(AsyncSessionLocal) as session:
+        async with access_session(AsyncSessionLocal) as session:
             await accept_snapshot_in_session(session, old, own)
     await stages()._cleanup_unaccepted(old)
     assert not (settings.data_dir/own.metadata.relative_path).exists()
@@ -343,7 +343,7 @@ async def test_db_response_delay_counts_against_original_start_deadline(monkeypa
         return now
     monkeypatch.setattr(module, "database_now", delayed)
     if owner == "snapshot":
-        async with completion_session(AsyncSessionLocal) as session:
+        async with access_session(AsyncSessionLocal) as session:
             prepared = await prepare_snapshot_in_session(session, claim)
         assert prepared.sampled_monotonic <= sampled[-1]
     elif owner == "completion":

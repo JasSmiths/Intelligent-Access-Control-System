@@ -12,21 +12,30 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal, Self
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import selectinload
 
 from app.db.session import AsyncSessionLocal
 from app.models import (
+    AccessCompletionWork,
     AccessDeviceCommandRecord,
     AccessEvent,
     Anomaly,
     AuditLog,
+    AutomationRun,
     GateCommandRecord,
     GateStateObservation,
+    HaPresenceEffect,
+    LprDebounceWindow,
+    LprIngestEvent,
+    LprObservationToken,
+    LprWindowMember,
     MovementSagaRecord,
+    MovementSessionObservation,
     MovementSessionRecord,
     NotificationRun,
     Person,
@@ -35,6 +44,7 @@ from app.models import (
     TelemetrySpan,
     TelemetryTrace,
     Vehicle,
+    VehicleInformationJob,
     VehiclePersonAssignment,
 )
 from app.models.enums import (
@@ -46,14 +56,14 @@ from app.models.enums import (
 )
 from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
-from app.services import access_events as access_events_module
-from app.services.access import enrichment as access_enrichment_module
 from app.services.access import evidence as access_evidence_module
 from app.services.access import execution as access_execution_module
 from app.services.access import hardware as access_hardware_module
+from app.services.access.pipeline_contracts import TrustedGateObservation, WindowClaim
+from app.services.access.publication import AccessPublicationStore
+from app.services.access.publication_worker import AccessPublicationLane
 from app.services.access.reads import (
     GATE_OBSERVATION_PAYLOAD_KEY,
-    KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
     PRESERVE_GATE_OBSERVATION_PAYLOAD_KEY,
 )
 from app.services.access_device_commands import (
@@ -63,6 +73,9 @@ from app.services.access_device_commands import (
 from app.services.access_events import AccessEventService
 from app.services.event_bus import event_bus
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
+from app.services.ha_presence_reservations import invalidate_people_in_session
+from app.services.realtime_contracts import RealtimePublishReceipt
+from app.services.settings import get_runtime_config
 from app.services.telemetry import telemetry
 
 SIMULATION_SOURCE = "simulation_e2e"
@@ -305,35 +318,85 @@ class HardwareFreeAccessEventService(AccessEventService):
         super().__init__()
         self._recorder = recorder
 
-    async def _publish_suppressed_read(self, read: PlateRead, *, reason: str) -> None:
-        simulation = _read_simulation_payload(read)
-        match = (read.raw_payload or {}).get(KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY) or {}
-        await event_bus.publish(
-            "plate_read.suppressed",
-            {
-                "registration_number": read.registration_number,
-                "detected_registration_number": match.get("detected_registration_number") or read.registration_number,
-                "source": read.source,
-                "reason": reason,
-                "scenario_id": simulation.get("scenario_id"),
-                "step_id": simulation.get("step_id"),
-            },
-        )
+    async def drive_read(self, read: PlateRead, *, flush: bool) -> None:
+        """Drive the actual SQL intake, without starting background/provider owners."""
+        observation = read.raw_payload[GATE_OBSERVATION_PAYLOAD_KEY]
+        await self.enqueue_plate_read(read, observation=TrustedGateObservation(
+            GateState(observation["state"]), read.captured_at, controller="simulation"))
+        self._runtime = await get_runtime_config()
+        coordinator = await self._pipeline.acquire_coordinator()
+        if coordinator is None:
+            raise FullAccessFlowIsolationError("Synthetic intake requires exclusive coordinator ownership.")
+        try:
+            ingest = await self._pipeline.claim_next_read(coordinator)
+            if ingest is not None:
+                immediate = await self._handle_queued_read(ingest)
+                if immediate is not None:
+                    await self._finalize_window(immediate)
+            while window := await self._pipeline.next_flush_window(
+                coordinator, quiet_seconds=0 if flush else self._runtime.lpr_debounce_quiet_seconds,
+                max_seconds=0 if flush else self._runtime.lpr_debounce_max_seconds,
+            ):
+                await self._finalize_window(window)
+        finally:
+            await self._pipeline.release_coordinator(coordinator)
 
+    async def flush(self) -> None:
+        coordinator = await self._pipeline.acquire_coordinator()
+        if coordinator is None:
+            raise FullAccessFlowIsolationError("Synthetic flush requires exclusive coordinator ownership.")
+        try:
+            while window := await self._pipeline.next_flush_window(
+                coordinator, quiet_seconds=0, max_seconds=0,
+            ):
+                await self._finalize_window(window)
+        finally:
+            await self._pipeline.release_coordinator(coordinator)
 
-async def _skip_vehicle_information(_event: AccessEvent) -> None:
-    """Synthetic replay never enqueues provider work."""
-
-
-class HardwareFreeEnrichment(access_enrichment_module.AccessEnrichment):
-    async def _vehicle_visual_detection_for_read(
-        self,
-        read: PlateRead,
-        *,
-        wait_for_match: bool,
-        trace: Any = None,
-    ) -> dict[str, Any] | None:
-        return None
+    async def _finalize_window(self, claim: WindowClaim) -> None:
+        await super()._finalize_window(claim)
+        async with AsyncSessionLocal() as session:
+            window = await session.get(LprDebounceWindow, claim.window_id)
+            if window is None or window.access_event_id is None:
+                return
+            event = await session.get(AccessEvent, window.access_event_id)
+            ingest = await session.get(LprIngestEvent, window.best_ingest_id)
+            if event is None or ingest is None:
+                raise RuntimeError("Synthetic committed evidence is missing.")
+            # Fixture metadata is not copied by production's compact projection.
+            simulation = ingest.normalized_payload.get("raw_payload", {}).get("simulation", {})
+            event.raw_payload = {**event.raw_payload, "simulation": simulation}
+            await session.execute(update(AccessCompletionWork).where(
+                AccessCompletionWork.event_id == event.id,
+                AccessCompletionWork.stage != "publication",
+            ).values(state="skipped", outcome="hardware_free_simulation",
+                     lease_token=None, lease_until=None, completed_at=datetime.now(UTC)))
+            await session.execute(update(VehicleInformationJob).where(
+                VehicleInformationJob.event_id == event.id,
+            ).values(status="skipped", outcome="hardware_free_simulation",
+                     lease_token=None, lease_until=None, completed_at=datetime.now(UTC)))
+            anomaly_ids = list(await session.scalars(select(Anomaly.id).where(Anomaly.event_id == event.id)))
+            notice_ids = [uuid.uuid5(event.id, "access.authorized_entry.notification")] + [
+                uuid.uuid5(identity, "access.anomaly.notification") for identity in anomaly_ids]
+            notices = list(await session.scalars(select(NotificationRun).where(NotificationRun.id.in_(notice_ids))))
+            for notice in notices:
+                self._recorder.notification_intents.append(dict(notice.context))
+                notice.status, notice.finished_at = "skipped", datetime.now(UTC)
+                notice.skipped_reasons = ["hardware_free_simulation"]
+            # Required workflow reservations still exist, but inert replay never
+            # leaves a queued action that could execute after fixture restoration.
+            await session.execute(update(AutomationRun).where(
+                AutomationRun.source == "access_event",
+                AutomationRun.trigger_payload["id"].astext == str(event.id),
+            ).values(status="skipped", finished_at=datetime.now(UTC),
+                     review_reason="hardware_free_simulation", claim_token=None, lease_expires_at=None))
+            await session.commit()
+        # Exercise the real durable publication checkpoint with the injected
+        # recording transport; no detached optional owner is started.
+        store = AccessPublicationStore()
+        lane = AccessPublicationLane(store, event_bus)
+        while publication := await store.claim():
+            await lane.deliver(publication)
 
 
 class HardwareFreeEvidence(access_evidence_module.AccessEvidenceResolver):
@@ -352,25 +415,6 @@ class HardwareFreeEvidence(access_evidence_module.AccessEvidenceResolver):
             "reason": "Hardware-free simulation does not call camera vision.",
         }
 
-
-class _FakeNotificationService:
-    def __init__(self, recorder: SimulationRecorder) -> None:
-        self._recorder = recorder
-
-    async def notify(self, context: Any) -> None:
-        self._recorder.notification_intents.append(
-            {
-                "event_type": context.event_type,
-                "subject": context.subject,
-                "severity": context.severity,
-                "facts": dict(context.facts),
-            }
-        )
-
-
-class _FakeLeaderboardService:
-    async def evaluate_known_overtake(self, _event_id: uuid.UUID) -> None:
-        return None
 
 
 async def _persist_synthetic_verified_gate_receipt(
@@ -518,17 +562,12 @@ class HardwareFreePatchScope:
         self._recorder = recorder
         self._had_publish_attr = "publish" in event_bus.__dict__
         self._original_publish_attr = event_bus.__dict__.get("publish")
-        self._original_notification_service = access_events_module.get_notification_service
-        self._original_enrichment_enqueue = access_enrichment_module.enqueue_arrival
-        self._original_enrichment = access_events_module.AccessEnrichment
-        self._original_evidence = access_execution_module.AccessEvidenceResolver
-        self._original_leaderboard_service = access_enrichment_module.get_leaderboard_service
-        self._original_snapshot_capture = access_enrichment_module.capture_access_event_snapshot
+        self._evidence_patch = patch.object(access_execution_module, "AccessEvidenceResolver", HardwareFreeEvidence)
         self._original_gate_open = access_execution_module.open_gate_for_access_event
         self._original_gate_skip = access_execution_module.publish_gate_open_skipped
 
     async def __aenter__(self) -> Self:
-        async def capture_publish(event_type: str, payload: dict[str, Any]) -> None:
+        async def capture_publish(event_type: str, payload: dict[str, Any]) -> RealtimePublishReceipt:
             self._recorder.realtime_events.append(
                 {
                     "type": event_type,
@@ -536,9 +575,7 @@ class HardwareFreePatchScope:
                     "created_at": datetime.now(tz=UTC).isoformat(),
                 }
             )
-
-        async def capture_snapshot(_event: AccessEvent, *, trace: Any | None = None) -> None:
-            return None
+            return RealtimePublishReceipt("in_process", True)
 
         async def capture_gate_open(
             event: AccessEvent,
@@ -636,13 +673,8 @@ class HardwareFreePatchScope:
             )
             await access_hardware_module.publish_gate_open_skipped(event, direction_resolution, person)
 
-        access_events_module.AccessEnrichment = HardwareFreeEnrichment
-        access_execution_module.AccessEvidenceResolver = HardwareFreeEvidence
-        access_enrichment_module.enqueue_arrival = _skip_vehicle_information
+        self._evidence_patch.start()
         event_bus.publish = capture_publish  # type: ignore[method-assign]
-        access_events_module.get_notification_service = lambda: _FakeNotificationService(self._recorder)  # type: ignore[assignment]
-        access_enrichment_module.get_leaderboard_service = lambda: _FakeLeaderboardService()  # type: ignore[assignment]
-        access_enrichment_module.capture_access_event_snapshot = capture_snapshot
         access_execution_module.open_gate_for_access_event = capture_gate_open
         access_execution_module.publish_gate_open_skipped = capture_gate_skip
         return self
@@ -653,14 +685,9 @@ class HardwareFreePatchScope:
         _exc: BaseException | None,
         _traceback: TracebackType | None,
     ) -> None:
-        access_events_module.AccessEnrichment = self._original_enrichment
-        access_execution_module.AccessEvidenceResolver = self._original_evidence
-        access_enrichment_module.enqueue_arrival = self._original_enrichment_enqueue
+        self._evidence_patch.stop()
         access_execution_module.publish_gate_open_skipped = self._original_gate_skip
         access_execution_module.open_gate_for_access_event = self._original_gate_open
-        access_enrichment_module.capture_access_event_snapshot = self._original_snapshot_capture
-        access_enrichment_module.get_leaderboard_service = self._original_leaderboard_service  # type: ignore[assignment]
-        access_events_module.get_notification_service = self._original_notification_service  # type: ignore[assignment]
         if self._had_publish_attr:
             event_bus.publish = self._original_publish_attr  # type: ignore[assignment,method-assign]
         else:
@@ -680,7 +707,7 @@ class SimulationRunContext:
     steps_run: int = 0
 
     async def reset_scenario(self, presence_states: dict[str, PresenceState]) -> None:
-        self.service._clear_pending_reads()
+        await self.service.flush()
         async with AsyncSessionLocal() as session:
             for person in self.data.people.values():
                 state = presence_states.get(person.key, PresenceState.EXITED)
@@ -691,6 +718,8 @@ class SimulationRunContext:
                 presence.state = state
                 presence.last_event_id = None
                 presence.last_changed_at = self.start_at - timedelta(minutes=1)
+            await invalidate_people_in_session(session, [p.person_id for p in self.data.people.values()],
+                                              reason="simulation_reset")
             await session.commit()
 
     async def inject_read(
@@ -730,20 +759,19 @@ class SimulationRunContext:
                 ],
             },
         }
-        await self.service._handle_queued_read(
+        await self.service.drive_read(
             PlateRead(
                 registration_number=registration_number,
                 confidence=confidence,
                 source=SIMULATION_SOURCE,
                 captured_at=captured_at,
                 raw_payload=raw_payload,
-            )
+            ),
+            flush=flush,
         )
-        if flush:
-            await self.service._flush_all_pending()
 
     async def flush(self) -> None:
-        await self.service._flush_all_pending()
+        await self.service.flush()
 
     async def events_for_scenario(self, scenario_id: str) -> list[AccessEvent]:
         async with AsyncSessionLocal() as session:
@@ -1050,6 +1078,44 @@ async def cleanup_synthetic_data(data: SyntheticDataSet, events: Sequence[Access
                     )
                 ).all()
             )
+        # Cleanup may erase only synthetic verified receipts, never uncertainty.
+        if command_ids:
+            targets = list(await session.scalars(select(AccessDeviceCommandRecord).where(
+                AccessDeviceCommandRecord.gate_command_id.in_(command_ids))))
+            if any(target.state in {"attempting", "unknown", "leased"}
+                   or target.accepted is True and not target.verification_observation_id
+                   for target in targets):
+                raise RuntimeError("Synthetic cleanup retains uncertain/accepted-unverified command journals.")
+        if await session.scalar(select(HaPresenceEffect.id).where(
+            or_(HaPresenceEffect.person_id.in_(person_ids), HaPresenceEffect.event_id.in_(event_ids)),
+            HaPresenceEffect.state.in_(["attempting", "accepted", "unknown"]),
+        ).limit(1)) is not None:
+            raise RuntimeError("Synthetic cleanup retains attempted HA effect journals.")
+        ingest_ids = list(await session.scalars(select(LprIngestEvent.id).where(
+            LprIngestEvent.source == SIMULATION_SOURCE,
+            LprIngestEvent.normalized_payload["raw_payload"]["simulation"]["marker"].astext == data.marker,
+        )))
+        window_ids = list(await session.scalars(select(LprWindowMember.window_id).where(
+            LprWindowMember.ingest_id.in_(ingest_ids)).distinct()))
+        if window_ids and await session.scalar(select(LprWindowMember.ingest_id).where(
+            LprWindowMember.window_id.in_(window_ids), LprWindowMember.ingest_id.not_in(ingest_ids),
+        ).limit(1)) is not None:
+            raise RuntimeError("Synthetic cleanup cannot delete a window containing unrelated evidence.")
+        if event_ids:
+            await session.execute(delete(AccessCompletionWork).where(AccessCompletionWork.event_id.in_(event_ids)))
+        if ingest_ids:
+            await session.execute(delete(MovementSessionObservation).where(MovementSessionObservation.ingest_id.in_(ingest_ids)))
+            await session.execute(delete(LprObservationToken).where(LprObservationToken.ingest_id.in_(ingest_ids)))
+            await session.execute(delete(LprWindowMember).where(LprWindowMember.ingest_id.in_(ingest_ids)))
+            await session.execute(update(LprIngestEvent).where(LprIngestEvent.id.in_(ingest_ids)).values(window_id=None))
+        if window_ids:
+            await session.execute(update(LprDebounceWindow).where(LprDebounceWindow.id.in_(window_ids)).values(
+                first_ingest_id=None, best_ingest_id=None, anchor_ingest_id=None, merged_into=None))
+            await session.execute(delete(LprDebounceWindow).where(LprDebounceWindow.id.in_(window_ids)))
+        if ingest_ids:
+            await session.execute(delete(LprIngestEvent).where(LprIngestEvent.id.in_(ingest_ids)))
+        await session.execute(delete(AutomationRun).where(
+            AutomationRun.source == "access_event", AutomationRun.trigger_payload["id"].astext.in_([str(i) for i in event_ids])))
         observation_ids = (
             list(
                 (
@@ -1124,6 +1190,7 @@ async def cleanup_synthetic_data(data: SyntheticDataSet, events: Sequence[Access
         if person_ids:
             await session.execute(delete(Person).where(Person.id.in_(person_ids), Person.notes == data.marker))
         await session.execute(delete(Schedule).where(Schedule.id == data.schedule_id, Schedule.description == data.marker))
+        await invalidate_people_in_session(session, person_ids, reason="synthetic_cleanup")
         await session.commit()
 
 
@@ -1365,7 +1432,7 @@ def _event_simulation_payload(event: AccessEvent) -> dict[str, Any]:
     raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
     best = raw_payload.get("best")
     best_payload = best if isinstance(best, dict) else {}
-    simulation = best_payload.get("simulation")
+    simulation = raw_payload.get("simulation") or best_payload.get("simulation")
     return simulation if isinstance(simulation, dict) else {}
 
 

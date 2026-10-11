@@ -43,6 +43,8 @@ def owned_resources(monkeypatch):
     monkeypatch.setattr(main, "engine", SimpleNamespace(dispose=service("database").stop))
     monkeypatch.setattr(main, "event_bus", service("realtime"))
     monkeypatch.setattr(main, "report_exports", service("reports"))
+    monkeypatch.setattr(main, "AccessCompletionOwner", lambda *args: service("access_completion"))
+    monkeypatch.setattr(main, "HaPresenceWorker", lambda *args: service("ha_presence"))
     monkeypatch.setattr(main, "vehicle_information_resources", service("vehicle_information_clients"))
     monkeypatch.setattr(main, "get_icloud_calendar_service", lambda: service("calendar"))
     for name in SERVICE_NAMES:
@@ -63,7 +65,7 @@ def owned_resources(monkeypatch):
     return events, controls
 
 
-@pytest.mark.parametrize("failure", ("realtime", "vehicle_information_clients", "reports", "calendar", *SERVICE_NAMES))
+@pytest.mark.parametrize("failure", ("realtime", "vehicle_information_clients", "reports", "calendar", "access_completion", "ha_presence", *SERVICE_NAMES))
 async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_resources, failure):
     events, controls = owned_resources
     controls["fail_start"] = failure
@@ -73,7 +75,7 @@ async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_re
             pytest.fail("Failed startup must not accept requests")
     started = [name for action, name in events if action == "start"]
     stopped = [name for action, name in events if action == "stop"]
-    producers = {"automation", "unifi_protect", "access_event", "movement_reconciliation", "vehicle_information", "reports"}
+    producers = {"automation", "unifi_protect", "access_event", "movement_reconciliation", "vehicle_information", "reports", "access_completion", "ha_presence"}
     assert stopped == [
         *[name for name in reversed(started) if name in producers],
         *[name for name in reversed(started) if name not in producers],

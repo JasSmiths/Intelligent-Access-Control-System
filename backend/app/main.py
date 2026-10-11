@@ -17,12 +17,19 @@ from app.db.bootstrap import init_database
 from app.db.session import AsyncSessionLocal, engine
 from app.recovery_hold import RecoveryHoldMiddleware, verify_readable_schema
 from app.services import vehicle_information as vehicle_information_resources
+from app.services.access.completion_media import AccessCompletionStages
+from app.services.access.completion_store import AccessCompletionStore
+from app.services.access.completion_worker import AccessCompletionOwner, CompletionStageOwners
+from app.services.access.publication import AccessPublicationStore
+from app.services.access.publication_worker import AccessPublicationLane
 from app.services.access_devices import get_access_device_service
 from app.services.access_events import get_access_event_service
 from app.services.auth import authenticate_request, count_users
 from app.services.automations import get_automation_service
 from app.services.event_bus import event_bus
 from app.services.gate_malfunctions import get_gate_malfunction_service
+from app.services.ha_presence_attempts import HaPresenceAttemptStore
+from app.services.ha_presence_worker import HaPresenceWorker
 from app.services.home_assistant import get_home_assistant_service
 from app.services.icloud_calendar import get_icloud_calendar_service
 from app.services.lpr_webhook_security import verify_lpr_webhook_request
@@ -38,6 +45,7 @@ from app.services.restart_backfill import (
 )
 from app.services.settings import get_runtime_config
 from app.services.snapshot_recovery import recover_missing_access_event_snapshots_safely
+from app.services.snapshots import get_snapshot_manager
 from app.services.telemetry import (
     CURRENT_REQUEST_ID,
     TELEMETRY_CATEGORY_WEBHOOKS_API,
@@ -48,6 +56,7 @@ from app.services.telemetry import (
 )
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.vehicle_information_jobs import get_vehicle_information_worker
+from app.services.vehicle_visual_detections import get_vehicle_visual_detection_recorder
 from app.services.visitor_passes import get_visitor_pass_service
 
 logger = get_logger(__name__)
@@ -112,6 +121,12 @@ async def lifespan(app: FastAPI):
                 return
             wire_application()
             await init_database()
+            stages = AccessCompletionStages(visual=get_vehicle_visual_detection_recorder(),
+                snapshots=get_snapshot_manager(), protect=get_unifi_protect_service())
+            completion = AccessCompletionOwner(AccessCompletionStore(), CompletionStageOwners(
+                stages.visual, stages.snapshot, stages.visitor_link, stages.zone_shadow),
+                AccessPublicationLane(AccessPublicationStore(), event_bus))
+            ha_presence = HaPresenceWorker(HaPresenceAttemptStore())
             # Register before start so a partially started service is also closed.
             for name, service in (
                 ("realtime", event_bus),
@@ -121,6 +136,8 @@ async def lifespan(app: FastAPI):
                 ("visitor_passes", get_visitor_pass_service()),
                 ("access_devices", get_access_device_service()),
                 ("icloud_calendar", get_icloud_calendar_service()),
+                ("access_completion", completion),
+                ("ha_presence", ha_presence),
                 ("vehicle_information", get_vehicle_information_worker()),
                 ("report_exports", report_exports),
                 ("access_events", get_access_event_service()),
@@ -132,7 +149,7 @@ async def lifespan(app: FastAPI):
                 owner = (
                     producers
                     if name
-                    in {"automations", "unifi_protect", "access_events", "movement_reconciliation", "vehicle_information", "report_exports"}
+                    in {"automations", "unifi_protect", "access_events", "movement_reconciliation", "vehicle_information", "report_exports", "access_completion", "ha_presence"}
                     else resources
                 )
                 owner.push_async_callback(_stop_owned_service, name, service.stop)

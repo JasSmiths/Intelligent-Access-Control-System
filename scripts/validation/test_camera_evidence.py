@@ -19,8 +19,9 @@ from app.modules.lpr.base import PlateRead
 from app.services.access import execution as execution_owner
 from app.services.access.evidence import AccessEvidenceResolver
 from app.services.access.execution import AccessExecution
-from app.services.access.reads import DebounceWindow, GATE_OBSERVATION_PAYLOAD_KEY
+from app.services.access.reads import GATE_OBSERVATION_PAYLOAD_KEY
 from app.services.lpr_ingest import LprIngestRepository
+from access_window_fixture import claimed_window
 from app.services.movement.sessions import MovementSessionService
 from app.services.movement_ledger import get_movement_ledger_repository
 from app.services.settings import get_runtime_config_for_session
@@ -72,9 +73,12 @@ async def test_access_execution_re_resolves_current_facts_after_camera_transacti
     # Exercise the full access transaction and finalizer, with one inert actuator boundary.
     hardware = AsyncMock(return_value=SimpleNamespace(command_id=None, accepted=False))
     monkeypatch.setattr(execution_owner, "open_gate_for_access_event", hardware)
-    service = AccessExecution(get_movement_ledger_repository(), MovementSessionService(), LprIngestRepository())
-    task = asyncio.create_task(service.execute(DebounceWindow(NOW, NOW, [read]), read=read,
-        direction_read=read, runtime=runtime, trace=Trace(), finalize_started_at=NOW, webhook_trace={}))
+    service = AccessExecution(get_movement_ledger_repository(), MovementSessionService())
+    async def execute():
+        async with claimed_window(read) as (window, claim):
+            return await service.execute(window, claim=claim, read=read, direction_read=read,
+                runtime=runtime, trace=Trace(), finalize_started_at=NOW, webhook_trace={})
+    task = asyncio.create_task(execute())
     try:
         await asyncio.wait_for(entered_camera.wait(), 8)
         async with AsyncSessionLocal() as session:

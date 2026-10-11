@@ -3,9 +3,7 @@
 from difflib import SequenceMatcher
 from typing import Any
 
-from app.modules.lpr.base import PlateRead
-from app.services.access.reads import DebounceWindow
-from app.services.movement.sessions import normalize_registration_number, plates_are_similar
+from app.services.movement.sessions import normalize_registration_number
 
 
 def match_candidates(
@@ -43,23 +41,3 @@ def match_candidates(
                     "exact": exact,
                 }
     return best
-
-
-def add_debounce_read(
-    pending: list[DebounceWindow],
-    read: PlateRead,
-    threshold: float,
-) -> DebounceWindow:
-    for window in pending:
-        best = window.best_read
-        if read.source == best.source and plates_are_similar(
-            read.registration_number,
-            best.registration_number,
-            threshold,
-        ):
-            window.reads.append(read)
-            window.updated_at = read.captured_at
-            return window
-    window = DebounceWindow(first_seen=read.captured_at, updated_at=read.captured_at, reads=[read])
-    pending.append(window)
-    return window

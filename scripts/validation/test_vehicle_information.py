@@ -41,6 +41,16 @@ def lookup(plate, *, tests=25):
     return VehicleLookup(information=resolve_information(plate, results, now=now, timezone="Europe/London"), results=results)
 
 
+async def reserve_arrival(event):
+    from app.services.access.authorization import recognition_origin_for_event
+    from app.services.access.completion_results import reserve_information_in_session
+    async with AsyncSessionLocal() as session:
+        current = await session.get(AccessEvent, event.id, with_for_update=True)
+        await reserve_information_in_session(session, current,
+            origin_at=await recognition_origin_for_event(session, current))
+        await session.commit()
+
+
 @pytest_asyncio.fixture
 async def records():
     plate = "SYN" + uuid.uuid4().hex[:10].upper()
@@ -73,7 +83,7 @@ async def test_jobs_deduplicate_commit_enrichment_and_notice_atomically(records,
     facade = SimpleNamespace(lookup=AsyncMock(return_value=lookup(vehicle.registration_number)))
     monkeypatch.setattr(jobs, "get_vehicle_information_service", lambda: facade)
     monkeypatch.setattr(jobs.event_bus, "publish", AsyncMock())
-    await jobs.enqueue_arrival(event); await jobs.enqueue_arrival(event)
+    await reserve_arrival(event); await reserve_arrival(event)
     worker = jobs.VehicleInformationWorker()
     claimed = await worker._claim()
     assert len(claimed) == 1
@@ -103,7 +113,7 @@ async def test_blocked_provider_releases_connections_and_registration_change_win
         entered.set(); await release.wait()
         return lookup(plate)
     monkeypatch.setattr(jobs, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=blocked))
-    await jobs.enqueue_arrival(event)
+    await reserve_arrival(event)
     worker=jobs.VehicleInformationWorker(); claimed=await worker._claim()
     task=asyncio.create_task(worker._process(*claimed[0])); await entered.wait()
     async with AsyncSessionLocal() as session:
@@ -117,7 +127,7 @@ async def test_blocked_provider_releases_connections_and_registration_change_win
 
 async def test_restart_lease_and_deadline_prevent_replay(records):
     _, event=records
-    await jobs.enqueue_arrival(event)
+    await reserve_arrival(event)
     first=await jobs.VehicleInformationWorker()._claim()
     assert len(first)==1 and not await jobs.VehicleInformationWorker()._claim()
     async with AsyncSessionLocal() as session:
@@ -227,7 +237,7 @@ async def test_unknown_arrival_enriches_facts_without_directory_or_hardware(reco
         before = await session.scalar(select(func.count()).select_from(Vehicle))
     facade = SimpleNamespace(lookup=AsyncMock(return_value=lookup(event.registration_number)))
     monkeypatch.setattr(jobs, "get_vehicle_information_service", lambda: facade)
-    await jobs.enqueue_arrival(event)
+    await reserve_arrival(event)
     worker = jobs.VehicleInformationWorker()
     await worker._process(*(await worker._claim())[0])
     async with AsyncSessionLocal() as session:
@@ -245,7 +255,7 @@ async def test_deferred_work_releases_lease_then_retries_before_deadline(records
     deferred.information = resolve_information(event.registration_number, deferred.results, now=datetime.now(UTC), timezone="Europe/London")
     facade = SimpleNamespace(lookup=AsyncMock(side_effect=[deferred, lookup(event.registration_number)]))
     monkeypatch.setattr(jobs, "get_vehicle_information_service", lambda: facade)
-    await jobs.enqueue_arrival(event)
+    await reserve_arrival(event)
     worker = jobs.VehicleInformationWorker()
     await worker._process(*(await worker._claim())[0])
     assert not await worker._claim()
@@ -275,7 +285,7 @@ async def test_older_completion_uses_current_tax_outcome_for_notification(record
         await apply_information(session, saved, latest, timezone="Europe/London")
         await session.commit()
     monkeypatch.setattr(jobs, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=AsyncMock(return_value=old)))
-    await jobs.enqueue_arrival(event)
+    await reserve_arrival(event)
     worker = jobs.VehicleInformationWorker()
     await worker._process(*(await worker._claim())[0])
     async with AsyncSessionLocal() as session:

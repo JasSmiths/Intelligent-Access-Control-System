@@ -48,6 +48,7 @@ from app.models.enums import (
     TimingClassification,
 )
 from app.modules.notifications.base import NotificationContext
+from app.services.access.publication import reserve_initial_publication_in_session
 from app.services.ha_presence_contracts import HaCoordinationBusy
 from app.services.ha_presence_reservations import reserve_all_in_session
 from app.services.notification_runs import NotificationRunStore
@@ -552,6 +553,7 @@ async def handle_resident_action(action_id: str, *, gate_intent_factory, execute
                     action=ACTION, actor=person.display_name, target_entity="AccessEvent", target_id=event.id,
                     outcome="authorized", metadata={"person_id": str(person.id), "original_event_id": str(original.id),
                          "attempt_id": str(attempt.id), "authority": "resident_confirmation"})
+                await reserve_initial_publication_in_session(session, event.id)
                 dispatch = (context.id, event.id, saga.id, context.expires_at, person.display_name,
                             vehicle.registration_number, config.gate_admission_device_key, context.metadata_["target_plan"])
             await reserve_all_in_session(session, [admission.ha_reservation] if admission.ha_reservation else [])

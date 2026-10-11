@@ -17,7 +17,7 @@ assert {p.name for p in Path('/sys/class/net').iterdir()} == {'lo'}
 assert '@127.0.0.1:5432/iacs_validation_' in os.environ.get('IACS_DATABASE_URL', '')
 
 from app.db.session import AsyncSessionLocal, engine
-from app.models import AccessDevice, AccessDeviceCommandRecord, AccessDeviceProviderBinding, AccessEvent, Anomaly, AuditLog, GateCommandRecord, LprIngestEvent, MovementSagaRecord, MovementSessionRecord, NotificationRun, Person, Presence, Schedule, Vehicle, VisitorPass, VisitorPassReservationRecord
+from app.models import AccessDevice, AccessDeviceCommandRecord, AccessDeviceProviderBinding, AccessEvent, Anomaly, AuditLog, GateCommandRecord, HaPresenceDesired, LprCoordinatorState, LprIngestEvent, AccessCompletionWork, MovementSagaRecord, MovementSessionRecord, NotificationRun, Person, Presence, Schedule, Vehicle, VisitorPass, VisitorPassReservationRecord
 from app.models.enums import AccessDecision, AccessDirection, MovementSagaState, PresenceState, VisitorPassStatus, VisitorPassType
 from app.modules.gate.base import CommandDelivery, GateState
 from app.modules.access_devices.base import AccessDeviceCommandResult, AccessDeviceStateObservation
@@ -27,9 +27,17 @@ from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.access_devices import AccessDeviceService
 from app.modules.lpr.base import PlateRead
 from app.services import access_events as owner
-from app.services.access import hardware, enrichment, execution, authorization
+from app.services.access import hardware, execution, authorization
 from app.services.access.pipeline_contracts import TrustedGateObservation
-from app.services.access.reads import DebounceWindow, EXTERNAL_ADMISSION_PAYLOAD_KEY, GATE_OBSERVATION_PAYLOAD_KEY
+from app.services.access.completion_store import AccessCompletionStore
+from app.services.access.completion_media import AccessCompletionStages
+from app.services.access.completion_worker import AccessCompletionOwner, CompletionStageOwners
+from app.services.access.publication import AccessPublicationStore
+from app.services.access.publication_worker import AccessPublicationLane
+from app.services.realtime_contracts import RealtimePublishReceipt
+from app.services.snapshots import get_snapshot_manager
+from access_window_fixture import claimed_window
+from app.services.access.reads import EXTERNAL_ADMISSION_PAYLOAD_KEY, GATE_OBSERVATION_PAYLOAD_KEY
 from app.services.movement import sessions as movement_sessions_owner
 from app.services.vehicle_visual_detections import VehiclePresenceTracker
 from app.services import movement_reconciliation as reconciliation
@@ -128,6 +136,7 @@ class Harness:
     async def publish(self, name, payload):
         self.events.append(name)
         self.publications.append((name, payload))
+        return RealtimePublishReceipt('in_process', True)
 
     async def presence_effect(self, person, event, **kwargs):
         async with AsyncSessionLocal() as s:
@@ -144,7 +153,7 @@ class Harness:
 @pytest_asyncio.fixture
 async def h(monkeypatch):
     async with AsyncSessionLocal() as s:
-        await s.execute(text('TRUNCATE people, vehicles, access_events, visitor_passes, visitor_pass_reservations, movement_sagas, movement_sessions, gate_command_records, access_device_command_records, access_devices, gate_state_observations, lpr_ingest_events, notification_runs, audit_logs CASCADE'))
+        await s.execute(text('TRUNCATE lpr_coordinator_state, people, vehicles, access_events, visitor_passes, visitor_pass_reservations, movement_sagas, movement_sessions, gate_command_records, access_device_command_records, access_devices, gate_state_observations, lpr_ingest_events, notification_runs, audit_logs CASCADE'))
         await s.commit()
     runtime = replace(await get_runtime_config(), site_timezone='Europe/London', schedule_default_policy='allow', lpr_zone_filter_mode='shadow', home_assistant_url='http://synthetic.invalid', home_assistant_token='synthetic-only', gate_control_provider='home_assistant', gate_failover_provider='none', gate_admission_device_key='synthetic_entry')
     fake = Harness(runtime)
@@ -165,19 +174,11 @@ async def h(monkeypatch):
     monkeypatch.setattr(devices_owner, 'emit_audit_log', lambda **kwargs: None)
     monkeypatch.setattr(owner, 'is_maintenance_mode_active', AsyncMock(return_value=False))
     monkeypatch.setattr(owner.telemetry, 'start_trace', lambda *a, **kw: Trace())
-    monkeypatch.setattr(enrichment, 'enqueue_arrival', fake.lookup)
-    monkeypatch.setattr(enrichment, 'capture_access_event_snapshot', fake.snapshot)
-    monkeypatch.setattr(enrichment, 'get_vehicle_visual_detection_recorder', lambda: SimpleNamespace(recent_match=fake.visual))
     monkeypatch.setattr(owner, 'get_lpr_zone_shadow_service', lambda: SimpleNamespace(record_decision=AsyncMock()))
-    monkeypatch.setattr(enrichment, 'get_leaderboard_service', lambda: SimpleNamespace(evaluate_known_overtake=AsyncMock()))
     monkeypatch.setattr(owner, 'get_gate_controller', lambda name: fake)
-    monkeypatch.setattr(owner, 'get_notification_service', lambda: fake.notifications)
-    monkeypatch.setattr(enrichment, 'get_lpr_zone_shadow_service', lambda: SimpleNamespace(record_decision=AsyncMock()))
     monkeypatch.setattr(hardware, 'get_gate_command_coordinator', lambda: GateCommandCoordinator(lambda name: gate_adapter.AccessDeviceGateController(fake.devices)))
     monkeypatch.setattr(hardware, 'get_access_device_service', lambda: fake.devices)
     monkeypatch.setattr(owner.event_bus, 'publish', fake.publish)
-    monkeypatch.setattr(enrichment, 'apply_person_presence_input_boolean_actions', fake.presence_effect)
-    monkeypatch.setattr(reconciliation, 'apply_person_presence_input_boolean_actions', fake.presence_effect)
     yield fake
     await engine.dispose()
 
@@ -208,17 +209,32 @@ def read(plate='SYNTH01', gate='closed', *, at=None, source='synthetic-access', 
 async def process(service, plate_read):
     assert isinstance(plate_read, FixturePlateRead) and plate_read.observation is not None
     await service.enqueue_plate_read(plate_read, observation=plate_read.observation)
-    if service._queue.empty(): return
-    queued = service._queue.get_nowait()
-    assert await service._claim_lpr_ingest_for_processing(queued)
-    # Use the same classification/finalization owners as the worker, with retries
-    # exposed as failures so a swallowed error cannot produce a passing test.
-    async def finalize(window, *, reason):
-        await service._finalize_window(window)
-        return True
-    service._finalize_window_or_fail = finalize
-    await service._handle_queued_read(queued)
-    await service._flush_all_pending()
+    coordinator = await service._pipeline.acquire_coordinator()
+    if coordinator is None:
+        return  # The concurrent real owner, not another execution path, proceeds.
+    try:
+        ingest = await service._pipeline.claim_next_read(coordinator)
+        if ingest is not None:
+            immediate = await service._handle_queued_read(ingest)
+            if immediate is not None:
+                await service._finalize_window(immediate)
+        while window := await service._pipeline.next_flush_window(coordinator, quiet_seconds=0, max_seconds=0):
+            await service._finalize_window(window)
+    finally:
+        await service._pipeline.release_coordinator(coordinator)
+
+
+async def complete_optional(h):
+    stages = AccessCompletionStages(visual=SimpleNamespace(recent_match=h.visual),
+        snapshots=get_snapshot_manager(), protect=SimpleNamespace(configured=AsyncMock(return_value=False)))
+    store = AccessCompletionStore()
+    publication = AccessPublicationLane(AccessPublicationStore(), owner.event_bus)
+    worker = AccessCompletionOwner(store, CompletionStageOwners(
+        stages.visual, stages.snapshot, stages.visitor_link, stages.zone_shadow), publication)
+    while claims := await store.claim(2):
+        await asyncio.gather(*(worker._process(claim) for claim in claims))
+    while claim := await publication.store.claim():
+        await publication.deliver(claim)
 
 
 async def rows(model):
@@ -238,7 +254,8 @@ async def test_arrival_persists_decision_before_gate_and_presence_after_outcome(
     assert presence.state == (PresenceState.PRESENT if verified else PresenceState.EXITED)
     assert saga.presence_committed is verified
     assert saga.state == (MovementSagaState.COMPLETED if verified else MovementSagaState.RECONCILIATION_REQUIRED if accepted else MovementSagaState.FAILED)
-    assert len(h.gate_calls) == 1 and len(h.presence_effects) == int(verified)
+    assert len(h.gate_calls) == 1
+    assert len(await rows(HaPresenceDesired)) == int(verified)
     # Every classified observation owns durable suppression state, including rejection.
     assert len(await rows(MovementSessionRecord)) == 1
     assert any(a.action=='gate.open.automatic' for a in await rows(AuditLog))
@@ -292,6 +309,7 @@ async def test_denied_schedule_never_changes_presence_or_commands(h):
 async def test_exact_session_suppression_is_durable_across_service_instances(h):
     await resident(); first=read()
     await process(h.service(),first)
+    await complete_optional(h)
     await process(h.service(),read(at=first.captured_at+timedelta(seconds=1)))
     assert len(await rows(AccessEvent))==1 and len(h.gate_calls)==1
     sagas=await rows(MovementSagaRecord); suppressed=[s for s in sagas if s.state==MovementSagaState.SUPPRESSED]
@@ -309,6 +327,7 @@ async def test_visitor_arrival_and_departure_keep_pass_links_and_audit(h):
             confidence=1, source='synthetic-prior-visit', raw_payload={}))
         await s.commit(); identity=visitor.id
     await process(h.service(),first)
+    await complete_optional(h)
     await process(h.service(),read('VISIT01',gate='closing',at=first.captured_at+timedelta(minutes=5)))
     async with AsyncSessionLocal() as s:
         visitor=await s.get(VisitorPass,identity)
@@ -385,71 +404,63 @@ async def test_post_command_failure_leaves_durable_outcome_for_reconciliation(h,
 
 
 async def test_same_read_concurrent_and_repeated_finalizers_create_one_event_and_command(h):
-    from app.services.access.reads import DebounceWindow
     await resident(); plate_read = read()
-    intake = h.service()
-    await intake.enqueue_plate_read(plate_read)
-    plate_read = intake._queue.get_nowait()
-    assert await intake._claim_lpr_ingest_for_processing(plate_read)
-    window = DebounceWindow(plate_read.captured_at, plate_read.captured_at, [plate_read])
-    await asyncio.gather(h.service()._finalize_window(window), h.service()._finalize_window(window))
-    await h.service()._finalize_window(window)
+    await asyncio.gather(process(h.service(), plate_read), process(h.service(), plate_read))
+    await process(h.service(), plate_read)
     for model in (AccessEvent, MovementSagaRecord, MovementSessionRecord, GateCommandRecord):
         assert len(await rows(model)) == 1
     assert len(h.gate_calls) == 1
 
 
-async def test_enrichment_runs_after_durable_outcome_and_preserves_concurrent_event_fields(h, monkeypatch):
+async def test_completion_runs_after_durable_outcome_and_preserves_concurrent_event_fields(h):
     await resident()
-    async def snapshot(event, **kwargs):
-        async with AsyncSessionLocal() as s:
-            persisted = await s.get(AccessEvent, event.id)
-            saga = await s.scalar(select(MovementSagaRecord))
-            presence = await s.scalar(select(Presence))
-            assert saga.state == MovementSagaState.COMPLETED and presence.last_event_id == event.id
-            persisted.raw_payload = {**persisted.raw_payload, 'concurrent_owner': {'retained': True}}
-            await s.commit()
-        event.snapshot_path = 'synthetic/test.jpg'; event.snapshot_bytes = 123
-        event.snapshot_content_type = 'image/jpeg'; event.snapshot_camera = 'camera.gate'
-        event.snapshot_width = 20; event.snapshot_height = 10; event.snapshot_captured_at = event.occurred_at
-    monkeypatch.setattr(enrichment, 'capture_access_event_snapshot', snapshot)
     await process(h.service(), read())
-    event, = await rows(AccessEvent); vehicle, = await rows(Vehicle)
-    assert event.snapshot_path == 'synthetic/test.jpg' and event.snapshot_bytes == 123
+    event, = await rows(AccessEvent)
+    async with AsyncSessionLocal() as session:
+        persisted = await session.get(AccessEvent, event.id)
+        saga = await session.scalar(select(MovementSagaRecord))
+        presence = await session.scalar(select(Presence))
+        assert saga.state == MovementSagaState.COMPLETED and presence.last_event_id == event.id
+        persisted.raw_payload = {**persisted.raw_payload, 'concurrent_owner': {'retained': True}}
+        await session.commit()
+    assert not h.enrichment_calls
+    await complete_optional(h)
+    event, = await rows(AccessEvent)
     assert event.raw_payload['concurrent_owner'] == {'retained': True}
     assert event.raw_payload['vehicle_visual_detection']['observed_vehicle_color'] == 'Blue'
     assert event.raw_payload['movement_saga']['presence_committed']
-    assert vehicle.make != 'Synthetic'  # Only the separate worker can apply provider data.
-    assert h.enrichment_calls == ['vehicle_job', 'visual']
+    assert event.resource_revision > 1
+    assert all(work.state in {'succeeded', 'skipped'} for work in await rows(AccessCompletionWork))
 
 
-async def test_failed_optional_providers_and_realtime_do_not_block_other_stages_or_enqueue(h, monkeypatch):
+async def test_blocked_optional_completion_allows_next_core_decision_and_cancellation_never_replays(h, monkeypatch):
     await resident()
-    async def fail(*args, **kwargs): raise RuntimeError('Synthetic optional failure')
-    monkeypatch.setattr(enrichment, 'enqueue_arrival', fail)
-    monkeypatch.setattr(enrichment, 'event_bus', SimpleNamespace(publish=fail))
-    monkeypatch.setattr(hardware, 'event_bus', SimpleNamespace(publish=fail))
-    await process(h.service(), read())
-    event, = await rows(AccessEvent); presence, = await rows(Presence)
-    assert event.raw_payload['vehicle_visual_detection']['observed_vehicle_color'] == 'Blue'
-    assert 'snapshot' in h.enrichment_calls and presence.last_event_id == event.id
-    assert len(h.gate_calls) == 1
-    assert any(row.trigger_event == 'authorized_entry' for row in await rows(NotificationRun))
-
-
-async def test_cancelled_enrichment_keeps_committed_access_and_does_not_replay(h, monkeypatch):
-    await resident(); plate_read = read()
-    async def cancel(*args, **kwargs): raise asyncio.CancelledError()
-    monkeypatch.setattr(enrichment, 'enqueue_arrival', cancel)
-    with pytest.raises(asyncio.CancelledError): await process(h.service(), plate_read)
-    event, = await rows(AccessEvent); saga, = await rows(MovementSagaRecord); ingest, = await rows(LprIngestEvent)
-    assert saga.state == MovementSagaState.COMPLETED and saga.presence_committed
-    assert ingest.status == 'succeeded' and ingest.access_event_id == event.id
-    await process(h.service(), plate_read)
-    assert len(await rows(AccessEvent)) == 1 and len(h.gate_calls) == 1
-    notifications = await rows(NotificationRun)
-    assert len(notifications) == 1 and notifications[0].trigger_event == 'authorized_entry'
-    assert notifications[0].status == 'queued'  # Required intent survives optional enrichment cancellation.
+    arrival = read()
+    await process(h.service(), arrival)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def visual(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return None
+    monkeypatch.setattr(h, 'visual', visual)
+    task = asyncio.create_task(complete_optional(h))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        departure = read(gate='closing', at=arrival.captured_at + timedelta(minutes=5))
+        await asyncio.wait_for(process(h.service(), departure), 5)
+        events = await rows(AccessEvent)
+        assert len(events) == 2 and any(event.direction == AccessDirection.EXIT for event in events)
+        assert len(h.gate_calls) == 1 and not task.done()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await process(h.service(), arrival)
+        assert len(await rows(AccessEvent)) == 2 and len(h.gate_calls) == 1
+        assert any(row.trigger_event == 'authorized_entry' for row in await rows(NotificationRun))
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_ocr_variant_suppression_is_durable_across_services(h):
@@ -513,10 +524,10 @@ async def test_external_arrival_cannot_command_hardware_even_with_closed_gate_ev
     def forbidden_gate_owner(*args, **kwargs):
         raise AssertionError('External admission must never dispatch hardware')
     monkeypatch.setattr(hardware, 'get_gate_command_coordinator', forbidden_gate_owner)
-    window = DebounceWindow(closed.captured_at, closed.captured_at, [closed])
-    domain = execution.AccessExecution(service._movement_ledger, service._movement_sessions, service._lpr_ingest_repo())
-    result = await domain.execute(window, read=closed, direction_read=closed, runtime=h.runtime,
-        trace=Trace(), finalize_started_at=datetime.now(UTC), webhook_trace={})
+    domain = execution.AccessExecution(service._movement_ledger, service._movement_sessions)
+    async with claimed_window(closed) as (window, claim):
+        result = await domain.execute(window, claim=claim, read=closed, direction_read=closed, runtime=h.runtime,
+            trace=Trace(), finalize_started_at=datetime.now(UTC), webhook_trace={})
     assert result is not None
     event, = [row for row in await rows(AccessEvent) if row.direction == AccessDirection.ENTRY]
     assert event.decision == AccessDecision.GRANTED
@@ -681,19 +692,16 @@ async def test_reconciliation_completed_before_finalizer_resumes_is_not_overwrit
     assert not saga.reconciliation_required
     assert event.raw_payload['movement_saga']['state'] == 'completed'
     assert event.raw_payload['movement_saga']['presence_committed']
-    assert len(h.presence_effects) == 1 and len(h.gate_calls) == 1
+    assert len(await rows(HaPresenceDesired)) == 1 and len(h.gate_calls) == 1
 
 
-async def test_optional_visitor_enrichment_failure_keeps_committed_transition_snapshot(h, monkeypatch):
+async def test_optional_visitor_completion_preserves_committed_transition_snapshot(h):
     first = read('VISIT02')
     async with AsyncSessionLocal() as session:
         visitor = VisitorPass(visitor_name='Synthetic visitor snapshot', expected_time=first.captured_at,
             status=VisitorPassStatus.ACTIVE, window_minutes=30)
         session.add(visitor)
         await session.commit()
-    async def fail_enrichment(*args, **kwargs):
-        raise RuntimeError('Synthetic optional visitor enrichment failure')
-    monkeypatch.setattr(enrichment.AccessEnrichment, '_enrich_visitor', fail_enrichment)
     await process(h.service(), first)
     event, = await rows(AccessEvent)
     pass_row, = await rows(VisitorPass)
@@ -709,7 +717,6 @@ async def test_optional_visitor_enrichment_failure_keeps_committed_transition_sn
 async def test_blocked_vehicle_provider_does_not_delay_next_lpr_decision(h, monkeypatch):
     from app.services import vehicle_information_jobs as jobs
     await resident()
-    monkeypatch.setattr(enrichment, "enqueue_arrival", jobs.enqueue_arrival)
     entered = asyncio.Event()
     release = asyncio.Event()
     async def blocked(*args, **kwargs):

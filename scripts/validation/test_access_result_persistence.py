@@ -20,7 +20,7 @@ from app.services.access.completion_results import (InformationClaim, accept_inf
     reserve_information_in_session, prepare_visual_in_session)
 from app.services.access.completion_store import AccessCompletionStore, reserve_external_completion_in_session
 from app.services.access.pipeline_contracts import PipelineLeaseLost
-from app.services.vehicle_information_jobs import enqueue_arrival, VehicleInformationWorker
+from app.services.vehicle_information_jobs import VehicleInformationWorker
 from app.services.visitor_passes import get_visitor_pass_service
 
 pytestmark = pytest.mark.asyncio
@@ -331,7 +331,7 @@ async def test_actual_supported_plate_update_invalidates_old_arrival_link():
 
 
 @pytest.mark.parametrize("mode",["missing","expired","multiple"])
-async def test_current_enqueue_bridge_uses_only_linked_original_receipts_without_renewal(mode):
+async def test_information_reservation_retains_original_origin_without_renewal(mode):
     ids=await context(offset=-400 if mode=="expired" else -240)
     async with AsyncSessionLocal() as session:
         await session.execute(text("DELETE FROM vehicle_information_jobs"))
@@ -340,7 +340,12 @@ async def test_current_enqueue_bridge_uses_only_linked_original_receipts_without
                 session.add(LprIngestEvent(idempotency_key=str(uuid.uuid4()),source="synthetic",registration_number="AB12CDE",captured_at=ids[3],received_at=ids[3]+timedelta(seconds=delta),
                     status="succeeded",access_event_id=ids[0],movement_saga_id=ids[2],normalized_payload={"webhook_trace":{"received_at":"2099-01-01T00:00:00+00:00"}}))
         await session.commit();event=await session.get(AccessEvent,ids[0])
-    await enqueue_arrival(event);await enqueue_arrival(event)
+    async with AsyncSessionLocal() as session:
+        current = await session.get(AccessEvent, event.id, with_for_update=True)
+        origin = None if mode == "missing" else ids[3]
+        await reserve_information_in_session(session, current, origin_at=origin)
+        await reserve_information_in_session(session, current, origin_at=origin)
+        await session.commit()
     async with AsyncSessionLocal() as session:
         job=await session.get(VehicleInformationJob,ids[0])
         assert job.status=={"missing":"held","expired":"expired","multiple":"queued"}[mode]

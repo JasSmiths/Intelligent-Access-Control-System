@@ -23,7 +23,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import AccessCompletionWork, AccessEvent, Anomaly
 from app.models.enums import AnomalyType
 from app.modules.unifi_protect.client import ProtectMedia
-from app.services.access.completion_database import completion_session
+from app.services.access.completion_database import access_session
 from app.services.access.completion_results import accept_visual_in_session
 from app.services.access.completion_store import (
     assert_completion_before_commit,
@@ -203,7 +203,7 @@ class AccessCompletionStages:
             raise TimeoutError("completion_start_deadline_expired")
 
     async def _skip(self, claim: CompletionClaim, reason: str, *, held: bool = False) -> None:
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             identity = await session.scalar(select(AccessEvent.id).where(
                 AccessEvent.id == claim.event_id
             ).with_for_update())
@@ -218,7 +218,7 @@ class AccessCompletionStages:
         self._check_start(deadline)
         if claim.stage != "visual":
             raise ValueError("Visual owner requires its explicit stage")
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             row = (await session.execute(select(
                 AccessEvent.registration_number, AccessEvent.occurred_at, AccessEvent.vehicle_id
             ).where(AccessEvent.id == claim.event_id).with_for_update())).one_or_none()
@@ -244,7 +244,7 @@ class AccessCompletionStages:
         if visual is None:
             await self._skip(claim, "visual_match_unavailable")
             return
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             await accept_visual_in_session(session, claim, visual)
             await assert_completion_before_commit(session, claim, finished=True)
             self._check_start(deadline)
@@ -265,7 +265,7 @@ class AccessCompletionStages:
 
     async def visitor_link(self, claim: CompletionClaim, deadline: float) -> None:
         self._check_start(deadline)
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             await apply_visitor_link_in_session(session, claim)
             await assert_completion_before_commit(session, claim, finished=True)
             self._check_start(deadline)
@@ -273,7 +273,7 @@ class AccessCompletionStages:
 
     async def zone_shadow(self, claim: CompletionClaim, deadline: float) -> None:
         self._check_start(deadline)
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             payloads = await apply_zone_shadow_in_session(session, claim)
             await assert_completion_before_commit(session, claim, finished=True)
             self._check_start(deadline)
@@ -289,7 +289,7 @@ class AccessCompletionStages:
                 })
 
     async def _camera_returned_in_time(self, claim: CompletionClaim) -> bool:
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             await session.scalar(select(AccessEvent.id).where(AccessEvent.id == claim.event_id).with_for_update())
             await assert_completion_in_session(session, claim)
             now = await database_now(session)
@@ -297,7 +297,7 @@ class AccessCompletionStages:
 
     async def _current_snapshot(self, claim: CompletionClaim, deadline: float) -> SnapshotInput:
         self._check_start(deadline)
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             return await prepare_snapshot_in_session(session, claim, operation_deadline=deadline)
 
     async def _provider_media(
@@ -373,7 +373,7 @@ class AccessCompletionStages:
         expected = access_event_snapshot_relative_path(claim.event_id, claim_token=claim.token)
         try:
             async with asyncio.timeout(5):
-                async with completion_session(self.session_factory) as session:
+                async with access_session(self.session_factory) as session:
                     current_path = await session.scalar(select(AccessEvent.snapshot_path).where(
                         AccessEvent.id == claim.event_id
                     ).with_for_update())
@@ -391,7 +391,7 @@ class AccessCompletionStages:
         commit_invoked = False
         try:
             try:
-                async with completion_session(self.session_factory) as session:
+                async with access_session(self.session_factory) as session:
                     prepared_input = await prepare_snapshot_in_session(session, claim, operation_deadline=deadline)
             except ValueError:
                 await self._skip(claim, "snapshot_input_unavailable", held=True)
@@ -400,7 +400,7 @@ class AccessCompletionStages:
             if prepared is None:
                 await self._skip(claim, "snapshot_unavailable")
                 return
-            async with completion_session(self.session_factory) as session:
+            async with access_session(self.session_factory) as session:
                 await accept_snapshot_in_session(session, claim, prepared)
                 await assert_completion_before_commit(session, claim, finished=True)
                 # Any failure/cancellation from here may be an accepted commit;

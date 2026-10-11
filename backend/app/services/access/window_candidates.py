@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import LprIngestEvent, LprWindowMember
+from app.models import LprDebounceWindow, LprIngestEvent, LprWindowMember
 from app.services.movement.sessions import normalize_registration_number
 
 CANDIDATE_PAGE_SIZE = 50
@@ -214,3 +216,81 @@ async def candidate_page_in_session(
             )
         )
     return tuple(results)
+
+
+class CandidateEvidenceConflict(ValueError):
+    """Legacy event has more than one authoritative evidence window."""
+
+
+class CandidateEvidenceItem(TypedDict):
+    ingest_id: str
+    ordinal: int
+    registration_number: str
+    detected_registration_number: str
+    confidence: float
+    captured_at: str
+    candidate_registration_numbers: list[str]
+    known_vehicle_plate_match: dict[str, Any] | None
+    visitor_pass_plate_match: dict[str, Any] | None
+    webhook_trace: dict[str, Any]
+
+
+class CandidateEvidencePage(TypedDict):
+    event_id: str
+    window_id: str
+    version: Literal[2]
+    total: int
+    items: list[CandidateEvidenceItem]
+    next_cursor: str | None
+
+
+def _candidate_cursor(event_id: uuid.UUID, window_id: uuid.UUID, ordinal: int) -> str:
+    body = {"v": 2, "e": str(event_id), "w": str(window_id), "o": ordinal}
+    return base64.urlsafe_b64encode(json.dumps(body, separators=(",", ":")).encode()).decode().rstrip("=")
+
+
+def _candidate_after(raw: str | None, event_id: uuid.UUID, window_id: uuid.UUID) -> int:
+    if raw is None:
+        return -1
+    try:
+        parsed = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+        if (len(raw) > 1024 or parsed["v"] != 2 or parsed["e"] != str(event_id)
+                or parsed["w"] != str(window_id) or type(parsed["o"]) is not int or parsed["o"] < 0):
+            raise ValueError("mismatch")
+        return int(parsed["o"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid or mismatched evidence cursor") from exc
+
+
+async def event_candidate_page_in_session(
+    session: AsyncSession, event_id: uuid.UUID, *, cursor: str | None = None,
+    limit: int = CANDIDATE_PAGE_SIZE,
+) -> CandidateEvidencePage | None:
+    """One bounded page of sanitized complete membership, never raw vendor input."""
+    if not 1 <= limit <= CANDIDATE_PAGE_SIZE:
+        raise ValueError("Candidate page bounds are invalid")
+    windows = (await session.execute(select(LprDebounceWindow.id, LprDebounceWindow.member_count)
+        .where(LprDebounceWindow.access_event_id == event_id, LprDebounceWindow.state == "completed")
+        .order_by(LprDebounceWindow.id).limit(2))).all()
+    if not windows:
+        return None
+    if len(windows) > 1:
+        raise CandidateEvidenceConflict("Event evidence has conflicting windows")
+    window_id, total = windows[0]
+    after = _candidate_after(cursor, event_id, window_id)
+    members = await candidate_page_in_session(session, window_id, after_ordinal=after, limit=limit)
+    items: list[CandidateEvidenceItem] = [
+        {"ingest_id": str(member.ingest_id), "ordinal": member.ordinal,
+         "registration_number": member.registration_number,
+         "detected_registration_number": member.detected_registration_number,
+         "confidence": member.confidence, "captured_at": member.captured_at.isoformat(),
+         "candidate_registration_numbers": list(member.candidate_registration_numbers),
+         "known_vehicle_plate_match": member.known_vehicle_plate_match,
+         "visitor_pass_plate_match": member.visitor_pass_plate_match, "webhook_trace": member.webhook_trace}
+        for member in members
+    ]
+    more = bool(members) and await session.scalar(select(LprWindowMember.ingest_id).where(
+        LprWindowMember.window_id == window_id, LprWindowMember.ordinal > members[-1].ordinal,
+    ).limit(1)) is not None
+    return {"event_id": str(event_id), "window_id": str(window_id), "version": 2, "total": total,
+            "items": items, "next_cursor": _candidate_cursor(event_id, window_id, members[-1].ordinal) if more else None}

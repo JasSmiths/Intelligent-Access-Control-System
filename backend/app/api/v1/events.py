@@ -25,6 +25,11 @@ from app.db.session import AsyncSessionLocal, get_db_session
 from app.models import AccessEvent, Anomaly, User
 from app.models.enums import AccessDecision, AccessDirection, AnomalySeverity, AnomalyType
 from app.services.access.event_reads import public_event_payload, public_event_query
+from app.services.access.window_candidates import (
+    CandidateEvidenceConflict,
+    CandidateEvidencePage,
+    event_candidate_page_in_session,
+)
 from app.services.action_confirmations import (
     ActionConfirmationError,
     consume_action_confirmation,
@@ -33,7 +38,12 @@ from app.services.action_confirmations import (
 )
 from app.services.event_bus import event_bus
 from app.services.expected_presence import expected_presence_summary_today, expected_presence_today
-from app.services.presence_reads import list_presence_in_session, presence_summary_in_session
+from app.services.presence_reads import (
+    PresenceRow,
+    PresenceSummary,
+    list_presence_in_session,
+    presence_summary_in_session,
+)
 from app.services.profile_photos import compact_image_bytes
 from app.services.settings import get_runtime_config
 from app.services.snapshots import (
@@ -224,6 +234,25 @@ async def event_detail(
     return dict(public_event_payload(row))
 
 
+@router.get("/events/{event_id}/candidates", response_model=CandidateEvidencePage)
+async def event_candidates(
+    event_id: uuid.UUID,
+    _: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 50,
+    cursor: Annotated[str | None, Query(max_length=1024)] = None,
+) -> CandidateEvidencePage:
+    try:
+        page = await event_candidate_page_in_session(session, event_id, cursor=cursor, limit=limit)
+    except CandidateEvidenceConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if page is None:
+        raise HTTPException(status_code=404, detail="Complete candidate evidence is unavailable for this event.")
+    return page
+
+
 @router.get("/events/{event_id}/snapshot", response_model=None)
 async def event_snapshot(
     event_id: uuid.UUID,
@@ -272,7 +301,7 @@ def _optional_text(value: Any) -> str | None:
 
 
 @router.get("/presence")
-async def list_presence() -> list[dict]:
+async def list_presence() -> list[PresenceRow]:
     session = AsyncSessionLocal()
     try:
         return await list_presence_in_session(session)
@@ -281,7 +310,7 @@ async def list_presence() -> list[dict]:
 
 
 @router.get("/presence/summary")
-async def presence_summary(_: Annotated[User, Depends(current_user)]) -> dict:
+async def presence_summary(_: Annotated[User, Depends(current_user)]) -> PresenceSummary:
     session = AsyncSessionLocal()
     try:
         return await presence_summary_in_session(session)

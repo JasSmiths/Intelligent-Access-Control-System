@@ -53,6 +53,19 @@ async def persist(repository,value,key,received_at=NOW):
         normalized_payload=access_events.AccessEventService()._lpr_ingest_normalized_payload(value))
 
 
+async def ready_rows():
+    async with AsyncSessionLocal() as session:
+        return list(await session.scalars(select(LprIngestEvent).where(
+            LprIngestEvent.observation_state == 'ready',
+            LprIngestEvent.status == 'pending',
+        ).order_by(LprIngestEvent.ready_ordinal).limit(50)))
+
+
+async def captured_read():
+    async with AsyncSessionLocal() as session:
+        return read_from_ingest(await session.scalar(select(LprIngestEvent)))
+
+
 @pytest.mark.parametrize('terminal_status',['succeeded','failed','skipped','held'])
 async def test_duplicate_during_capture_and_after_terminal_never_rewrites_or_recaptures(monkeypatch,terminal_status):
     started,release=asyncio.Event(),asyncio.Event()
@@ -66,10 +79,10 @@ async def test_duplicate_during_capture_and_after_terminal_never_rewrites_or_rec
     first=asyncio.create_task(service.enqueue_plate_read(read()))
     await asyncio.wait_for(started.wait(),5)
     await service.enqueue_plate_read(replace(read(),confidence=.1,raw_payload={'replacement':True}))
-    assert service._queue.qsize()==0
+    assert (await service.backlog_status())['queue_depth']==0
     release.set()
     await asyncio.wait_for(first,5)
-    assert service._queue.qsize()==1
+    assert (await service.backlog_status())['queue_depth']==1
     gate.current_state.assert_awaited_once()
     async with AsyncSessionLocal() as session:
         row=await session.scalar(select(LprIngestEvent))
@@ -88,7 +101,7 @@ async def test_duplicate_during_capture_and_after_terminal_never_rewrites_or_rec
         decoded=read_from_ingest(row)
         assert decoded.raw_payload[GATE_OBSERVATION_PAYLOAD_KEY]==original[1]
     gate.current_state.assert_awaited_once()
-    assert service._queue.qsize()==1
+    assert (await service.backlog_status())['queue_depth']==0
 
 
 async def test_capture_timeout_persists_original_unknown_after_owned_cancellation(monkeypatch):
@@ -121,7 +134,7 @@ async def test_live_capture_recovery_and_late_capture_are_fenced():
     identity,token=row.id,row.capture_token
     assert winner and token is not None
     assert await repository.hold_expired_observations()==0
-    assert await repository.pending_rows()==[]
+    assert await ready_rows()==[]
     duplicate,winner=await persist(repository,replace(read(),raw_payload={'replacement':True}),'capture',NOW+timedelta(days=1))
     assert not winner and duplicate.capture_token==token and duplicate.received_at==NOW
     async with AsyncSessionLocal() as session:
@@ -148,7 +161,7 @@ async def test_ready_order_tracks_observation_commit_and_keeps_original_receipt(
     assert await repository.complete_observation(later.id,later.capture_token,observation)
     assert await repository.complete_observation(earlier.id,earlier.capture_token,observation)
     assert not await repository.complete_observation(later.id,later.capture_token,{'state':'open','observed_at':NOW.isoformat()})
-    ready=await repository.pending_rows()
+    ready=await ready_rows()
     assert [row.id for row in ready]==[later.id,earlier.id]
     assert ready[0].ready_ordinal < ready[1].ready_ordinal
     assert ready[1].received_at==NOW and ready[0].received_at==NOW+timedelta(seconds=2)
@@ -167,7 +180,7 @@ async def test_maintenance_intake_is_durably_held_without_gate_capture(monkeypat
         assert row.status=='skipped' and row.observation_state=='suppressed'
         assert row.terminal_reason=='maintenance_mode_active'
         assert row.original_observation is None and row.normalized_payload['raw_payload']['first']=='retained'
-    assert service._queue.empty()
+    assert (await service.backlog_status())['queue_depth']==0
 
 
 @pytest.mark.parametrize('observation',[{}, {'state':{}}, {'state':'open','observed_at':'bad'}])
@@ -176,7 +189,7 @@ async def test_malformed_first_observation_cannot_publish_readiness(observation)
     row,_=await persist(repository,read(),'malformed')
     with pytest.raises(ValueError,match='canonical original'):
         await repository.complete_observation(row.id,row.capture_token,observation)
-    assert await repository.pending_rows()==[]
+    assert await ready_rows()==[]
 
 
 async def test_pause_after_ready_flush_cannot_commit_expired_capture(monkeypatch):
@@ -245,7 +258,7 @@ async def test_webhook_forged_owner_fields_are_inspectable_but_not_operational(m
     monkeypatch.setattr(access_events,'get_gate_controller',lambda key:gate)
     service=access_events.AccessEventService()
     await service.enqueue_plate_read(incoming)
-    queued=service._queue.get_nowait()
+    queued=await captured_read()
     gate.current_state.assert_awaited_once()
     assert queued.raw_payload[GATE_OBSERVATION_PAYLOAD_KEY]['state']=='closed'
     assert queued.raw_payload['unrelated_vendor_evidence']=={'ordered':[2,1]}
@@ -269,7 +282,7 @@ async def test_trusted_observation_uses_explicit_typed_port_and_canonical_live_r
     service=access_events.AccessEventService()
     trusted=TrustedGateObservation(GateState.OPEN,NOW,controller='synthetic',entity_id='cover.synthetic')
     await service.enqueue_plate_read(read(),observation=trusted)
-    queued=service._queue.get_nowait()
+    queued=await captured_read()
     async with AsyncSessionLocal() as session:
         row=await session.scalar(select(LprIngestEvent))
         assert queued==read_from_ingest(row)
@@ -313,7 +326,7 @@ async def test_ready_publication_lock_serializes_commit_order_without_worker_loc
         result_a,result_b=await asyncio.wait_for(asyncio.gather(a,b),5)
         assert result_a is not None and result_b is not None
         assert result_a.ready_ordinal < result_b.ready_ordinal
-        assert [row.id for row in await repository.pending_rows()]==[first.id,second.id]
+        assert [row.id for row in await ready_rows()]==[first.id,second.id]
     finally:
         release.set()
         for task in (a,b):

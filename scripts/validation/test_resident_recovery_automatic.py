@@ -29,11 +29,12 @@ from app.services import resident_recovery as recovery
 from app.services.access import authorization, evidence, execution, hardware
 from app.services.access.evidence import AccessEvidenceResolver
 from app.services.access.execution import AccessExecution
-from app.services.access.reads import (DebounceWindow, GATE_OBSERVATION_PAYLOAD_KEY,
+from app.services.access.reads import (GATE_OBSERVATION_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY, LPR_INGEST_EVENT_PAYLOAD_KEY)
 from app.services.access_device_configuration import AccessDeviceConfiguration
 from app.services.gate_commands import GateCommandOutcome
 from app.services.lpr_ingest import LprIngestRepository
+from access_window_fixture import claimed_window
 from app.services.movement.sessions import MovementSessionService
 from app.services.movement_ledger import get_movement_ledger_repository
 from app.services.resident_recovery_evidence import configuration_binding
@@ -63,7 +64,7 @@ class Harness:
         self.pause_config = None
         self.ingest = LprIngestRepository()
         self.service = AccessExecution(get_movement_ledger_repository(),
-            MovementSessionService(), self.ingest)
+            MovementSessionService())
 
     async def runtime(self, session):
         pause, self.pause_config = self.pause_config, None
@@ -106,9 +107,10 @@ class Harness:
             command_id=None, delivery=CommandDelivery.NOT_SENT, reconciliation_required=False)
 
     async def execute(self, read):
-        return await self.service.execute(DebounceWindow(read.captured_at, read.captured_at, [read]),
-            read=read, direction_read=read, runtime=await self.current_runtime(), trace=Trace(),
-            finalize_started_at=datetime.now(UTC), webhook_trace={})
+        async with claimed_window(read) as (window, claim):
+            return await self.service.execute(window, claim=claim, read=read, direction_read=read,
+                runtime=await self.current_runtime(), trace=Trace(),
+                finalize_started_at=datetime.now(UTC), webhook_trace={})
 
     async def assert_dispatch(self, intent):
         async with AsyncSessionLocal() as session:

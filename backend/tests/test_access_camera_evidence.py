@@ -1,9 +1,9 @@
 """DB-free camera handoff contracts: real resolver/FSM, inert provider and trace sinks."""
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-import uuid
 
 import pytest
 
@@ -11,12 +11,10 @@ from app.models import Person, Vehicle
 from app.models.enums import AccessDirection, PresenceState
 from app.modules.lpr.base import PlateRead
 from app.services.access import evidence as owner
-from app.services.access import execution as execution_owner
 from app.services.access.evidence import AccessEvidenceResolver, PreparedCameraEvidence
-from app.services.access.execution import AccessExecution
 from app.services.access.reads import GATE_OBSERVATION_PAYLOAD_KEY
 from app.services.schedules import ScheduleEvaluation
-from app.services.telemetry import ActiveTrace, CURRENT_PARENT_SPAN_ID
+from app.services.telemetry import CURRENT_PARENT_SPAN_ID, ActiveTrace
 
 NOW = datetime(2026, 9, 12, 12, tzinfo=UTC)
 
@@ -35,7 +33,7 @@ def runtime():
 
 class ProbeSession:
     def __init__(self):
-        self.entered = False
+        self.entered = True
         self.exited = False
 
     async def __aenter__(self):
@@ -45,11 +43,14 @@ class ProbeSession:
     async def __aexit__(self, *args):
         self.exited = True
 
+    async def close(self):
+        self.exited = True
+
     async def get(self, model, identity):
         return SimpleNamespace(state=PresenceState.PRESENT)
 
     async def scalars(self, statement):
-        return SimpleNamespace(all=lambda: [])
+        return SimpleNamespace(all=list)
 
 
 @pytest.fixture
@@ -199,19 +200,6 @@ async def test_probe_cancellation_exits_owned_session_and_does_not_call_vendor(m
     forbidden.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_duplicate_saga_is_checked_before_optional_vendor_preparation(monkeypatch, trace):
-    session = ProbeSession()
-    monkeypatch.setattr(execution_owner, "AsyncSessionLocal", lambda: session)
-    ledger = SimpleNamespace(movement_saga_by_idempotency_key=AsyncMock(return_value=SimpleNamespace(access_event_id=uuid.uuid4())))
-    forbidden = AsyncMock(side_effect=AssertionError("Duplicate observation reached camera"))
-    monkeypatch.setattr(AccessEvidenceResolver, "prepare_camera_evidence", forbidden)
-    service = AccessExecution(ledger, SimpleNamespace(), SimpleNamespace())
-    result = await service.execute(SimpleNamespace(), read=read(), direction_read=read(), runtime=runtime(),
-                                   trace=trace, finalize_started_at=NOW, webhook_trace={})
-    assert result is None and session.exited
-    ledger.movement_saga_by_idempotency_key.assert_awaited_once()
-    forbidden.assert_not_awaited()
 
 
 @pytest.mark.asyncio

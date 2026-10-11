@@ -20,7 +20,7 @@ def test_decision_is_pure_and_stages_do_not_depend_on_orchestrator():
     assert imported_modules(ROOT / 'access/decision.py') <= {
         'dataclasses', 'app.models.enums', 'app.modules.gate.base', '__future__',
     }
-    for name in ('reads', 'evidence', 'execution', 'enrichment', 'payloads'):
+    for name in ('reads', 'evidence', 'execution', 'completion_media', 'payloads'):
         modules = imported_modules(ROOT / f'access/{name}.py')
         assert 'app.services.access_events' not in modules
         tree = ast.parse((ROOT / f'access/{name}.py').read_text())
@@ -32,8 +32,8 @@ def test_decision_is_pure_and_stages_do_not_depend_on_orchestrator():
     assert not evidence.intersection({'app.services.access.hardware', 'app.services.access.execution', 'app.services.access.enrichment'})
     execution = imported_modules(ROOT / 'access/execution.py')
     assert not execution.intersection({'app.services.dvla', 'app.services.unifi_protect', 'app.services.access.enrichment'})
-    enrichment = imported_modules(ROOT / 'access/enrichment.py')
-    assert not enrichment.intersection({'app.services.gate_commands', 'app.services.access.hardware', 'app.services.access_devices'})
+    completion = imported_modules(ROOT / 'access/completion_media.py')
+    assert not completion.intersection({'app.services.gate_commands', 'app.services.access.hardware', 'app.services.access_devices'})
 
 
 @pytest.mark.parametrize('schedule,identity,visitor,external', list(product([False, True], repeat=4)))

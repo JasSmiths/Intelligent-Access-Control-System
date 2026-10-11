@@ -17,7 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
 from app.models import LprCoordinatorState, LprDebounceWindow, LprIngestEvent
+from app.services.access.completion_database import access_session
 from app.services.access.pipeline_contracts import (
+    MAX_PLATE_READ_PROCESSING_ATTEMPTS,
     CoordinatorBoundary,
     CoordinatorClaim,
     IngestClaim,
@@ -149,12 +151,119 @@ async def terminalize_window_in_session(
     # acquire blocking locks. Cancellation rolls the whole transaction back.
 
 
+async def hold_window_in_session(
+    session: AsyncSession,
+    claim: WindowClaim,
+    *,
+    reason: str,
+    detail: str | None = None,
+) -> None:
+    """Retain every acknowledged member when the original processing budget ends."""
+    window = await assert_window_in_session(session, claim)
+    now = await database_now(session)
+    await session.execute(
+        update(LprIngestEvent)
+        .where(
+            LprIngestEvent.window_id == claim.window_id,
+        )
+        .values(
+            status="held",
+            processed_at=now,
+            processing_started_at=None,
+            terminal_reason=reason[:120],
+            last_error=detail[:500] if detail else None,
+            lease_token=None,
+            lease_until=None,
+        )
+    )
+    window.state, window.reason = "held", reason[:120]
+    window.last_error = detail[:500] if detail else None
+    window.lease_token, window.lease_until = None, None
+    await session.flush()
+    await assert_coordinator_in_session(session, claim.coordinator)
+
+
+async def preparation_failed_in_session(
+    session: AsyncSession,
+    claim: IngestClaim,
+    *,
+    detail: str,
+    max_attempts: int,
+) -> bool:
+    """Recovery increments the original ingest budget; no RAM retry counter."""
+    row = await assert_ingest_in_session(session, claim)
+    row.last_error = detail[:500]
+    if row.attempt_count < max_attempts:
+        await session.flush()
+        await assert_ingest_in_session(session, claim)
+        return True
+    coordinator = await assert_coordinator_in_session(session, claim.coordinator)
+    row.status, row.terminal_reason = "held", "processing_attempts_exhausted"
+    row.processed_at, row.processing_started_at = await database_now(session), None
+    row.lease_token, row.lease_until = None, None
+    coordinator.boundary_phase, coordinator.flush_clock = "flushing", await database_now(session)
+    coordinator.flush_upper_ordinal = coordinator.next_open_ordinal - 1
+    coordinator.flush_completed_ordinal, coordinator.finalizing_window_id = 0, None
+    await session.flush()
+    await assert_coordinator_in_session(session, claim.coordinator)
+    return False
+
+
+async def finalization_failed_in_session(
+    session: AsyncSession,
+    claim: WindowClaim,
+    *,
+    detail: str,
+    max_attempts: int,
+) -> bool:
+    """Use the chosen ingest's TOTAL processing budget, including preparation.
+
+    A committed window is never passed here: command/admission recovery belongs
+    to its already committed saga and command journal, not original execution.
+    """
+    window = await assert_window_in_session(session, claim)
+    row = await session.get(
+        LprIngestEvent, window.best_ingest_id, with_for_update=True, populate_existing=True
+    )
+    if row is None:
+        raise PipelineLeaseLost("chosen_ingest_unavailable")
+    if row.attempt_count >= max_attempts:
+        await hold_window_in_session(
+            session, claim, reason="processing_attempts_exhausted", detail=detail
+        )
+        return False
+    row.attempt_count += 1
+    row.last_error, window.last_error = detail[:500], detail[:500]
+    await session.flush()
+    await assert_window_in_session(session, claim)
+    return True
+
+
 class AccessPipelineStore:
     def __init__(self, session_factory: Callable[[], AsyncSession] = AsyncSessionLocal) -> None:
         self.session_factory = session_factory
 
+    async def backlog_status(self) -> dict[str, int | float | str | None]:
+        """Indexed scalar diagnostics; readiness never needs durable backlog detail."""
+        async with access_session(self.session_factory) as session:
+            waiting = (LprIngestEvent.observation_state == "ready",
+                       LprIngestEvent.status.in_(["pending", "processing"]),
+                       LprIngestEvent.window_id.is_(None))
+            windows = LprDebounceWindow.state.in_(["open", "finalizing"])
+            queued, pending, ingest_at, window_at = (await session.execute(select(
+                select(func.count()).select_from(LprIngestEvent).where(*waiting).scalar_subquery(),
+                select(func.count()).select_from(LprDebounceWindow).where(windows).scalar_subquery(),
+                select(func.min(LprIngestEvent.received_at)).where(*waiting).scalar_subquery(),
+                select(func.min(LprDebounceWindow.min_received_at)).where(windows).scalar_subquery(),
+            ))).one()
+            oldest = min((value for value in (ingest_at, window_at) if value is not None), default=None)
+            now = await database_now(session)
+            return {"queue_depth": queued, "pending_windows": pending,
+                    "oldest_pending_at": oldest.isoformat() if oldest is not None else None,
+                    "oldest_pending_age_seconds": max(0.0, (now - oldest).total_seconds()) if oldest is not None else None}
+
     async def acquire_coordinator(self) -> CoordinatorClaim | None:
-        async with self.session_factory() as session:
+        async with access_session(self.session_factory) as session:
             row = await _coordinator_row(session)
             now = await database_now(session)
             if (
@@ -173,7 +282,7 @@ class AccessPipelineStore:
             return claim
 
     async def renew_coordinator(self, claim: CoordinatorClaim) -> CoordinatorClaim:
-        async with self.session_factory() as session:
+        async with access_session(self.session_factory) as session:
             row = await session.get(
                 LprCoordinatorState, 1, with_for_update=True, populate_existing=True
             )
@@ -187,13 +296,13 @@ class AccessPipelineStore:
             return renewed
 
     async def release_coordinator(self, claim: CoordinatorClaim) -> None:
-        async with self.session_factory() as session:
+        async with access_session(self.session_factory) as session:
             row = await assert_coordinator_in_session(session, claim)
             row.lease_token, row.lease_until = None, None
             await session.commit()
 
     async def boundary(self, claim: CoordinatorClaim) -> CoordinatorBoundary:
-        async with self.session_factory() as session:
+        async with access_session(self.session_factory) as session:
             row = await assert_coordinator_in_session(session, claim)
             phase = row.boundary_phase or "idle"
             if phase not in {
@@ -218,7 +327,7 @@ class AccessPipelineStore:
     async def claim_next_read(self, claim: CoordinatorClaim) -> IngestClaim | None:
         """Lowest visible ready order; terminal metadata pages never imply exhaustion."""
         while True:
-            async with self.session_factory() as session:
+            async with access_session(self.session_factory) as session:
                 coordinator = await assert_coordinator_in_session(session, claim)
                 if coordinator.boundary_phase is not None:
                     raise PipelineLeaseLost("unfinished_read_flush_boundary")
@@ -281,7 +390,7 @@ class AccessPipelineStore:
                 return result
 
     async def recover_preparing_read(self, claim: CoordinatorClaim) -> IngestClaim:
-        async with self.session_factory() as session:
+        async with access_session(self.session_factory) as session:
             coordinator = await assert_coordinator_in_session(session, claim)
             if coordinator.boundary_phase != "preparing" or coordinator.boundary_ingest_id is None:
                 raise PipelineLeaseLost("preparing_boundary_unavailable")
@@ -358,7 +467,7 @@ class AccessPipelineStore:
         max_seconds: float,
     ) -> WindowClaim | None:
         """Resume finalization before looking past a one-read→flush boundary."""
-        async with self.session_factory() as session:
+        async with access_session(self.session_factory) as session:
             coordinator = await assert_coordinator_in_session(session, claim)
             if coordinator.boundary_phase == "preparing":
                 raise PipelineLeaseLost("read_preparation_unfinished")
@@ -384,10 +493,18 @@ class AccessPipelineStore:
                         now + timedelta(seconds=COORDINATOR_LEASE_SECONDS),
                     )
                     result = WindowClaim(window.id, window.lease_token, claim)
-                    await session.flush()
-                    await assert_window_in_session(session, result)
-                    await session.commit()
-                    return result
+                    ingest = await session.get(LprIngestEvent, window.best_ingest_id,
+                                               with_for_update=True, populate_existing=True)
+                    if ingest is None:
+                        await hold_window_in_session(session, result, reason="window_evidence_unavailable")
+                    elif ingest.attempt_count >= MAX_PLATE_READ_PROCESSING_ATTEMPTS:
+                        await hold_window_in_session(session, result, reason="processing_attempts_exhausted")
+                    else:
+                        ingest.attempt_count += 1
+                        await session.flush()
+                        await assert_window_in_session(session, result)
+                        await session.commit()
+                        return result
                 if window.state not in {"completed", "suppressed", "held"}:
                     raise PipelineLeaseLost("finalizing_window_outcome_unavailable")
                 if coordinator.boundary_phase == "immediate_finalizing":

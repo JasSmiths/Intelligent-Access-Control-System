@@ -16,6 +16,8 @@ class PipelineLeaseLost(RuntimeError):
 
 
 
+MAX_PLATE_READ_PROCESSING_ATTEMPTS = 3
+
 @dataclass(frozen=True)
 class CoordinatorClaim:
     token: uuid.UUID

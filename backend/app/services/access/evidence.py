@@ -19,11 +19,13 @@ from sqlalchemy.orm import selectinload
 from app.ai.providers import analyze_image_with_provider
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, Person, Presence, Vehicle, VisitorPass
 from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification
 from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
+from app.services.access.completion_database import access_session
 from app.services.access.decision import AccessPlan, access_is_allowed, plan_access
 from app.services.access.payloads import vehicle_display_name
 from app.services.access.reads import (
@@ -110,7 +112,7 @@ class AccessEvidenceResolver:
         external_admission: dict[str, Any] | None, trace: Any,
     ) -> PreparedCameraEvidence | None:
         request = None
-        async with AsyncSessionLocal() as session:
+        async with access_session(AsyncSessionLocal) as session:
             try:
                 await self.resolve(session, read, direction_read, external_admission, trace,
                                    probe_camera=True)
@@ -124,18 +126,20 @@ class AccessEvidenceResolver:
         started = time.monotonic()
         if request.recovery:
             task = asyncio.create_task(self._resolve_duplicate_arrival_with_camera(direction_read, person, trace=trace))
-            done, _ = await asyncio.wait({task}, timeout=5)
-            if task in done:
-                decision = task.result()
-            else:
-                task.cancel()
-                # Discard all late provider results; cancellation cleanup cannot
-                # lengthen this recovery decision's five-second authority window.
-                def discard_result(completed):
-                    if not completed.cancelled():
-                        completed.exception()
-                task.add_done_callback(discard_result)
-                decision = {"direction": "unknown", "confidence": 0.0, "reason": "camera_timeout"}
+            deadline = started + 5
+            try:
+                done, _ = await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
+                decision = (
+                    task.result()
+                    if task in done and time.monotonic() < deadline
+                    else {"direction": "unknown", "confidence": 0.0, "reason": "camera_timeout"}
+                )
+            finally:
+                # Freeze authority above, then retain ownership through actual
+                # provider/trace cleanup, including repeated parent cancellation.
+                if not task.done():
+                    task.cancel()
+                await drain_owned(asyncio.gather(task, return_exceptions=True))
         else:
             decision = await self._resolve_duplicate_arrival_with_camera(direction_read, person, trace=trace)
         decision["elapsed_ms"] = round((time.monotonic()-started)*1000, 2)
@@ -688,7 +692,7 @@ class AccessEvidenceResolver:
                 height=runtime.unifi_protect_snapshot_height,
             )
             if trace:
-                artifact = await telemetry.store_artifact(
+                artifact = await drain_owned(telemetry.store_artifact(
                     media.content,
                     content_type=media.content_type,
                     kind="camera_snapshot",
@@ -699,7 +703,7 @@ class AccessEvidenceResolver:
                         "registration_number": read.registration_number,
                         "person_id": str(person.id),
                     },
-                )
+                ))
             result = await analyze_image_with_provider(
                 "openai",
                 prompt=prompt,

@@ -7,10 +7,10 @@ from app.models import Person, Vehicle, VisitorPass
 from app.modules.lpr.base import PlateRead
 from app.services.access.reads import (
     EXTERNAL_ADMISSION_PAYLOAD_KEY,
+    GATE_OBSERVATION_PAYLOAD_KEY,
     VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY,
     VISITOR_PASS_PAYLOAD_KEY,
     WEBHOOK_TRACE_PAYLOAD_KEY,
-    DebounceWindow,
     _external_admission_from_read,
     _gate_malfunction_from_read,
     _visitor_pass_plate_match_from_read,
@@ -19,6 +19,9 @@ from app.services.access.reads import (
 
 if TYPE_CHECKING:
     from app.services.gate_commands import GateCommandOutcome
+from app.services.access.read_codec import classification_context
+from app.services.access.window_store import StoredWindow
+from app.services.lpr_zone_shadow import compact_zone_shadow_read
 from app.services.movement.sessions import (
     candidate_registration_numbers as _candidate_registration_numbers,
 )
@@ -39,9 +42,38 @@ PERSON_NOTIFICATION_PRONOUNS = {
 }
 
 SUGGESTED_PERSON_PRONOUNS_BY_FIRST_NAME = {
-    **dict.fromkeys(("jason", "john", "james", "david", "michael", "paul", "mark", "peter", "stephen", "steven"), "he/him"),
-    **dict.fromkeys(("sarah", "steph", "stephanie", "sylvia", "emma", "olivia", "amelia", "ava", "charlotte", "grace"), "she/her"),
+    **dict.fromkeys(
+        (
+            "jason",
+            "john",
+            "james",
+            "david",
+            "michael",
+            "paul",
+            "mark",
+            "peter",
+            "stephen",
+            "steven",
+        ),
+        "he/him",
+    ),
+    **dict.fromkeys(
+        (
+            "sarah",
+            "steph",
+            "stephanie",
+            "sylvia",
+            "emma",
+            "olivia",
+            "amelia",
+            "ava",
+            "charlotte",
+            "grace",
+        ),
+        "she/her",
+    ),
 }
+
 
 def access_event_realtime_payload(
     event: Any,
@@ -69,10 +101,13 @@ def access_event_realtime_payload(
         "visitor_name": visitor_pass.visitor_name if visitor_pass else None,
         "visitor_pass_mode": visitor_pass_mode if visitor_pass else None,
         "external_admission_mode": external_admission.get("mode") if external_admission else None,
-        "external_admission_source": external_admission.get("source") if external_admission else None,
+        "external_admission_source": external_admission.get("source")
+        if external_admission
+        else None,
     }
     payload.update(access_event_snapshot_payload(event))
     return payload
+
 
 def notification_facts(
     event: Any,
@@ -87,7 +122,11 @@ def notification_facts(
     garage_door: str | None = None,
     entity_id: str | None = None,
 ) -> dict[str, Any]:
-    information = vehicle_information if vehicle_information is not None else (event.raw_payload or {}).get("vehicle_information", {})
+    information = (
+        vehicle_information
+        if vehicle_information is not None
+        else (event.raw_payload or {}).get("vehicle_information", {})
+    )
     external_admission = external_admission_from_event(event)
     visual = vehicle_visual_detection_from_event(event)
     detected_vehicle_type = fact_text(
@@ -104,10 +143,18 @@ def notification_facts(
         or visual.get("detected_vehicle_colour")
     )
     vehicle_display = vehicle_display_name(vehicle, event.registration_number)
-    vehicle_make = fact_text(information.get("make")) or (getattr(vehicle, "make", "") if vehicle else "") or ""
+    vehicle_make = (
+        fact_text(information.get("make"))
+        or (getattr(vehicle, "make", "") if vehicle else "")
+        or ""
+    )
     provider_colour = fact_text(information.get("colour"))
     vehicle_colour = (
-        (provider_colour or (getattr(vehicle, "color", "") if vehicle else "") or detected_vehicle_colour)
+        (
+            provider_colour
+            or (getattr(vehicle, "color", "") if vehicle else "")
+            or detected_vehicle_colour
+        )
         if vehicle
         else (detected_vehicle_colour or provider_colour)
     )
@@ -116,7 +163,9 @@ def notification_facts(
     facts = {
         "message": message,
         "access_event_id": str(event.id),
-        "telemetry_trace_id": str(((event.raw_payload or {}).get("telemetry") or {}).get("trace_id") or ""),
+        "telemetry_trace_id": str(
+            ((event.raw_payload or {}).get("telemetry") or {}).get("trace_id") or ""
+        ),
         "first_name": getattr(person, "first_name", "") if person else "",
         "last_name": getattr(person, "last_name", "") if person else "",
         "display_name": getattr(person, "display_name", "") if person else "",
@@ -126,7 +175,9 @@ def notification_facts(
         "vehicle_display_name": vehicle_display,
         "vehicle_make": vehicle_make,
         "vehicle_type": detected_vehicle_type,
-        "vehicle_model": (getattr(vehicle, "model", "") if vehicle else "") or fact_text(information.get("model")) or "",
+        "vehicle_model": (getattr(vehicle, "model", "") if vehicle else "")
+        or fact_text(information.get("model"))
+        or "",
         "vehicle_color": vehicle_colour or "",
         "vehicle_colour": vehicle_colour or "",
         "detected_vehicle_type": detected_vehicle_type,
@@ -141,8 +192,12 @@ def notification_facts(
         "direction": event.direction.value,
         "decision": event.decision.value,
         "source": event.source,
-        "external_admission_mode": fact_text(external_admission.get("mode") if external_admission else None),
-        "external_admission_source": fact_text(external_admission.get("source") if external_admission else None),
+        "external_admission_mode": fact_text(
+            external_admission.get("mode") if external_admission else None
+        ),
+        "external_admission_source": fact_text(
+            external_admission.get("source") if external_admission else None
+        ),
         "timing_classification": event.timing_classification.value,
         "occurred_at": event.occurred_at.isoformat(),
     }
@@ -156,6 +211,7 @@ def notification_facts(
     facts.update({key: fact_text(value) for key, value in extras.items() if value is not None})
     return facts
 
+
 def authorized_entry_message(person: Any, vehicle: Any | None) -> str:
     first_name = person.first_name or person.display_name.split(" ", 1)[0]
     possessive = f"{first_name}'" if first_name.lower().endswith("s") else f"{first_name}'s"
@@ -168,19 +224,30 @@ def authorized_entry_message(person: Any, vehicle: Any | None) -> str:
         )
     return f"{person.display_name} has been detected at the gate. I've let {object_pronoun} in."
 
+
 def vehicle_display_name(vehicle: Any | None, fallback: str) -> str:
     if not vehicle:
         return fallback
-    label = " ".join(part for part in [getattr(vehicle, "make", None), getattr(vehicle, "model", None)] if part)
-    return label or getattr(vehicle, "description", None) or getattr(vehicle, "registration_number", None) or fallback
+    label = " ".join(
+        part for part in [getattr(vehicle, "make", None), getattr(vehicle, "model", None)] if part
+    )
+    return (
+        label
+        or getattr(vehicle, "description", None)
+        or getattr(vehicle, "registration_number", None)
+        or fallback
+    )
+
 
 def vehicle_visual_detection_from_event(event: Any) -> dict[str, Any]:
     return dict((event.raw_payload or {}).get("vehicle_visual_detection") or {})
+
 
 def external_admission_from_event(event: Any) -> dict[str, Any] | None:
     raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
     payload = raw_payload.get("external_admission")
     return payload if isinstance(payload, dict) else None
+
 
 def fact_text(value: Any) -> str:
     if value is None:
@@ -189,6 +256,7 @@ def fact_text(value: Any) -> str:
         return value.isoformat()
     return str(value).strip()
 
+
 def person_notification_pronouns(person: Any | None) -> tuple[str, str]:
     pronouns = str(getattr(person, "pronouns", None) or "").strip().casefold()
     if not pronouns and person:
@@ -196,9 +264,10 @@ def person_notification_pronouns(person: Any | None) -> tuple[str, str]:
         pronouns = SUGGESTED_PERSON_PRONOUNS_BY_FIRST_NAME.get(first_name, "")
     return PERSON_NOTIFICATION_PRONOUNS.get(pronouns, ("them", "their"))
 
+
 def _access_event_raw_payload(
     *,
-    window: DebounceWindow,
+    window: StoredWindow | None,
     read: PlateRead,
     schedule_evaluation: ScheduleEvaluation | None,
     direction_resolution: dict[str, Any],
@@ -210,28 +279,56 @@ def _access_event_raw_payload(
     webhook_trace: dict[str, Any],
     external_admission: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "best": read.raw_payload,
+    summary = window.summary if window is not None else None
+    preview = (
+        [candidate.as_payload() for candidate in window.preview]
+        if window is not None
+        else [
+            {
+                "registration_number": read.registration_number,
+                "detected_registration_number": _detected_registration_number(read),
+                "confidence": read.confidence,
+                "captured_at": read.captured_at.isoformat(),
+                "candidate_registration_numbers": list(_candidate_registration_numbers(read)),
+                "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(read),
+                "visitor_pass_plate_match": _visitor_pass_plate_match_from_read(read),
+                WEBHOOK_TRACE_PAYLOAD_KEY: _webhook_trace_from_read(read),
+            }
+        ]
+    )
+    # The immutable ingest owns the vendor body. Retain only fields consumed by
+    # recovery/media/zone owners here, plus a bounded display preview and full ref.
+    best = {
+        **compact_zone_shadow_read(read)["raw_payload"],
+        **classification_context(read)["annotations"],
+        GATE_OBSERVATION_PAYLOAD_KEY: gate_observation_from_read(read),
         WEBHOOK_TRACE_PAYLOAD_KEY: webhook_trace,
-        "schedule": schedule_evaluation_payload(schedule_evaluation, missing_reason="No active vehicle identity matched."),
+    }
+    explicit = explicit_direction_from_read(read)
+    if explicit is not None:
+        best["direction"] = explicit.value
+    return {
+        "best": best,
+        WEBHOOK_TRACE_PAYLOAD_KEY: webhook_trace,
+        "schedule": schedule_evaluation_payload(
+            schedule_evaluation, missing_reason="No active vehicle identity matched."
+        ),
         "debounce": {
-            "candidate_count": len(window.reads),
-            "first_seen": window.first_seen.isoformat(),
-            "updated_at": window.updated_at.isoformat(),
+            "version": 2,
+            "candidate_count": summary.count if summary is not None else 1,
+            "preview_count": len(preview),
+            "preview_complete": summary is None or summary.count == len(preview),
+            "evidence_reference": {"version": 2, "window_id": str(summary.evidence.window_id)}
+            if summary is not None
+            else None,
+            "first_seen": (
+                summary.first_seen if summary is not None else read.captured_at
+            ).isoformat(),
+            "updated_at": (
+                summary.updated_at if summary is not None else read.captured_at
+            ).isoformat(),
             "finalize_started_at": finalize_started_at.isoformat(),
-            "candidates": [
-                {
-                    "registration_number": item.registration_number,
-                    "detected_registration_number": _detected_registration_number(item),
-                    "confidence": item.confidence,
-                    "captured_at": item.captured_at.isoformat(),
-                    "candidate_registration_numbers": list(_candidate_registration_numbers(item)),
-                    "known_vehicle_plate_match": _known_vehicle_plate_match_from_read(item),
-                    "visitor_pass_plate_match": _visitor_pass_plate_match_from_read(item),
-                    WEBHOOK_TRACE_PAYLOAD_KEY: _webhook_trace_from_read(item),
-                }
-                for item in window.reads
-            ],
+            "candidates": preview,
         },
         "direction_resolution": direction_resolution,
         VEHICLE_VISUAL_DETECTION_PAYLOAD_KEY: vehicle_visual_detection,
@@ -239,6 +336,7 @@ def _access_event_raw_payload(
         EXTERNAL_ADMISSION_PAYLOAD_KEY: external_admission,
         "telemetry": {"trace_id": trace_id},
     }
+
 
 def _movement_intent_payload(
     read: PlateRead,
@@ -262,6 +360,7 @@ def _movement_intent_payload(
         "gate_malfunction": _gate_malfunction_from_read(read),
     }
 
+
 def _raw_payload_with_movement_saga(
     raw_payload: dict[str, Any] | None,
     *,
@@ -283,6 +382,7 @@ def _raw_payload_with_movement_saga(
         "gate": gate_outcome.as_payload() if gate_outcome else None,
     }
     return payload
+
 
 def _visitor_pass_payload(
     visitor_pass: VisitorPass | None,

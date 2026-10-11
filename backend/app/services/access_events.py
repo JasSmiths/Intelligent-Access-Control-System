@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
@@ -12,11 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import (
-    AccessEvent,
-    Anomaly,
     GateCommandRecord,
+    LprDebounceWindow,
     LprIngestEvent,
     MovementSagaRecord,
     Vehicle,
@@ -25,12 +24,26 @@ from app.models import (
 from app.models.enums import MovementSagaState, VisitorPassStatus, VisitorPassType
 from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
-from app.modules.notifications.base import NotificationContext
-from app.services.access.enrichment import AccessEnrichment, independently
+from app.services.access.completion_database import access_session
 from app.services.access.execution import AccessExecution
-from app.services.access.payloads import access_event_realtime_payload, notification_facts
-from app.services.access.pipeline_contracts import TrustedGateObservation
-from app.services.access.plate_matching import add_debounce_read, match_candidates
+from app.services.access.pipeline_contracts import (
+    MAX_PLATE_READ_PROCESSING_ATTEMPTS,
+    CoordinatorClaim,
+    IngestClaim,
+    PipelineLeaseLost,
+    TrustedGateObservation,
+    WindowClaim,
+)
+from app.services.access.pipeline_store import (
+    COORDINATOR_RENEWAL_SECONDS,
+    AccessPipelineStore,
+    assert_ingest_in_session,
+    assert_window_in_session,
+    finalization_failed_in_session,
+    hold_window_in_session,
+    preparation_failed_in_session,
+)
+from app.services.access.plate_matching import match_candidates
 from app.services.access.read_codec import read_from_ingest
 from app.services.access.reads import (
     EXTERNAL_ADMISSION_PAYLOAD_KEY,
@@ -40,14 +53,10 @@ from app.services.access.reads import (
     GATE_OBSERVATION_PAYLOAD_KEY,
     INGEST_METADATA_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY,
-    MAX_PLATE_READ_PROCESSING_ATTEMPTS,
     PLATE_READ_RETRY_BACKOFF_SECONDS,
-    PROCESSING_ATTEMPT_PAYLOAD_KEY,
     VISITOR_PASS_PLATE_MATCH_PAYLOAD_KEY,
     WEBHOOK_TRACE_PAYLOAD_KEY,
     WORKER_STALL_QUEUE_SECONDS,
-    DebounceWindow,
-    ResolvedPlateWindow,
     _external_admission_from_read,
     _external_admission_payload,
     _float_from_payload,
@@ -58,16 +67,13 @@ from app.services.access.reads import (
     _plate_read_with_payload,
     _visitor_pass_candidate_kind,
     _webhook_trace_for_window,
-    _webhook_trace_from_read,
-    lpr_ingest_id_from_read,
 )
+from app.services.access.window_store import AccessWindowStore
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_controller import UnsupportedModuleError, get_gate_controller
 from app.services.gate_malfunctions import active_stuck_open_malfunction_at
 from app.services.lpr_ingest import (
     LPR_GATE_CAPTURE_TIMEOUT_SECONDS,
-    LPR_INGEST_STATUS_FAILED,
-    LPR_INGEST_STATUS_SKIPPED,
     LprIngestRepository,
 )
 from app.services.lpr_zone_shadow import (
@@ -101,11 +107,9 @@ from app.services.movement_fsm import (
     ResolvedMovementWindow,
 )
 from app.services.movement_ledger import get_movement_ledger_repository
-from app.services.notifications import get_notification_service
 from app.services.settings import RuntimeConfig, get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_LPR,
-    audit_log_event_payload,
     telemetry,
     write_audit_log,
 )
@@ -127,12 +131,16 @@ class AccessEventService:
     """
 
     def __init__(self) -> None:
-        self._queue: asyncio.Queue[PlateRead] = asyncio.Queue()
-        self._pending: list[DebounceWindow] = []
+        self._wake = asyncio.Event()
+        self._cleanup: asyncio.Task[None] | None = None
+        self._pipeline = AccessPipelineStore(session_factory=lambda: AsyncSessionLocal())
+        self._windows = AccessWindowStore(session_factory=lambda: AsyncSessionLocal())
+        self._active_ingest: IngestClaim | None = None
+        self._active_window: WindowClaim | None = None
+        self._coordinator_owned = False
         self._worker: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._runtime: RuntimeConfig | None = None
-        self._recent_visitor_pass_resolutions: list[ResolvedPlateWindow] = []
         self._movement_suppression_fsm = MovementSuppressionFSM()
         self._movement_ledger = get_movement_ledger_repository()
         self._movement_sessions = MovementSessionService(
@@ -149,38 +157,41 @@ class AccessEventService:
         self._total_failures = 0
 
     async def start(self) -> None:
-        if self._worker and not self._worker.done():
+        if self._worker is not None and not self._worker.done():
             return
+        if self._cleanup is not None and not self._cleanup.done():
+            raise RuntimeError("access_cleanup_in_progress")
+        self._cleanup = None
         self._stop_event.clear()
-        self._started_at = datetime.now(tz=UTC)
-        self._last_heartbeat_at = self._started_at
-        self._worker = asyncio.create_task(self._process_queue(), name="lpr-debounce-worker")
-        self._worker.add_done_callback(self._handle_worker_done)
+        self._started_at = self._last_heartbeat_at = datetime.now(tz=UTC)
         event_bus.subscribe(self._handle_realtime_event, scope="all_workers")
         event_bus.subscribe(self._handle_local_realtime_event)
-        try:
-            await self._enqueue_pending_lpr_ingest_rows()
-        except Exception as exc:  # noqa: BLE001 - worker recovery or fail-closed evidence boundary
-            self._record_worker_failure(exc)
-            logger.warning(
-                "lpr_ingest_startup_recovery_failed",
-                extra={"error": self._safe_exception_detail(exc)},
-            )
+        self._worker = asyncio.create_task(self._process_queue(), name="lpr-durable-coordinator")
+        self._wake.set()
         logger.info("access_event_service_started")
 
     async def stop(self) -> None:
         self._stop_event.set()
-        if self._worker:
-            await self._worker
-        await self._flush_all_pending()
+        self._wake.set()
         event_bus.unsubscribe(self._handle_realtime_event)
         event_bus.unsubscribe(self._handle_local_realtime_event)
+        if self._cleanup is None:
+            self._cleanup = asyncio.create_task(self._stop_owned(), name="access-coordinator-stop")
+        await drain_owned(self._cleanup)
+
+    async def _stop_owned(self) -> None:
+        if self._worker is not None:
+            if not self._worker.done() and not self._worker.cancelling():
+                self._worker.cancel()
+            await asyncio.gather(self._worker, return_exceptions=True)
+            self._worker = None
+        # No early finalization. Original memberships/boundaries remain in SQL
+        # for the next owner; cancellation rolls any uncommitted domain work back.
         logger.info("access_event_service_stopped")
 
     def status(self) -> dict[str, Any]:
         now = datetime.now(tz=UTC)
         worker_running = bool(self._worker and not self._worker.done())
-        queue_depth = self._queue.qsize()
         heartbeat_age_seconds = (
             max(0.0, (now - self._last_heartbeat_at).total_seconds())
             if self._last_heartbeat_at
@@ -188,7 +199,7 @@ class AccessEventService:
         )
         stalled = bool(
             worker_running
-            and queue_depth > 0
+            and (self._active_ingest is not None or self._active_window is not None)
             and heartbeat_age_seconds is not None
             and heartbeat_age_seconds > WORKER_STALL_QUEUE_SECONDS
         )
@@ -201,8 +212,8 @@ class AccessEventService:
         return {
             "status": state,
             "worker_running": worker_running,
-            "queue_depth": queue_depth,
-            "pending_windows": len(self._pending),
+            "intake_source": "durable",
+            "coordinator_owned": self._coordinator_owned,
             "movement_sessions_source": "durable",
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "last_heartbeat_at": self._last_heartbeat_at.isoformat()
@@ -217,6 +228,9 @@ class AccessEventService:
             "total_failures": self._total_failures,
             "stalled": stalled,
         }
+
+    async def backlog_status(self) -> dict[str, int | float | str | None]:
+        return await self._pipeline.backlog_status()
 
     async def enqueue_plate_read(
         self, read: PlateRead, *, observation: TrustedGateObservation | None = None
@@ -243,11 +257,15 @@ class AccessEventService:
         if capture_token is None:
             return
         if await is_maintenance_mode_active():
-            await self._lpr_ingest_repo().suppress_capture(ingest_row.id, capture_token, "maintenance_mode_active")
+            await self._lpr_ingest_repo().suppress_capture(
+                ingest_row.id, capture_token, "maintenance_mode_active"
+            )
             return
         read = await self._read_with_gate_observation(read, observation=observation)
         gate_observation = gate_observation_from_read(read)
-        observed_row = await self._lpr_ingest_repo().complete_observation(ingest_row.id, capture_token, gate_observation)
+        observed_row = await self._lpr_ingest_repo().complete_observation(
+            ingest_row.id, capture_token, gate_observation
+        )
         if observed_row is None:
             return
         read = read_from_ingest(observed_row)
@@ -265,7 +283,7 @@ class AccessEventService:
                 "ingest_event_id": str(ingest_row.id),
             },
         )
-        await self._queue.put(read)
+        self._wake.set()
         await event_bus.publish(
             "plate_read.received",
             {
@@ -325,42 +343,6 @@ class AccessEventService:
             normalized_payload=payload,
         )
 
-    async def _enqueue_pending_lpr_ingest_rows(self) -> int:
-        rows = await self._lpr_ingest_repo().pending_rows()
-        for row in rows:
-            await self._queue.put(read_from_ingest(row))
-        if rows:
-            logger.info("lpr_ingest_pending_rows_enqueued", extra={"count": len(rows)})
-        return len(rows)
-
-    async def _claim_lpr_ingest_for_processing(self, read: PlateRead) -> bool:
-        ingest_id = lpr_ingest_id_from_read(read)
-        if ingest_id is None:
-            return True
-        return await self._lpr_ingest_repo().claim_for_processing(ingest_id)
-
-    async def _mark_lpr_ingest_succeeded(
-        self,
-        read: PlateRead,
-        *,
-        movement_saga_id: uuid.UUID | None = None,
-        access_event_id: uuid.UUID | None = None,
-    ) -> None:
-        ingest_id = lpr_ingest_id_from_read(read)
-        if ingest_id is None:
-            return
-        await self._lpr_ingest_repo().mark_succeeded(
-            ingest_id,
-            access_event_id=access_event_id,
-            movement_saga_id=movement_saga_id,
-        )
-
-    async def _mark_lpr_ingest_terminal(self, read: PlateRead, *, status: str, detail: str) -> None:
-        ingest_id = lpr_ingest_id_from_read(read)
-        if ingest_id is None:
-            return
-        await self._lpr_ingest_repo().mark_terminal(ingest_id, status=status, detail=detail)
-
     def _lpr_ingest_repo(self) -> LprIngestRepository:
         self._lpr_ingest_repository.session_factory = AsyncSessionLocal
         return self._lpr_ingest_repository
@@ -385,8 +367,13 @@ class AccessEventService:
         if observation is not None:
             if not isinstance(observation, TrustedGateObservation):
                 raise ValueError("An explicit typed trusted gate observation is required")
-            return _plate_read_with_payload(read, {**(read.raw_payload or {}),
-                GATE_OBSERVATION_PAYLOAD_KEY: observation.as_payload()})
+            return _plate_read_with_payload(
+                read,
+                {
+                    **(read.raw_payload or {}),
+                    GATE_OBSERVATION_PAYLOAD_KEY: observation.as_payload(),
+                },
+            )
 
         observed_at = datetime.now(tz=UTC)
         detail: str | None = None
@@ -420,107 +407,161 @@ class AccessEventService:
 
     async def _process_queue(self) -> None:
         while not self._stop_event.is_set():
-            read_for_retry: PlateRead | None = None
+            claim: CoordinatorClaim | None = None
+            renewal: asyncio.Task[None] | None = None
+            operation: asyncio.Task[bool] | None = None
             try:
-                self._last_heartbeat_at = datetime.now(tz=UTC)
-                self._runtime = await get_runtime_config()
-                try:
-                    read = await asyncio.wait_for(self._queue.get(), timeout=0.5)
-                except TimeoutError:
-                    read = None
-
-                if read is not None:
-                    read_for_retry = read
-                    if not await self._claim_lpr_ingest_for_processing(read):
-                        read_for_retry = None
-                        continue
-                    if await is_maintenance_mode_active():
-                        self._clear_pending_reads()
-                        await self._mark_lpr_ingest_terminal(
-                            read,
-                            status=LPR_INGEST_STATUS_SKIPPED,
-                            detail="maintenance_mode_active",
-                        )
-                        await self._publish_terminal_read(
-                            read,
-                            "plate_read.skipped",
-                            reason="maintenance_mode_active",
-                        )
-                        read_for_retry = None
-                        continue
-                    # Recovery always decodes the persisted first observation.
-                    read_for_retry = read
-                    await self._handle_queued_read(read)
-                    self._last_processed_at = datetime.now(tz=UTC)
-                    if self._processing_attempt(read) > 0:
-                        await self._publish_terminal_read(
-                            read,
-                            "plate_read.recovered",
-                            reason="retry_succeeded",
-                        )
-                    read_for_retry = None
-
-                await self._flush_expired_windows()
-                if read is None and self._queue.empty():
-                    await self._enqueue_pending_lpr_ingest_rows()
-                self._consecutive_failures = 0
-            except Exception as exc:  # noqa: BLE001 - worker recovery or fail-closed evidence boundary
-                await self._handle_worker_iteration_failure(exc, read_for_retry=read_for_retry)
-
-    def _handle_worker_done(self, task: asyncio.Task) -> None:
-        if self._stop_event.is_set() or task.cancelled():
-            return
-        try:
-            exc = task.exception()
-        except asyncio.CancelledError:
-            return
-        if exc is None:
-            return
-        self._record_worker_failure(exc)
-        logger.error(
-            "access_event_worker_stopped_unexpectedly",
-            extra={"error": self._safe_exception_detail(exc)},
-        )
-        try:
-            asyncio.create_task(
-                event_bus.publish(
-                    "access_event.worker_failed",
-                    {
-                        "status": "down",
-                        "queue_depth": self._queue.qsize(),
-                        "pending_windows": len(self._pending),
-                        "error": self._safe_exception_detail(exc),
-                    },
+                claim = await self._pipeline.acquire_coordinator()
+                if claim is None:
+                    await self._wait_for_wake()
+                    continue
+                self._coordinator_owned = True
+                renewal = asyncio.create_task(
+                    self._renew_coordinator(claim), name="lpr-coordinator-renewal"
                 )
-            )
-        except RuntimeError:
-            logger.warning(
-                "access_event_worker_failure_event_not_published",
-                extra={"error": self._safe_exception_detail(exc)},
-            )
+                while not self._stop_event.is_set():
+                    self._active_ingest, self._active_window = None, None
+                    self._wake.clear()
+                    operation = asyncio.create_task(
+                        self._process_boundary(claim), name="lpr-read-flush-boundary"
+                    )
+                    try:
+                        done, _ = await asyncio.wait(
+                            {operation, renewal}, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        if renewal in done:
+                            renewal.result()
+                            raise PipelineLeaseLost("coordinator_renewal_stopped")
+                        worked = await operation
+                        self._consecutive_failures = 0
+                        if not worked:
+                            await self._wait_for_wake()
+                    except PipelineLeaseLost:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - retain the original durable processing phase.
+                        self._record_worker_failure(exc)
+                        await self._record_boundary_failure(exc)
+                        await self._sleep_until_retry(self._worker_backoff_seconds())
+                    finally:
+                        if operation is not None and not operation.done():
+                            operation.cancel()
+                            await asyncio.gather(operation, return_exceptions=True)
+                        operation = None
+            except PipelineLeaseLost:
+                pass  # The new SQL owner resumes the original durable boundary.
+            except Exception as exc:  # noqa: BLE001 - database outages leave durable intake recoverable.
+                self._record_worker_failure(exc)
+                logger.warning(
+                    "access_coordinator_failed", extra={"error": self._safe_exception_detail(exc)}
+                )
+                await self._sleep_until_retry(self._worker_backoff_seconds())
+            finally:
+                if operation is not None and not operation.done():
+                    operation.cancel()
+                if renewal is not None and not renewal.done():
+                    renewal.cancel()
+                await asyncio.gather(
+                    *(task for task in (operation, renewal) if task is not None),
+                    return_exceptions=True,
+                )
+                self._coordinator_owned = False
+                if claim is not None:
+                    try:
+                        await self._pipeline.release_coordinator(claim)
+                    except Exception as exc:  # noqa: BLE001 - expiry still fences abandoned ownership.
+                        logger.warning(
+                            "access_coordinator_release_failed",
+                            extra={"error": self._safe_exception_detail(exc)},
+                        )
 
-    async def _handle_worker_iteration_failure(
-        self,
-        exc: Exception,
-        *,
-        read_for_retry: PlateRead | None,
-    ) -> None:
-        self._record_worker_failure(exc)
-        payload = {
-            "status": "degraded",
-            "queue_depth": self._queue.qsize(),
-            "pending_windows": len(self._pending),
-            "consecutive_failures": self._consecutive_failures,
-            "error": self._safe_exception_detail(exc),
-        }
-        if read_for_retry is not None:
-            payload.update(self._read_failure_payload(read_for_retry, exc, stage="worker"))
-        logger.error("access_event_worker_iteration_failed", extra=payload)
-        await event_bus.publish("access_event.worker_degraded", payload)
-        if read_for_retry is not None:
-            await self._retry_or_fail_read(read_for_retry, exc, stage="worker")
-            return
-        await self._sleep_until_retry(self._worker_backoff_seconds())
+    async def _renew_coordinator(self, claim: CoordinatorClaim) -> None:
+        while True:
+            await asyncio.sleep(COORDINATOR_RENEWAL_SECONDS)
+            await self._pipeline.renew_coordinator(claim)
+
+    async def _wait_for_wake(self) -> None:
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=0.5)
+        except TimeoutError:
+            pass
+
+    async def _process_boundary(self, coordinator: CoordinatorClaim) -> bool:
+        async with asyncio.timeout(90):
+            self._last_heartbeat_at = datetime.now(tz=UTC)
+            self._runtime = await get_runtime_config()
+            boundary = await self._pipeline.boundary(coordinator)
+            ingest = None
+            worked = boundary.phase != "idle"
+            if boundary.phase == "preparing":
+                ingest = await self._pipeline.recover_preparing_read(coordinator)
+            elif boundary.phase == "idle":
+                ingest = await self._pipeline.claim_next_read(coordinator)
+            if ingest is not None:
+                worked = True
+                self._active_ingest = ingest
+                immediate = await self._handle_queued_read(ingest)
+                self._active_ingest = None
+                if immediate is not None:
+                    self._active_window = immediate
+                    await self._finalize_window(immediate)
+                    self._active_window = None
+            maintenance = await is_maintenance_mode_active()
+            while not self._stop_event.is_set():
+                window = await self._pipeline.next_flush_window(
+                    coordinator,
+                    quiet_seconds=0 if maintenance else self._runtime.lpr_debounce_quiet_seconds,
+                    max_seconds=0 if maintenance else self._runtime.lpr_debounce_max_seconds,
+                )
+                if window is None:
+                    break
+                worked = True
+                self._active_window = window
+                await self._finalize_window(window)
+                self._active_window = None
+            self._last_processed_at = datetime.now(tz=UTC)
+            return worked
+
+    async def _record_boundary_failure(self, exc: Exception) -> None:
+        detail = self._safe_exception_detail(exc)
+        async with access_session(AsyncSessionLocal) as session:
+            if self._active_window is not None:
+                window = await session.get(LprDebounceWindow, self._active_window.window_id)
+                if window is not None and window.state == "completed":
+                    # Hardware/receipt failure after the core commit is reconciled
+                    # from the command journal. Never rerun original execution.
+                    return
+                retry = await finalization_failed_in_session(
+                    session,
+                    self._active_window,
+                    detail=detail,
+                    max_attempts=MAX_PLATE_READ_PROCESSING_ATTEMPTS,
+                )
+                identity = self._active_window.window_id
+            elif self._active_ingest is not None:
+                retry = await preparation_failed_in_session(
+                    session,
+                    self._active_ingest,
+                    detail=detail,
+                    max_attempts=MAX_PLATE_READ_PROCESSING_ATTEMPTS,
+                )
+                identity = self._active_ingest.ingest_id
+            else:
+                return
+            await write_audit_log(
+                session,
+                category=TELEMETRY_CATEGORY_LPR,
+                action="plate_read.processing_retry" if retry else "plate_read.processing_held",
+                actor="System",
+                target_entity="LprIngestEvent" if self._active_ingest else "LprDebounceWindow",
+                target_id=identity,
+                outcome="retry" if retry else "held",
+                metadata={
+                    "error": detail,
+                    "budget": "original_total_processing",
+                    "max_attempts": MAX_PLATE_READ_PROCESSING_ATTEMPTS,
+                },
+            )
+            await session.commit()
 
     def _record_worker_failure(self, exc: BaseException) -> None:
         self._total_failures += 1
@@ -534,104 +575,6 @@ class AccessEventService:
             len(PLATE_READ_RETRY_BACKOFF_SECONDS) - 1,
         )
         return PLATE_READ_RETRY_BACKOFF_SECONDS[index]
-
-    async def _retry_or_fail_read(
-        self,
-        read: PlateRead,
-        exc: Exception,
-        *,
-        stage: str,
-        reason: str | None = None,
-        candidate_count: int | None = None,
-    ) -> bool:
-        attempt = self._processing_attempt(read) + 1
-        payload = self._read_failure_payload(
-            read,
-            exc,
-            stage=stage,
-            attempt=attempt,
-            reason=reason,
-            candidate_count=candidate_count,
-        )
-        if self._stop_event.is_set() or attempt >= MAX_PLATE_READ_PROCESSING_ATTEMPTS:
-            logger.error("plate_read_processing_failed_permanently", extra=payload)
-            await self._mark_lpr_ingest_terminal(
-                read,
-                status=LPR_INGEST_STATUS_FAILED,
-                detail=self._safe_exception_detail(exc),
-            )
-            await event_bus.publish("plate_read.failed", payload)
-            return False
-
-        backoff_seconds = PLATE_READ_RETRY_BACKOFF_SECONDS[
-            min(attempt - 1, len(PLATE_READ_RETRY_BACKOFF_SECONDS) - 1)
-        ]
-        await event_bus.publish(
-            "plate_read.retrying",
-            {**payload, "next_retry_seconds": backoff_seconds},
-        )
-        await self._sleep_until_retry(backoff_seconds)
-        if self._stop_event.is_set():
-            return False
-        await self._queue.put(self._read_with_processing_attempt(read, attempt))
-        return True
-
-    async def _publish_terminal_read(
-        self,
-        read: PlateRead,
-        event_type: str,
-        *,
-        reason: str,
-        candidate_count: int | None = None,
-    ) -> None:
-        payload = {
-            "registration_number": read.registration_number,
-            "detected_registration_number": _detected_registration_number(read),
-            "source": read.source,
-            "captured_at": read.captured_at.isoformat(),
-            "attempt": self._processing_attempt(read),
-            "reason": reason,
-        }
-        if candidate_count is not None:
-            payload["candidate_count"] = candidate_count
-        await event_bus.publish(event_type, payload)
-
-    def _read_failure_payload(
-        self,
-        read: PlateRead,
-        exc: Exception,
-        *,
-        stage: str,
-        attempt: int | None = None,
-        reason: str | None = None,
-        candidate_count: int | None = None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "registration_number": read.registration_number,
-            "detected_registration_number": _detected_registration_number(read),
-            "source": read.source,
-            "captured_at": read.captured_at.isoformat(),
-            "attempt": self._processing_attempt(read) if attempt is None else attempt,
-            "max_attempts": MAX_PLATE_READ_PROCESSING_ATTEMPTS,
-            "stage": stage,
-            "error": self._safe_exception_detail(exc),
-        }
-        if reason:
-            payload["reason"] = reason
-        if candidate_count is not None:
-            payload["candidate_count"] = candidate_count
-        return payload
-
-    def _processing_attempt(self, read: PlateRead) -> int:
-        try:
-            return max(0, int((read.raw_payload or {}).get(PROCESSING_ATTEMPT_PAYLOAD_KEY) or 0))
-        except (TypeError, ValueError):
-            return 0
-
-    def _read_with_processing_attempt(self, read: PlateRead, attempt: int) -> PlateRead:
-        raw_payload = dict(read.raw_payload or {})
-        raw_payload[PROCESSING_ATTEMPT_PAYLOAD_KEY] = attempt
-        return _plate_read_with_payload(read, raw_payload)
 
     async def _sleep_until_retry(self, seconds: float) -> None:
         if seconds <= 0:
@@ -647,63 +590,109 @@ class AccessEventService:
             detail = f"{detail[:237]}..."
         return f"{exc.__class__.__name__}: {detail}" if detail else exc.__class__.__name__
 
-    async def _handle_queued_read(self, read: PlateRead) -> None:
+    async def _handle_queued_read(self, claim: IngestClaim) -> WindowClaim | None:
+        async with access_session(AsyncSessionLocal) as session:
+            row = await assert_ingest_in_session(session, claim)
+            read = read_from_ingest(row)
+            exhausted = row.attempt_count > MAX_PLATE_READ_PROCESSING_ATTEMPTS
+        if exhausted or await is_maintenance_mode_active():
+            async with access_session(AsyncSessionLocal) as session:
+                await self._pipeline.suppress_read_in_session(
+                    session,
+                    claim,
+                    status="held",
+                    reason="processing_attempts_exhausted"
+                    if exhausted
+                    else "maintenance_mode_active",
+                )
+                await session.commit()
+            return None
         read = await self._read_with_known_vehicle_match(read)
         read = await self._read_with_gate_malfunction_context(read)
-        gate_malfunction = _gate_malfunction_from_read(read)
-        known_vehicle_match = _known_vehicle_plate_match_from_read(read)
-        if gate_malfunction and not known_vehicle_match:
-            await self._ignore_unknown_gate_malfunction_read(read)
-            return
-
-        if await self._suppress_by_live_lpr_zone_filter(read):
-            return
-
-        if not gate_malfunction:
-            exact_suppression_reason = await self._exact_resolution_suppression_reason(read)
-            if exact_suppression_reason:
-                await self._publish_suppressed_read(read, reason=exact_suppression_reason)
-                return
-
-            if not known_vehicle_match:
-                read = await self._read_with_external_admission_match(read)
-
-            if not _external_admission_from_read(read):
-                vehicle_session_suppression = await self._movement_sessions.suppression_for_read(
-                    read,
-                    runtime=self._runtime,
-                )
-                if vehicle_session_suppression:
-                    await self._movement_sessions.annotate_suppressed_read(
-                        read,
-                        vehicle_session_suppression,
-                        runtime=self._runtime,
+        malfunction = _gate_malfunction_from_read(read)
+        known = _known_vehicle_plate_match_from_read(read)
+        reason = "unknown_plate_during_gate_malfunction" if malfunction and not known else None
+        suppression = None
+        if reason is None and await self._suppress_by_live_lpr_zone_filter(read):
+            reason = LPR_ZONE_FILTER_SUPPRESSION_REASON
+        if reason is None and not malfunction:
+            reason = await self._exact_resolution_suppression_reason(read)
+            if reason is None:
+                if not known:
+                    read = await self._read_with_external_admission_match(read)
+                if not _external_admission_from_read(read):
+                    suppression = await self._movement_sessions.suppression_for_read(
+                        read, runtime=self._runtime
                     )
-                    await self._publish_suppressed_read(
-                        read, reason=vehicle_session_suppression.reason
-                    )
-                    return
-
-        external_admission = _external_admission_from_read(read)
-        if not _known_vehicle_plate_match_from_read(read) and not external_admission:
+                    reason = suppression.reason if suppression is not None else None
+        external = _external_admission_from_read(read)
+        if reason is None and not _known_vehicle_plate_match_from_read(read) and not external:
             read = await self._read_with_visitor_pass_departure_match(read)
-        if self._suppress_after_visitor_pass_resolution(read):
-            await self._publish_suppressed_read(
-                read, reason="visitor_pass_plate_already_resolved_in_debounce_window"
+        runtime = self._runtime or await get_runtime_config()
+        async with access_session(AsyncSessionLocal) as session:
+            await assert_ingest_in_session(session, claim)
+            if reason is None and await self._windows.suppress_after_visitor_resolution_in_session(
+                session, claim, read
+            ):
+                reason = "visitor_pass_plate_already_resolved_in_debounce_window"
+            if reason is not None:
+                if suppression is not None:
+                    await self._movement_sessions.annotate_suppressed_read_in_session(
+                        session, read, suppression, runtime=runtime, ingest_id=claim.ingest_id
+                    )
+                saga = await self._record_suppressed_movement_read(session, read, reason=reason)
+                await self._pipeline.suppress_read_in_session(
+                    session, claim, reason=reason, status="succeeded", saga_id=saga.id
+                )
+                await write_audit_log(
+                    session,
+                    category=TELEMETRY_CATEGORY_LPR,
+                    action="plate_read.gate_malfunction_ignored"
+                    if malfunction and not known
+                    else "plate_read.suppressed",
+                    actor="System",
+                    target_entity="LprIngestEvent",
+                    target_id=claim.ingest_id,
+                    target_label=read.registration_number,
+                    metadata={"reason": reason, "source": read.source},
+                )
+                await session.commit()
+                await event_bus.publish("plate_read.suppressed", {
+                    "registration_number": read.registration_number,
+                    "detected_registration_number": _detected_registration_number(read),
+                    "source": read.source,
+                    "reason": reason,
+                    "ingest_event_id": str(claim.ingest_id),
+                })
+                return None
+            summary = await self._windows.append_in_session(
+                session, claim, read, threshold=runtime.lpr_similarity_threshold
             )
-            return
-
-        window = self._add_to_debounce_window(read)
-        if _is_exact_known_vehicle_plate_match(read):
-            window = self._pop_exact_known_plate_window(window)
-            await self._finalize_window_or_fail(window, reason="exact_known_vehicle_plate")
-        elif external_admission:
-            window = self._pop_related_read_window(window, read)
-            await self._finalize_window_or_fail(window, reason="external_unknown_vehicle_admission")
-        elif _is_visitor_pass_plate_match(read):
-            window = self._pop_related_read_window(window, read)
-            if await self._finalize_window_or_fail(window, reason="visitor_pass_departure_plate"):
-                self._remember_visitor_pass_resolution(window, read)
+            immediate_reason = (
+                "exact_known_vehicle_plate"
+                if _is_exact_known_vehicle_plate_match(read)
+                else "external_unknown_vehicle_admission"
+                if external
+                else "visitor_pass_departure_plate"
+                if _is_visitor_pass_plate_match(read)
+                else None
+            )
+            immediate = None
+            if immediate_reason is not None:
+                summary = await self._windows.merge_related_in_session(
+                    session,
+                    claim,
+                    summary.evidence.window_id,
+                    anchor_read=read,
+                    max_seconds=runtime.lpr_debounce_max_seconds,
+                )
+                immediate = await self._windows.claim_immediate_in_session(
+                    session, claim, summary.evidence.window_id, reason=immediate_reason
+                )
+            else:
+                await self._pipeline.begin_flush_in_session(session, claim)
+            await session.commit()
+            return immediate
 
     async def _suppress_by_live_lpr_zone_filter(self, read: PlateRead) -> bool:
         mode = (
@@ -742,12 +731,11 @@ class AccessEventService:
                     "error": self._safe_exception_detail(exc),
                 },
             )
-        await self._publish_suppressed_read(read, reason=LPR_ZONE_FILTER_SUPPRESSION_REASON)
         return True
 
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
-        if event.type == "maintenance_mode.changed" and event.payload.get("is_active") is True:
-            self._clear_pending_reads()
+        if event.type == "maintenance_mode.changed":
+            self._wake.set()
 
     async def _handle_local_realtime_event(self, event: RealtimeEvent) -> None:
         if event.type != "gate.state_changed":
@@ -761,70 +749,29 @@ class AccessEventService:
         await self._record_external_gate_open_admission(event)
 
     async def _record_external_gate_open_admission(self, event: RealtimeEvent) -> None:
-        if await is_maintenance_mode_active():
+        if self._stop_event.is_set() or await is_maintenance_mode_active():
             return
-        observed_at = (
-            datetime_from_payload(event.payload.get("state_changed_at"))
-            or datetime_from_payload(event.created_at)
-            or datetime.now(tz=UTC)
-        )
+        observed_at = datetime_from_payload(
+            event.payload.get("state_changed_at")
+        ) or datetime_from_payload(event.created_at)
+        if observed_at is None:
+            return
         runtime = self._runtime or await get_runtime_config()
-        result: tuple[AccessEvent, list[Anomaly], dict[str, Any]] | None = None
-        async with AsyncSessionLocal() as session:
+        async with access_session(AsyncSessionLocal) as session:
             if await self._recent_iacs_gate_open_command(session, observed_at):
                 return
             match = await self._movement_sessions.external_admission_candidate_for_gate_open(
-                session,
-                opened_at=observed_at,
-                runtime=runtime,
+                session, opened_at=observed_at, runtime=runtime
             )
-            if not match:
+            if match is None:
                 return
             result = await AccessExecution(
-                self._movement_ledger, self._movement_sessions, self._lpr_ingest_repo()
+                self._movement_ledger, self._movement_sessions
             )._persist_external_gate_open_admission(
-                session,
-                match,
-                observed_at=observed_at,
-                gate_payload=event.payload,
-                runtime=runtime,
+                session, match, observed_at=observed_at, gate_payload=event.payload, runtime=runtime
             )
-            if result is None:
-                return
-            await session.commit()
-
-        access_event, anomalies, realtime_payload = result
-        await independently(
-            "external_snapshot",
-            access_event.id,
-            lambda: AccessEnrichment(runtime).capture_snapshot(access_event),
-        )
-        realtime_payload.update(
-            access_event_realtime_payload(
-                access_event,
-                anomaly_count=len(anomalies),
-                visitor_pass=None,
-                visitor_pass_mode=None,
-            )
-        )
-        await independently(
-            "external_realtime",
-            access_event.id,
-            lambda: event_bus.publish("access_event.finalized", realtime_payload),
-        )
-        for anomaly in anomalies:
-
-            async def notify_anomaly(anomaly: Anomaly = anomaly) -> None:
-                await get_notification_service().notify(
-                    NotificationContext(
-                        event_type=anomaly.anomaly_type.value,
-                        subject=access_event.registration_number,
-                        severity=anomaly.severity.value,
-                        facts=notification_facts(access_event, None, None, anomaly.message),
-                    )
-                )
-
-            await independently("external_anomaly_notification", access_event.id, notify_anomaly)
+            if result is not None:
+                await session.commit()
 
     async def _recent_iacs_gate_open_command(
         self, session: AsyncSession, observed_at: datetime
@@ -846,18 +793,6 @@ class AccessEventService:
             .order_by(GateCommandRecord.started_at.desc(), GateCommandRecord.created_at.desc())
             .limit(1)
         )
-
-    def _clear_pending_reads(self) -> None:
-        self._pending = []
-        self._recent_visitor_pass_resolutions = []
-
-    def _add_to_debounce_window(self, read: PlateRead) -> DebounceWindow:
-        threshold = (
-            self._runtime.lpr_similarity_threshold
-            if self._runtime
-            else settings.lpr_similarity_threshold
-        )
-        return add_debounce_read(self._pending, read, threshold)
 
     async def _read_with_known_vehicle_match(self, read: PlateRead) -> PlateRead:
         candidates = _candidate_registration_numbers(read)
@@ -881,7 +816,7 @@ class AccessEventService:
     async def _matching_vehicle_registrations(self, candidates: tuple[str, ...]) -> list[str]:
         if not candidates:
             return []
-        async with AsyncSessionLocal() as session:
+        async with access_session(AsyncSessionLocal) as session:
             # These fixed SQL literals match the functional index even when PostgreSQL
             # chooses a generic prepared plan. Plate candidates remain bound values.
             normalized = func.upper(
@@ -920,7 +855,7 @@ class AccessEventService:
         if gate_state not in DEPARTURE_GATE_STATES:
             return read
 
-        async with AsyncSessionLocal() as session:
+        async with access_session(AsyncSessionLocal) as session:
             malfunction = await active_stuck_open_malfunction_at(
                 session,
                 observed_at=read.captured_at,
@@ -939,7 +874,7 @@ class AccessEventService:
         if gate_state not in DEPARTURE_GATE_STATES:
             return read
         runtime = self._runtime or await get_runtime_config()
-        async with AsyncSessionLocal() as session:
+        async with access_session(AsyncSessionLocal) as session:
             departure = await self._movement_sessions.external_departure_candidate_for_read(
                 session,
                 read,
@@ -989,54 +924,12 @@ class AccessEventService:
         )
         return _plate_read_with_payload(read, raw_payload, registration_number=registration_number)
 
-    async def _ignore_unknown_gate_malfunction_read(self, read: PlateRead) -> None:
-        gate_observation = gate_observation_from_read(read)
-        gate_malfunction = _gate_malfunction_from_read(read) or {}
-        detail = {
-            "registration_number": read.registration_number,
-            "detected_registration_number": _detected_registration_number(read),
-            "confidence": read.confidence,
-            "source": read.source,
-            "captured_at": read.captured_at.isoformat(),
-            "gate_state": gate_observation.get("state"),
-            "gate_observation": gate_observation,
-            "gate_malfunction": gate_malfunction,
-            "malfunction_id": gate_malfunction.get("id"),
-            "reason": "gate_malfunction_unknown_vehicle",
-        }
-        logger.info("plate_read_ignored_during_gate_malfunction", extra=detail)
-        await self._mark_lpr_ingest_terminal(
-            read,
-            status=LPR_INGEST_STATUS_SKIPPED,
-            detail="gate_malfunction_unknown_vehicle",
-        )
-        await event_bus.publish("plate_read.ignored", detail)
-        try:
-            async with AsyncSessionLocal() as session:
-                row = await write_audit_log(
-                    session,
-                    category=TELEMETRY_CATEGORY_LPR,
-                    action="plate_read.gate_malfunction_ignored",
-                    actor="System",
-                    target_entity="PlateRead",
-                    target_label=read.registration_number,
-                    metadata=detail,
-                )
-                await session.commit()
-                await session.refresh(row)
-            await event_bus.publish("audit.log.created", audit_log_event_payload(row))
-        except Exception as exc:  # noqa: BLE001 - worker recovery or fail-closed evidence boundary
-            logger.warning(
-                "plate_read_gate_malfunction_ignore_audit_failed",
-                extra={"registration_number": read.registration_number, "error": str(exc)},
-            )
-
     async def _read_with_visitor_pass_departure_match(self, read: PlateRead) -> PlateRead:
         plate = normalize_registration_number(read.registration_number)
         if not plate:
             return read
 
-        async with AsyncSessionLocal() as session:
+        async with access_session(AsyncSessionLocal) as session:
             row = (
                 await session.execute(
                     select(VisitorPass.id, VisitorPass.arrival_time)
@@ -1072,59 +965,10 @@ class AccessEventService:
         }
         return _plate_read_with_payload(read, raw_payload, registration_number=plate)
 
-    def _pop_exact_known_plate_window(self, window: DebounceWindow) -> DebounceWindow:
-        exact_read = next(
-            (read for read in window.reads if _is_exact_known_vehicle_plate_match(read)),
-            window.best_read,
-        )
-        return self._pop_related_read_window(window, exact_read)
-
-    def _pop_related_read_window(
-        self, window: DebounceWindow, anchor_read: PlateRead
-    ) -> DebounceWindow:
-        max_seconds = (
-            self._runtime.lpr_debounce_max_seconds
-            if self._runtime
-            else settings.lpr_debounce_max_seconds
-        )
-        related: list[DebounceWindow] = []
-        remaining: list[DebounceWindow] = []
-        for item in self._pending:
-            if item is window:
-                continue
-            if item.best_read.source == anchor_read.source and self._window_overlaps_anchor_read(
-                item,
-                anchor_read,
-                max_seconds,
-            ):
-                related.append(item)
-                continue
-            remaining.append(item)
-
-        self._pending = remaining
-        if not related:
-            return window
-
-        reads = [read for related_window in [window, *related] for read in related_window.reads]
-        return DebounceWindow(
-            first_seen=min(read.captured_at for read in reads),
-            updated_at=max(read.captured_at for read in reads),
-            reads=reads,
-        )
-
-    def _window_overlaps_anchor_read(
-        self,
-        window: DebounceWindow,
-        anchor_read: PlateRead,
-        max_seconds: float,
-    ) -> bool:
-        anchor_at = anchor_read.captured_at
-        return window.first_seen <= anchor_at <= window.first_seen + timedelta(seconds=max_seconds)
-
     async def _exact_resolution_suppression_reason(self, read: PlateRead) -> str | None:
         match = _known_vehicle_plate_match_from_read(read)
         try:
-            async with AsyncSessionLocal() as session:
+            async with access_session(AsyncSessionLocal) as session:
                 rows = await self._movement_ledger.movement_sessions_for_exact_suppression(
                     session,
                     source=read.source,
@@ -1162,287 +1006,95 @@ class AccessEventService:
         )
         return decision.reason
 
-    def _remember_visitor_pass_resolution(
-        self, window: DebounceWindow, anchor_read: PlateRead
-    ) -> None:
-        max_seconds = (
-            self._runtime.lpr_debounce_max_seconds
-            if self._runtime
-            else settings.lpr_debounce_max_seconds
-        )
-        self._recent_visitor_pass_resolutions.append(
-            ResolvedPlateWindow(
-                source=anchor_read.source,
-                first_seen=window.first_seen,
-                debounce_expires_at=window.first_seen + timedelta(seconds=max_seconds),
-            )
-        )
-
-    def _suppress_after_visitor_pass_resolution(self, read: PlateRead) -> bool:
-        self._prune_recent_visitor_pass_resolutions(read.captured_at)
-        if _is_exact_known_vehicle_plate_match(read) or _is_visitor_pass_plate_match(read):
-            return False
-        for resolution in self._recent_visitor_pass_resolutions:
-            if read.source != resolution.source:
-                continue
-            if not (resolution.first_seen <= read.captured_at <= resolution.debounce_expires_at):
-                continue
-            return True
-        return False
-
-    def _prune_recent_visitor_pass_resolutions(self, now: datetime) -> None:
-        self._recent_visitor_pass_resolutions = [
-            resolution
-            for resolution in self._recent_visitor_pass_resolutions
-            if resolution.debounce_expires_at >= now
-        ]
-
-    async def _publish_suppressed_read(self, read: PlateRead, *, reason: str) -> None:
-        match = _known_vehicle_plate_match_from_read(read) or {}
-        saga = await self._record_suppressed_movement_read(read, reason=reason)
-        await self._mark_lpr_ingest_succeeded(read, movement_saga_id=saga.id)
-        await event_bus.publish(
-            "plate_read.suppressed",
-            {
-                "registration_number": read.registration_number,
-                "detected_registration_number": match.get("detected_registration_number")
-                or read.registration_number,
-                "source": read.source,
-                "reason": reason,
-            },
-        )
-
     async def _record_suppressed_movement_read(
-        self, read: PlateRead, *, reason: str
-    ) -> MovementSagaRecord:
-        async with AsyncSessionLocal() as session:
-            saga = await self._movement_ledger.create_movement_saga(
-                session,
-                idempotency_key=f"movement-suppressed:{_movement_saga_idempotency_key(read)}:{reason}",
-                source=read.source,
-                occurred_at=read.captured_at,
-                registration_number=_detected_registration_number(read),
-                state=MovementSagaState.SUPPRESSED,
-                intent_payload={
-                    "source": read.source,
-                    "captured_at": read.captured_at.isoformat(),
-                    "registration_number": read.registration_number,
-                    "detected_registration_number": _detected_registration_number(read),
-                    "confidence": read.confidence,
-                },
-                decision_payload={"suppression_reason": reason},
-            )
-            await self._movement_ledger.transition_movement_saga(
-                session,
-                saga,
-                MovementSagaState.SUPPRESSED,
-                detail=reason,
-                reconciliation_required=False,
-            )
-            await session.commit()
-            return saga
-
-    async def _flush_expired_windows(self) -> None:
-        if await is_maintenance_mode_active():
-            self._clear_pending_reads()
-            return
-        now = datetime.now(tz=UTC)
-        ready: list[DebounceWindow] = []
-        waiting: list[DebounceWindow] = []
-
-        for window in self._pending:
-            quiet_for = (now - window.updated_at).total_seconds()
-            total_age = (now - window.first_seen).total_seconds()
-            if quiet_for >= (
-                self._runtime.lpr_debounce_quiet_seconds
-                if self._runtime
-                else settings.lpr_debounce_quiet_seconds
-            ) or total_age >= (
-                self._runtime.lpr_debounce_max_seconds
-                if self._runtime
-                else settings.lpr_debounce_max_seconds
-            ):
-                ready.append(window)
-            else:
-                waiting.append(window)
-
-        self._pending = waiting
-        for window in ready:
-            await self._finalize_window_or_fail(window, reason="debounce_window_expired")
-
-    async def _flush_all_pending(self) -> None:
-        if await is_maintenance_mode_active():
-            self._clear_pending_reads()
-            return
-        pending = self._pending
-        self._pending = []
-        for window in pending:
-            await self._finalize_window_or_fail(window, reason="service_stopping")
-
-    async def _handle_finalize_failure(
         self,
-        window: DebounceWindow,
-        exc: Exception,
+        session: AsyncSession,
+        read: PlateRead,
         *,
         reason: str,
-    ) -> None:
-        payload = {
-            "registration_number": window.best_read.registration_number,
-            "detected_registration_number": _detected_registration_number(window.best_read),
-            "source": window.best_read.source,
-            "candidate_count": len(window.reads),
-            "reason": reason,
-            "error": self._safe_exception_detail(exc),
-        }
-        next_attempt = self._processing_attempt(window.best_read) + 1
-        await event_bus.publish(
-            "access_event.finalize_failed",
-            {
-                **payload,
-                "will_retry": (
-                    not self._stop_event.is_set()
-                    and next_attempt < MAX_PLATE_READ_PROCESSING_ATTEMPTS
-                ),
-                "attempt": next_attempt,
-                "max_attempts": MAX_PLATE_READ_PROCESSING_ATTEMPTS,
+    ) -> MovementSagaRecord:
+        saga = await self._movement_ledger.create_movement_saga(
+            session,
+            idempotency_key=f"movement-suppressed:{_movement_saga_idempotency_key(read)}:{reason}",
+            source=read.source,
+            occurred_at=read.captured_at,
+            registration_number=_detected_registration_number(read),
+            state=MovementSagaState.SUPPRESSED,
+            intent_payload={
+                "source": read.source,
+                "captured_at": read.captured_at.isoformat(),
+                "registration_number": read.registration_number,
+                "detected_registration_number": _detected_registration_number(read),
+                "confidence": read.confidence,
             },
+            decision_payload={"suppression_reason": reason},
         )
-        await self._retry_or_fail_read(
-            window.best_read,
-            exc,
-            stage="finalize",
-            reason=reason,
-            candidate_count=len(window.reads),
+        await self._movement_ledger.transition_movement_saga(
+            session,
+            saga,
+            MovementSagaState.SUPPRESSED,
+            detail=reason,
+            reconciliation_required=False,
         )
+        return saga
 
-    async def _finalize_window_or_fail(self, window: DebounceWindow, *, reason: str) -> bool:
-        try:
-            await self._finalize_window(window)
-            return True
-        except Exception as exc:
-            logger.exception(
-                "access_event_finalize_failed",
-                extra={
-                    "candidate_count": len(window.reads),
-                    "best_registration_number": window.best_read.registration_number,
-                    "reason": reason,
-                },
-            )
-            await self._handle_finalize_failure(window, exc, reason=reason)
-            return False
-
-    async def _finalize_window(self, window: DebounceWindow) -> None:
-        if await is_maintenance_mode_active():
-            self._clear_pending_reads()
-            return
+    async def _finalize_window(self, claim: WindowClaim) -> None:
+        async with access_session(AsyncSessionLocal) as session:
+            await assert_window_in_session(session, claim)
+            if await is_maintenance_mode_active():
+                await hold_window_in_session(session, claim, reason="maintenance_mode_active")
+                await write_audit_log(
+                    session,
+                    category=TELEMETRY_CATEGORY_LPR,
+                    action="plate_read.processing_held",
+                    actor="System",
+                    target_entity="LprDebounceWindow",
+                    target_id=claim.window_id,
+                    outcome="held",
+                    metadata={"reason": "maintenance_mode_active"},
+                )
+                await session.commit()
+                return
+            window = await self._windows.load_in_session(session, claim.window_id)
         read = window.best_read
-        external_admission = _external_admission_from_read(read)
-        direction_read = (
-            read if _is_visitor_pass_plate_match(read) or external_admission else window.first_read
-        )
+        direction_read = window.anchor_read or window.first_read
         finalize_started_at = datetime.now(tz=UTC)
         webhook_trace = _webhook_trace_for_window(window)
-        webhook_received_at = (
-            datetime_from_payload(webhook_trace.get("received_at"))
-            or datetime_from_payload(webhook_trace.get("captured_at"))
-            or window.first_seen
-        )
-        captured_to_webhook_ms = _float_from_payload(webhook_trace.get("captured_to_webhook_ms"))
-        if captured_to_webhook_ms is None:
-            captured_to_webhook_ms = _datetime_delta_ms(
-                webhook_received_at, window.first_read.captured_at
-            )
-        webhook_to_finalize_ms = _datetime_delta_ms(finalize_started_at, webhook_received_at)
-        logger.info(
-            "plate_read_finalize_started",
-            extra={
-                "registration_number": read.registration_number,
-                "source": read.source,
-                "candidate_count": len(window.reads),
-                "first_seen": window.first_seen.isoformat(),
-                "updated_at": window.updated_at.isoformat(),
-                "finalize_started_at": finalize_started_at.isoformat(),
-                "first_seen_to_finalize_ms": _datetime_delta_ms(
-                    finalize_started_at, window.first_seen
-                ),
-                "last_read_to_finalize_ms": _datetime_delta_ms(
-                    finalize_started_at, window.updated_at
-                ),
-                "captured_to_webhook_ms": captured_to_webhook_ms,
-                "webhook_to_finalize_ms": webhook_to_finalize_ms,
-                "exact_known_vehicle": _is_exact_known_vehicle_plate_match(read),
-                "visitor_pass_match": _is_visitor_pass_plate_match(read) is not None,
-                "external_admission_mode": external_admission.get("mode")
-                if external_admission
-                else None,
-            },
-        )
         trace = telemetry.start_trace(
             f"Plate Detection - {read.registration_number}",
             category=TELEMETRY_CATEGORY_LPR,
             source=read.source,
             registration_number=read.registration_number,
-            started_at=window.first_seen,
+            started_at=window.summary.first_seen,
             context={
-                "candidate_count": len(window.reads),
+                "candidate_count": window.summary.count,
+                "preview_count": len(window.preview),
+                "evidence_reference": {"version": 2, "window_id": str(claim.window_id)},
                 "source": read.source,
-                "first_seen": window.first_seen.isoformat(),
+                "first_seen": window.summary.first_seen.isoformat(),
                 "finalize_started_at": finalize_started_at.isoformat(),
-                "webhook_received_at": webhook_received_at.isoformat(),
-                "captured_to_webhook_ms": captured_to_webhook_ms,
-                "webhook_to_finalize_ms": webhook_to_finalize_ms,
+                "webhook_received_at": window.summary.min_received_at.isoformat(),
                 WEBHOOK_TRACE_PAYLOAD_KEY: webhook_trace,
             },
         )
         trace.record_span(
-            "Camera Capture to Webhook Receipt",
-            started_at=window.first_read.captured_at,
-            ended_at=webhook_received_at,
-            attributes={
-                "source": window.first_read.source,
-                "captured_to_webhook_ms": captured_to_webhook_ms,
-            },
-            output_payload={
-                "registration_number": window.first_read.registration_number,
-                "confidence": window.first_read.confidence,
-                "captured_at": window.first_read.captured_at.isoformat(),
-                "received_at": webhook_received_at.isoformat(),
-                "captured_to_webhook_ms": captured_to_webhook_ms,
-            },
-        )
-        trace.record_span(
             "Webhook Receipt to Debounce Finalization",
-            started_at=webhook_received_at,
+            started_at=window.summary.min_received_at,
             ended_at=finalize_started_at,
             attributes={
-                "candidate_count": len(window.reads),
+                "candidate_count": window.summary.count,
                 "selected_registration_number": read.registration_number,
-                "selected_confidence": read.confidence,
-                "first_seen": window.first_seen.isoformat(),
-                "updated_at": window.updated_at.isoformat(),
-                "webhook_to_finalize_ms": webhook_to_finalize_ms,
             },
             output_payload={
-                "candidates": [
-                    {
-                        "registration_number": item.registration_number,
-                        "detected_registration_number": _detected_registration_number(item),
-                        "confidence": item.confidence,
-                        "captured_at": item.captured_at.isoformat(),
-                        "candidate_registration_numbers": list(
-                            _candidate_registration_numbers(item)
-                        ),
-                        WEBHOOK_TRACE_PAYLOAD_KEY: _webhook_trace_from_read(item),
-                    }
-                    for item in window.reads
-                ],
+                "candidates": [item.as_payload() for item in window.preview],
+                "preview_complete": window.summary.count == len(window.preview),
             },
         )
-        execution = AccessExecution(
-            self._movement_ledger, self._movement_sessions, self._lpr_ingest_repo()
-        )
-        result = await execution.execute(
+        result = await AccessExecution(
+            self._movement_ledger, self._movement_sessions
+        ).execute(
             window,
+            claim=claim,
             read=read,
             direction_read=direction_read,
             runtime=self._runtime or await get_runtime_config(),
@@ -1450,12 +1102,14 @@ class AccessEventService:
             finalize_started_at=finalize_started_at,
             webhook_trace=webhook_trace,
         )
-        if result is None:
-            trace.finish(
-                status="ok", summary="Previously committed movement reused; no hardware replay."
-            )
-            return
-        await AccessEnrichment(result.runtime).run(result, trace=trace)
+        trace.finish(
+            status="ok",
+            summary=(
+                "Committed access decision and durable completion reservations."
+                if result is not None
+                else "Original movement outcome reused or held; no hardware replay."
+            ),
+        )
 
 
 def _datetime_delta_ms(end: datetime, start: datetime) -> float:

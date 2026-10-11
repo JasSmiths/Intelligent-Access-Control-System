@@ -10,7 +10,7 @@ from datetime import timedelta
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
 
@@ -19,8 +19,6 @@ from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import (
     AccessEvent,
-    LprIngestEvent,
-    MovementSagaRecord,
     Person,
     Vehicle,
     VehicleInformationJob,
@@ -33,7 +31,6 @@ from app.services.access.completion_results import (
     accept_information_in_session,
     assert_information_before_commit,
     check_information_claim,
-    reserve_information_in_session,
 )
 from app.services.access.payloads import notification_facts
 from app.services.access.pipeline_contracts import PipelineLeaseLost
@@ -68,40 +65,6 @@ def eligible_arrival(direction: AccessDirection, gate_state: GateState) -> bool:
         direction != AccessDirection.EXIT and gate_state in ARRIVAL_GATE_STATES
     )
 
-
-async def enqueue_arrival(event: AccessEvent) -> None:
-    """Called only after live access execution; historical owners do not call this."""
-    # Temporary postcommit caller of the single participant reservation. Core
-    # wiring will reserve this atomically from its already locked completion origin.
-    async with _worker_session() as session:
-        current = await session.get(
-            AccessEvent, event.id, with_for_update=True, populate_existing=True
-        )
-        if current is None:
-            return
-        total = await session.scalar(
-            select(func.count())
-            .select_from(LprIngestEvent)
-            .where(LprIngestEvent.access_event_id == current.id)
-        )
-        valid, origin_at = (
-            await session.execute(
-                select(func.count(), func.min(LprIngestEvent.received_at))
-                .select_from(LprIngestEvent)
-                .join(MovementSagaRecord, LprIngestEvent.movement_saga_id == MovementSagaRecord.id)
-                .where(
-                    LprIngestEvent.access_event_id == current.id,
-                    LprIngestEvent.status == "succeeded",
-                    MovementSagaRecord.access_event_id == current.id,
-                    MovementSagaRecord.registration_number == current.registration_number,
-                )
-            )
-        ).one()
-        await reserve_information_in_session(
-            session, current, origin_at=origin_at if total and valid == total else None
-        )
-        await session.commit()
-    get_vehicle_information_worker().wake()
 
 
 class VehicleInformationWorker:

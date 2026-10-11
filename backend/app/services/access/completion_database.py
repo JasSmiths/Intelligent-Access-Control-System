@@ -1,4 +1,4 @@
-"""Actual database-close ownership for the access completion/publication lanes.
+"""Actual database-close ownership for serial access and completion/publication.
 
 The operation child receives cancellation during active SQL. Its connection close
 must settle before the owning slot or application resources can be released.
@@ -15,7 +15,7 @@ from app.core.task_lifecycle import drain_owned
 
 
 @asynccontextmanager
-async def completion_session(factory: Callable[[], AsyncSession]) -> AsyncIterator[AsyncSession]:
+async def access_session(factory: Callable[[], AsyncSession]) -> AsyncIterator[AsyncSession]:
     session = factory()
     try:
         yield session

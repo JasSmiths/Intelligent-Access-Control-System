@@ -65,6 +65,8 @@ TYPE_OWNERS = (
     TypeOwner('app/services/ha_presence_resolution_contracts.py', 'strict'),
     TypeOwner('app/services/ha_presence_resolutions.py', 'strict'),
     TypeOwner('app/services/access_events.py', 'checked'),
+    TypeOwner('app/api/v1/events.py', 'checked'),
+    TypeOwner('app/simulation/scenarios.py', 'checked'),
     TypeOwner('app/services/lpr_ingest.py', 'strict'),
     TypeOwner('app/services/unifi_protect_contracts.py', 'strict'),
     TypeOwner('app/services/unifi_protect_operations.py', 'strict'),

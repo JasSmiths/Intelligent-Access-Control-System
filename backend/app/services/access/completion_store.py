@@ -33,7 +33,7 @@ from app.services.access.completion_contracts import (
     RetainedResultReference,
     VisitorCompletionTarget,
 )
-from app.services.access.completion_database import completion_session
+from app.services.access.completion_database import access_session
 from app.services.access.pipeline_contracts import CompletionClaim, PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
 from app.services.access.snapshot_identity import protect_event_id_from_payload
@@ -415,7 +415,7 @@ class AccessCompletionStore:
         if available_slots == 0:
             return []
         while True:
-            async with completion_session(self.session_factory) as session:
+            async with access_session(self.session_factory) as session:
                 now = await database_now(session)
                 ids = list(
                     await session.scalars(
@@ -529,7 +529,7 @@ class AccessCompletionStore:
                 # continue to real ready work without retaining a large lock set.
 
     async def renew(self, claim: CompletionClaim) -> None:
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             work = await session.get(
                 AccessCompletionWork, claim.work_id, with_for_update=True, populate_existing=True
             )
@@ -546,7 +546,7 @@ class AccessCompletionStore:
 
     async def assert_owned(self, claim: CompletionClaim) -> float:
         """Returns a conservative absolute loop deadline, including close latency."""
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             work = await session.get(
                 AccessCompletionWork, claim.work_id, with_for_update=True, populate_existing=True
             )
@@ -570,7 +570,7 @@ class AccessCompletionStore:
             or not 0 <= delay_seconds <= COMPLETION_TIMEOUT_SECONDS
         ):
             raise ValueError("Completion retry delay must stay bounded")
-        async with completion_session(self.session_factory) as session:
+        async with access_session(self.session_factory) as session:
             work = await session.get(
                 AccessCompletionWork, claim.work_id, with_for_update=True, populate_existing=True
             )
