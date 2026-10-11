@@ -1,9 +1,10 @@
 """Drain owned resource cleanup and journal children before closing resources."""
 
 import asyncio
+from collections.abc import Awaitable
 
 
-async def drain_owned(awaitable):
+async def drain_owned[T](awaitable: Awaitable[T]) -> T:
     """Cancellation may stop intake, but cannot abandon a journal/cleanup child."""
     task = asyncio.ensure_future(awaitable)
     cancelled = False

@@ -23,8 +23,8 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
     let body: unknown;
     switch (path) {
       case "/api/v1/auth/status": body = { setup_required: false, authenticated: true, user: account(role) }; break;
-      case "/api/v1/presence": body = []; break;
-      case "/api/v1/presence/expected-today": body = { date: "2026-09-23", timezone: "Europe/London", generated_at: now, count: 0, learning: false, coverage: { regular_candidates: 0, learned_candidates: 0, learning_population: 0, ratio: 0 }, people: [] }; break;
+      case "/api/v1/presence/summary": body = { counts: { total: 0, present: 0, exited: 0, unknown: 0 }, inside: { people: [], hidden: 0 } }; break;
+      case "/api/v1/presence/expected-today/summary": body = { date: "2026-09-23", timezone: "Europe/London", generated_at: now, count: 0, hidden: 0, learning: false, coverage: { regular_candidates: 0, learned_candidates: 0, learning_population: 0, ratio: 0 }, people: [] }; break;
       case "/api/v1/events": body = [event]; break;
       case "/api/v1/events/history": body = history([event]); break;
       case "/api/v1/events/event-1": body = event; break;
@@ -587,15 +587,23 @@ test("creates manual duration passes with a normalized plate and optional phone 
   const unexpected = await installFixtures(page);
   const confirmations: Record<string, unknown>[] = [];
   const created: Record<string, unknown>[] = [];
+  let savedPass: Record<string, unknown> = pass;
   await page.route("**/api/v1/action-confirmations", async (route) => {
     confirmations.push(route.request().postDataJSON());
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ confirmation_token: "fixture-only-confirmation" }) });
   });
   await page.route("**/api/v1/visitor-passes", async (route) => {
+    if (route.request().method() === "GET") { await route.fulfill({ json: [savedPass] }); return; }
     if (route.request().method() !== "POST") { await route.fallback(); return; }
     const payload = route.request().postDataJSON();
     created.push(payload);
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...pass, ...payload }) });
+    savedPass = { ...pass, ...payload };
+    delete savedPass.confirmation_token;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(savedPass) });
+  });
+  await page.route(`**/api/v1/visitor-passes/${pass.id}`, async (route) => {
+    expect(route.request().method()).toBe("GET");
+    await route.fulfill({ json: savedPass });
   });
   await page.goto("/passes");
   for (const [width, height] of [[1440, 900], [390, 600]]) {
@@ -613,7 +621,10 @@ test("creates manual duration passes with a normalized plate and optional phone 
     expect(created.at(-1)).toMatchObject({ pass_type: "duration", number_plate: "AB12CDE", visitor_phone: null, confirmation_token: "fixture-only-confirmation" });
     expect(confirmations.at(-1)).toMatchObject({ action: "visitor_pass.create", payload: { number_plate: "AB12CDE", visitor_phone: null } });
   }
+  const selectedRead = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/visitor-passes/${pass.id}` && response.request().method() === "GET");
   await page.locator(".visitor-pass-card").first().click();
+  expect(await (await selectedRead).json()).toMatchObject({ id: pass.id, status: pass.status,
+    pass_type: "duration", visitor_name: "Fixture Duration Visitor", number_plate: "AB12CDE" });
   const tabs = page.getByRole("tablist", { name: "Visitor Pass details", exact: true });
   await expect(tabs.getByRole("tab")).toHaveText(["Details", "Log"]);
   expect(unexpected).toEqual([]);

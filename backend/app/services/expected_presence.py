@@ -5,9 +5,8 @@ from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import or_, select
+from sqlalchemy import String, Uuid, case, cast, func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.models import AccessEvent, Person, Vehicle, VehiclePersonAssignment
 from app.models.enums import AccessDecision, AccessDirection
@@ -54,41 +53,66 @@ async def expected_presence_today(
         time.min,
         tzinfo=timezone,
     ).astimezone(UTC)
-    people = (
-        await session.scalars(
-            select(Person).where(Person.is_active.is_(True)).order_by(Person.display_name)
-        )
-    ).all()
-    active_people_by_id = {str(person.id): person for person in people}
-    events = (
-        await session.scalars(
-            select(AccessEvent)
-            .options(
-                selectinload(AccessEvent.vehicle).selectinload(Vehicle.owner),
-                selectinload(AccessEvent.vehicle)
-                .selectinload(Vehicle.person_assignments)
-                .selectinload(VehiclePersonAssignment.person),
-            )
-            .where(
-                AccessEvent.decision == AccessDecision.GRANTED,
-                AccessEvent.occurred_at >= window_start,
-                AccessEvent.occurred_at <= generated_at,
-                or_(AccessEvent.person_id.is_not(None), AccessEvent.vehicle_id.is_not(None)),
-            )
-            .order_by(AccessEvent.occurred_at)
-        )
-    ).all()
-    historical = [
-        event
-        for row in events
-        if (event := historical_event_from_access_event(row, active_people_by_id)) is not None
-    ]
+    historical = await historical_presence_events_in_session(
+        session, window_start=window_start, generated_at=generated_at,
+    )
     return build_expected_presence_payload(
         historical,
         target_date=target_date,
         timezone_name=timezone.key,
         generated_at=generated_at,
     )
+
+
+async def historical_presence_events_in_session(
+    session: AsyncSession, *, window_start: datetime, generated_at: datetime,
+) -> list[HistoricalPresenceEvent]:
+    """Resolve recorded identity first, then a distinct single active vehicle person."""
+    eligible = (
+        AccessEvent.decision == AccessDecision.GRANTED,
+        AccessEvent.direction.in_((AccessDirection.ENTRY, AccessDirection.EXIT)),
+        AccessEvent.occurred_at >= window_start,
+        AccessEvent.occurred_at <= generated_at,
+    )
+    needed_vehicles = select(AccessEvent.vehicle_id).where(
+        *eligible, AccessEvent.person_id.is_(None), AccessEvent.vehicle_id.is_not(None),
+    ).distinct()
+    # UNION deduplicates an owner who is also explicitly assigned to the vehicle.
+    candidates = union(
+        select(Vehicle.id.label("vehicle_id"), Person.id.label("person_id"))
+        .join(Person, Person.id == Vehicle.person_id)
+        .where(Vehicle.id.in_(needed_vehicles), Person.is_active.is_(True)),
+        select(VehiclePersonAssignment.vehicle_id.label("vehicle_id"), Person.id.label("person_id"))
+        .join(Person, Person.id == VehiclePersonAssignment.person_id)
+        .where(VehiclePersonAssignment.vehicle_id.in_(needed_vehicles), Person.is_active.is_(True)),
+    ).subquery()
+    single_person = (
+        select(candidates.c.vehicle_id,
+               cast(func.min(cast(candidates.c.person_id, String)), Uuid).label("person_id"))
+        .group_by(candidates.c.vehicle_id).having(func.count() == 1).subquery()
+    )
+    identity = case((AccessEvent.person_id.is_not(None), AccessEvent.person_id),
+                    else_=single_person.c.person_id)
+    rows = (await session.execute(
+        select(Person.id, Person.display_name, AccessEvent.occurred_at, AccessEvent.direction)
+        .select_from(AccessEvent)
+        .outerjoin(single_person, single_person.c.vehicle_id == AccessEvent.vehicle_id)
+        .join(Person, Person.id == identity)
+        .where(*eligible, Person.is_active.is_(True))
+        .order_by(AccessEvent.occurred_at)
+    )).all()
+    return [HistoricalPresenceEvent(person_id=str(person_id), display_name=name,
+                                    occurred_at=_ensure_aware(occurred_at), direction=direction)
+            for person_id, name, occurred_at, direction in rows]
+
+
+async def expected_presence_summary_today(
+    session: AsyncSession, *, timezone_name: str, now: datetime | None = None,
+) -> dict[str, Any]:
+    """Bound the internal response, retaining the same population/density predictor."""
+    payload = await expected_presence_today(session, timezone_name=timezone_name, now=now)
+    people = payload["people"][:6]
+    return {**payload, "people": people, "hidden": max(payload["count"] - len(people), 0)}
 
 
 def build_expected_presence_payload(
@@ -270,37 +294,6 @@ def _has_regular_training_evidence(
     return recent_visits >= MIN_RECENT_TRAINING_VISITS
 
 
-def historical_event_from_access_event(
-    event: AccessEvent,
-    active_people_by_id: Mapping[str, Person],
-) -> HistoricalPresenceEvent | None:
-    direction = _coerce_direction(getattr(event, "direction", None))
-    if direction not in {AccessDirection.ENTRY, AccessDirection.EXIT}:
-        return None
-
-    direct_person_id = getattr(event, "person_id", None)
-    if direct_person_id:
-        person = active_people_by_id.get(str(direct_person_id))
-        if not person:
-            return None
-        return HistoricalPresenceEvent(
-            person_id=str(person.id),
-            display_name=person.display_name,
-            occurred_at=_ensure_aware(event.occurred_at),
-            direction=direction,
-        )
-
-    person = _single_active_vehicle_person(getattr(event, "vehicle", None))
-    if not person:
-        return None
-    return HistoricalPresenceEvent(
-        person_id=str(person.id),
-        display_name=person.display_name,
-        occurred_at=_ensure_aware(event.occurred_at),
-        direction=direction,
-    )
-
-
 def _visit_days_by_person(
     events: Sequence[HistoricalPresenceEvent],
     *,
@@ -399,41 +392,12 @@ def _weekday_dates_between(start_date: date, end_date: date, weekday: int) -> li
     return dates
 
 
-def _single_active_vehicle_person(vehicle: Any) -> Any | None:
-    if not vehicle:
-        return None
-    candidates: list[Any] = []
-    for assignment in getattr(vehicle, "person_assignments", []) or []:
-        person = getattr(assignment, "person", None)
-        if person and getattr(person, "is_active", False):
-            candidates.append(person)
-    owner = getattr(vehicle, "owner", None)
-    if owner and getattr(owner, "is_active", False):
-        candidates.append(owner)
-
-    unique: dict[str, Any] = {}
-    for person in candidates:
-        person_id = str(getattr(person, "id", ""))
-        if person_id:
-            unique[person_id] = person
-    return next(iter(unique.values())) if len(unique) == 1 else None
-
-
 def _typical_time(minutes: Any) -> str | None:
     values = [int(value) for value in minutes]
     if not values:
         return None
     typical = round(median(values))
     return f"{typical // 60:02d}:{typical % 60:02d}"
-
-
-def _coerce_direction(value: Any) -> AccessDirection | None:
-    if isinstance(value, AccessDirection):
-        return value
-    try:
-        return AccessDirection(str(value))
-    except ValueError:
-        return None
 
 
 def _ensure_aware(value: datetime) -> datetime:

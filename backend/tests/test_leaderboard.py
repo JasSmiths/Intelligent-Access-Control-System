@@ -1,16 +1,17 @@
+import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
-import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.models import LeaderboardState
 from app.models.enums import AccessDecision, AccessDirection
-from app.modules.dvla.vehicle_enquiry import DvlaVehicleEnquiryError
 from app.modules.notifications.base import NotificationContext
 from app.services import leaderboard as leaderboard_module
-from app.services.leaderboard import KNOWN_TOP_STATE_KEY, LeaderboardService, _snapshot_payload
+from app.services.leaderboard import KNOWN_TOP_STATE_KEY, LeaderboardService
+from app.services.leaderboard_reads import snapshot_payload
 from app.services.snapshots import access_event_snapshot_relative_path
 
 
@@ -100,7 +101,7 @@ def test_leaderboard_snapshot_payload_requires_existing_file(tmp_path, monkeypat
     event_id = uuid.uuid4()
     relative_path = access_event_snapshot_relative_path(event_id)
 
-    assert _snapshot_payload(
+    assert snapshot_payload(
         event_id=event_id,
         captured_at=datetime(2026, 5, 2, 16, 30, tzinfo=UTC),
         relative_path=relative_path,
@@ -114,7 +115,7 @@ def test_leaderboard_snapshot_payload_requires_existing_file(tmp_path, monkeypat
     snapshot_path.parent.mkdir(parents=True)
     snapshot_path.write_bytes(b"jpeg")
 
-    payload = _snapshot_payload(
+    payload = snapshot_payload(
         event_id=event_id,
         captured_at=datetime(2026, 5, 2, 16, 30, tzinfo=UTC),
         relative_path=relative_path,
@@ -167,9 +168,9 @@ async def test_get_leaderboard_returns_shape_and_enriches_unknowns(monkeypatch) 
             "label": "Silver Ford",
         }
 
-    monkeypatch.setattr(leaderboard_module, "AsyncSessionLocal", lambda: FakeSessionContext(object()))
-    monkeypatch.setattr(service, "_known_leaders", fake_known)
-    monkeypatch.setattr(service, "_unknown_leaders", fake_unknown)
+    monkeypatch.setattr(leaderboard_module, "AsyncSessionLocal", lambda: SimpleNamespace(close=AsyncMock()))
+    monkeypatch.setattr(leaderboard_module, "known_leaders_in_session", fake_known)
+    monkeypatch.setattr(leaderboard_module, "unknown_leaders_in_session", fake_unknown)
     monkeypatch.setattr(service, "_lookup_unknown_vehicle", fake_lookup)
 
     result = await service.get_leaderboard()
@@ -181,8 +182,56 @@ async def test_get_leaderboard_returns_shape_and_enriches_unknowns(monkeypatch) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enrich_unknowns", [False, True])
+async def test_public_chart_preserves_latest_snapshot_from_real_projection(tmp_path, monkeypatch, enrich_unknowns):
+    event_id = uuid.UUID(int=301)
+    now = datetime(2026, 10, 8, 12, tzinfo=UTC)
+    relative_path = "snapshots/public-chart.jpg"
+    snapshot_file = tmp_path / relative_path
+    snapshot_file.parent.mkdir(parents=True)
+    snapshot_file.write_bytes(b"synthetic-existing-snapshot")
+    monkeypatch.setattr("app.services.snapshots.settings.data_dir", tmp_path)
+    row = {"registration_number": "PUBLIC", "read_count": 1, "first_seen_at": now,
+           "last_seen_at": now, "snapshot_event_id": event_id, "snapshot_captured_at": now,
+           "snapshot_path": relative_path, "snapshot_bytes": None, "snapshot_width": 320,
+           "snapshot_height": 180, "snapshot_camera": "camera.synthetic"}
+    # Keep the actual unknown scalar projection/serializer and public composition.
+    # Only the SQL transport is inert here; real SQL parity is covered by the PG fixture.
+    session = SimpleNamespace(
+        execute=AsyncMock(return_value=SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [row]))),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(leaderboard_module, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(leaderboard_module, "known_leaders_in_session", AsyncMock(return_value=[]))
+    service = LeaderboardService()
+    information = {"status": "ok", "information": None, "label": "Synthetic"}
+    lookup = AsyncMock(return_value=information)
+    monkeypatch.setattr(service, "_lookup_unknown_vehicle", lookup)
+
+    result = await service.get_leaderboard(enrich_unknowns=enrich_unknowns)
+
+    assert set(result) == {"known", "unknown", "top_known", "generated_at"}
+    assert result["known"] == [] and result["top_known"] is None
+    assert result["unknown"] == [{
+        "rank": 1, "registration_number": "PUBLIC", "read_count": 1,
+        "first_seen_at": now.isoformat(), "last_seen_at": now.isoformat(),
+        "latest_snapshot": {"event_id": str(event_id),
+            "url": f"/api/v1/events/{event_id}/snapshot", "captured_at": now.isoformat(),
+            "bytes": None, "width": 320, "height": 180, "camera": "camera.synthetic"},
+        "vehicle_information": information if enrich_unknowns else {
+            "status": "skipped", "information": None, "label": ""},
+    }]
+    session.close.assert_awaited_once()
+    if enrich_unknowns:
+        lookup.assert_awaited_once_with("PUBLIC")
+    else:
+        lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_unknown_information_uses_only_shared_cache(monkeypatch) -> None:
     from unittest.mock import AsyncMock
+
     from app.services.vehicle_information_contracts import VehicleInformation
     lookup = AsyncMock(return_value=SimpleNamespace(information=VehicleInformation(registration_number="NOPE123")))
     monkeypatch.setattr(leaderboard_module, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=lookup))
@@ -241,10 +290,13 @@ async def test_same_known_leader_updates_state_without_overtake(monkeypatch) -> 
     monkeypatch.setattr(leaderboard_module, "AsyncSessionLocal", lambda: FakeSessionContext(session))
     monkeypatch.setattr(leaderboard_module, "event_bus", fake_bus)
     monkeypatch.setattr(service, "_current_top_known_leader", fake_top)
+    prior = AsyncMock(return_value=_leader(vehicle_id=vehicle_id, person_id=person_id, read_count=2))
+    monkeypatch.setattr(leaderboard_module, "known_leader_from_state_in_session", prior)
 
     result = await service.evaluate_known_overtake(event_id)
 
     assert result["changed"] is False
+    prior.assert_awaited_once_with(session, registration_number="VIP123", vehicle_id=vehicle_id, person_id=person_id, read_count=2)
     assert state.read_count == 3
     assert state.last_event_id == event_id
     assert fake_bus.events == []

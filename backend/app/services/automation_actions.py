@@ -18,6 +18,7 @@ from app.services.automation_policy import (
     HARDWARE_ACTION_TYPES,
     HARDWARE_DENIAL_DETAILS,
     REQUESTER_CONFIRMATION_REQUIRED,
+    action_paused_by_maintenance_mode,
     hardware_action_denial,
 )
 from app.services.gate_commands import GateCommandIntent
@@ -65,7 +66,7 @@ class IntegrationExecution(Protocol):
         context: AutomationContext,
         *,
         rule: AutomationRule,
-        operation_id: str | None = None,
+        execution: AutomationExecution | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -74,11 +75,6 @@ ActionHandler = Callable[
     Awaitable[dict[str, Any]],
 ]
 HardwareAuthorization = Callable[[AsyncSession, AutomationExecution], Awaitable[None]]
-
-
-def action_paused_by_maintenance_mode(action_type: str) -> bool:
-    definition = ACTION_BY_TYPE.get(action_type)
-    return definition.paused_by_maintenance if definition else False
 
 
 def render_action_reason(
@@ -323,5 +319,5 @@ class AutomationActionExecutor:
             action,
             context,
             rule=rule,
-            operation_id=execution["operation_id"] if execution else None,
+            execution=execution,
         )

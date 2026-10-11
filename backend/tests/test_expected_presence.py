@@ -1,6 +1,4 @@
 from datetime import UTC, date, datetime, time, timedelta
-from types import SimpleNamespace
-from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -8,9 +6,7 @@ from app.models.enums import AccessDirection
 from app.services.expected_presence import (
     HistoricalPresenceEvent,
     build_expected_presence_payload,
-    historical_event_from_access_event,
 )
-
 
 TIMEZONE_NAME = "Europe/London"
 TIMEZONE = ZoneInfo(TIMEZONE_NAME)
@@ -137,38 +133,6 @@ def test_learning_folds_in_people_observed_today() -> None:
     assert payload["people"][0]["evidence_days"] == 0
 
 
-def test_vehicle_fallback_skips_ambiguous_people() -> None:
-    first = person("First Person")
-    second = person("Second Person")
-    event = access_event(
-        vehicle=SimpleNamespace(
-            owner=None,
-            person_assignments=[
-                SimpleNamespace(person=first),
-                SimpleNamespace(person=second),
-            ],
-        )
-    )
-
-    assert historical_event_from_access_event(event, {}) is None
-
-
-def test_vehicle_fallback_uses_single_active_person() -> None:
-    assigned = person("Assigned Person")
-    event = access_event(
-        vehicle=SimpleNamespace(
-            owner=None,
-            person_assignments=[SimpleNamespace(person=assigned)],
-        )
-    )
-
-    historical = historical_event_from_access_event(event, {})
-
-    assert historical is not None
-    assert historical.person_id == str(assigned.id)
-    assert historical.display_name == "Assigned Person"
-
-
 def routine_events(
     person_id: str,
     display_name: str,
@@ -222,17 +186,4 @@ def build_payload(events: list[HistoricalPresenceEvent]) -> dict:
         target_date=TARGET_MONDAY,
         timezone_name=TIMEZONE_NAME,
         generated_at=datetime(2026, 5, 4, 8, 0, tzinfo=UTC),
-    )
-
-
-def person(display_name: str, *, is_active: bool = True) -> Any:
-    return SimpleNamespace(id=uuid4(), display_name=display_name, is_active=is_active)
-
-
-def access_event(*, vehicle: Any) -> Any:
-    return SimpleNamespace(
-        person_id=None,
-        vehicle=vehicle,
-        direction=AccessDirection.ENTRY,
-        occurred_at=datetime(2026, 5, 1, 8, 30, tzinfo=UTC),
     )

@@ -1,192 +1,227 @@
+"""Actual locked SDK calls; no policy, database sessions or unowned native work."""
+from __future__ import annotations
+
 import base64
-import json
 import shutil
 import tempfile
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-from zoneinfo import ZoneInfo
+from typing import Any, NoReturn
+
+from pyicloud import PyiCloudService
+from pyicloud.hsa2_bridge import TrustedDeviceBridgeBootstrapper
 
 from app.core.config import settings
+from app.modules.icloud_calendar.bridge import CalendarBridgeSocket
+from app.modules.icloud_calendar.contracts import (
+    CalendarCoverage,
+    CalendarSnapshot,
+    ICloudCalendarClientError,
+    ICloudCalendarReauthRequired,
+)
+from app.modules.icloud_calendar.events import normalize_snapshot
+from app.modules.icloud_calendar.native import CalendarNativeOwner
+from app.modules.icloud_calendar.transport import CalendarHTTPAdapter
 
 ICLOUD_RECONNECT_REQUIRED_MESSAGE = (
     "Stored iCloud session is no longer accepted by Apple. Reconnect this account."
 )
 
 
-class ICloudCalendarClientError(RuntimeError):
-    """Raised when iCloud calendar authentication or sync fails."""
-
-
-class ICloudCalendarReauthRequired(ICloudCalendarClientError):
-    """Raised when a stored iCloud session can no longer be used."""
-
-
-@dataclass(frozen=True)
-class ICloudCalendarEvent:
-    calendar_id: str
-    event_id: str
-    title: str
-    starts_at: datetime
-    ends_at: datetime
-    description: str
-    notes: str
-    raw: dict[str, Any]
-
-
 @dataclass
 class ICloudAuthSession:
     apple_id: str
-    api: Any
+    api: PyiCloudService
     cookie_directory: Path
+    adapter: CalendarHTTPAdapter
+    operation: CalendarNativeOwner | None
+    bridges: list[CalendarBridgeSocket] = field(default_factory=list)
 
 
 class ICloudCalendarClient:
-    """Small adapter around pyicloud so the rest of IACS never imports vendor APIs."""
+    """Synchronous calls run only inside the service's one actual SDK child."""
 
-    def start_auth(self, apple_id: str, password: str) -> ICloudAuthSession:
-        cookie_directory = self._new_cookie_directory()
-        api = self._service(apple_id, password=password, cookie_directory=cookie_directory)
-        return ICloudAuthSession(apple_id=apple_id, api=api, cookie_directory=cookie_directory)
+    def start_auth(
+        self, apple_id: str, password: str, *, operation: CalendarNativeOwner
+    ) -> ICloudAuthSession:
+        return self._service(apple_id, password=password, operation=operation)
+
+    def activate(self, auth_session: ICloudAuthSession, operation: CalendarNativeOwner) -> None:
+        operation.work.check()
+        auth_session.operation = operation
+        auth_session.adapter.work = operation.work
+        for bridge in auth_session.bridges:
+            if not bridge.closed:
+                bridge.activate(operation)
+        operation.work.check()
+
+    def detach(self, auth_session: ICloudAuthSession) -> None:
+        for bridge in auth_session.bridges:
+            if not bridge.closed:
+                bridge.detach()
+        auth_session.operation = None
 
     def requires_security_key(self, auth_session: ICloudAuthSession) -> bool:
-        try:
-            return bool(getattr(auth_session.api, "security_key_names", None))
-        except Exception:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
-            return False
+        return bool(auth_session.api.security_key_names)
 
     def requires_2fa(self, auth_session: ICloudAuthSession) -> bool:
-        return bool(getattr(auth_session.api, "requires_2fa", False))
-
-    def requires_2sa(self, auth_session: ICloudAuthSession) -> bool:
-        return bool(getattr(auth_session.api, "requires_2sa", False))
+        return bool(auth_session.api.requires_2fa)
 
     def requires_legacy_2sa(self, auth_session: ICloudAuthSession) -> bool:
-        return self.requires_2sa(auth_session) and not self.requires_2fa(auth_session)
+        return bool(auth_session.api.requires_2sa and not auth_session.api.requires_2fa)
 
     def request_2fa_code(self, auth_session: ICloudAuthSession) -> None:
-        requester = getattr(auth_session.api, "request_2fa_code", None)
-        if callable(requester):
-            requester()
+        self._current(auth_session).work.check()
+        try:
+            auth_session.api.request_2fa_code()
+        except Exception as exc:  # noqa: BLE001 - Vendor failures are sanitized after checking the current operation.
+            self._raise_provider_failure(auth_session, exc, "Unable to request an Apple verification code.")
+        self._current(auth_session).work.check()
 
     def validate_2fa_code(self, auth_session: ICloudAuthSession, code: str) -> bool:
-        validator = getattr(auth_session.api, "validate_2fa_code", None)
-        if not callable(validator):
-            raise ICloudCalendarClientError(
-                "This iCloud session cannot validate a verification code."
-            )
-        return bool(validator(code))
+        self._current(auth_session).work.check()
+        try:
+            result = bool(auth_session.api.validate_2fa_code(code))
+        except Exception as exc:  # noqa: BLE001 - Vendor failures are sanitized after checking the current operation.
+            self._raise_provider_failure(auth_session, exc, "Unable to verify the Apple verification code.")
+        self._current(auth_session).work.check()
+        return result
 
     def trust_session(self, auth_session: ICloudAuthSession) -> bool:
+        self._current(auth_session).work.check()
         try:
-            if bool(getattr(auth_session.api, "is_trusted_session", False)):
-                return True
-        except Exception:  # noqa: BLE001 - Vendor boundary preserves failure truth for arbitrary SDK errors.
-            return False
-        trust = getattr(auth_session.api, "trust_session", None)
-        if not callable(trust):
-            return False
-        return bool(trust())
+            result = bool(auth_session.api.is_trusted_session or auth_session.api.trust_session())
+        except Exception as exc:  # noqa: BLE001 - Vendor failures are sanitized after checking the current operation.
+            self._raise_provider_failure(auth_session, exc, "Unable to trust the verified Apple session.")
+        self._current(auth_session).work.check()
+        return result
 
     def session_bundle(self, auth_session: ICloudAuthSession) -> dict[str, Any]:
+        self._current(auth_session).work.check()
         return _bundle_directory(auth_session.cookie_directory)
 
     def cleanup_auth_session(self, auth_session: ICloudAuthSession) -> None:
-        shutil.rmtree(auth_session.cookie_directory, ignore_errors=True)
-
-    def fetch_events(
-        self,
-        *,
-        apple_id: str,
-        session_bundle: dict[str, Any],
-        starts_at: datetime,
-        ends_at: datetime,
-    ) -> list[ICloudCalendarEvent]:
-        cookie_directory = self._new_cookie_directory()
-        try:
-            _restore_directory_bundle(cookie_directory, session_bundle)
+        """Close all acquired handles even when stop/deadline forbids new work."""
+        failure: BaseException | None = None
+        for bridge in auth_session.bridges:
             try:
-                api = self._service(apple_id, password=None, cookie_directory=cookie_directory)
-            except ICloudCalendarClientError as exc:
-                if _stored_session_needs_reauth(exc):
-                    raise ICloudCalendarReauthRequired(ICLOUD_RECONNECT_REQUIRED_MESSAGE) from exc
-                raise
-            if bool(getattr(api, "requires_2fa", False)) or bool(
-                getattr(api, "requires_2sa", False)
-            ):
+                bridge.close()
+            except BaseException as exc:  # noqa: BLE001 - Observe every acquired handle before propagating cleanup failure.
+                failure = failure or exc
+        try:
+            # Clear the SDK's retained reference as well as our concrete handles.
+            auth_session.api._clear_trusted_device_bridge_state()
+        except BaseException as exc:  # noqa: BLE001 - Observe every acquired handle before propagating cleanup failure.
+            failure = failure or exc
+        try:
+            auth_session.api.session.close()
+        except BaseException as exc:  # noqa: BLE001 - Observe every acquired handle before propagating cleanup failure.
+            failure = failure or exc
+        try:
+            shutil.rmtree(auth_session.cookie_directory)
+        except FileNotFoundError:
+            pass
+        except BaseException as exc:  # noqa: BLE001 - Observe every acquired handle before propagating cleanup failure.
+            failure = failure or exc
+        auth_session.operation = None
+        if failure is not None:
+            raise failure
+
+    def fetch_snapshot(
+        self, *, apple_id: str, session_bundle: dict[str, Any],
+        coverage: CalendarCoverage, operation: CalendarNativeOwner,
+    ) -> CalendarSnapshot:
+        auth_session = self._service(apple_id, password=None, operation=operation,
+                                     session_bundle=session_bundle)
+        try:
+            if auth_session.api.requires_2fa or auth_session.api.requires_2sa:
                 raise ICloudCalendarReauthRequired(
                     "iCloud requested verification again. Reconnect this account."
                 )
-            raw_events = _fetch_raw_calendar_events(api, starts_at, ends_at)
-            return [event for event in (_normalize_event(item) for item in raw_events) if event]
+            operation.work.check()
+            calendar = auth_session.api.calendar
+            auth_session.adapter.bind_coverage(f"{calendar.service_root}/ca/events", coverage)
+            response = calendar.refresh_client(coverage.requested_start, coverage.requested_end)
+            operation.work.check()
+            return normalize_snapshot(response, coverage)
+        except Exception as exc:  # noqa: BLE001 - Vendor failures are sanitized after checking the current operation.
+            self._raise_provider_failure(auth_session, exc, "Unable to read iCloud Calendar. Try again or reconnect the account.")
         finally:
-            shutil.rmtree(cookie_directory, ignore_errors=True)
+            self.cleanup_auth_session(auth_session)
 
-    def _fetch_calendar_events(self, api: Any, starts_at: datetime, ends_at: datetime) -> list[Any]:
-        return _fetch_raw_calendar_events(api, starts_at, ends_at)
-
-    def _service(self, apple_id: str, *, password: str | None, cookie_directory: Path) -> Any:
+    def _service(
+        self, apple_id: str, *, password: str | None, operation: CalendarNativeOwner,
+        session_bundle: dict[str, Any] | None = None,
+    ) -> ICloudAuthSession:
+        operation.work.check()
+        cookie_directory = self._new_cookie_directory()
+        auth_session: ICloudAuthSession | None = None
         try:
-            from pyicloud import PyiCloudService
-        except ImportError as exc:
-            raise ICloudCalendarClientError(
-                "pyicloud is not installed in the backend environment. Rebuild the backend container."
-            ) from exc
+            if session_bundle is not None:
+                _restore_directory_bundle(cookie_directory, session_bundle)
+            # Constructor does no authentication. Install finite HTTP and bridge
+            # ports before the first real authentication request is possible.
+            api = PyiCloudService(apple_id, password, cookie_directory=str(cookie_directory),
+                                 authenticate=False)
+            adapter = CalendarHTTPAdapter(operation.work)
+            api.session.mount("https://", adapter)
+            api.session.mount("http://", adapter)
+            auth_session = ICloudAuthSession(apple_id, api, cookie_directory, adapter, operation)
 
-        try:
-            return PyiCloudService(
-                apple_id,
-                password,
-                cookie_directory=str(cookie_directory),
-            )
-        except Exception as exc:
-            raise ICloudCalendarClientError(str(exc) or "Unable to connect to iCloud.") from exc
+            def bridge_factory(url: str, timeout: float, origin: str, user_agent: str) -> CalendarBridgeSocket:
+                current = self._current(auth_session)
+                bridge = CalendarBridgeSocket(url, timeout, origin, user_agent, operation=current)
+                auth_session.bridges.append(bridge)
+                return bridge
 
-    def _new_cookie_directory(self) -> Path:
+            api._trusted_device_bridge = TrustedDeviceBridgeBootstrapper(websocket_factory=bridge_factory)
+            operation.work.check()
+            api.authenticate()
+            operation.work.check()
+            return auth_session
+        except BaseException as exc:
+            if auth_session is not None:
+                try:
+                    self.cleanup_auth_session(auth_session)
+                except BaseException as cleanup_error:
+                    raise cleanup_error from exc
+            else:
+                shutil.rmtree(cookie_directory)
+            operation.work.check()
+            if not isinstance(exc, Exception):
+                raise
+            if "no password set" in str(exc).lower():
+                raise ICloudCalendarReauthRequired(ICLOUD_RECONNECT_REQUIRED_MESSAGE) from exc
+            if isinstance(exc, ICloudCalendarClientError):
+                raise
+            raise ICloudCalendarClientError("Unable to connect to iCloud. Check the account and try again.") from exc
+
+    @staticmethod
+    def _current(auth_session: ICloudAuthSession) -> CalendarNativeOwner:
+        if auth_session.operation is None:
+            raise RuntimeError("Pending Apple authentication has no admitted SDK operation.")
+        return auth_session.operation
+
+    @classmethod
+    def _raise_provider_failure(cls, auth_session: ICloudAuthSession, exc: Exception, detail: str) -> NoReturn:
+        cls._current(auth_session).work.check()
+        if isinstance(exc, ICloudCalendarClientError):
+            raise exc
+        raise ICloudCalendarClientError(detail) from exc
+
+    @staticmethod
+    def _new_cookie_directory() -> Path:
         root = settings.data_dir / "icloud-calendar-sessions"
         root.mkdir(parents=True, exist_ok=True)
         return Path(tempfile.mkdtemp(prefix="session-", dir=root))
 
 
-def _fetch_raw_calendar_events(api: Any, starts_at: datetime, ends_at: datetime) -> list[Any]:
-    calendar = getattr(api, "calendar", None)
-    if calendar is None:
-        raise ICloudCalendarClientError(
-            "iCloud Calendar service was not available for this account."
-        )
-
-    refresh_client = getattr(calendar, "refresh_client", None)
-    if callable(refresh_client):
-        response = refresh_client(starts_at, ends_at) or {}
-        if isinstance(response, dict):
-            return list(response.get("Event") or [])
-
-    get_events = getattr(calendar, "get_events", None)
-    if callable(get_events):
-        try:
-            return list(get_events(from_dt=starts_at, to_dt=ends_at, as_objs=False) or [])
-        except TypeError:
-            return list(get_events(from_dt=starts_at, period="2weeks", as_objs=False) or [])
-
-    if hasattr(calendar, "events"):
-        return list(calendar.events(starts_at, ends_at) or [])
-
-    raise ICloudCalendarClientError("The installed pyicloud calendar client cannot fetch events.")
-
-
 def _bundle_directory(directory: Path) -> dict[str, Any]:
     files: list[dict[str, str]] = []
     for path in directory.rglob("*"):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(directory).as_posix()
-        files.append(
-            {
-                "path": relative,
-                "content_b64": base64.b64encode(path.read_bytes()).decode("ascii"),
-            }
-        )
+        if path.is_file():
+            files.append({"path": path.relative_to(directory).as_posix(),
+                          "content_b64": base64.b64encode(path.read_bytes()).decode("ascii")})
     return {"version": 1, "files": files}
 
 
@@ -201,139 +236,3 @@ def _restore_directory_bundle(directory: Path, bundle: dict[str, Any]) -> None:
         target = directory / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(base64.b64decode(str(item.get("content_b64") or "")))
-
-
-def _stored_session_needs_reauth(exc: Exception) -> bool:
-    message = str(exc).strip().lower()
-    return "no password set" in message
-
-
-def _normalize_event(value: Any) -> ICloudCalendarEvent | None:
-    title = _text(_event_value(value, "title", "summary", "name"))
-    calendar_id = _text(
-        _event_value(value, "pguid", "pGuid", "calendar_id", "calendarId", "calendarGuid")
-    )
-    event_id = _text(_event_value(value, "guid", "id", "event_id", "eventId"))
-    timezone = _event_timezone(value)
-    starts_at = _datetime_value(
-        _event_value(
-            value,
-            "startDate",
-            "start_date",
-            "localStartDate",
-            "local_start_date",
-            "start",
-            "starts_at",
-        ),
-        timezone=timezone,
-    )
-    ends_at = _datetime_value(
-        _event_value(
-            value, "endDate", "end_date", "localEndDate", "local_end_date", "end", "ends_at"
-        ),
-        timezone=timezone,
-    )
-    if not title or not event_id or not starts_at or not ends_at or ends_at <= starts_at:
-        return None
-    if bool(_event_value(value, "allDay", "all_day", "is_all_day")):
-        return None
-    return ICloudCalendarEvent(
-        calendar_id=calendar_id or "calendar",
-        event_id=event_id,
-        title=title,
-        starts_at=starts_at,
-        ends_at=ends_at,
-        description=_text(_event_value(value, "description", "desc")),
-        notes=_text(
-            _event_value(value, "notes", "note", "privateComments", "private_comments", "comments")
-        ),
-        raw=_safe_event_raw(value),
-    )
-
-
-def _event_value(value: Any, *names: str) -> Any:
-    if isinstance(value, dict):
-        for name in names:
-            if name in value:
-                return value[name]
-    getter = getattr(value, "get", None)
-    if callable(getter):
-        for name in names:
-            try:
-                result = getter(name)
-            except TypeError:
-                result = None
-            if result is not None:
-                return result
-    for name in names:
-        if hasattr(value, name):
-            return getattr(value, name)
-    return None
-
-
-def _datetime_value(value: Any, *, timezone: ZoneInfo | None = None) -> datetime | None:
-    if isinstance(value, datetime):
-        return _ensure_aware(value, timezone=timezone)
-    if isinstance(value, list | tuple) and len(value) >= 6:
-        try:
-            parsed = datetime(
-                int(value[1]),
-                int(value[2]),
-                int(value[3]),
-                int(value[4]),
-                int(value[5]),
-                tzinfo=timezone or UTC,
-            )
-        except (TypeError, ValueError):
-            return None
-        return parsed
-    if isinstance(value, int | float):
-        seconds = value / 1000 if value > 10_000_000_000 else value
-        return datetime.fromtimestamp(seconds, tz=UTC)
-    if isinstance(value, str) and value.strip():
-        text = value.strip().replace("Z", "+00:00")
-        try:
-            return _ensure_aware(datetime.fromisoformat(text), timezone=timezone)
-        except ValueError:
-            return None
-    return None
-
-
-def _ensure_aware(value: datetime, *, timezone: ZoneInfo | None = None) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone or UTC)
-    return value.astimezone(UTC)
-
-
-def _event_timezone(value: Any) -> ZoneInfo | None:
-    for candidate in (
-        _text(_event_value(value, "tz", "timezone", "timeZone", "time_zone")),
-        _text(_event_value(value, "tzname", "time_zone_name")),
-    ):
-        if not candidate:
-            continue
-        try:
-            return ZoneInfo(candidate)
-        except Exception:  # noqa: BLE001, S112 - Vendor boundary preserves failure truth for arbitrary SDK errors.
-            continue
-    return None
-
-
-def _text(value: Any) -> str:
-    return " ".join(str(value or "").strip().split())
-
-
-def _safe_event_raw(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        raw = value
-    else:
-        raw = {
-            key: getattr(value, key)
-            for key in ("guid", "pguid", "title", "start_date", "end_date")
-            if hasattr(value, key)
-        }
-    try:
-        json.dumps(raw, default=str)
-    except TypeError:
-        return {}
-    return json.loads(json.dumps(raw, default=str)) if isinstance(raw, dict) else {}

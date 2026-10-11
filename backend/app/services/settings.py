@@ -24,6 +24,7 @@ from app.modules.access_devices.binding_policies import (
 )
 from app.modules.home_assistant.covers import normalize_cover_entities
 from app.services.access_device_commands import AccessDeviceCommandJournal
+from app.services.auth_root import reload_auth_root_for_transaction
 from app.services.mutation_context import load_active_admin
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
@@ -452,6 +453,7 @@ async def seed_dynamic_settings() -> None:
 
 
 async def seed_dynamic_settings_for_session(session: AsyncSession) -> None:
+    await reload_auth_root_for_transaction(session)
     existing = set((await session.scalars(select(SystemSetting.key))).all())
     for key, (category, default, description) in DEFAULT_DYNAMIC_SETTINGS.items():
         if key in existing:
@@ -638,6 +640,7 @@ async def update_settings(
     validate_dynamic_setting_keys(updates)
 
     async with AsyncSessionLocal() as session:
+        await reload_auth_root_for_transaction(session)
         current_actor = (
             await load_active_admin(
                 session, user.id, auth_version=user.auth_session_version, lock=True

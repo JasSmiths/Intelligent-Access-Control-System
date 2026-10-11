@@ -1,10 +1,10 @@
-const testReads = vi.hoisted(() => ({ presence: [] as Presence[], expectedPresence: null as ExpectedPresenceSummary | null, events: [] as AccessEvent[], people: [] as Person[], vehicles: [] as Vehicle[] }));
+const testReads = vi.hoisted(() => ({ presence: [] as Presence[], presenceCounts: { total: 0, present: 0, exited: 0, unknown: 0 }, insideHidden: 0, expectedPresence: null as ExpectedPresenceOverview | null, events: [] as AccessEvent[], people: [] as Person[], vehicles: [] as Vehicle[] }));
 vi.mock("../features/dashboard/reads", () => ({ useDashboardReads: () => ({ ...testReads, error: "", refresh: vi.fn().mockResolvedValue(undefined) }) }));
 vi.mock("../features/dashboard/useDashboardDirectory", () => ({ useDashboardDirectory: () => ({ people: testReads.people, vehicles: testReads.vehicles, activeVehicleCount: testReads.vehicles.length, error: "", refresh: vi.fn().mockResolvedValue(undefined) }) }));
 import * as directoryApi from "../api/directory";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { AccessEvent, Anomaly, ExpectedPresenceSummary, IntegrationStatus, Person, Presence, UserAccount, Vehicle } from "../api/types";
+import type { AccessEvent, Anomaly, ExpectedPresenceOverview, IntegrationStatus, Person, Presence, UserAccount, Vehicle } from "../api/types";
 import { Dashboard } from "./DashboardView";
 
 const integrationStatus = { configured: true, connected: true, gate_entities: [], garage_door_entities: [] } as unknown as IntegrationStatus;
@@ -15,7 +15,7 @@ const props = {
   navigateToView: vi.fn(), onMaintenanceStatusChanged: vi.fn()
 };
 beforeEach(() => {
-  Object.assign(testReads, { presence: [], expectedPresence: null, events: [], people: [], vehicles: [] });
+  Object.assign(testReads, { presence: [], presenceCounts: { total: 0, present: 0, exited: 0, unknown: 0 }, insideHidden: 0, expectedPresence: null, events: [], people: [], vehicles: [] });
   vi.spyOn(directoryApi, "listVehicles").mockResolvedValue({ items: [], total: 0, next_cursor: null });
   vi.spyOn(directoryApi, "lookupVehicleRegistrations").mockResolvedValue([]);
   vi.spyOn(directoryApi, "lookupPeople").mockResolvedValue([]);

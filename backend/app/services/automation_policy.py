@@ -85,3 +85,8 @@ def hardware_configuration_error(
     if "vehicle.unknown_plate" in trigger_keys and HARDWARE_ACTION_TYPES.intersection(action_types):
         return HARDWARE_DENIAL_DETAILS[UNKNOWN_PLATE_HARDWARE_FORBIDDEN]
     return None
+
+
+def action_paused_by_maintenance_mode(action_type: str) -> bool:
+    definition = ACTION_BY_TYPE.get(action_type)
+    return definition.paused_by_maintenance if definition else False

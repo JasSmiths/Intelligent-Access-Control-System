@@ -8,13 +8,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRule, ICloudCalendarAccount
-from app.services.icloud_calendar import ICloudCalendarError, get_icloud_calendar_service
+from app.modules.icloud_calendar.contracts import ICloudCalendarClientError
+from app.services.automation_execution import AutomationRunStore
+from app.services.calendar_sync_store import calendar_session
+from app.services.calendar_workflow_authority import CalendarWorkflowAuthority
+from app.services.icloud_calendar import get_icloud_calendar_service
+from app.services.icloud_calendar_sdk import CalendarSDKBusy
 from app.services.workflows.action_definitions import (
     ACTION_BY_TYPE,
     action_definition,
     require_exhaustive_bindings,
 )
 from app.services.workflows.automation_definition import AutomationContext
+from app.services.workflows.execution_contracts import (
+    AutomationExecution,
+    checked_action,
+    checked_execution,
+)
 
 IntegrationEnabledCheck = Callable[[], Awaitable[bool]]
 
@@ -27,8 +37,7 @@ class IntegrationActionHandler(Protocol):
         context: AutomationContext,
         rule: AutomationRule,
         *,
-        operation_id: str | None = None,
-        origin: dict[str, Any] | None = None,
+        execution: AutomationExecution | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -113,8 +122,7 @@ async def execute_integration_action(
     context: AutomationContext,
     *,
     rule: AutomationRule,
-    operation_id: str | None = None,
-    origin: dict[str, Any] | None = None,
+    execution: AutomationExecution | None = None,
 ) -> dict[str, Any]:
     action_type = str(action.get("type") or "")
     definition = integration_action_for_type(action_type)
@@ -137,12 +145,12 @@ async def execute_integration_action(
             "disabled_reason": status.disabled_reason,
         }
     return await definition.execute(
-        session, action, context, rule, operation_id=operation_id, origin=origin
+        session, action, context, rule, execution=execution
     )
 
 
 async def _icloud_calendar_enabled() -> bool:
-    async with AsyncSessionLocal() as session:
+    async with calendar_session(AsyncSessionLocal) as session:
         return bool(
             await session.scalar(
                 select(ICloudCalendarAccount.id)
@@ -160,16 +168,25 @@ async def _execute_icloud_calendar_sync(
     context: AutomationContext,
     rule: AutomationRule,
     *,
-    operation_id: str | None = None,
-    origin: dict[str, Any] | None = None,
+    execution: AutomationExecution | None = None,
 ) -> dict[str, Any]:
     try:
+        canonical = checked_execution(execution)
+        participant = CalendarWorkflowAuthority(canonical, checked_action(action), runs=AutomationRunStore())
+    except (TypeError, ValueError) as exc:
+        return {"id": action["id"], "type": action["type"], "status": "failed",
+            "reason": "calendar_authority_unavailable", "error": str(exc)}
+    try:
         result = await get_icloud_calendar_service().sync_all(
-            trigger_source="automation",
-            triggered_by_user_id=_coerce_uuid(getattr(rule, "created_by_user_id", None)),
-            actor="Automation Engine",
+            run_id=uuid.UUID(canonical["operation_id"]), origin="workflow", execution=canonical,
+            authorize=participant.authorize,
+            actor_user_id=_coerce_uuid(getattr(rule, "created_by_user_id", None)), actor="Automation Engine",
         )
-    except ICloudCalendarError as exc:
+    except CalendarSDKBusy:
+        return {"id": action["id"], "type": action["type"], "status": "skipped",
+            "reason": "calendar_busy", "integration_provider": "icloud_calendar",
+            "integration_action": "sync_calendars", "requires_review": False}
+    except ICloudCalendarClientError as exc:
         return {
             "id": action["id"],
             "type": action["type"],
@@ -180,7 +197,7 @@ async def _execute_icloud_calendar_sync(
         }
 
     sync_status = str(result.get("status") or "ok")
-    status = "success" if sync_status == "ok" else "failed"
+    status = "unknown" if result.get("interrupted") or sync_status == "unknown" else ("success" if sync_status == "ok" else "failed")
     response = {
         "id": action["id"],
         "type": action["type"],
@@ -196,7 +213,10 @@ async def _execute_icloud_calendar_sync(
         "passes_cancelled": result.get("passes_cancelled", 0),
         "passes_skipped": result.get("passes_skipped", 0),
     }
-    if status == "failed":
+    if status == "unknown":
+        response["requires_review"] = True
+        response["reason"] = "calendar_attempt_interrupted_or_unknown"
+    if status != "success":
         response["error"] = result.get("error") or f"iCloud Calendar sync returned {sync_status}."
     return response
 

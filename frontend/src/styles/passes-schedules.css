@@ -2462,3 +2462,10 @@
   font-size: 13px;
   text-align: center;
 }
+
+.icloud-run-reference {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}

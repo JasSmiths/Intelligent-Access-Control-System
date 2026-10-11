@@ -69,11 +69,7 @@ export type PresenceRosterPerson = {
 export function insideNowRoster(rows: Presence[], peopleById: Map<string, Person>, now = new Date()): PresenceRosterPerson[] {
   return rows
     .filter((row) => row.state === "present")
-    .slice()
-    .sort((left, right) => {
-      const byTime = timeValue(right.last_changed_at) - timeValue(left.last_changed_at);
-      return byTime || left.display_name.localeCompare(right.display_name);
-    })
+    // The bounded summary already supplies the deterministic server roster order.
     .map((row) => ({
       id: row.person_id,
       display_name: row.display_name,

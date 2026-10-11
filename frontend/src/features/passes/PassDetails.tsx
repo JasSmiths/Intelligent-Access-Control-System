@@ -21,12 +21,14 @@ export function VisitorPassDetailsModal({
   onEdit: finishEdit,
   onCancel,
   onDelete,
+  metadataError = "",
 }: {
   visitorPass: VisitorPass;
   onClose: () => void;
   onEdit: (visitorPass: VisitorPass) => void;
   onCancel: (visitorPass: VisitorPass) => Promise<VisitorPass | null>;
   onDelete: (visitorPass: VisitorPass) => Promise<boolean>;
+  metadataError?: string;
 }) {
   const modalRef = React.useRef<HTMLDivElement>(null);
   const onClose = useModalClose(modalRef, finishClose);
@@ -44,7 +46,7 @@ export function VisitorPassDetailsModal({
   const logsLoadSequenceRef = React.useRef(0);
   const logsLoadAbortRef = React.useRef<AbortController | null>(null);
   const isDuration = visitorPass.pass_type === "duration";
-  const canModify = visitorPass.status === "active" || visitorPass.status === "scheduled";
+  const canModify = !metadataError && (visitorPass.status === "active" || visitorPass.status === "scheduled");
   const vehicleValue = [visitorPass.vehicle_colour, visitorPass.vehicle_make].filter(Boolean).join(" ") || visitorPass.number_plate || "Vehicle details pending";
   const vehicleDetail = visitorPass.number_plate ? `Registration ${visitorPass.number_plate}` : "Plate pending";
   const sourceLabel = visitorPassSourceLabel(visitorPass.creation_source);
@@ -111,7 +113,7 @@ export function VisitorPassDetailsModal({
 
 
   const confirmVisitorPassAction = async () => {
-    if (!confirmAction || action !== null) return;
+    if (!confirmAction || action !== null || metadataError || (confirmAction === "cancel" && !canModify)) return;
     setAction(confirmAction);
     try {
       if (confirmAction === "cancel") {
@@ -238,7 +240,7 @@ export function VisitorPassDetailsModal({
             <button className="secondary-button danger" onClick={() => setConfirmAction("cancel")} disabled={!canModify || action !== null} type="button">
               <X size={15} /> {action === "cancel" ? "Cancelling..." : "Cancel pass"}
             </button>
-            <button className="danger-button" onClick={() => setConfirmAction("delete")} disabled={action !== null} type="button">
+            <button className="danger-button" onClick={() => setConfirmAction("delete")} disabled={action !== null || Boolean(metadataError)} type="button">
               <Trash2 size={15} /> {action === "delete" ? "Deleting..." : "Delete pass"}
             </button>
           </div>

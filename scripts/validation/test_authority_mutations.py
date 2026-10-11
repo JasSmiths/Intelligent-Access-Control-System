@@ -123,15 +123,17 @@ async def test_settings_concurrent_admins_serialize_before_values_and_absent_cre
     if existing:
         await seed_setting("app_name", "Before")
     first_at_audit, release_first, second_started, second_at_audit = (asyncio.Event() for _ in range(4))
-    pids = {}
-    load_admin, write = settings.load_active_admin, settings.write_audit_log
+    pids, writer_ids = {}, {}
+    load_root, write = settings.reload_auth_root_for_transaction, settings.write_audit_log
 
-    async def current_actor(session, user_id, **kwargs):
-        actor = await load_admin(session, user_id, **kwargs)
-        pids[actor.id] = await session.scalar(select(func.pg_backend_pid()))
-        if actor.id == second.id:
+    async def before_auth_root(session):
+        task = asyncio.current_task()
+        assert task in writer_ids
+        user_id = writer_ids[task]
+        pids[user_id] = await session.scalar(select(func.pg_backend_pid()))
+        if user_id == second.id:
             second_started.set()
-        return actor
+        return await load_root(session)
 
     async def held_audit(session, **kwargs):
         if kwargs["actor_user_id"] == first.id:
@@ -151,12 +153,15 @@ async def test_settings_concurrent_admins_serialize_before_values_and_absent_cre
                 await asyncio.sleep(0)
         return False
 
-    monkeypatch.setattr(settings, "load_active_admin", current_actor)
+    monkeypatch.setattr(settings, "reload_auth_root_for_transaction", before_auth_root)
     monkeypatch.setattr(settings, "write_audit_log", held_audit)
     tasks = [asyncio.create_task(settings.update_settings({"app_name": "First"}, user=first, source="authority_contract"))]
+    writer_ids[tasks[0]] = first.id
     try:
         await bounded(first_at_audit.wait())
-        tasks.append(asyncio.create_task(settings.update_settings({"app_name": "Second"}, user=second, source="authority_contract")))
+        second_task = asyncio.create_task(settings.update_settings({"app_name": "Second"}, user=second, source="authority_contract"))
+        writer_ids[second_task] = second.id
+        tasks.append(second_task)
         await bounded(second_started.wait())
         assert await bounded(observe_real_contention()), "The second writer reached its audit using an unserialized before-value"
     finally:

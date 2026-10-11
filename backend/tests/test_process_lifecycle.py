@@ -44,6 +44,7 @@ def owned_resources(monkeypatch):
     monkeypatch.setattr(main, "event_bus", service("realtime"))
     monkeypatch.setattr(main, "report_exports", service("reports"))
     monkeypatch.setattr(main, "vehicle_information_resources", service("vehicle_information_clients"))
+    monkeypatch.setattr(main, "get_icloud_calendar_service", lambda: service("calendar"))
     for name in SERVICE_NAMES:
         instance = service(name)
         monkeypatch.setattr(main, f"get_{name}_worker" if name == "vehicle_information" else f"get_{name}_service", lambda instance=instance: instance)
@@ -62,7 +63,7 @@ def owned_resources(monkeypatch):
     return events, controls
 
 
-@pytest.mark.parametrize("failure", ("realtime", "vehicle_information_clients", "reports", *SERVICE_NAMES))
+@pytest.mark.parametrize("failure", ("realtime", "vehicle_information_clients", "reports", "calendar", *SERVICE_NAMES))
 async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_resources, failure):
     events, controls = owned_resources
     controls["fail_start"] = failure
@@ -105,8 +106,9 @@ async def test_normal_shutdown_drains_owned_tasks_before_services_and_database(o
     first_stop = next(i for i, event in enumerate(events) if event[0] == "stop")
     assert all(i < first_stop for i, event in enumerate(events) if event == ("task", "stopped"))
     assert events[-1] == ("stop", "database")
+    assert events.index(("stop", "calendar")) < events.index(("stop", "visitor_pass"))
     for producer in ("automation", "unifi_protect", "access_event", "movement_reconciliation", "vehicle_information", "reports"):
-        for sink in ("access_device", "notification", "database"):
+        for sink in ("calendar", "access_device", "notification", "database"):
             assert events.index(("stop", producer)) < events.index(("stop", sink))
 
 
@@ -159,3 +161,42 @@ async def test_timed_out_cooperative_cleanup_is_cancelled_before_later_resources
     assert ('cancelled', 'access_device') in events
     assert events.index(('cancelled', 'access_device')) < events.index(('stop', 'notification'))
     assert events[-2:] == [('stop', 'realtime'), ('stop', 'database')]
+
+
+async def test_full_lifespan_retains_calendar_observation_cleanup_before_database_disposal(owned_resources, monkeypatch):
+    from app.services.icloud_calendar import ICloudCalendarService
+    events, _ = owned_resources
+    client = SimpleNamespace(cleanup_auth_session=lambda _: None, detach=lambda _: None)
+    service = ICloudCalendarService(client)
+    monkeypatch.setattr(main, "get_icloud_calendar_service", lambda: service)
+    entered, cleanup, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    cancelled = []
+    async def actual_observer():
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.append(asyncio.current_task().cancelling())
+            cleanup.set()
+            await release.wait()
+    async def accepted(native):
+        return {"status": "connected", "id": "inert-known-receipt"}
+    async def after(receipt, native):
+        return await service._observe_accepted(receipt, actual_observer, work=native.work)
+    monkeypatch.setattr("app.services.icloud_calendar.CALENDAR_OBSERVATION_SECONDS", .02)
+    original_wait_for = asyncio.wait_for
+    async def short_stop(awaitable, *, timeout):
+        return await original_wait_for(awaitable, timeout=.01)
+    monkeypatch.setattr(main.asyncio, "wait_for", short_stop)
+    lifetime = main.lifespan(FastAPI())
+    await lifetime.__aenter__()
+    request = asyncio.create_task(service.sdk.run(accepted, after_result=after))
+    await entered.wait()
+    shutdown = asyncio.create_task(lifetime.__aexit__(None, None, None))
+    await cleanup.wait(); await asyncio.sleep(.03)
+    assert not shutdown.done() and not request.done() and service.sdk._active is not None
+    assert ("stop", "database") not in events and cancelled == [1]
+    release.set()
+    assert (await request)["id"] == "inert-known-receipt"
+    await shutdown
+    assert events[-1] == ("stop", "database") and service.sdk._active is None

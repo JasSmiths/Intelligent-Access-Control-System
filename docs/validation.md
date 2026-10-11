@@ -62,8 +62,8 @@ scale. Run the identical fixture against the preserved baseline and candidate,
 retain source/runtime/lock/fixture identities, and compare equivalent visible
 outputs. Report the beyond-500 case separately as correctness evidence. Loaded
 payload changes do not establish reduced database work or production speedups;
-unchanged unpaged group/schedule contracts and temporary full presence reads must
-remain explicit limitations. Build and unit evidence uses the guide's locked
+unchanged unpaged group/schedule contracts and the population-sized public
+presence compatibility read remain explicit limitations. Build and unit evidence uses the guide's locked
 Node 22 runtime; host browser runtime identity is recorded separately. If development
 effect replay changes request counts, retain those results and compare the same
 fixture against locked production assets served sequentially from disposable
@@ -95,6 +95,35 @@ blocked save/delete/create races and late pre-mutation reads. This fixture is
 synthetic; it does not register or actuate a live provider. Backend provider-policy
 extension evidence and final integrated E1 conformance remain separate gates.
 
+
+## Calendar ownership checks
+
+The [calendar persistence inventory](../scripts/validation/recovery_checks.py)
+registers store, authority, reconciliation, auth-root writers, SDK/account engine,
+authentication and actual ASGI adapters separately. Fixtures prove real PostgreSQL
+locks/flush fences, logout serialization, current workflow execution, same-run
+recovery, required audit rollback, uncertain acceptance and actual cleanup.
+The [SDK tests](../backend/tests/test_icloud_calendar_boundary.py) use installed
+locked pyicloud with inert transport; transport tests include actual local TLS
+backpressure, eight retained receivers, stale abort callbacks and close/join.
+The rejected kernel send-timeout probe remains failed evidence; it is not a
+transport implementation guarantee.
+
+[Calendar browser fixtures](../frontend/e2e/calendar-recovery.spec.ts) inspect a
+workflow run without implicit mutation, confirm adoption of its exact UUID,
+retain an original lost-response request and a dirty auth draft, and replay the
+same UUID after remount. [Selected-pass owner tests](../frontend/src/features/passes/selectedMetadata.test.tsx)
+cover filtered aggregate invalidation and old GET after authoritative full-row
+replacement. Required browser checks remain Chromium/WebKit with `CI=1`, owned
+5174 and no backend proxy. Host Node24 progress is supplemental; the final locked
+Node22 build/unit and complete isolated harness remain mandatory.
+
+Calendar WIP is not a full-stage validation claim. Bounded primitives have exact
+Astra approvals recorded in the closure ledger; later API/editor/lifecycle and
+session-cleanup changes require current real gates. Keep original setup/test
+failures and copied source identities. Migration checks include empty down/re-up
+and refusal of populated ownership downgrade. No live calendar requests or
+mixed-version operational cutover is exercised by these inert checks.
 
 ## Final runtime PDF capability
 
@@ -609,3 +638,57 @@ Queue/context accounting bounds retained work; SDK response and synchronous
 extractor allocation before admission is a separate transient cost. Supplemental
 socket-denied macOS checks do not replace the required Linux isolated harness,
 persistence, migrations and restore rehearsal.
+
+
+## Compact read candidate checks
+
+The [compact-read PG suite](../scripts/validation/test_compact_reads_persistence.py)
+checks rank/group/nullable media semantics, selected snapshot lookup including
+unknown byte sizes and unavailable latest files, four-field public presence order,
+one-statement counts/roster, C-collated name ties, recorded-before-current forecast
+attribution, duplicate owner/assignment identity and DST/horizon boundaries. It
+asserts executed column projections and no entity hydration. The
+[browser fixture](../frontend/e2e/compact-presence.spec.ts) checks global/hidden
+counts, six-name order and recent-event Exited Today at phone, desktop and dark
+tablet sizes; it must run in both configured browsers on owned source assets.
+
+[Compact read measurements](../scripts/benchmarks/compact_reads.py) run the same
+public entry points and fixed synthetic inputs in immutable baseline and candidate
+snapshots with exact locked dependencies. Run only inside the guide's loopback-only
+migrated disposable database/container; the script refuses other database/network
+namespaces. Examples within that owned environment:
+
+```sh
+python -m scripts.benchmarks.compact_reads --phase baseline --suite charts --events 10000 --output /evidence/chart-small.json
+python -m scripts.benchmarks.compact_reads --phase candidate --suite charts --events 1000000 --output /evidence/chart-target.json
+python -m scripts.benchmarks.compact_reads --phase candidate --suite presence --people 2000 --output /evidence/presence-target.json
+python -m scripts.benchmarks.compact_reads --phase candidate --suite forecast --people 2000 --density high --output /evidence/forecast-target-high.json
+```
+
+Run **each** workload against **both** source snapshots, using the identical fixture
+body and all arguments except phase/output path. The full matrix is charts
+10,000/1,000,000 events; presence 20/2,000 people; forecast 20/2,000 people at low
+(12 weekly days × two movements) and high (60 days × four movements) density.
+A separate small `--fat-unused` experiment transfers synthetic unused photo/raw
+strings on the baseline without making million-event blobs a forced OOM test.
+Each receipt retains fixed input cardinality, source/tool/lock identities, three
+query/time/Python-allocation samples, actual executed driver SQL/parameters and
+complete EXPLAIN ANALYZE plans, plus public output bytes/SHA and JSON. Chart
+`generated_at` alone is removed from equality; exact snapshot-time tie behavior
+has a separate documented fixture. Assert equivalent supported output before
+interpreting cost changes. Python allocations are not process RSS; timings are
+synthetic, full-history aggregation remains, and forecast/public population reads
+are not constant-memory claims. Prepared fixtures and bounded progress checks do
+not substitute for the complete comparison matrix, full isolated harness and
+exact-candidate review. Retain the original failed attempts and map fixture-only
+repairs separately from changes to application behavior.
+
+
+On restart, preserve historical results but disclose absent raw evidence rather
+than treating the ledger as a current gate. The resumed calendar/P7 comparison and
+required checks use the persistent evidence sibling recorded in the
+[closure ledger](architecture-maintainability-closure.md#calendarp7-validation-resumed-on-2026-10-11).
+The complete 11-pair comparison retains equal public outputs and three samples
+per phase. Its target chart is slightly slower and selected unknown-snapshot
+bitmap scans remain material; lower Python allocation does not establish bounded
+scanned work, a general speedup, process RSS or PostgreSQL memory bounds.

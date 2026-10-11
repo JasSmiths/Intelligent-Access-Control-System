@@ -1490,6 +1490,10 @@ Index(
 
 class ICloudCalendarAccount(Base, TimestampMixin):
     __tablename__ = "icloud_calendar_accounts"
+    __table_args__ = (
+        CheckConstraint("sync_generation >= 0", name="ck_icloud_calendar_sync_generation"),
+        CheckConstraint("(sync_lease_token IS NULL) = (sync_lease_until IS NULL)", name="ck_icloud_calendar_sync_lease_pair"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     apple_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
@@ -1497,6 +1501,9 @@ class ICloudCalendarAccount(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(40), default="connected", nullable=False, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     encrypted_session_bundle: Mapped[str | None] = mapped_column(Text)
+    sync_generation: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
+    sync_lease_token: Mapped[uuid.UUID | None] = mapped_column()
+    sync_lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_auth_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_sync_status: Mapped[str | None] = mapped_column(String(40), index=True)
@@ -1512,6 +1519,11 @@ class ICloudCalendarAccount(Base, TimestampMixin):
 
 class ICloudCalendarSyncRun(Base, TimestampMixin):
     __tablename__ = "icloud_calendar_sync_runs"
+
+    # Empty marks historical rows; only the typed v1 owner can resume new context.
+    run_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb"), nullable=False
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     started_at: Mapped[datetime] = mapped_column(
