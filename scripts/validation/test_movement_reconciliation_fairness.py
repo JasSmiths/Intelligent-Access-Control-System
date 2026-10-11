@@ -51,8 +51,7 @@ async def assert_held_unchanged(*, standalone):
                        and row.reconciliation_required and row.admission_status is None for row in sagas)
 
 
-async def test_twenty_five_held_sagas_do_not_starve_later_verified_admission(monkeypatch):
-    monkeypatch.setattr(reconciliation_owner, "apply_person_presence_input_boolean_actions", AsyncMock())
+async def test_twenty_five_held_sagas_do_not_starve_later_verified_admission():
     await held_batch(standalone=False)
     owner = await person()
     event_id, saga_id = await movement(owner)

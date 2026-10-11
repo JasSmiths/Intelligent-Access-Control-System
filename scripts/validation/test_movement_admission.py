@@ -315,10 +315,9 @@ async def unfinished_parent(parent_id, *, active=False):
 
 
 @pytest.mark.parametrize("verified", [False, True])
-async def test_child_checkpoint_recovers_parent_admission_and_required_outputs_once(monkeypatch, verified):
+async def test_child_checkpoint_recovers_parent_admission_and_required_outputs_once(verified):
     from app.services import movement_reconciliation as recovery
 
-    monkeypatch.setattr(recovery, "apply_person_presence_input_boolean_actions", AsyncMock())
     owner = await person()
     event_id, saga_id = await movement(owner)
     parent_id = await evidence(event_id, saga_id,

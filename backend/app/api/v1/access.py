@@ -246,6 +246,7 @@ async def request_movement_reconciliation(
     )
     await session.commit()
     await session.refresh(row)
+    await session.refresh(row, attribute_names=["gate_commands"])
     payload = _movement_payload(row, include_history=True)
     await event_bus.publish(
         "movement_saga.reconciliation_requested",
@@ -309,6 +310,7 @@ async def request_event_movement_reconciliation(
     )
     await session.commit()
     await session.refresh(row)
+    await session.refresh(row, attribute_names=["gate_commands"])
     payload = _movement_payload(row, include_history=True)
     await event_bus.publish(
         "movement_saga.reconciliation_requested",

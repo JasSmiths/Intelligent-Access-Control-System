@@ -402,7 +402,7 @@ async def test_configuration_nowait_contention_maps_to_full_caller_busy():
         assert (await session.get(HaPresenceDesired, proposal.person_id)).eligible
 
 
-async def test_missing_setting_creation_uses_real_writer_fence_and_full_caller_rollback(monkeypatch):
+async def test_real_settings_writer_auth_root_fence_rolls_back_whole_reservation_caller(monkeypatch):
     proposal = await seed()
     async with AsyncSessionLocal() as session:
         await session.execute(delete(SystemSetting).where(SystemSetting.key == 'home_assistant_url'))
@@ -412,9 +412,8 @@ async def test_missing_setting_creation_uses_real_writer_fence_and_full_caller_r
     class PausedSettingWriter(AsyncSession):
         async def execute(self, statement, *args, **kwargs):
             result = await super().execute(statement, *args, **kwargs)
-            # Observe the real writer's acquired lock, without reproducing its
-            # key in this fixture. The URL row does not exist at this boundary.
-            if 'pg_advisory_xact_lock' in str(statement):
+            # Root-first settings composition must be observed before settings.
+            if str(statement) == 'SELECT pg_advisory_xact_lock(:key)' and args[0] == {'key': AUTH_ROOT_LOCK_KEY}:
                 acquired.set()
                 await release.wait()
             return result
@@ -429,7 +428,7 @@ async def test_missing_setting_creation_uses_real_writer_fence_and_full_caller_r
             person = await owner.get(Person, proposal.person_id, with_for_update=True)
             person.display_name = 'Must roll back'
             await owner.flush()
-            with pytest.raises(HaCoordinationBusy, match='^ha_setting_busy$'):
+            with pytest.raises(HaCoordinationBusy, match='^ha_auth_root_busy$'):
                 await asyncio.wait_for(reservations.reserve_all_in_session(owner, [proposal]), 1)
             await owner.rollback()
         async with AsyncSessionLocal() as session:
@@ -447,6 +446,50 @@ async def test_missing_setting_creation_uses_real_writer_fence_and_full_caller_r
         assert desired.deadline == proposal.origin_at + timedelta(seconds=300)
         assert target.url == replacement
         assert await session.scalar(select(AuditLog).where(AuditLog.action == 'settings.update')) is not None
+
+
+async def test_missing_setting_creation_fence_rolls_back_whole_configuration_participant(monkeypatch):
+    from app.services.home_assistant_configuration import lock_home_assistant_connection
+
+    proposal = await seed()
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(SystemSetting).where(SystemSetting.key == 'home_assistant_url'))
+        await session.commit()
+    acquired, release = asyncio.Event(), asyncio.Event()
+
+    class PausedSettingWriter(AsyncSession):
+        async def execute(self, statement, *args, **kwargs):
+            result = await super().execute(statement, *args, **kwargs)
+            if str(statement) == 'SELECT pg_advisory_xact_lock(hashtext(:setting))' and args[0] == {'setting': 'iacs:setting:home_assistant_url'}:
+                acquired.set()
+                await release.wait()
+            return result
+
+    writer_sessions = async_sessionmaker(engine, class_=PausedSettingWriter, expire_on_commit=False)
+    monkeypatch.setattr(settings_owner, 'AsyncSessionLocal', writer_sessions)
+    replacement = 'http://setting-fence.synthetic.invalid'
+    writer = asyncio.create_task(settings_owner.update_settings({'home_assistant_url': replacement}))
+    try:
+        await asyncio.wait_for(acquired.wait(), 2)
+        async with AsyncSessionLocal() as owner:
+            person = await owner.get(Person, proposal.person_id, with_for_update=True)
+            person.display_name = 'Must roll back'
+            await owner.flush()
+            # Exercise the narrow setting participant directly: the complete
+            # reservation would correctly stop earlier at the auth-root fence.
+            with pytest.raises(HaCoordinationBusy, match='^ha_setting_busy$'):
+                await asyncio.wait_for(lock_home_assistant_connection(owner), 1)
+            await owner.rollback()
+        async with AsyncSessionLocal() as observer:
+            assert await observer.get(SystemSetting, 'home_assistant_url') is None
+            assert (await observer.get(Person, proposal.person_id)).display_name == 'Synthetic HA person'
+            assert await observer.get(HaPresenceDesired, proposal.person_id) is None
+    finally:
+        release.set()
+        await asyncio.wait_for(writer, 3)
+    async with AsyncSessionLocal() as observer:
+        assert (await observer.get(SystemSetting, 'home_assistant_url')).value == {'plain': replacement}
+        assert await observer.scalar(select(AuditLog).where(AuditLog.action == 'settings.update')) is not None
 
 
 async def test_historical_applied_projection_invalidates_without_new_live_budget():
