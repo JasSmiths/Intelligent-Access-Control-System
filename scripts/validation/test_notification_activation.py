@@ -21,6 +21,7 @@ pytestmark = pytest.mark.asyncio
 async def isolated_notification_rows(isolated_resources):
     async def clear():
         async with AsyncSessionLocal() as session:
+            await session.execute(text("DROP TABLE IF EXISTS fixture_vehicle_refresh_reservations"))
             await session.execute(text("TRUNCATE notification_rules CASCADE"))
             await session.commit()
     await clear()
@@ -91,115 +92,6 @@ async def test_failed_machine_audit_rolls_back_activation_and_checkpoint_retaini
         assert not (await session.scalars(select(AuditLog))).all()
 
 
-@pytest.mark.parametrize("fail_audit", [False, True])
-async def test_extension_transaction_commits_domain_reservation_receipt_and_audit_together(monkeypatch, fail_audit):
-    from app.models import NotificationRun
-    from app.services.automation_actions import AutomationActionExecutor
-    from app.services.automation_execution import AutomationRunStore
-    from app.services.notification_runs import NotificationRunStore
-    from app.services.workflows.action_definitions import ACTION_BY_TYPE, ACTION_DEFINITIONS, ActionDefinition, NotificationReference
-    from app.services.workflows.execution_contracts import checked_execution
-    from app.services.workflows import export_contracts
-
-    target, workflow = await seed()
-    action_type = "fixture.domain.reserve"
-    definition = ActionDefinition(
-        type=action_type, group="fixture", group_label="Fixture", label="Reserve",
-        description="Test-only caller transaction domain handoff", configuration=NotificationReference,
-        execution="transactional", effect="configuration", editor="notification_reference",
-    )
-    monkeypatch.setitem(ACTION_BY_TYPE, action_type, definition)
-    monkeypatch.setattr(export_contracts, "ACTION_DEFINITIONS", (*ACTION_DEFINITIONS, definition))
-    generated = export_contracts.render_contracts()
-    assert f'"{action_type}": {{ "notification_rule_id": string; "notification_rule_name": string }}' in generated
-    assert f'"{action_type}": {{\n    "editor": "notification_reference"' in generated
-    assert definition.defaults() == {"notification_rule_id": "", "notification_rule_name": ""}
-    async with AsyncSessionLocal() as session:
-        row = await session.get(AutomationRule, workflow)
-        row.actions = [{"id": "reservation", "type": action_type,
-                        "config": {"notification_rule_id": str(target)}}]
-        await session.commit()
-
-    calls = []
-    original_bindings = AutomationActionExecutor._bind_handlers
-
-    async def reserve_domain(session, action, _context, _rule, execution):
-        identity = checked_execution(execution)
-        owned = await session.get(AutomationRun, uuid.UUID(identity["run_id"]))
-        item = owned.action_plan[identity["index"]]
-        assert owned.claim_token == uuid.UUID(identity["claim_token"])
-        assert item["state"] == "pending" and "attempted_at" not in item
-        assert item["operation_id"] == identity["operation_id"] == identity["idempotency_key"]
-        assert action["config"] == {"notification_rule_id": str(target), "notification_rule_name": ""}
-        assert item["action"]["config"] == action["config"]
-        receipt = await notification_rules.set_automation_activation(
-            session, reference=action["config"], active=True,
-        )
-        await NotificationRunStore().enqueue_in_session(
-            session, {"event_type": "fixture", "subject": "Inert domain reservation",
-                      "severity": "info", "facts": {"notification_rule_id": action["config"]["notification_rule_id"]}},
-            run_id=uuid.UUID(identity["operation_id"]),
-        )
-        calls.append(identity)
-        return {"id": action["id"], "type": action["type"], "status": "success",
-                "reservation_id": identity["operation_id"], **receipt}
-
-    monkeypatch.setattr(AutomationActionExecutor, "_bind_handlers",
-        lambda self: {**original_bindings(self), action_type: reserve_domain})
-    service = automations.AutomationService()
-    forbidden = AsyncMock(side_effect=AssertionError("External/independently committing port called"))
-    def forbidden_owner():
-        raise AssertionError("Hardware owner accessed by transactional action")
-    service.action_executor.gates = service.action_executor.devices = forbidden_owner
-    service.action_executor.maintenance_change = forbidden
-    service.action_executor.integrations = forbidden
-    original_audit = automations.write_audit_log
-    observed = []
-
-    async def audit_in_transaction(session, **kwargs):
-        async with AsyncSessionLocal() as observer:
-            persisted = (await observer.scalars(select(AutomationRun))).one()
-            assert persisted.action_plan[0]["state"] == "pending"
-            assert (await observer.get(NotificationRule, target)).is_active is False
-            assert not (await observer.scalars(select(NotificationRun))).all()
-            assert not (await observer.scalars(select(AuditLog))).all()
-        observed.append(True)
-        if fail_audit:
-            raise RuntimeError("synthetic extension audit failure")
-        return await original_audit(session, **kwargs)
-
-    monkeypatch.setattr(automations, "write_audit_log", audit_in_transaction)
-    if fail_audit:
-        with pytest.raises(RuntimeError, match="synthetic extension audit failure"):
-            await service.execute_rule(str(workflow), trigger_key="time.every_x", trigger_payload={})
-        async with AsyncSessionLocal() as session:
-            run = (await session.scalars(select(AutomationRun))).one()
-            assert run.status == "queued" and run.action_plan[0]["state"] == "pending"
-            assert run.action_results == []
-            assert not (await session.scalars(select(NotificationRun))).all()
-            assert not (await session.scalars(select(AuditLog))).all()
-            assert (await session.get(NotificationRule, target)).is_active is False
-        monkeypatch.setattr(automations, "write_audit_log", original_audit)
-        assert await service.dispatcher.run_once(run.id)
-    else:
-        result = await service.execute_rule(str(workflow), trigger_key="time.every_x", trigger_payload={})
-        assert result["status"] == "success"
-    async with AsyncSessionLocal() as session:
-        run = (await session.scalars(select(AutomationRun))).one()
-        reservations = (await session.scalars(select(NotificationRun))).all()
-        audits = (await session.scalars(select(AuditLog))).all()
-        assert run.status == "success" and run.action_plan[0]["state"] == "succeeded"
-        assert "attempted_at" not in run.action_plan[0]
-        assert len(reservations) == len(audits) == 1
-        assert reservations[0].context["facts"]["notification_rule_id"] == str(target)
-        assert str(reservations[0].id) == run.action_plan[0]["operation_id"] == run.action_results[0]["reservation_id"]
-        assert audits[0].metadata_["action_results"][0]["reservation_id"] == str(reservations[0].id)
-        assert (await session.get(NotificationRule, target)).is_active is True
-    assert not await service.dispatcher.run_once(run.id)
-    assert len({call["operation_id"] for call in calls}) == 1 and observed
-    forbidden.assert_not_awaited()
-
-
 async def test_expired_claim_cannot_call_transactional_handler_or_reserve_domain_work(monkeypatch):
     from app.services.automation_execution import AutomationClaimLost
     from app.services.automation_intake import reserve_occurrence
@@ -230,3 +122,123 @@ async def test_expired_claim_cannot_call_transactional_handler_or_reserve_domain
         assert (await session.get(NotificationRule, target)).is_active is False
         assert not (await session.scalars(select(NotificationRun))).all()
         assert not (await session.scalars(select(AuditLog))).all()
+
+
+@pytest.mark.parametrize("fail_audit", [False, True])
+async def test_known_vehicle_refresh_extension_uses_current_owner_and_atomic_reservation(monkeypatch, fail_audit):
+    """Hypothetical automation origin: no event-keyed arrival job is fabricated.
+
+    The small SQL fixture represents the additional domain reservation a real
+    manual-origin feature would need. No runtime worker can discover this table.
+    """
+    from app.models import AccessEvent, Vehicle, VehicleInformationJob
+    from app.services import vehicle_information, vehicle_information_jobs, vehicle_information_store
+    from app.modules.dvla.vehicle_enquiry import normalize_registration_number
+    from app.services.automation_actions import AutomationActionExecutor
+    from app.services.workflows.action_definitions import ACTION_BY_TYPE, ActionDefinition, Configuration
+    from app.services.workflows.execution_contracts import checked_execution
+
+    class VehicleRefreshConfiguration(Configuration):
+        vehicle_id: str = ""
+
+    action_type = "fixture.vehicle_information.refresh"
+    definition = ActionDefinition(type=action_type, group="fixture", group_label="Fixture",
+        label="Refresh known vehicle", description="Inert manual-origin reservation exercise",
+        configuration=VehicleRefreshConfiguration, execution="transactional",
+        effect="configuration", editor="none")
+    monkeypatch.setitem(ACTION_BY_TYPE, action_type, definition)
+    _, workflow = await seed()
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("CREATE TABLE fixture_vehicle_refresh_reservations ("
+            "operation_id uuid PRIMARY KEY, vehicle_id uuid NOT NULL REFERENCES vehicles(id), "
+            "registration_number text NOT NULL, origin_run_id uuid NOT NULL, state text NOT NULL)"))
+        vehicle = Vehicle(registration_number="P9REFRESH", is_active=True, information_outcome="found")
+        session.add(vehicle)
+        rule = await session.get(AutomationRule, workflow)
+        await session.flush()
+        vehicle_id = vehicle.id
+        rule.actions = [{"id": "refresh", "type": action_type, "config": {"vehicle_id": str(vehicle_id)}}]
+        await session.commit()
+
+    calls = []
+    original_bindings = AutomationActionExecutor._bind_handlers
+    async def reserve_refresh(session, action, _context, _rule, execution):
+        identity = checked_execution(execution)
+        run = await session.get(AutomationRun, uuid.UUID(identity["run_id"]))
+        item = run.action_plan[identity["index"]]
+        assert run.claim_token == uuid.UUID(identity["claim_token"])
+        assert item["state"] == "pending" and "attempted_at" not in item
+        assert item["operation_id"] == identity["operation_id"] == identity["idempotency_key"]
+        current = await session.scalar(select(Vehicle).where(
+            Vehicle.id == uuid.UUID(action["config"]["vehicle_id"])).with_for_update()
+            .execution_options(populate_existing=True))
+        assert current is not None and current.is_active
+        # The feature owner clears its aggregate in the caller's transaction;
+        # a test-only reservation records current identity, never stale config.
+        await vehicle_information_store.invalidate_information_in_session(session, current)
+        await session.execute(text("INSERT INTO fixture_vehicle_refresh_reservations "
+            "(operation_id,vehicle_id,registration_number,origin_run_id,state) "
+            "VALUES (:operation,:vehicle,:plate,:origin,'reserved') ON CONFLICT DO NOTHING"),
+            {"operation": uuid.UUID(identity["operation_id"]), "vehicle": current.id,
+             "plate": normalize_registration_number(current.registration_number), "origin": run.id})
+        calls.append(identity["operation_id"])
+        return {"id": action["id"], "type": action["type"], "status": "success",
+                "reservation_id": identity["operation_id"], "vehicle_id": str(current.id),
+                "registration_number": current.registration_number}
+    monkeypatch.setattr(AutomationActionExecutor, "_bind_handlers",
+        lambda self: {**original_bindings(self), action_type: reserve_refresh})
+    forbidden = AsyncMock(side_effect=AssertionError("Fixture cannot call a provider"))
+    monkeypatch.setattr(vehicle_information_jobs, "get_vehicle_information_service", forbidden)
+    monkeypatch.setattr(vehicle_information.VehicleInformationService, "_fetch", forbidden)
+    service = automations.AutomationService()
+    original_audit = automations.write_audit_log
+    async def required_audit(session, **kwargs):
+        async with AsyncSessionLocal() as observer:
+            assert not (await observer.execute(text("SELECT operation_id FROM fixture_vehicle_refresh_reservations"))).all()
+            assert (await observer.get(Vehicle, vehicle_id)).information_outcome == "found"
+            run = (await observer.scalars(select(AutomationRun))).one()
+            assert run.action_plan[0]["state"] == "pending" and run.action_results == []
+        if fail_audit:
+            raise RuntimeError("synthetic refresh audit failure")
+        return await original_audit(session, **kwargs)
+    monkeypatch.setattr(automations, "write_audit_log", required_audit)
+    try:
+        # Registration changes after enqueue configuration are resolved by the
+        # actual domain participant, not copied from the action's stored config.
+        async with AsyncSessionLocal() as session:
+            current = await session.get(Vehicle, vehicle_id)
+            current.registration_number = "P9CURRENT"
+            await session.commit()
+        if fail_audit:
+            with pytest.raises(RuntimeError, match="synthetic refresh audit failure"):
+                await service.execute_rule(str(workflow), trigger_key="time.every_x", trigger_payload={})
+            async with AsyncSessionLocal() as session:
+                run = (await session.scalars(select(AutomationRun))).one()
+                assert run.status == "queued" and run.action_results == []
+                assert run.action_plan[0]["state"] == "pending"
+                assert not (await session.execute(text("SELECT operation_id FROM fixture_vehicle_refresh_reservations"))).all()
+                assert (await session.get(Vehicle, vehicle_id)).information_outcome == "found"
+                assert not (await session.scalars(select(AuditLog))).all()
+            monkeypatch.setattr(automations, "write_audit_log", original_audit)
+            assert await service.dispatcher.run_once(run.id)
+        else:
+            assert (await service.execute_rule(str(workflow), trigger_key="time.every_x", trigger_payload={}))['status'] == 'success'
+        async with AsyncSessionLocal() as session:
+            run = (await session.scalars(select(AutomationRun))).one()
+            reservation = (await session.execute(text("SELECT * FROM fixture_vehicle_refresh_reservations"))).mappings().one()
+            audit = (await session.scalars(select(AuditLog))).one()
+            assert run.status == "success" and run.action_plan[0]["state"] == "succeeded"
+            assert "attempted_at" not in run.action_plan[0]
+            assert str(reservation['operation_id']) == run.action_results[0]['reservation_id'] == run.action_plan[0]['operation_id']
+            assert reservation['vehicle_id'] == vehicle_id and reservation['registration_number'] == 'P9CURRENT'
+            assert audit.metadata_['action_results'][0]['reservation_id'] == str(reservation['operation_id'])
+            assert (await session.get(Vehicle, vehicle_id)).information_outcome is None
+            assert not (await session.scalars(select(AccessEvent))).all()
+            assert not (await session.scalars(select(VehicleInformationJob))).all()
+        assert not await service.dispatcher.run_once(run.id)
+        assert len(set(calls)) == 1
+        forbidden.assert_not_awaited()
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("DROP TABLE fixture_vehicle_refresh_reservations"))
+            await session.commit()

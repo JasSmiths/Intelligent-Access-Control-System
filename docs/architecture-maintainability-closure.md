@@ -1121,3 +1121,9 @@ load/append allocation only, not RSS or throughput; after timings were not faste
 Optional-provider-A blocking while core-B commits is proven by the actual composed
 pipeline fixtures, separate from this memory comparison. Full P6/P8 composition,
 required harness/browser checks and exact final-candidate review remain open.
+
+
+Astra High approved the focused P6 checkpoint `30c4938` after independently
+checking the 263-case mapping, retained run/log hashes, source/cleanup proofs and
+bounded allocation evidence. The ordinary resident-count correction changes only
+documentation. Full composed P6/P8/P9 validation and fresh final review remain open.

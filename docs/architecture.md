@@ -721,3 +721,27 @@ the same person represented both ways. The full public forecast remains availabl
 Dashboard uses the bounded six-name presentation with the same global count and
 learning metadata. Prediction memory still grows with required population/event
 density. These changes add no prediction cache, count store or persisted ranks.
+
+
+### Access and workflow extension exercises
+
+The known-vehicle refresh exercise in the existing
+[transactional action suite](../scripts/validation/test_notification_activation.py)
+adds only a test definition and executor binding. The real dispatcher passes its
+checked pending-operation identity to a transaction participant that locks current
+Vehicle/registration and calls the existing vehicle-information aggregate owner.
+A small disposable fixture table represents a hypothetical automation-origin
+reservation; completion receipt, domain work and mandatory audit commit or roll
+back together. It is not a runtime queue. A real manual-origin feature would need
+an explicit domain reservation/schema/API with its own original authority;
+current arrival jobs require an actual AccessEvent and cannot be repurposed by
+inventing one. Provider lookup, worker deadlines and registration checks remain
+with their existing feature owners. No dispatcher action-string branch is added.
+
+The [dated access-schedule exercise](../scripts/validation/test_schedule_operations.py)
+injects a test-only JSON date-key normalizer at schedule_operations and evaluator
+at schedules. It covers legacy/default round-trip, actual persistence/audit,
+vehicle then unambiguous owner then default selection, London's repeated DST hour
+and a separately committed edit denying actual final recognition authority despite
+stale preloaded state. A real dated rule would extend these owners and corresponding
+request/read contracts; this fixture ships no new rule format or calendar behavior.

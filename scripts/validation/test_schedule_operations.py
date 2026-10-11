@@ -420,3 +420,135 @@ async def test_invalid_device_schedule_id_is_rejected_instead_of_cleared():
     assert result.get('status') == 400
     assert 'Invalid schedule ID' in result['error']
     assert await audit_rows(user.id) == []
+
+
+@pytest.fixture
+def dated_access_schedule_extension(monkeypatch):
+    """Exercise a hypothetical date-key representation at its two real owners.
+
+    Production accepts weekly blocks only. This local adapter is never installed
+    outside the isolated test and adds no schema, registry or runtime feature.
+    """
+    from dataclasses import replace
+    from datetime import date
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+    from app.services import schedules
+
+    original_normalize = schedules.normalize_time_blocks
+    original_evaluate = schedules._evaluate_schedule
+    def normalize(value):
+        if not isinstance(value, dict):
+            return original_normalize(value)
+        weekly = {key: intervals for key, intervals in value.items() if len(str(key)) != 10}
+        result = original_normalize(weekly)
+        for key, intervals in value.items():
+            if len(str(key)) == 10:
+                canonical = date.fromisoformat(key).isoformat()
+                result[canonical] = original_normalize({'0': intervals})['0']
+        return result
+    def evaluate(schedule, occurred_at, timezone_name, *, source):
+        local = occurred_at.astimezone(ZoneInfo(timezone_name))
+        representation = normalize(schedule.time_blocks)
+        weekly = {day: representation[day] for day in schedules.WEEKDAY_KEYS}
+        selected_date = local.date().isoformat()
+        if selected_date in representation:
+            weekly[str(local.weekday())] = representation[selected_date]
+        result = original_evaluate(SimpleNamespace(id=schedule.id, name=schedule.name, time_blocks=weekly),
+            occurred_at, timezone_name, source=source)
+        return replace(result, configuration_snapshot={**result.configuration_snapshot,
+            'time_blocks': representation, 'dated_exception': selected_date if selected_date in representation else None})
+    monkeypatch.setattr(operations, 'normalize_time_blocks', normalize)
+    monkeypatch.setattr(schedules, '_evaluate_schedule', evaluate)
+    return schedules
+
+
+async def test_dated_access_schedule_extension_roundtrip_precedence_and_dst_boundary(dated_access_schedule_extension):
+    from datetime import UTC, datetime
+    from sqlalchemy.orm import selectinload
+    schedules = dated_access_schedule_extension
+    legacy = operations.validate_schedule_values({'name': 'Legacy weekly', 'time_blocks': BLOCKS})
+    assert legacy.time_blocks == normalize_time_blocks(BLOCKS)
+    assert operations.ScheduleValues.model_validate_json(legacy.model_dump_json()) == legacy
+    dated = operations.validate_schedule_values({'name': 'Dated-' + uuid.uuid4().hex,
+        'time_blocks': {'2026-10-25': [{'start': '01:30', 'end': '02:00'}]}})
+    assert operations.ScheduleValues.model_validate_json(dated.model_dump_json()) == dated
+    assert operations.validate_schedule_values({'name': 'Default representation'}).time_blocks == schedules.empty_time_blocks()
+    admin = await make_user()
+    async with AsyncSessionLocal() as session:
+        assigned = await operations.create_schedule(session, dated, user=admin, source='api')
+        owner_schedule = await operations.create_schedule(session, operations.validate_schedule_values({
+            'name': 'Owner-' + uuid.uuid4().hex, 'time_blocks': {str(i): [{'start': '00:00', 'end': '24:00'}] for i in range(7)}}),
+            user=admin, source='api')
+        person = Person(display_name='Unambiguous schedule owner', schedule_id=owner_schedule.id)
+        vehicle = Vehicle(registration_number='P9SCHEDULE', owner=person, schedule_id=assigned.id)
+        session.add_all([person, vehicle]); await session.commit()
+        identity, person_id = vehicle.id, person.id
+        assert (await session.get(Schedule, assigned.id)).time_blocks == dated.time_blocks
+    async def evaluate(at, *, default='deny'):
+        async with AsyncSessionLocal() as session:
+            vehicle = await session.get(Vehicle, identity, options=[selectinload(Vehicle.schedule),
+                selectinload(Vehicle.owner).selectinload(Person.schedule)])
+            return await schedules.evaluate_vehicle_schedule(session, vehicle, at,
+                timezone_name='Europe/London', default_policy=default)
+    before_fold = await evaluate(datetime(2026, 10, 25, 0, 45, tzinfo=UTC))
+    after_fold = await evaluate(datetime(2026, 10, 25, 1, 45, tzinfo=UTC))
+    boundary = datetime(2026, 10, 25, 2, tzinfo=UTC)
+    assert before_fold.allowed and after_fold.allowed
+    assert before_fold.evaluated_local_at.endswith('+01:00') and after_fold.evaluated_local_at.endswith('+00:00')
+    denied = await evaluate(boundary)
+    assert not denied.allowed and denied.source == 'vehicle'  # Assigned vehicle wins over its allowed owner.
+    assert denied.configuration_snapshot['dated_exception'] == '2026-10-25'
+    async with AsyncSessionLocal() as session:
+        (await session.get(Vehicle, identity)).schedule_id = None
+        await session.commit()
+    inherited = await evaluate(boundary)
+    assert inherited.allowed and inherited.source == 'person'
+    async with AsyncSessionLocal() as session:
+        (await session.get(Person, person_id)).schedule_id = None
+        await session.commit()
+    default = await evaluate(boundary)
+    assert not default.allowed and default.source == 'default'
+    assert (await evaluate(boundary, default='allow')).allowed
+    assert len(await audit_rows(admin.id)) == 2
+
+
+async def test_dated_access_schedule_edit_after_enqueue_denies_real_final_authority(dated_access_schedule_extension):
+    from datetime import UTC, datetime, timedelta
+    from app.models import AccessEvent, LprIngestEvent
+    from app.models.enums import AccessDecision, AccessDirection
+    from app.services.access.authorization import RecognitionAuthorizationDenied, assert_current_recognition_authorization
+    now = datetime(2026, 10, 25, 0, 45, tzinfo=UTC)
+    admin = await make_user()
+    values = operations.validate_schedule_values({'name': 'Current authority-' + uuid.uuid4().hex,
+        'time_blocks': {'2026-10-25': [{'start': '01:30', 'end': '02:00'}]}})
+    async with AsyncSessionLocal() as session:
+        schedule = await operations.create_schedule(session, values, user=admin, source='api')
+        person = Person(display_name='Current schedule owner')
+        vehicle = Vehicle(registration_number='P9AUTH', owner=person, schedule_id=schedule.id)
+        session.add_all([person, vehicle]); await session.flush()
+        event = AccessEvent(vehicle_id=vehicle.id, person_id=person.id, registration_number=vehicle.registration_number,
+            direction=AccessDirection.ENTRY, decision=AccessDecision.GRANTED, confidence=1,
+            source='synthetic-p9-schedule', occurred_at=now, raw_payload={})
+        session.add(event); await session.flush()
+        session.add(LprIngestEvent(idempotency_key='p9-schedule-' + uuid.uuid4().hex, source=event.source,
+            registration_number=vehicle.registration_number, captured_at=now, received_at=now,
+            status='succeeded', access_event_id=event.id))
+        await session.commit()
+        event_id, schedule_id = event.id, schedule.id
+    # Keep the actual attempt session, including preloaded stale schedule, across
+    # a real separately committed edit. Authorization must lock and reload it.
+    async with AsyncSessionLocal() as attempt:
+        stale = await attempt.get(Schedule, schedule_id)
+        checkpoint = await assert_current_recognition_authorization(attempt, event_id=event_id, now=now)
+        assert checkpoint.event_id == event_id
+        await attempt.commit()  # Release the real authority locks before editor commit.
+        async with AsyncSessionLocal() as editor:
+            await operations.update_schedule(editor, schedule_id,
+                {'time_blocks': {'2026-10-25': []}}, user=admin, source='api')
+        assert stale.time_blocks['2026-10-25']  # Existing identity-map snapshot is stale.
+        with pytest.raises(RecognitionAuthorizationDenied, match='Current vehicle permissions'):
+            await assert_current_recognition_authorization(attempt, event_id=event_id, now=now + timedelta(seconds=1))
+    records = await audit_rows(admin.id)
+    assert [record.action for record in records] == ['schedule.create', 'schedule.update']
+    assert records[-1].diff['new']['time_blocks']['2026-10-25'] == []
