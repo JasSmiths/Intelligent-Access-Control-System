@@ -51,6 +51,7 @@ TYPE_OWNERS = (
     TypeOwner('app/services/schedule_assignments.py', 'checked'),
     TypeOwner('app/services/schedule_operations.py', 'checked'),
     TypeOwner('app/services/domain_events.py', 'checked'),
+    TypeOwner('app/services/telemetry.py', 'checked'),
     TypeOwner('app/services/event_bus.py', 'strict'),
     TypeOwner('app/services/realtime_contracts.py', 'strict'),
     TypeOwner('app/modules/home_assistant/input_boolean_contracts.py', 'strict'),

@@ -72,8 +72,7 @@ class EventBus:
         websocket_queue_size: int = REALTIME_WEBSOCKET_QUEUE_SIZE,
     ) -> None:
         self._connections: dict[WebSocket, _WebSocketConnection] = {}
-        self._listeners: dict[EventListener, ListenerScope] = {}
-        self._listener_tasks: set[asyncio.Task] = set()
+        self._listeners: dict[EventListener, tuple[ListenerScope, frozenset[str] | None]] = {}
         self._lock = asyncio.Lock()
         self._redis_lock = asyncio.Lock()
         self._started = False
@@ -122,9 +121,7 @@ class EventBus:
 
         async with self._lock:
             connections = list(self._connections.values())
-            listener_tasks = list(self._listener_tasks)
             self._connections.clear()
-            self._listener_tasks.clear()
             self._listeners.clear()
 
         for connection in connections:
@@ -144,11 +141,6 @@ class EventBus:
                 await connection.websocket.close()
             except Exception:
                 logger.debug("event_bus_websocket_close_failed", exc_info=True)
-
-        for task in listener_tasks:
-            task.cancel()
-        if listener_tasks:
-            await asyncio.gather(*listener_tasks, return_exceptions=True)
 
         await self._close_redis()
         logger.info("event_bus_stopped")
@@ -177,10 +169,13 @@ class EventBus:
         if connection is not None and connection.sender_task is not None:
             connection.sender_task.cancel()
 
-    def subscribe(self, listener: EventListener, *, scope: ListenerScope = "local") -> None:
+    def subscribe(
+        self, listener: EventListener, *, scope: ListenerScope = "local",
+        event_types: frozenset[str] | None = None,
+    ) -> None:
         if scope not in {"local", "all_workers"}:
             raise ValueError(f"unsupported event listener scope: {scope}")
-        self._listeners[listener] = scope
+        self._listeners[listener] = (scope, event_types)
 
     def unsubscribe(self, listener: EventListener) -> None:
         self._listeners.pop(listener, None)
@@ -191,7 +186,6 @@ class EventBus:
             "transport": self._transport,
             "connections": len(self._connections),
             "listeners": len(self._listeners),
-            "listener_tasks": len(self._listener_tasks),
             "websocket_queue_size": self._websocket_queue_size,
             "websocket_queued_events": sum(
                 connection.queue.qsize() for connection in self._connections.values()
@@ -345,7 +339,8 @@ class EventBus:
         async with self._lock:
             connections = list(self._connections.values())
             listeners = [
-                listener for listener, scope in self._listeners.items() if scope in listener_scopes
+                listener for listener, (scope, event_types) in self._listeners.items()
+                if scope in listener_scopes and (event_types is None or event.type in event_types)
             ]
 
         message = event.__dict__
@@ -360,13 +355,13 @@ class EventBus:
                     extra={"event_type": event.type},
                 )
 
+        # Snapshot/filter under the bus lock; invoke inline outside it. Source
+        # owners publish hints after releasing DB/domain locks. No task per event.
         for listener in listeners:
-            task = asyncio.create_task(
-                _invoke_listener(listener, event), name=f"event-bus-listener:{event.type}"
-            )
-            self._listener_tasks.add(task)
-            task.add_done_callback(self._listener_tasks.discard)
-            task.add_done_callback(_log_listener_error)
+            try:
+                await listener(event)
+            except Exception:  # noqa: BLE001 - One observational listener must not prevent other listeners.
+                logger.warning("event_bus_listener_failed", extra={"event_type": event.type})
 
     async def _websocket_sender(self, websocket: WebSocket) -> None:
         while True:
@@ -388,19 +383,6 @@ class EventBus:
                     extra={"error": str(exc)},
                 )
                 return
-
-
-async def _invoke_listener(listener: EventListener, event: RealtimeEvent) -> None:
-    await listener(event)
-
-
-def _log_listener_error(task: asyncio.Future) -> None:
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logger.exception("event_bus_listener_failed")
 
 
 def _redis_client_from_url(redis_url: str) -> redis_asyncio.Redis:

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import (
     AccessEvent,
@@ -120,6 +121,7 @@ class GateMalfunctionService:
         self._poll_interval_seconds = poll_interval_seconds
         self._worker: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        self._wake = asyncio.Event()
         self._tick_lock = asyncio.Lock()
         self._started = False
 
@@ -127,13 +129,16 @@ class GateMalfunctionService:
         if self._worker and not self._worker.done():
             return
         self._stop_event.clear()
-        event_bus.subscribe(self._handle_realtime_event)
+        event_bus.subscribe(self._handle_realtime_event, event_types=frozenset({
+            "gate.state_changed", "notification.sent", "notification.failed", "notification.skipped",
+        }))
         self._worker = asyncio.create_task(self._run(), name="gate-malfunction-scheduler")
         self._started = True
         logger.info("gate_malfunction_service_started")
 
     async def stop(self) -> None:
         self._stop_event.set()
+        self._wake.set()
         if self._worker:
             await self._worker
         if self._started:
@@ -341,6 +346,7 @@ class GateMalfunctionService:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
+            self._wake.clear()
             try:
                 await self.evaluate_once()
             except asyncio.CancelledError:
@@ -349,7 +355,7 @@ class GateMalfunctionService:
                 logger.exception("gate_malfunction_tick_failed")
 
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=self._poll_interval_seconds)
+                await asyncio.wait_for(self._wake.wait(), timeout=self._poll_interval_seconds)
             except TimeoutError:
                 pass
 
@@ -371,10 +377,7 @@ class GateMalfunctionService:
 
     async def _handle_realtime_event(self, event: RealtimeEvent) -> None:
         if event.type == "gate.state_changed":
-            task = asyncio.create_task(
-                self.evaluate_once(), name="gate-malfunction-realtime-evaluation"
-            )
-            task.add_done_callback(_log_background_task_error)
+            self._wake.set()
             return
         if event.type not in {"notification.sent", "notification.failed", "notification.skipped"}:
             return
@@ -433,7 +436,9 @@ class GateMalfunctionService:
         opened_at = snapshot.state_changed_at or now
         opened_long_enough = opened_at <= now - timedelta(seconds=MALFUNCTION_TRIGGER_SECONDS)
 
-        async with AsyncSessionLocal() as session:
+        resolved_notice: tuple[uuid.UUID, datetime, dict[str, Any]] | None = None
+        session = AsyncSessionLocal()
+        try:
             existing = await session.scalar(
                 select(GateMalfunctionState)
                 .where(
@@ -459,16 +464,8 @@ class GateMalfunctionService:
                         existing,
                         include_timeline=True,
                     )
+                    resolved_notice = (existing.id, reopened_at, resolved_payload)
                     if not opened_long_enough:
-                        await event_bus.publish("gate_malfunction.resolved", resolved_payload)
-                        await event_bus.publish("gate_malfunction.updated", resolved_payload)
-                        await self._queue_notification(
-                            existing.id,
-                            "resolved",
-                            "Gate malfunction resolved",
-                            "info",
-                            reopened_at,
-                        )
                         return
                 else:
                     existing.last_gate_state = snapshot.state.value
@@ -478,17 +475,6 @@ class GateMalfunctionService:
 
             if not opened_long_enough:
                 return
-
-            if existing and resolved_payload is not None:
-                await event_bus.publish("gate_malfunction.resolved", resolved_payload)
-                await event_bus.publish("gate_malfunction.updated", resolved_payload)
-                await self._queue_notification(
-                    existing.id,
-                    "resolved",
-                    "Gate malfunction resolved",
-                    "info",
-                    reopened_at or now,
-                )
 
             duplicate = await session.scalar(
                 select(GateMalfunctionState.id).where(
@@ -515,7 +501,7 @@ class GateMalfunctionService:
             )
             session.add(row)
             await session.flush()
-            await self._create_trace(session, row, snapshot)
+            trace_hint = await self._create_trace(session, row, snapshot)
             if last_event:
                 await self._add_timeline_event(
                     session,
@@ -545,6 +531,18 @@ class GateMalfunctionService:
             payload = await self._serialize_malfunction(session, row, include_timeline=True)
             row_id = row.id
 
+        finally:
+            await drain_owned(session.close())
+            if resolved_notice is not None:
+                # Resolution already committed even if the following declaration
+                # conflicts or fails. Its hints/intake run after actual DB close.
+                resolved_id, resolved_at, resolved_payload = resolved_notice
+                await event_bus.publish("gate_malfunction.resolved", resolved_payload)
+                await event_bus.publish("gate_malfunction.updated", resolved_payload)
+                await self._queue_notification(
+                    resolved_id, "resolved", "Gate malfunction resolved", "info", resolved_at,
+                )
+        await event_bus.publish("telemetry.trace.created", trace_hint)
         await event_bus.publish("gate_malfunction.declared", payload)
         await event_bus.publish("gate_malfunction.updated", payload)
         await self._queue_notification(
@@ -1329,7 +1327,8 @@ class GateMalfunctionService:
         if malfunction_id is None:
             return
         stage = normalize_notification_stage(payload.get("malfunction_stage"))
-        async with AsyncSessionLocal() as session:
+        session = AsyncSessionLocal()
+        try:
             row = await session.get(GateMalfunctionState, malfunction_id)
             if not row:
                 return
@@ -1362,11 +1361,13 @@ class GateMalfunctionService:
             await self._update_trace(session, row)
             await session.commit()
             serialized = await self._serialize_malfunction(session, row, include_timeline=True)
+        finally:
+            await drain_owned(session.close())
         await event_bus.publish("gate_malfunction.updated", serialized)
 
     async def _create_trace(
         self, session, row: GateMalfunctionState, snapshot: GateSnapshot
-    ) -> None:
+    ) -> dict[str, Any]:
         trace = TelemetryTrace(
             trace_id=str(row.telemetry_trace_id),
             name=f"Gate Malfunction - {row.gate_name or row.gate_entity_id}",
@@ -1393,18 +1394,11 @@ class GateMalfunctionService:
             },
         )
         session.add(trace)
-        await event_bus.publish(
-            "telemetry.trace.created",
-            {
-                "trace_id": trace.trace_id,
-                "name": trace.name,
-                "category": trace.category,
-                "status": trace.status,
-                "level": trace.level,
-                "duration_ms": trace.duration_ms,
-                "registration_number": trace.registration_number,
-            },
-        )
+        return {
+            "trace_id": trace.trace_id, "name": trace.name, "category": trace.category,
+            "status": trace.status, "level": trace.level, "duration_ms": trace.duration_ms,
+            "registration_number": trace.registration_number,
+        }
 
     async def _update_trace(self, session, row: GateMalfunctionState) -> None:
         if not row.telemetry_trace_id:
@@ -1670,12 +1664,3 @@ class GateMalfunctionService:
 @lru_cache
 def get_gate_malfunction_service() -> GateMalfunctionService:
     return GateMalfunctionService()
-
-
-def _log_background_task_error(task: asyncio.Task) -> None:
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        logger.exception("gate_malfunction_background_task_failed")

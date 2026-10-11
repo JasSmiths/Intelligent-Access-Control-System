@@ -233,7 +233,7 @@ class NotificationService:
     async def start(self) -> None:
         if self._started:
             return
-        event_bus.subscribe(self._handle_realtime_event)
+        event_bus.subscribe(self._handle_realtime_event, event_types=frozenset({"notification.trigger"}))
         self._started = True
         self.dispatcher.start()
         logger.info("notification_workflow_service_started")

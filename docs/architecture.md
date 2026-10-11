@@ -239,6 +239,33 @@ without resetting dirty fields. Calendar behavior extensions change the
 reconciliation owner and its fixtures; protocol-envelope changes belong to the
 vendor module, not the shared facade or editor frame.
 
+### Diagnostics and realtime observers
+
+[TelemetryService](../backend/app/services/telemetry.py) owns one serialized trace/span
+writer. Queued and in-flight work share limits of 1,024 records and 16 MiB of encoded
+payload, with batches of at most 100. Admin telemetry summaries expose retained work,
+drop reasons and hint failures. A flush waits for its accepted prefix. Shutdown stops
+intake and allows ten seconds of diagnostic work, then cancels the writer once and
+awaits actual database cleanup; that cleanup can extend beyond the work deadline.
+Budget remains occupied through close and postcommit hints. Committed diagnostic rows
+are not counted as lost when only their realtime hint is interrupted.
+
+Mandatory audits never enter this lossy FIFO. Gate observations and unmatched automation
+triggers join their existing transaction. [Device command outcomes](../backend/app/services/access_device_commands.py)
+and their UUID5 audit share the existing journal commit; replay does not duplicate the
+SQL audit. A failed post-send outcome commit preserves the attempting fence and returns
+UNKNOWN for reconciliation, without provider failover or a second send. Independent
+maintenance and integration-test audits are awaited. Audit refresh hints retain the
+existing full payload after successful commit and actual session close; delivery is
+best effort and replay may repeat a hint.
+
+[EventBus](../backend/app/services/event_bus.py) awaits filtered listeners inline outside
+its lock. Actual publishers own listener completion; there is no listener task pool.
+The malfunction listener wakes its existing scheduler, clearing the wake before each
+evaluation so a trailing hint survives. HA refresh publishes effects after releasing
+its refresh lock. Lifespan composition must stop producers before the notification
+consumer and diagnostic writer, then close the bus and database.
+
 ## Frontend ownership
 
 [App](../frontend/src/app/App.tsx) composes authentication, navigation, account-scoped

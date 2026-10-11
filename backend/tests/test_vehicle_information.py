@@ -179,7 +179,7 @@ async def test_public_lookup_is_normalized_and_no_history_or_raw_provider_payloa
     info = VehicleInformation(registration_number="TEST123", model="Focus")
     lookup = AsyncMock(return_value=VehicleLookup(information=info, results={}))
     monkeypatch.setattr(integrations, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=lookup))
-    monkeypatch.setattr(integrations, "emit_audit_log", lambda **kwargs: None)
+    monkeypatch.setattr(integrations, "record_audit_log", AsyncMock())
     response = await integrations.vehicle_lookup(VehicleLookupRequest(registration_number="TEST123"), SimpleNamespace(id=None, username="fixture", full_name="Fixture"))
     assert response == info and "tests" not in response.model_dump() and "vehicle" not in response.model_dump()
 

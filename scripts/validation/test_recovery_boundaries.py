@@ -123,7 +123,6 @@ async def isolated_resources(monkeypatch):
     monkeypatch.setattr(event_bus, "publish", AsyncMock())
     monkeypatch.setattr(telemetry, "start_trace", lambda *a, **kw: Trace())
     monkeypatch.setattr(telemetry, "flush", AsyncMock())
-    monkeypatch.setattr(automation_owner, "emit_audit_log", lambda *a, **kw: None)
     monkeypatch.setattr(automation_owner, "is_maintenance_mode_active", AsyncMock(return_value=False))
 
     try:

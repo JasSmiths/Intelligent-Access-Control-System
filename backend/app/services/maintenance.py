@@ -21,7 +21,7 @@ from app.services.mutation_context import load_active_admin
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_MAINTENANCE,
     audit_log_event_payload,
-    emit_audit_log,
+    record_audit_log,
     write_audit_log,
 )
 
@@ -259,7 +259,7 @@ async def _sync_home_assistant(active: bool, *, actor: str, source: str, reason:
     try:
         await get_home_assistant_client().call_service(service, {"entity_id": MAINTENANCE_HA_ENTITY_ID})
     except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
-        emit_audit_log(
+        await record_audit_log(
             category=TELEMETRY_CATEGORY_MAINTENANCE,
             action="maintenance_mode.ha_sync_failed",
             actor=actor,

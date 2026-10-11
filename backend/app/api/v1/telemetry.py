@@ -121,6 +121,7 @@ async def telemetry_summary(
             "by_outcome": await _group_counts(session, AuditLog.outcome, audit_filters),
         },
         "storage": storage,
+        "diagnostic_writer": telemetry.status(),
         "updated_at": datetime.now(tz=UTC).isoformat(),
     }
 

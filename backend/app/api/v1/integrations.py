@@ -49,7 +49,7 @@ from app.services.settings import get_runtime_config, normalize_esphome_device_i
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
-    emit_audit_log,
+    record_audit_log,
     write_audit_log,
 )
 from app.services.vehicle_information import get_vehicle_information_service
@@ -562,7 +562,7 @@ async def vehicle_lookup(
         lookup = await get_vehicle_information_service().lookup(request.registration_number)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid vehicle registration") from exc
-    emit_audit_log(category=TELEMETRY_CATEGORY_INTEGRATIONS, action="vehicle.information_lookup",
+    await record_audit_log(category=TELEMETRY_CATEGORY_INTEGRATIONS, action="vehicle.information_lookup",
         actor=actor_from_user(user), actor_user_id=user.id, target_entity="Vehicle",
         target_id=lookup.information.registration_number, target_label=lookup.information.registration_number,
         metadata={"providers": {name: outcome.status for name, outcome in lookup.information.providers.items()}})

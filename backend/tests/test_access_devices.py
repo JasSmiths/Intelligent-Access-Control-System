@@ -181,18 +181,11 @@ def test_command_evidence_records_whether_a_command_was_sent(monkeypatch) -> Non
         },
     )
     spans = []
-    audits = []
     monkeypatch.setattr(
         access_devices_module.telemetry,
         "record_span",
         lambda *args, **kwargs: spans.append((args, kwargs)),
     )
-    monkeypatch.setattr(
-        access_devices_module,
-        "emit_audit_log",
-        lambda **kwargs: audits.append(kwargs),
-    )
-
     AccessDeviceService()._record_command_evidence(
         result,
         reason="Arrival automation",
@@ -202,8 +195,6 @@ def test_command_evidence_records_whether_a_command_was_sent(monkeypatch) -> Non
 
     assert spans[0][1]["output_payload"]["command_sent"] is False
     assert spans[0][1]["output_payload"]["dispatch_state"] == "withheld"
-    assert audits[0]["action"] == "access_device.command.withheld"
-    assert audits[0]["metadata"]["reason_code"] == "schedule_outside_window"
 
 
 @pytest.mark.asyncio
@@ -1233,3 +1224,59 @@ def test_esphome_entity_state_payload_captures_binary_input_and_redacts_network_
     assert redacted is False
     assert network_payload == {"state": "<redacted>", "missing_state": False}
     assert network_redacted is True
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_poller_before_provider_close_despite_repeated_cancellation(monkeypatch):
+    service = AccessDeviceService()
+    subscription_started, poll_started = asyncio.Event(), asyncio.Event()
+    subscription_closing, poll_closing = asyncio.Event(), asyncio.Event()
+    subscription_release, poll_release = asyncio.Event(), asyncio.Event()
+    provider_closing, provider_release = asyncio.Event(), asyncio.Event()
+    observed = []
+
+    async def producer(name, started, closing, release):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            closing.set()
+            await release.wait()
+            observed.append(name)
+
+    subscription = asyncio.create_task(producer('subscription.closed', subscription_started,
+        subscription_closing, subscription_release))
+    poller = asyncio.create_task(producer('poller.closed', poll_started, poll_closing, poll_release))
+    service._subscription_tasks['fixture'] = subscription
+    service._poll_task = poller
+    await subscription_started.wait()
+    await poll_started.wait()
+
+    async def close_provider():
+        assert subscription.done() and poller.done() and service._poll_task is None
+        provider_closing.set()
+        await provider_release.wait()
+        observed.append('provider.closed')
+
+    monkeypatch.setattr(access_devices_module, 'access_device_provider_keys', lambda: ['fixture'])
+    monkeypatch.setattr(access_devices_module, 'get_access_device_provider',
+        lambda _key: SimpleNamespace(close=close_provider))
+    stopped = asyncio.create_task(service.stop())
+    await subscription_closing.wait()
+    subscription_release.set()
+    await poll_closing.wait()
+    stopped.cancel()
+    await asyncio.sleep(0)
+    stopped.cancel()
+    await asyncio.sleep(0)
+    assert not stopped.done() and not provider_closing.is_set() and poller.cancelling() == 1
+    poll_release.set()
+    await provider_closing.wait()
+    stopped.cancel()
+    await asyncio.sleep(0)
+    assert not stopped.done()
+    provider_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopped
+    assert observed == ['subscription.closed', 'poller.closed', 'provider.closed']
+    assert service._subscription_tasks == {} and service._poll_task is None

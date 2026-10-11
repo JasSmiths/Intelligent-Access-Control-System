@@ -14,11 +14,24 @@ from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
-from app.models import AccessDeviceCommandRecord, GateCommandRecord, GateStateObservation
+from app.models import (
+    AccessDevice,
+    AccessDeviceCommandRecord,
+    AuditLog,
+    GateCommandRecord,
+    GateStateObservation,
+)
 from app.models.enums import GateCommandState
 from app.modules.access_devices.base import gate_receipt_projection
 from app.modules.gate.base import CommandDelivery, GateState
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_INTEGRATIONS,
+    audit_log_event_payload,
+    publish_audit_log_hint,
+    write_audit_log,
+)
 
 UNRESOLVED_DEVICE_COMMAND_STATES = ("prepared", "attempting", "accepted", "unknown")
 DEVICE_COMMAND_LEASE_SECONDS = 120
@@ -31,6 +44,7 @@ class DeviceCommandClaim:
     record: AccessDeviceCommandRecord
     token: str
     acquired: bool
+    outcome_audits: tuple[AuditLog, ...] = ()
 
 
 def target_idempotency_key(operation_key: str, target_id: str, action: str) -> str:
@@ -87,6 +101,52 @@ def device_command_receipt(row: AccessDeviceCommandRecord) -> dict[str, Any]:
 
 
 class AccessDeviceCommandJournal:
+    @staticmethod
+    async def record_outcome_in_session(session: AsyncSession, row: AccessDeviceCommandRecord) -> AuditLog | None:
+        """Outcome and mandatory audit share the existing journal transaction.
+
+        The locked command identity and durable state also identify its audit.
+        Replaying accepted is silent; later verified truth has its own audit.
+        Prepared/attempting remain dispatch authority, not completed outcomes.
+        """
+        states = {
+            "not_sent": ("withheld", "skipped", "info"),
+            "rejected": ("attempted", "failed", "error"),
+            "accepted": ("accepted", "accepted", "warning"),
+            "unknown": ("uncertain", "requires_review", "warning"),
+            "verified": ("verified", "success", "info"),
+        }
+        if row.state not in states:
+            return None
+        audit_id = uuid.uuid5(row.id, f"device-command-outcome:{row.state}")
+        existing = await session.get(AuditLog, audit_id)
+        if existing is not None:
+            return existing
+        dispatch_state, outcome, level = states[row.state]
+        device = await session.get(AccessDevice, row.target_device_id)
+        payload = device_command_receipt(row)
+        payload.update(entity_id=row.device_key, name=device.name if device else row.device_key,
+                       kind=device.kind if device else None, dispatch_state=dispatch_state)
+        audit = await write_audit_log(
+            session, category=TELEMETRY_CATEGORY_INTEGRATIONS,
+            action=f"access_device.command.{dispatch_state}", actor="IACS",
+            target_entity="AccessDevice", target_id=row.device_key,
+            target_label=device.name if device else row.device_key,
+            outcome=outcome, level=level, metadata=payload,
+        )
+        audit.id = audit_id
+        return audit
+
+    @staticmethod
+    async def publish_outcome_hint(audit: AuditLog | None) -> None:
+        """Preserve the full audit event after commit/close; replay may repeat it.
+
+        SQL audit identity is idempotent; realtime delivery is best effort.
+        Externally composed access participants use access-event publication.
+        """
+        if audit is not None:
+            await publish_audit_log_hint(audit_log_event_payload(audit))
+
     async def reconcile_parent_in_session(
         self, session: AsyncSession, parent: GateCommandRecord,
     ) -> dict[str, Any] | None:
@@ -186,7 +246,11 @@ class AccessDeviceCommandJournal:
                      gate_command_id: str | None = None) -> AccessDeviceCommandRecord | None:
         origin = automatic_garage_origin_context(origin_context, target_id=target_id, action=action,
             intent_id=intent_id, operation_key=operation_key, gate_command_id=gate_command_id)
-        async with AsyncSessionLocal() as session:
+        committed = False
+        row = None
+        audit = None
+        session = AsyncSessionLocal()
+        try:
             row = await session.scalar(select(AccessDeviceCommandRecord).where(
                 AccessDeviceCommandRecord.idempotency_key == target_idempotency_key(operation_key, target_id, action)
             ).with_for_update())
@@ -195,8 +259,15 @@ class AccessDeviceCommandJournal:
                         or row.origin_context != origin):
                     raise ValueError("An existing command identity cannot be rebound to different confirmed inputs.")
                 self.expire(row, await session.scalar(select(func.clock_timestamp())))
+                audit = await self.record_outcome_in_session(session, row)
                 await session.commit()
+                committed = True
             return row
+
+        finally:
+            await drain_owned(session.close())
+            if committed:
+                await self.publish_outcome_hint(audit)
 
     async def freeze_parent_plan(self, command_id: str, lease_token: str, plan: dict[str, Any]) -> None:
         async with AsyncSessionLocal() as session:
@@ -262,13 +333,18 @@ class AccessDeviceCommandJournal:
                     or row.origin_context != origin):
                 raise ValueError("An existing command identity cannot be rebound to different inputs.")
             self.expire(row, now)
-            return DeviceCommandClaim(row, "", False)
+            audit = await self.record_outcome_in_session(session, row)
+            return DeviceCommandClaim(row, "", False, (audit,) if audit else ())
         active = await session.scalar(select(AccessDeviceCommandRecord).where(
             AccessDeviceCommandRecord.target_device_id == target_id,
             AccessDeviceCommandRecord.state.in_(UNRESOLVED_DEVICE_COMMAND_STATES),
         ).with_for_update())
+        audits: list[AuditLog] = []
         if active:
             self.expire(active, now)
+            audit = await self.record_outcome_in_session(session, active)
+            if audit is not None:
+                audits.append(audit)
             await session.flush()
         blocked = bool(active and active.state in UNRESOLVED_DEVICE_COMMAND_STATES)
         expired = bool(expires_at and expires_at < now)
@@ -292,7 +368,10 @@ class AccessDeviceCommandJournal:
         )
         session.add(row)
         await session.flush()
-        return DeviceCommandClaim(row, token, not blocked and not expired)
+        audit = await self.record_outcome_in_session(session, row)
+        if audit is not None:
+            audits.append(audit)
+        return DeviceCommandClaim(row, token, not blocked and not expired, tuple(audits))
 
     async def lock_claim(self, session: AsyncSession, claim: DeviceCommandClaim) -> AccessDeviceCommandRecord:
         row = await session.get(AccessDeviceCommandRecord, claim.record.id, with_for_update=True, populate_existing=True)
@@ -301,17 +380,24 @@ class AccessDeviceCommandJournal:
         return row
 
     async def begin_attempt(self, session: AsyncSession, claim: DeviceCommandClaim, *,
-                            provider: str, external_id: str) -> bool:
+                            provider: str, external_id: str,
+                            outcome_audits: list[AuditLog] | None = None) -> bool:
         row = await session.get(AccessDeviceCommandRecord, claim.record.id, with_for_update=True,
                                 populate_existing=True)
         now = await session.scalar(select(func.clock_timestamp()))
         if not row or not self._owns(row, claim.token, "prepared", now):
             if row:
                 self.expire(row, now)
+                audit = await self.record_outcome_in_session(session, row)
+                if audit is not None and outcome_audits is not None:
+                    outcome_audits.append(audit)
             return False
         expires = row.binding_snapshot.get("expires_at")
         if expires and datetime.fromisoformat(expires) < now:
             self._terminal(row, "not_sent", now, "Command authority expired before dispatch.", accepted=False)
+            audit = await self.record_outcome_in_session(session, row)
+            if audit is not None and outcome_audits is not None:
+                outcome_audits.append(audit)
             return False
         if not any(item["provider"] == provider and item["external_id"] == external_id
                    for item in row.binding_snapshot["providers"]):
@@ -331,14 +417,20 @@ class AccessDeviceCommandJournal:
                              observation: dict[str, Any] | None = None,
                              has_fallback: bool = False,
                              acceptance_basis: str | None = None) -> AccessDeviceCommandRecord:
-        async with AsyncSessionLocal() as session:
+        committed = False
+        row = None
+        audit = None
+        session = AsyncSessionLocal()
+        try:
             row = await session.get(AccessDeviceCommandRecord, claim.record.id, with_for_update=True)
             if not row:
                 raise RuntimeError("Device command receipt is missing.")
             now = await session.scalar(select(func.clock_timestamp()))
             if not self._owns(row, claim.token, "attempting", now):
                 self.expire(row, now)
+                audit = await self.record_outcome_in_session(session, row)
                 await session.commit()
+                committed = True
                 return row
             receipts = list(row.provider_receipts or [])
             receipts[-1] = {**receipts[-1], "delivery": delivery.value, "status": delivery.value,
@@ -364,18 +456,37 @@ class AccessDeviceCommandJournal:
                         row.detail = "Provider accepted the command; fresh physical verification is still required."
             else:
                 self._terminal(row, delivery.value, now, detail, accepted=False)
+            audit = await self.record_outcome_in_session(session, row)
             await session.commit()
+            committed = True
             return row
+
+        finally:
+            await drain_owned(session.close())
+            if committed:
+                await self.publish_outcome_hint(audit)
 
     async def finish_without_send(self, claim: DeviceCommandClaim, *, detail: str,
                                   observation: dict[str, Any] | None = None) -> AccessDeviceCommandRecord:
-        async with AsyncSessionLocal() as session:
-            row = await self.complete_prepared(session, claim, detail=detail, observation=observation)
+        committed = False
+        row = None
+        audits: list[AuditLog] = []
+        session = AsyncSessionLocal()
+        try:
+            row = await self.complete_prepared(session, claim, detail=detail, observation=observation, outcome_audits=audits)
             await session.commit()
+            committed = True
             return row
 
+        finally:
+            await drain_owned(session.close())
+            if committed:
+                for audit in audits:
+                    await self.publish_outcome_hint(audit)
+
     async def complete_prepared(self, session: AsyncSession, claim: DeviceCommandClaim, *, detail: str,
-                                observation: dict[str, Any] | None = None) -> AccessDeviceCommandRecord:
+                                observation: dict[str, Any] | None = None,
+                                outcome_audits: list[AuditLog] | None = None) -> AccessDeviceCommandRecord:
         row = await session.get(AccessDeviceCommandRecord, claim.record.id, with_for_update=True,
                                 populate_existing=True)
         if not row:
@@ -393,11 +504,18 @@ class AccessDeviceCommandJournal:
                     self._terminal(row, "not_sent", now, detail, accepted=False)
         else:
             self.expire(row, now)
+        audit = await self.record_outcome_in_session(session, row)
+        if audit is not None and outcome_audits is not None:
+            outcome_audits.append(audit)
         return row
 
     async def reconcile_observation(self, command_id: uuid.UUID, *, binding_fingerprint: str,
                                     observation: dict[str, Any]) -> AccessDeviceCommandRecord | None:
-        async with AsyncSessionLocal() as session:
+        committed = False
+        row = None
+        audit = None
+        session = AsyncSessionLocal()
+        try:
             row = await session.get(AccessDeviceCommandRecord, command_id, with_for_update=True)
             if not row:
                 return None
@@ -407,11 +525,22 @@ class AccessDeviceCommandJournal:
             # resolved by fresh evidence from their exact frozen binding only.
             if row.state in {"accepted", "unknown"} and row.binding_fingerprint == binding_fingerprint:
                 await self._verify(session, row, observation, now)
+            audit = await self.record_outcome_in_session(session, row)
             await session.commit()
+            committed = True
             return row
 
+        finally:
+            await drain_owned(session.close())
+            if committed:
+                await self.publish_outcome_hint(audit)
+
     async def reconcile_recorded_observation(self, command_id: uuid.UUID) -> AccessDeviceCommandRecord | None:
-        async with AsyncSessionLocal() as session:
+        committed = False
+        row = None
+        audit = None
+        session = AsyncSessionLocal()
+        try:
             row = await session.get(AccessDeviceCommandRecord, command_id, with_for_update=True)
             if not row:
                 return None
@@ -435,8 +564,15 @@ class AccessDeviceCommandJournal:
                     row.gate_state = observation.state
                     row.state, row.completed_at = "verified", now
                     row.lease_token = row.lease_expires_at = None
+            audit = await self.record_outcome_in_session(session, row)
             await session.commit()
+            committed = True
             return row
+
+        finally:
+            await drain_owned(session.close())
+            if committed:
+                await self.publish_outcome_hint(audit)
 
     async def parent_receipts(self, session: AsyncSession, parent: GateCommandRecord) -> list[dict[str, Any]]:
         plan = (parent.command_metadata or {}).get("target_plan") or {}
@@ -470,6 +606,8 @@ class AccessDeviceCommandJournal:
                 session.add(row)
                 await session.flush()
                 by_target[target["target_device_id"]] = row
+            if row is not None:
+                await self.record_outcome_in_session(session, row)
         return [device_command_receipt(by_target[target["target_device_id"]])
                 for target in plan.get("targets", []) if target["target_device_id"] in by_target]
 

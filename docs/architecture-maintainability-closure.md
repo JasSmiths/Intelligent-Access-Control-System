@@ -1142,3 +1142,52 @@ Astra High approved the focused P6 checkpoint `30c4938` after independently
 checking the 263-case mapping, retained run/log hashes, source/cleanup proofs and
 bounded allocation evidence. The ordinary resident-count correction changes only
 documentation. Full composed P6/P8/P9 validation and fresh final review remain open.
+
+### Resumed P8 diagnostics and observer candidate
+
+This owner slice replaces per-record diagnostic tasks with one bounded existing
+TelemetryService writer, keeping mandatory audits separately awaited or in their
+existing domain transaction. Outcome audits join the device journal commit and retain
+its original physical uncertainty and resend fence if post-send persistence fails.
+Full audit refresh payloads publish only after commit and actual close. Inline filtered
+listeners replace listener tasks; the existing malfunction scheduler coalesces hints,
+and HA refresh effects run after its lock. No schema, durable audit queue or generic
+publishing framework was added. Core owns lifespan composition, the access-delivery
+expiry participant and standalone-parent recovery's audit hint; these integration seams
+and the full P6/P8 harness remain open until the composed gate.
+
+Fresh evidence is under
+`/Users/jas/.codex/worktrees/iacs-maintainability-frontend/validation-evidence/p8-diagnostics`.
+The final journal run passes 35 PostgreSQL cases, including real audit INSERT failures
+after ACCEPTED/UNKNOWN delivery, rollback with no hint, no resend, recovery, replay,
+accepted-to-verified audit and exact full payload compatibility after close. The
+corrected diagnostic run passes all three cases, including actual 250 rows/three INSERT
+batches and joined audit rollback/commit. Cleanup, source/dependency integrity and
+operational equality pass. Current lint, 141 checked-body/117 strict targets and
+124 distinct affected unit cases pass, including actual 20/2,000 blocked-input accounting,
+16-MiB byte saturation, nested publication and bounded shutdown ownership. The original
+synthetic Person marker's missing display_name failure, initial import correction and
+two type-command driver mistakes remain retained; none counts as a successful gate.
+The source guard passes 22 cases. On this older integration base, the 29-case harness
+guard has one known deleted-enrichment coverage-floor failure and the architecture
+guide has that retired link; core already corrected both in its clean P6 checkpoint.
+Device shutdown now drains its poller before provider close, with an actual
+repeated-cancellation lifetime regression. The shared HA-client/main stop seam
+remains core-owned.
+
+The inert same-dependency comparison uses three samples each at 20 and 1,000 inputs.
+All six pairs have equal persisted rows, hint payloads and serialized input bytes.
+At 1,000, blocked tasks and maximum active mock sessions change from 1,000 to one;
+commits change from 1,000 to ten. Median Python allocation peak changes from
+4,210,612 to 1,447,475 bytes; mock elapsed time is slower, 0.1300 to 0.1756 seconds.
+At 20, allocation peak is 96,198 to 95,427 bytes and elapsed time is slower,
+0.00267 to 0.00376 seconds. This proves bounded concurrency and less retained Python
+allocation, not RSS, PostgreSQL memory, production throughput or a universal speedup.
+Over-cap input intentionally drops diagnostics with explicit counters, so it is not an
+equivalent-output comparison. Astra High approved this exact owner integration
+checkpoint with no remaining scoped finding: receipt
+`9688e8fee68ddc14fffa79c49a03f4a15f379d3883a755024bb617fe22419801`,
+patch `af37b982ffd3caac646f4bf50900ce8b33499db88c2f77b38d4ce4dbd7dd1738`.
+The commit mapping preserves reviewed runtime/test bytes; only this approval prose
+differs. Core composition and the integrated stage gate remain open. Earlier absent
+raw logs remain historical records as disclosed above.

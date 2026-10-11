@@ -17,6 +17,7 @@ PERSISTENCE_TESTS = [
     "scripts/validation/test_compact_reads_persistence.py",
     "scripts/validation/test_leaderboard_coalescer_persistence.py",
     "scripts/validation/test_historical_candidates_persistence.py",
+    "scripts/validation/test_diagnostics_audit_persistence.py",
     "scripts/validation/test_calendar_api_persistence.py",
     "scripts/validation/test_calendar_auth_root_persistence.py",
     "scripts/validation/test_calendar_authentication_persistence.py",

@@ -4,6 +4,7 @@ The ordinary unit suite skips these checks. The recovery harness must run this
 file explicitly with IACS_RECOVERY_PROBES=synthetic-only and report that outcome.
 """
 import asyncio
+from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 import socket
@@ -15,14 +16,16 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.exc import DBAPIError
 
-from app.db.session import AsyncSessionLocal
-from app.models import AccessDevice, AccessDeviceCommandRecord, AccessDeviceProviderBinding, GateStateObservation
+from app.db.session import AsyncSessionLocal, engine
+from app.models import AccessDevice, AccessDeviceCommandRecord, AccessDeviceProviderBinding, AuditLog, GateStateObservation
 from app.modules.access_devices.base import AccessDeviceCommandResult, AccessDeviceStateObservation
 from app.modules.gate.base import CommandDelivery, GateState
 from app.services import access_devices as devices_module
 from app.services import maintenance_state
+from app.services import telemetry as telemetry_owner
 from app.services.access_device_commands import AccessDeviceCommandJournal, device_command_receipt
 from app.services.access_devices import AccessDeviceService
 
@@ -46,7 +49,6 @@ async def synthetic_namespace(monkeypatch):
         return original_connect(sock, address)
 
     monkeypatch.setattr(socket.socket, "connect", isolated_connect)
-    monkeypatch.setattr(devices_module, "emit_audit_log", lambda **_kwargs: None)
     monkeypatch.setattr(devices_module.telemetry, "record_span", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(devices_module, "COMMAND_CONFIRMATION_TIMEOUT_SECONDS", 0)
     monkeypatch.setattr(devices_module, "CLOSE_COMMAND_CONFIRMATION_TIMEOUT_SECONDS", 0)
@@ -372,8 +374,9 @@ async def test_maintenance_waits_for_winning_attempt_checkpoint_commit(monkeypat
     begin_attempt = service._journal.begin_attempt
     committed_attempt_seen = []
 
-    async def pause_before_checkpoint_commit(session, claim, *, provider, external_id):
-        allowed = await begin_attempt(session, claim, provider=provider, external_id=external_id)
+    async def pause_before_checkpoint_commit(session, claim, *, provider, external_id, outcome_audits=None):
+        allowed = await begin_attempt(session, claim, provider=provider, external_id=external_id,
+                                      outcome_audits=outcome_audits)
         assert allowed
         checkpoint_ready.set()
         await release_checkpoint.wait()
@@ -821,3 +824,174 @@ async def test_child_reservation_locks_parent_before_target_during_expiry_projec
                 task.cancel()
             if task is not None:
                 await asyncio.gather(task, return_exceptions=True)
+
+
+@asynccontextmanager
+async def failing_outcome_audit():
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("""CREATE FUNCTION fixture_fail_outcome_audit() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN
+            IF NEW.action LIKE 'access_device.command.%' THEN
+                RAISE EXCEPTION 'synthetic mandatory outcome audit failure';
+            END IF;
+            RETURN NEW; END $$"""))
+        await session.execute(text('CREATE TRIGGER fixture_fail_outcome_audit BEFORE INSERT ON audit_logs '
+                                   'FOR EACH ROW EXECUTE FUNCTION fixture_fail_outcome_audit()'))
+        await session.commit()
+    try:
+        yield
+    finally:
+        async with AsyncSessionLocal() as session:
+            await session.execute(text('DROP TRIGGER fixture_fail_outcome_audit ON audit_logs'))
+            await session.execute(text('DROP FUNCTION fixture_fail_outcome_audit()'))
+            await session.commit()
+
+
+async def command_audits(identity):
+    async with AsyncSessionLocal() as session:
+        return list(await session.scalars(select(AuditLog).where(
+            AuditLog.metadata_['command_id'].astext == str(identity)).order_by(AuditLog.timestamp)))
+
+
+@pytest.fixture
+async def outcome_hints(monkeypatch):
+    hints = []
+
+    async def publish(event_type, payload):
+        assert event_type == "audit.log.created"
+        assert engine.pool.checkedout() == 0
+        async with AsyncSessionLocal() as session:
+            audit = await session.get(AuditLog, uuid.UUID(payload["id"]))
+            assert audit is not None and audit.action == payload["action"]
+            assert payload == telemetry_owner.audit_log_event_payload(audit)
+        hints.append(payload)
+
+    monkeypatch.setattr(telemetry_owner.event_bus, "publish", publish)
+    return hints
+
+
+
+@pytest.mark.parametrize('provider_delivery', [CommandDelivery.ACCEPTED, CommandDelivery.UNKNOWN])
+async def test_post_send_audit_database_failure_holds_unknown_and_never_resends(monkeypatch, provider_delivery, outcome_hints):
+    persisted = await persisted_device()
+    provider = InertProvider(delivery=provider_delivery)
+    service = AccessDeviceService()
+    wire_provider(monkeypatch, provider, persisted.key)
+    plan = await service.preview_device_command(persisted.key, 'open')
+    identity = str(uuid.uuid4())
+    async with failing_outcome_audit():
+        result = await service.command_device(persisted.key, 'open', 'Synthetic', bypass_schedule=True,
+            intent_id=identity, idempotency_key=identity, target_plan=plan)
+        command_id = uuid.UUID(result.metadata['command_id'])
+        assert result.delivery == CommandDelivery.UNKNOWN and result.requires_reconciliation
+        assert not result.accepted and not result.verified
+        assert result.metadata['uncommitted_provider_delivery'] == provider_delivery.value
+        saved = await row_for(command_id)
+        assert saved.state == 'attempting' and saved.accepted is None
+        assert saved.provider_receipts[-1]['delivery'] == 'unknown'
+        assert await command_audits(command_id) == []
+        replay = await service.command_device(persisted.key, 'open', 'Synthetic replay', bypass_schedule=True,
+            intent_id=identity, idempotency_key=identity, target_plan=plan)
+        assert replay.metadata['command_id'] == str(command_id) and replay.requires_reconciliation
+        assert len(provider.calls) == 1
+        async with AsyncSessionLocal() as session:
+            await session.execute(update(AccessDeviceCommandRecord).where(AccessDeviceCommandRecord.id == command_id)
+                .values(lease_expires_at=datetime.now(UTC)-timedelta(seconds=1)))
+            await session.commit()
+        with pytest.raises(DBAPIError):
+            await service._journal.reconcile_recorded_observation(command_id)
+        assert (await row_for(command_id)).state == 'attempting'
+        assert await command_audits(command_id) == [] and len(provider.calls) == 1
+        assert outcome_hints == []
+    recovered = await service._journal.reconcile_recorded_observation(command_id)
+    assert recovered.state == 'unknown' and recovered.accepted is None
+    audits = await command_audits(command_id)
+    assert len(audits) == 1 and audits[0].action == 'access_device.command.uncertain'
+    assert audits[0].outcome == 'requires_review'
+    assert len(outcome_hints) == 1 and outcome_hints[0]['action'] == 'access_device.command.uncertain'
+    await service.command_device(persisted.key, 'open', 'Synthetic final replay', bypass_schedule=True,
+        intent_id=identity, idempotency_key=identity, target_plan=plan)
+    assert len(await command_audits(command_id)) == 1 and len(provider.calls) == 1
+
+
+async def test_expired_unsent_audit_database_failure_rolls_back_before_any_provider(monkeypatch):
+    persisted = await persisted_device()
+    provider, service = InertProvider(), AccessDeviceService()
+    wire_provider(monkeypatch, provider, persisted.key)
+    plan = await service.preview_device_command(persisted.key, 'open')
+    identity = str(uuid.uuid4())
+    expires = datetime.now(UTC)-timedelta(seconds=1)
+    async with failing_outcome_audit():
+        with pytest.raises(DBAPIError):
+            await service.command_device(persisted.key, 'open', 'Synthetic expired', bypass_schedule=True,
+                intent_id=identity, idempotency_key=identity, target_plan=plan, expires_at=expires)
+        async with AsyncSessionLocal() as session:
+            assert await session.scalar(select(AccessDeviceCommandRecord.id).where(
+                AccessDeviceCommandRecord.intent_id == identity)) is None
+        assert provider.calls == []
+    result = await service.command_device(persisted.key, 'open', 'Synthetic expired', bypass_schedule=True,
+        intent_id=identity, idempotency_key=identity, target_plan=plan, expires_at=expires)
+    audits = await command_audits(result.metadata['command_id'])
+    assert len(audits) == 1 and audits[0].action == 'access_device.command.withheld'
+    assert result.delivery == CommandDelivery.NOT_SENT and provider.calls == []
+
+
+async def test_accepted_then_verified_audits_share_state_commits_and_replay_deduplicates(outcome_hints):
+    journal, selected = AccessDeviceCommandJournal(), target()
+    owned = await claim(journal, selected)
+    assert await begin(journal, owned)
+    accepted = await journal.finish_attempt(owned, delivery=CommandDelivery.ACCEPTED,
+        state=GateState.UNKNOWN, detail='Synthetic accepted')
+    assert [row.action for row in await command_audits(accepted.id)] == ['access_device.command.accepted']
+    replay = await claim(journal, selected, intent=owned.record.intent_id)
+    assert not replay.acquired and len(await command_audits(accepted.id)) == 1
+    verified = await journal.reconcile_observation(accepted.id, binding_fingerprint=selected['binding_fingerprint'],
+        observation={'provider':'home_assistant','state':'open','observed_at':datetime.now(UTC)})
+    assert verified.state == 'verified'
+    assert [row.action for row in await command_audits(accepted.id)] == [
+        'access_device.command.accepted', 'access_device.command.verified']
+    await journal.reconcile_recorded_observation(accepted.id)
+    assert len(await command_audits(accepted.id)) == 2
+    assert [hint['action'] for hint in outcome_hints] == [
+        'access_device.command.accepted', 'access_device.command.verified', 'access_device.command.verified']
+
+
+async def test_successful_claim_hints_prior_expired_outcome_after_close(monkeypatch, outcome_hints):
+    persisted = await persisted_device()
+    provider, service = InertProvider(), AccessDeviceService()
+    wire_provider(monkeypatch, provider, persisted.key)
+    plan = await service.preview_device_command(persisted.key, 'open')
+    old = await claim(service._journal, plan['targets'][0])
+    async with AsyncSessionLocal() as session:
+        await session.execute(update(AccessDeviceCommandRecord).where(AccessDeviceCommandRecord.id == old.record.id)
+            .values(lease_expires_at=datetime.now(UTC)-timedelta(seconds=1)))
+        await session.commit()
+    identity = str(uuid.uuid4())
+    result = await service.command_device(persisted.key, 'open', 'Synthetic new authority', bypass_schedule=True,
+        intent_id=identity, idempotency_key=identity, target_plan=plan)
+    assert result.accepted and len(provider.calls) == 1
+    assert outcome_hints[0]['id'] == str(uuid.uuid5(old.record.id, 'device-command-outcome:not_sent'))
+    assert outcome_hints[0]['action'] == 'access_device.command.withheld'
+    assert (await row_for(old.record.id)).state == 'not_sent'
+
+
+async def test_dispatch_refusal_hints_actual_committed_no_send_outcome(monkeypatch, outcome_hints):
+    persisted = await persisted_device()
+    provider, service = InertProvider(), AccessDeviceService()
+    wire_provider(monkeypatch, provider, persisted.key)
+    plan = await service.preview_device_command(persisted.key, 'open')
+    begin_attempt = service._journal.begin_attempt
+
+    async def expire_at_dispatch(session, owned, **kwargs):
+        row = await session.get(AccessDeviceCommandRecord, owned.record.id, with_for_update=True)
+        row.binding_snapshot = {**row.binding_snapshot,
+            'expires_at': (datetime.now(UTC)-timedelta(seconds=1)).isoformat()}
+        return await begin_attempt(session, owned, **kwargs)
+
+    monkeypatch.setattr(service._journal, 'begin_attempt', expire_at_dispatch)
+    identity = str(uuid.uuid4())
+    result = await service.command_device(persisted.key, 'open', 'Synthetic late expiry', bypass_schedule=True,
+        intent_id=identity, idempotency_key=identity, target_plan=plan)
+    assert result.delivery == CommandDelivery.NOT_SENT and provider.calls == []
+    assert len(await command_audits(result.metadata['command_id'])) == 1
+    assert outcome_hints and {hint['action'] for hint in outcome_hints} == {'access_device.command.withheld'}
