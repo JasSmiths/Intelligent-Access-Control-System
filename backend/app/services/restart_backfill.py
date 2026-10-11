@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import (
     AccessEvent,
@@ -33,11 +34,23 @@ from app.models.enums import (
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.gate.base import GateState
 from app.modules.unifi_protect.client import UnifiProtectError
+from app.services import ha_presence_reservations
 from app.services.access.historical import (
     HistoricalSessionInput,
     persist_historical_event_in_session,
 )
-from app.services.event_bus import event_bus
+from app.services.access.publication import reserve_initial_publication_in_session
+from app.services.ha_presence_contracts import HaCoordinationBusy
+from app.services.historical_candidates import (
+    HISTORICAL_MEDIA_SECONDS,
+    HISTORICAL_PAGE_SIZE,
+    HISTORICAL_TRANSACTION_SECONDS,
+    HistoricalCandidateStore,
+    HistoricalClaim,
+    HistoricalClaimLost,
+)
+from app.services.leaderboard import get_leaderboard_service
+from app.services.movement.admission import AdmissionResult
 from app.services.movement.sessions import payload_values
 from app.services.movement_fsm import MovementDirectionFSM, MovementIntent
 from app.services.movement_ledger import movement_saga_summary
@@ -47,6 +60,7 @@ from app.services.snapshots import (
     SNAPSHOT_HEIGHT,
     SNAPSHOT_WIDTH,
     SnapshotError,
+    SnapshotMetadata,
     access_event_snapshot_relative_path,
     access_event_snapshot_url,
     alert_snapshot_metadata_from_event,
@@ -199,7 +213,8 @@ async def run_missed_access_event_reconciliation(
                 action="access_event.reconciliation_checked",
                 target_label="Protect LPR reconciliation",
             )
-        window_start = window_end
+        if result.errors == 0:
+            window_start = window_end
         await asyncio.sleep(interval_seconds)
 
 
@@ -209,10 +224,12 @@ class MissedAccessEventBackfillService:
         *,
         source: str = MISSED_EVENT_BACKFILL_SOURCE,
         backfill_reason: str = "UniFi Protect retained an LPR event during a backend/container restart window.",
+        candidate_store: HistoricalCandidateStore | None = None,
     ) -> None:
         self.source = source
         self.backfill_reason = backfill_reason
         self._movement_direction_fsm = MovementDirectionFSM()
+        self.candidate_store = candidate_store or HistoricalCandidateStore()
 
     async def run(
         self,
@@ -224,6 +241,7 @@ class MissedAccessEventBackfillService:
         startup = _aware_utc(startup_at or datetime.now(tz=UTC))
         protect = get_unifi_protect_service()
         result = MissedAccessEventBackfillResult(window_end=startup.isoformat())
+        drained = await self._drain_candidates(result, limit=HISTORICAL_PAGE_SIZE)
 
         if not await protect.configured():
             result.reason = "unifi_protect_not_configured"
@@ -253,32 +271,31 @@ class MissedAccessEventBackfillService:
         result.scanned = len(events)
 
         for protect_event in events:
-            candidate = await self._candidate_from_protect_event(protect, protect_event)
-            if not candidate:
-                result.skipped += 1
-                continue
-            if candidate.captured_at < window_start or candidate.captured_at > startup:
-                result.skipped += 1
-                continue
-            result.lpr_candidates += 1
-
             try:
-                created = await self._create_backfill_event(candidate)
-            except Exception as exc:
+                protect_id = str(protect_event.get("id") or "").strip()
+                # Stored original evidence wins before any track/provider fetch.
+                if protect_id and await self.candidate_store.contains(protect_id):
+                    result.duplicates += 1
+                    continue
+                candidate = await self._candidate_from_protect_event(protect, protect_event)
+                if not candidate or not window_start <= candidate.captured_at <= startup:
+                    result.skipped += 1
+                    continue
+                result.lpr_candidates += 1
+                payload = asdict(candidate)
+                payload["captured_at"] = candidate.captured_at.isoformat()
+                payload["backfill_reason"] = self.backfill_reason
+                payload["discovery_source"] = self.source
+                if not await self.candidate_store.reserve(
+                        protect_event_id=candidate.protect_event_id, captured_at=candidate.captured_at,
+                        candidate=payload):
+                    result.duplicates += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - failed discovery/reservation must not advance the scan window
                 result.errors += 1
-                logger.exception(
-                    "missed_access_event_backfill_candidate_failed",
-                    extra={
-                        "protect_event_id": candidate.protect_event_id,
-                        "registration_number": candidate.registration_number,
-                        "error": str(exc),
-                    },
-                )
-                continue
-            if created:
-                result.backfilled += 1
-            else:
-                result.duplicates += 1
+                logger.warning("Historical candidate discovery deferred")
+        await self._drain_candidates(result, limit=HISTORICAL_PAGE_SIZE-drained)
 
         return result
 
@@ -288,18 +305,11 @@ class MissedAccessEventBackfillService:
         protect_event: dict[str, Any],
     ) -> ProtectBackfillCandidate | None:
         protect_event_id = str(protect_event.get("id") or "").strip()
-        if not protect_event_id:
+        if not protect_event_id or len(protect_event_id) > 180:
             return None
         if not _event_might_have_plate(protect_event):
             return None
-        try:
-            track = await protect.event_lpr_track(protect_event_id)
-        except UnifiProtectError as exc:
-            logger.debug(
-                "missed_access_event_track_unavailable",
-                extra={"protect_event_id": protect_event_id, "error": str(exc)},
-            )
-            return None
+        track = await protect.event_lpr_track(protect_event_id)
 
         observations = [row for row in track.get("observations", []) if isinstance(row, dict)]
         track_candidate = _best_track_candidate(observations)
@@ -337,11 +347,86 @@ class MissedAccessEventBackfillService:
             track_candidate=track_candidate,
         )
 
-    async def _create_backfill_event(self, candidate: ProtectBackfillCandidate) -> bool:
+    async def _drain_candidates(self, result: MissedAccessEventBackfillResult, *, limit: int) -> int:
+        processed = 0
+        for _ in range(limit):
+            claim = await self.candidate_store.claim()
+            if claim is None:
+                break
+            processed += 1
+            try:
+                processor = MissedAccessEventBackfillService(
+                    source=str(claim.candidate.get("discovery_source") or claim.source),
+                    backfill_reason=str(claim.candidate["backfill_reason"]), candidate_store=self.candidate_store)
+                created = await processor._process_candidate(claim)
+                if created:
+                    result.backfilled += 1
+                else:
+                    result.duplicates += 1
+            except asyncio.CancelledError:
+                await drain_owned(self._retry_candidate(claim, reason="historical_cancelled"))
+                raise
+            except HistoricalClaimLost:
+                result.errors += 1
+            except HaCoordinationBusy:
+                await self._retry_candidate(claim, reason="ha_coordination_busy")
+                result.errors += 1
+            except Exception:  # noqa: BLE001 - retain immutable candidate/media for bounded automatic retry
+                await self._retry_candidate(claim, reason="historical_processing_failed")
+                result.errors += 1
+                logger.warning("Historical candidate processing deferred")
+        return processed
+
+    async def _retry_candidate(self, claim: HistoricalClaim, *, reason: str) -> None:
+        try:
+            await self.candidate_store.retry(claim, reason=reason)
+        except HistoricalClaimLost:
+            pass  # Expired ownership is settled by the next bounded claim scan.
+
+    async def _process_candidate(self, claim: HistoricalClaim) -> bool:
+        saved = claim.candidate
+        candidate = ProtectBackfillCandidate(protect_event_id=claim.protect_event_id,
+            registration_number=str(saved["registration_number"]), captured_at=claim.captured_at,
+            confidence=float(saved["confidence"]), camera_id=saved["camera_id"], camera_name=saved["camera_name"],
+            protect_event=saved["protect_event"], track_candidate=saved["track_candidate"])
+        async with self.candidate_store.session() as session:
+            existing = await self._matching_existing_event(session, candidate)
+        if existing is not None:
+            async with self.candidate_store.session() as session:
+                row = await self.candidate_store.lock_owned(session, claim)
+                await self.candidate_store.complete_in_session(session, row, claim, skipped=True)
+                await session.commit()
+            await self.candidate_store.discard_skipped_media(claim)
+            return False
+        if claim.media_state == "pending":
+            token = await self.candidate_store.begin_media(claim)
+            child = asyncio.create_task(self._prepare_protect_thumbnail(claim, token, candidate),
+                name="historical-media")
+            try:
+                async with asyncio.timeout(HISTORICAL_MEDIA_SECONDS):
+                    media = await asyncio.shield(child)
+            finally:
+                if not child.done() and not child.cancelling():
+                    child.cancel()
+                await drain_owned(asyncio.gather(child, return_exceptions=True))
+            await self.candidate_store.finish_media(claim, token, media)
+        media = await self.candidate_store.media_result(claim)
+        created = await self._create_backfill_event(candidate, claim, media)
+        if not created:
+            await self.candidate_store.discard_skipped_media(claim)
+        return created
+
+    async def _create_backfill_event(
+        self, candidate: ProtectBackfillCandidate, claim: HistoricalClaim, media: dict[str, Any]
+    ) -> bool:
         config = await get_runtime_config()
-        async with AsyncSessionLocal() as session:
+        async with asyncio.timeout(HISTORICAL_TRANSACTION_SECONDS), self.candidate_store.session() as session:
+            candidate_row = await self.candidate_store.lock_owned(session, claim)
+            lease_until = candidate_row.lease_until
             duplicate = await self._matching_existing_event(session, candidate)
             if duplicate:
+                await self.candidate_store.complete_in_session(session, candidate_row, claim, skipped=True)
+                await session.commit()
                 return False
 
             vehicle = await self._lookup_vehicle(session, candidate.registration_number)
@@ -359,6 +444,8 @@ class MissedAccessEventBackfillService:
                             "matched_registration_number": suppressed_by.registration_number,
                         },
                     )
+                    await self.candidate_store.complete_in_session(session, candidate_row, claim, skipped=True)
+                    await session.commit()
                     return False
             person = vehicle.owner if vehicle else None
             visitor_pass: VisitorPass | None = None
@@ -421,6 +508,7 @@ class MissedAccessEventBackfillService:
             )
 
             event = AccessEvent(
+                id=claim.event_id,
                 vehicle_id=vehicle.id if vehicle else None,
                 person_id=person.id if person else None,
                 registration_number=candidate.registration_number,
@@ -459,7 +547,7 @@ class MissedAccessEventBackfillService:
             session.add(event)
             await session.flush()
 
-            await self._attach_protect_thumbnail(event, candidate)
+            self._apply_prepared_thumbnail(event, candidate, media)
             anomalies = _build_backfill_anomalies(
                 event, person, vehicle, allowed, visitor_pass=visitor_pass
             )
@@ -495,8 +583,18 @@ class MissedAccessEventBackfillService:
                 },
                 trace_id=trace.trace_id,
             )
+            await reserve_initial_publication_in_session(session, event.id)
+            await get_leaderboard_service().mark_access_in_session(session, event, origin_at=None)
+            await self.candidate_store.complete_in_session(session, candidate_row, claim)
+            await session.flush()
+            proposals = [finalized.ha_reservation] if finalized.ha_reservation is not None else []
+            # Last domain participant: busy rolls back event, session, audit,
+            # publication, chart and candidate completion together.
+            await ha_presence_reservations.reserve_all_in_session(session, proposals)
+            if lease_until is None or await self.candidate_store.now(session) >= lease_until:
+                raise HistoricalClaimLost("historical_lease_expired_before_commit")
             await session.commit()
-            await session.refresh(event)
+            get_leaderboard_service().wake()
 
         logger.info(
             "missed_access_event_backfilled",
@@ -534,28 +632,10 @@ class MissedAccessEventBackfillService:
                 "anomaly_count": len(anomalies),
             },
         )
-        await telemetry.flush()
-        await event_bus.publish(
-            "access_event.finalized",
-            {
-                "event_id": str(event.id),
-                "access_event_id": str(event.id),
-                "person_id": str(event.person_id) if event.person_id else None,
-                "vehicle_id": str(event.vehicle_id) if event.vehicle_id else None,
-                "registration_number": event.registration_number,
-                "direction": event.direction.value,
-                "decision": event.decision.value,
-                "confidence": event.confidence,
-                "source": event.source,
-                "occurred_at": event.occurred_at.isoformat(),
-                "event_type": "access_event.finalized",
-                "timing_classification": event.timing_classification.value,
-                "anomaly_count": len(anomalies),
-                "movement_saga": movement_saga_summary(movement_saga),
-                "backfilled": True,
-                "backfill_source": self._backfill_payload_source(),
-            },
-        )
+        try:
+            await telemetry.flush()
+        except Exception:  # noqa: BLE001 - observability cannot undo the committed historical decision
+            logger.warning("Historical telemetry flush deferred")
         return True
 
     async def _persist_backfill_movement(
@@ -565,7 +645,7 @@ class MissedAccessEventBackfillService:
         candidate: ProtectBackfillCandidate,
         *,
         direction_resolution: dict[str, Any],
-    ):
+    ) -> AdmissionResult:
         return await persist_historical_event_in_session(
             session,
             event,
@@ -732,43 +812,36 @@ class MissedAccessEventBackfillService:
             return "protect_reconciliation"
         return "startup_reconciliation"
 
-    async def _attach_protect_thumbnail(
-        self,
-        event: AccessEvent,
-        candidate: ProtectBackfillCandidate,
-    ) -> None:
-        protect = get_unifi_protect_service()
+    async def _prepare_protect_thumbnail(
+        self, claim: HistoricalClaim, token: uuid.UUID, candidate: ProtectBackfillCandidate
+    ) -> dict[str, Any]:
+        relative_path = access_event_snapshot_relative_path(claim.event_id, claim_token=token)
         try:
-            media = await protect.event_thumbnail(
-                candidate.protect_event_id,
-                width=SNAPSHOT_WIDTH,
-                height=SNAPSHOT_HEIGHT,
-            )
-            metadata = await get_snapshot_manager().store_image(
-                media.content,
-                relative_path=access_event_snapshot_relative_path(event.id),
-                url=access_event_snapshot_url(event.id),
+            media = await get_unifi_protect_service().event_thumbnail(candidate.protect_event_id,
+                width=SNAPSHOT_WIDTH, height=SNAPSHOT_HEIGHT)
+            metadata = await get_snapshot_manager().store_image(media.content,
+                relative_path=relative_path, url=access_event_snapshot_url(claim.event_id),
                 camera=candidate.camera_id or candidate.camera_name or "unifi_protect_event",
-                captured_at=candidate.captured_at,
-            )
+                captured_at=candidate.captured_at)
+            return {"status":"ready", **metadata.as_payload()}
+        except (OSError, SnapshotError, UnifiProtectError):
+            return {"status":"unavailable", "relative_path":relative_path, "reason":"historical_thumbnail_unavailable"}
+
+    def _apply_prepared_thumbnail(
+        self, event: AccessEvent, candidate: ProtectBackfillCandidate, media: dict[str, Any]
+    ) -> None:
+        if media["status"] == "ready":
+            captured_at = _parse_datetime(media["captured_at"])
+            if captured_at is None:
+                raise ValueError("Historical snapshot capture time is unavailable")
+            metadata = SnapshotMetadata(relative_path=media["relative_path"], url=media["url"],
+                camera=media["camera"], captured_at=captured_at, content_type=media["content_type"],
+                bytes=media["bytes"], width=media["width"], height=media["height"])
             apply_snapshot_to_access_event(event, metadata)
-        except (OSError, SnapshotError, UnifiProtectError) as exc:
-            raw_payload = dict(event.raw_payload or {})
-            raw_payload["snapshot_backfill"] = {
-                "status": "unavailable",
-                "protect_event_id": candidate.protect_event_id,
-                "reason": str(exc),
-                "attempted_at": datetime.now(tz=UTC).isoformat(),
-            }
-            event.raw_payload = raw_payload
-            logger.info(
-                "missed_access_event_thumbnail_unavailable",
-                extra={
-                    "event_id": str(event.id),
-                    "protect_event_id": candidate.protect_event_id,
-                    "error": str(exc),
-                },
-            )
+        else:
+            event.raw_payload = {**(event.raw_payload or {}), "snapshot_backfill":{
+                "status":"unavailable", "protect_event_id":candidate.protect_event_id,
+                "reason":"historical_thumbnail_unavailable"}}
 
 
 def backfill_window_start(

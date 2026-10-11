@@ -7,6 +7,7 @@ from sqlalchemy.orm import defer, selectinload
 
 from app.models import User, Vehicle, VehiclePersonAssignment
 from app.schemas.directory import CreateVehicleRequest, UpdateVehicleRequest, VehicleResponse
+from app.services.leaderboard import get_leaderboard_service
 from app.services.mutation_context import MutationError, load_active_admin
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
@@ -83,7 +84,9 @@ async def add_vehicle(
             target_label=vehicle.registration_number,
             diff={"old": {}, "new": vehicle_audit_snapshot(vehicle)},
         )
+        await get_leaderboard_service().mark_dirty_in_session(session)
         await session.commit()
+        get_leaderboard_service().wake()
     except IntegrityError as exc:
         await session.rollback()
         raise DirectoryOperationError(status_code=409, detail="Vehicle already exists") from exc
@@ -159,7 +162,9 @@ async def update_vehicle(
         diff=audit_diff(before, vehicle_audit_snapshot(vehicle)),
     )
     try:
+        await get_leaderboard_service().mark_dirty_in_session(session)
         await session.commit()
+        get_leaderboard_service().wake()
     except IntegrityError as exc:
         await session.rollback()
         raise DirectoryOperationError(status_code=409, detail="Vehicle already exists") from exc
@@ -217,7 +222,9 @@ async def refresh_vehicle_information(
         target_label=vehicle.registration_number,
         diff=audit_diff(before, vehicle_audit_snapshot(vehicle)),
     )
+    await get_leaderboard_service().mark_dirty_in_session(session)
     await session.commit()
+    get_leaderboard_service().wake()
 
     return await get_vehicle(session, vehicle_id)
 
@@ -244,7 +251,9 @@ async def delete_vehicle(
         diff={"old": before, "new": {}},
     )
     await session.delete(vehicle)
+    await get_leaderboard_service().mark_dirty_in_session(session)
     await session.commit()
+    get_leaderboard_service().wake()
 
 
 async def mot_history(session: AsyncSession, vehicle_id: uuid.UUID, *, cursor: str | None, limit: int) -> MotHistoryPage:

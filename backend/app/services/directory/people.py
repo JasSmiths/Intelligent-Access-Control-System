@@ -6,6 +6,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models import Person, User, Vehicle, VehiclePersonAssignment
 from app.schemas.directory import CreatePersonRequest, PersonResponse, UpdatePersonRequest
+from app.services.leaderboard import get_leaderboard_service
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
@@ -92,7 +93,9 @@ async def add_person(
         target_label=person.display_name,
         diff={"old": {}, "new": person_audit_snapshot(person)},
     )
+    await get_leaderboard_service().mark_dirty_in_session(session)
     await session.commit()
+    get_leaderboard_service().wake()
     refreshed_person = await session.scalar(
         select(Person)
         .options(
@@ -223,7 +226,9 @@ async def update_person(
         target_label=person.display_name,
         diff=audit_diff(before, after),
     )
+    await get_leaderboard_service().mark_dirty_in_session(session)
     await session.commit()
+    get_leaderboard_service().wake()
     refreshed_person = await session.scalar(
         select(Person)
         .options(
