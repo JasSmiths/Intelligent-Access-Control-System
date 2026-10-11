@@ -1,6 +1,8 @@
-# P6 concrete design draft — read-only preparation
+# P6 historical design and approval record
 
-Historical design record. Its “current” and pending-approval descriptions refer
+Implemented P6 status and exact validation/review authority are in the
+[closure record](architecture-maintainability-closure.md). This is a historical
+design record. Its “current” and pending-approval descriptions refer
 to the preparation snapshots below. The implemented flow and current extension
 owners are documented in [Architecture](architecture.md); current stage and
 evidence disposition are in the [closure record](architecture-maintainability-closure.md).

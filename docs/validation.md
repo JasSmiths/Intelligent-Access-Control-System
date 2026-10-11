@@ -757,3 +757,11 @@ and full standalone/garage refresh payloads after the actual database close.
 The harness removes only containers whose exact validation label matches its
 owned prefix, including their anonymous image-declared volumes; it never prunes
 unidentified volumes. Source and harness guards protect that cleanup boundary.
+
+The completed programme uses one external final evidence index under the programme
+worktree parent's `validation-evidence/final-candidate/evidence-index.json`. It
+records the full run plus the reviewed unit-only amendment, exact unchanged
+PostgreSQL/frontend mappings, fresh and retained browser cases, runtime image
+smoke, benchmark limits and the final independent review disposition. Earlier
+failed runs remain failed evidence; they are not described as all-green runs.
+Historical raw evidence lost after restart remains unavailable.

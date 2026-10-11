@@ -794,6 +794,7 @@ Chart notifications reserve the existing NotificationRunStore directly in the
 chart transaction. The existing dispatcher discovers committed intents using its
 ordinary two-second polling interval after bounded serial batches; backlog and
 provider work can delay discovery. Original deadline checks remain authoritative.
-There is no chart-to-notification-service back-import or separate wake dispatcher. HA configuration reads and invalidation share the
+There is no chart-to-notification-service back-import or separate wake dispatcher.
+HA configuration reads and invalidation share the
 existing database owner's setting-lock helper. Only the connection reader decodes
 values; configuration invalidation needs the same locks and generation update.

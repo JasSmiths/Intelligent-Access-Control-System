@@ -6,34 +6,51 @@ requires evidence and Astra High approval before new closure. Prior Astra Ultra
 approvals below remain historical records. Planned retention is
 an explicit disposition requiring approval, not a claim that code was fixed.
 
-## Current implementation and remaining gates
+## Current implementation and validation
 
-The durable access coordinator, canonical revisioned event projection and bounded
-completion/publication owners are integrated; RAM windows and inline optional
-completion have been retired. Astra High approved the focused P6 checkpoint
-`30c4938` with 263 distinct PostgreSQL cases and bounded 4/80-window allocation
-and output evidence. Calendar/P7 has its approved full and browser gates.
-E1's provider-setting invariant and E2/E3's real transaction/current-authority
-exercises are source-approved; E2/E3 also passed 42 PostgreSQL cases. E4 now has
-an existing-store mileage/reset exercise with real PostgreSQL coverage. P8
-diagnostics and required audits are composed, including shared-client shutdown
-and parent-journal seams; their final integrated review remains open. The combined
-full harness, affected browser checks and
-fresh complete-candidate Astra High review remain required. These focused
-approvals do not close P6, P8 or P9.
+The implemented programme uses the durable access coordinator, canonical
+revisioned event projection, bounded completion/publication workers, chart dirty
+coalescer and bounded historical reconciliation. RAM windows, inline optional
+completion and superseded senders are retired. Required audits join their owning
+transactions; diagnostics and shared-client shutdown retain actual cleanup.
+[Architecture](architecture.md) describes the current flow and extension owners.
+E1–E5 are bounded conformance exercises, with no hypothetical product features
+shipped to satisfy them.
 
-The first composed full run at `2719d503`, retained as
-`final-composed/iacs-validation-_a667g8w`, is failed evidence and does not close any
-stage: five of 226 result entries failed (architecture, backend units, report
-lifespan, plate-query fixture and recovery-hold fixture). It recorded 1,484 passing
-backend units and 1,136 passing PostgreSQL cases across 62 suites, with eleven
-unit failures, two PostgreSQL failures and seven setup errors. Cleanup and source
-integrity passed; the operational checkout remained unchanged. The dependency
-cycles and obsolete test adapters are corrected in the next candidate, whose
-fresh full harness and runtime image checks remain pending. Logs and source
-snapshots stay available; disposable database/dependency scratch may be removed
-after verified cleanup. Earlier historical raw evidence remains unavailable as
-stated below, regardless of historical retained-evidence wording.
+The final authority is the single external evidence index at
+`/Users/jas/.codex/worktrees/iacs-maintainability-programme/validation-evidence/final-candidate/evidence-index.json`.
+It binds exact checkout, branch, HEAD/tree and dirty patch to check commands,
+logs, source mappings, image identities and fresh Astra High review disposition.
+The mapped composed gate combines full run `iacs-validation-9v9u9m9t` with the
+whole-backend/static amendment `unit-amendment-uf0y3y3h`: 1,495 backend cases,
+1,145 PostgreSQL cases across 62 suites, 376 frontend cases and the frontend build
+pass. The 35 journal cases skipped in the database-free unit invocation pass in
+the PostgreSQL journal suite. Source22/config30, architecture and 141 checked/117
+strict type targets pass without baseline expansion or rule relaxation.
+Browser evidence covers 182 distinct cases: 36 freshly run Chromium/WebKit cases
+and 146 unchanged retained cases, mapped by exact frontend hashes. Runtime PDF
+and installed SDK import evidence are bound to the final backend bytes in the
+index. This is a mapped composed gate, not a claim of one all-green full run.
+
+The original operational checkout remains on
+`65e1b6d070e6327314ca9bd72c01264496b821fb`, with only the preserved untracked audit
+(SHA256 `7da57e4bd918d4b7160e60ff2b4b3198853544b13433512d090fc6eac3400c68`).
+No deployment, production migration, live provider send or hardware test occurred.
+Synthetic allocation/timing results retain their stated limits. Supported recovery
+requires compatible source/image/schema or the matching backup; restoring a
+backup cannot undo physical effects that occurred later.
+
+Earlier checkpoint narratives below are historical and retain their original
+scope and pending wording. They are superseded by this current section, the
+matrices and the final index. Historical raw files under
+`/private/tmp/iacs-maintainability-programme` were lost after restart and remain
+unavailable; historical approval facts do not imply those raw files are retained.
+Both initial composed failures stay available: `_a667g8w` had five failed result
+entries; `9v9u9m9t` had one test-only exact-clock assertion failure, replaced by the
+reviewed deterministic remaining-budget fixture in `c92cf2d` and the green whole
+backend/static amendment. All other mapped full-run inputs are unchanged. Logs,
+source snapshots and results are retained; verified unused database/dependency
+scratch may be retired after cleanup.
 
 ## Source and implementation gates
 
@@ -288,29 +305,29 @@ conformance and non-report P8 owners remain pending.
 | AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Closed / Astra approved P3 exact candidate |
 | AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Closed backend / Astra approved P4 exact candidate |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Closed frontend / Astra approved P4 exact candidate |
-| AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Focused 263-case PostgreSQL checkpoint and 4/80-window allocation/output evidence; full composed gate remains | Focused checkpoint approved / integrated full gate pending |
-| AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | P7 full/browser gate and P6 focused allocation/output checkpoint approved / final composed P6 gate pending |
-| AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Owner overflow/20–2,000-input evidence and lifetime fixtures; shared-client/parent-audit composition | Astra High approved P8 owner checkpoint; composition implemented / final full gate pending |
-| AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Report/calendar owners approved; P8/P9 integrated gates pending / Astra Ultra report; Astra High calendar |
+| AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Focused 263-case PostgreSQL checkpoint and 4/80-window allocation/output evidence; full composed mapping in final index | Implemented and composed validation passed / final review in evidence index |
+| AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | P6/P7 composed validation and bounded output/allocation evidence passed / final review in evidence index |
+| AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Owner overflow/20–2,000-input evidence and lifetime fixtures; shared-client/parent-audit composition | P8 owner approved; composed lifetime/audit validation passed / final review in evidence index |
+| AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Report/calendar owners approved; composed validation passed / final review in evidence index |
 | AM-09 runtime PDF support | Shared backend image ancestry and final-image smoke; P1 | Runtime-user PDF from installed actual template with no network/overlays; image identity/size/build time | Closed / Astra approved P1 runtime packaging |
-| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original live coverage floor/flags preserved, retired owner removed explicitly; 141 checked/117 strict, source22/config30; final harness | Earlier stage safeguards approved; current checks pass / integrated full gate pending |
-| AM-11 obsolete authority/bridges | Pure access plan, execution result and durable workflow intake; P5 | Whole-repository consumer trace; authoritative journals retained; no duplicate realtime intake | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
+| AM-10 type/evidence coverage | Single type policy, harness guards and retained evidence; P0/continuous | Original live coverage floor/flags preserved, retired owner removed explicitly; 141 checked/117 strict, source22/config30; final harness | Safeguards and composed validation passed / final review in evidence index |
+| AM-11 obsolete authority/bridges | Pure access plan, execution result and durable workflow intake; P5 | Whole-repository consumer trace; authoritative journals retained; no duplicate realtime intake | Closed P5 implementation; integrated conformance validated / final review in evidence index |
 | AM-12 compact presence/forecast | Presence/predictor reads; P7 | Equivalent output and compact unloaded columns; bounded internal reads; 20/2,000-person density evidence; public-list exception disclosed | Closed P7 / Astra High approved exact candidate |
-| AM-13 provider-information reset | Vehicle information store in-session invalidation; P5 | Plate-change aggregate, stale completion and user-field preservation; E4 conformance | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
+| AM-13 provider-information reset | Vehicle information store in-session invalidation; P5 | Plate-change aggregate, stale completion and user-field preservation; E4 conformance | Closed P5 implementation; integrated conformance validated / final review in evidence index |
 
 ## Simplification candidates
 
 | Candidate | Disposition and owner | Required evidence or retention reason | Status / Astra approval |
 | --- | --- | --- | --- |
-| Pure plan discarded command field | Remove; P5/AM-11 | Trace internal consumers; preserve persisted saga/receipt semantics | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
-| Automation realtime bridge and notification visitor fallback | Remove; P5/AM-11 | Keep durable mapper and notification wake; negative duplicate-intake fixtures | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
-| AccessExecutionResult unused window/command/skipped/outcome fields | Narrow after tracing; P5/AM-11 | Whole-repository and fixture trace; retain durable fields | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
-| External-admission private method | Explicit supported AccessExecution.persist_external_gate_open_admission interface; P6 | Existing implementation and sole coordinator caller renamed together; execution/admission ordering preserved | Implemented / composed gate and final review pending |
+| Pure plan discarded command field | Remove; P5/AM-11 | Trace internal consumers; preserve persisted saga/receipt semantics | Closed P5 implementation; integrated conformance validated / final review in evidence index |
+| Automation realtime bridge and notification visitor fallback | Remove; P5/AM-11 | Keep durable mapper and notification wake; negative duplicate-intake fixtures | Closed P5 implementation; integrated conformance validated / final review in evidence index |
+| AccessExecutionResult unused window/command/skipped/outcome fields | Narrow after tracing; P5/AM-11 | Whole-repository and fixture trace; retain durable fields | Closed P5 implementation; integrated conformance validated / final review in evidence index |
+| External-admission private method | Explicit supported AccessExecution.persist_external_gate_open_admission interface; P6 | Existing implementation and sole coordinator caller renamed together; execution/admission ordering preserved | Implemented and actual pipeline validated / final review in evidence index |
 | Unused shell reads and seeds | Remove with feature ownership; P3 | Actual feature read coverage and invalidation/draft lifetimes | Closed / Astra approved P3 |
 | OAuth placeholder flags/button/import | Remove together; P4 | No implemented OAuth operation; provider editor checks | Closed / Astra approved P4 frontend |
 | Artificial provider progress waits | Remove; P4 | Actual pending work owns feedback; no backend speedup claim | Closed / Astra approved P4 frontend |
 | Report first-500/secondary subject filtering | Replace with bounded server search and selected hydration; P3 | Subject beyond 500 and server-only searchable-field fixtures | Closed / Astra approved P3 |
-| _commit_if_supported and guaranteed-protocol getattr wrappers | Remove after correcting fakes/ports; P5 | Concrete required ports and uncertainty-boundary regression checks | Closed P5 implementation; integrated conformance where listed remains pending / Astra approved P5 |
+| _commit_if_supported and guaranteed-protocol getattr wrappers | Remove after correcting fakes/ports; P5 | Concrete required ports and uncertainty-boundary regression checks | Closed P5 implementation; integrated conformance validated / final review in evidence index |
 | IACS_SEED_DEMO_DATA | Retain pending external-consumer evidence; P5 | Parsed public deployment option; audit did not establish all external configuration users | Retained / Astra approved P5 |
 | Calendar SDK fallback shapes | Retain unless locked-SDK/serialized-session fixtures prove obsolete; P5/P8 | Vendor/data compatibility not established by absence of one call path | Retained / Astra approved P5 |
 | Public legacy cover aliases | Retain; P5 | External consumers unknown; confirmation bindings remain supported | Retained / Astra approved P5 |
@@ -328,12 +345,12 @@ conformance and non-report P8 owners remain pending.
 
 | Exercise | Stage and acceptance | Status / Astra approval |
 | --- | --- | --- |
-| E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | P4 stage fixtures approved; configured-setting subset guard source-approved and 34 unit cases pass / final integrated P9 gate pending |
-| E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | Concrete current-vehicle reservation/editor export/atomic audit exercise source and PostgreSQL approved / final integrated P9 gate pending |
-| E3 ACCESS SCHEDULE dated exception | P2/P8/P9: access-schedule ownership, current authority and generated configuration contracts; separate from iCloud calendar sync | Test-only dated rule, precedence/DST and actual edit-before-attempt denial source and PostgreSQL approved / final integrated P9 gate pending |
-| E4 last recorded mileage summary | P5/P6/P9: saved snapshot/read contract, information reset and stale-result fence | Test-only value/unit/source/date, missing/zero and reset/stale completion fixture passes in real PostgreSQL / final integrated P9 review pending |
-| E5 MOT freshness in dashboard activity | P3/P7/P9: bounded summaries, typed updates and no provider I/O | Astra High approved test-only consumer checkpoint aadf8ac4; focused9 and Node22 types pass / composed browser/full gate pending |
-| P9 final integrated candidate | Complete required release-candidate validation, exact source/patch identity, no actionable findings and fresh Astra approval | Pending / pending |
+| E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | P4 fixtures and configured-setting subset guard validated in composed gate / final review in evidence index |
+| E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | Concrete vehicle reservation/editor export/atomic audit exercise validated / final review in evidence index |
+| E3 ACCESS SCHEDULE dated exception | P2/P8/P9: access-schedule ownership, current authority and generated configuration contracts; separate from iCloud calendar sync | Test-only dated rule, precedence/DST and actual final-authority denial validated / final review in evidence index |
+| E4 last recorded mileage summary | P5/P6/P9: saved snapshot/read contract, information reset and stale-result fence | Saved value/unit/source/date, missing/zero and reset/stale completion validated / final review in evidence index |
+| E5 MOT freshness in dashboard activity | P3/P7/P9: bounded summaries, typed updates and no provider I/O | Bounded consumer, revision/account and provider-free invalidation validated; browser36 fresh / final review in evidence index |
+| P9 final integrated candidate | Complete required release-candidate validation, exact source/patch identity, no actionable findings and fresh Astra approval | Mapped composed gate passed / exact-candidate review in evidence index |
 
 Public population-sized presence reads remain an approved compatibility exception;
 internal consumers must use bounded summaries/selected reads. Forecast rows can
