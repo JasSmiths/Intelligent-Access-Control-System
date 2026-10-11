@@ -577,3 +577,57 @@ async def test_terminal_admission_presence_change_and_revision_share_commit_and_
         assert (await session.get(AccessEvent, event_id)).resource_revision == 2
         work = await session.scalar(select(AccessCompletionWork).where(AccessCompletionWork.event_id == event_id))
         assert work.expected_revision == 2
+
+
+async def test_visitor_signal_retries_with_publication_and_later_media_revision_does_not_repeat():
+    from app.models import MovementSagaRecord, VisitorPass
+    from app.models.enums import MovementSagaState, VisitorPassStatus
+    from app.services.access.publication_worker import AccessPublicationLane
+    from app.services.realtime_contracts import RealtimePublishReceipt
+    event_id, visitor_id, saga_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with AsyncSessionLocal() as session:
+        event = event_value()
+        event.id = event_id
+        event.raw_payload = {'visitor_pass': {'id': str(visitor_id), 'visitor_name': 'Synthetic visitor', 'mode': 'arrival'},
+                             'movement_saga': {'id': str(saga_id), 'admission_status': 'verified'}}
+        session.add(event)
+        await session.flush()
+        session.add_all([
+            VisitorPass(id=visitor_id, visitor_name='Synthetic visitor', expected_time=NOW,
+                status=VisitorPassStatus.USED, arrival_event_id=event_id),
+            MovementSagaRecord(id=saga_id, idempotency_key=str(saga_id), source='synthetic', occurred_at=NOW,
+                access_event_id=event_id, state=MovementSagaState.COMPLETED, admission_status='verified'),
+        ])
+        await reserve_initial_publication_in_session(session, event_id)
+        await session.commit()
+    sent = []
+    fail_visitor = True
+    class Transport:
+        async def publish(self, event_type, payload):
+            sent.append((event_type, payload))
+            return RealtimePublishReceipt('in_process', not (fail_visitor and event_type == 'visitor_pass.used'))
+    store = AccessPublicationStore()
+    lane = AccessPublicationLane(store, Transport())
+    await lane.deliver(await store.claim())
+    work = await work_value(event_id)
+    assert work.state == 'queued' and work.result == {'published_revision': 0}
+    assert sent[-1][0] == 'visitor_pass.used'
+    assert sent[-1][1]['visitor_pass']['arrival_event_id'] == str(event_id)
+    fail_visitor = False
+    async with AsyncSessionLocal() as session:
+        work = await session.get(AccessCompletionWork, work.id, with_for_update=True)
+        work.due_at = datetime.now(UTC)
+        await session.commit()
+    await lane.deliver(await store.claim())
+    work = await work_value(event_id)
+    assert work.result == {'published_revision': 1, 'visitor_transition': 'visitor_pass.used'}
+    assert [event_type for event_type, _ in sent].count('visitor_pass.used') == 2
+    async with AsyncSessionLocal() as session:
+        event = await session.get(AccessEvent, event_id, with_for_update=True)
+        event.confidence = .8
+        await mark_public_event_changed_in_session(session, event_id)
+        await session.commit()
+    await lane.deliver(await store.claim())
+    assert sent[-1][0] == 'access_event.updated'
+    assert [event_type for event_type, _ in sent].count('visitor_pass.used') == 2
+    assert (await work_value(event_id)).result['visitor_transition'] == 'visitor_pass.used'

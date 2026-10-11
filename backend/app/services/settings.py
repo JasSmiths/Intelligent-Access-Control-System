@@ -779,6 +779,10 @@ async def update_settings(
                 ),
                 metadata={"keys": sorted(changed_keys), "source": source},
             )
+        if set(changed_keys) & {"home_assistant_url", "home_assistant_token"}:
+            from app.services.ha_presence_reservations import invalidate_configuration_in_session
+
+            await invalidate_configuration_in_session(session)
         await session.commit()
     invalidate_runtime_config_cache()
     return await list_settings()

@@ -107,6 +107,10 @@ class Harness:
             command_id=None, delivery=CommandDelivery.NOT_SENT, reconciliation_required=False)
 
     async def execute(self, read):
+        async with AsyncSessionLocal() as session:
+            identity = uuid.UUID(read.raw_payload[LPR_INGEST_EVENT_PAYLOAD_KEY]["id"])
+            if (await session.get(LprIngestEvent, identity)).status == "succeeded":
+                return None
         async with claimed_window(read) as (window, claim):
             return await self.service.execute(window, claim=claim, read=read, direction_read=read,
                 runtime=await self.current_runtime(), trace=Trace(),
@@ -128,7 +132,7 @@ async def connect(runtime):
 @pytest_asyncio.fixture(autouse=True)
 async def h(isolated_resources, monkeypatch):
     async with AsyncSessionLocal() as session:
-        await session.execute(text("TRUNCATE people, vehicles, access_events, movement_sagas, movement_sessions, lpr_ingest_events, notification_action_contexts, notification_runs CASCADE"))
+        await session.execute(text("TRUNCATE lpr_coordinator_state, ha_presence_effect_resolutions, ha_presence_effects, ha_presence_targets, ha_presence_desired, ha_presence_coordinator, access_chart_dirty_state, people, vehicles, access_events, movement_sagas, movement_sessions, lpr_ingest_events, notification_action_contexts, notification_runs CASCADE"))
         session.add_all([SystemSetting(key=key, category="missed_exit_recovery", value={"plain": value},
             is_secret=False) for key, value in SETTINGS.items()])
         await session.commit()
@@ -242,20 +246,8 @@ async def test_warm_ready_phone_local_evaluation_records_timings(h, capsys):
 async def test_concurrent_exact_reads_for_two_owned_cars_claim_at_most_one_return_and_replay_is_inert(h, monkeypatch):
     item = await seed(h)
     observations = [await plate_read(h, item, index) for index in (0, 1)]
-    original = AccessEvidenceResolver.prepare_camera_evidence
-    arrived = 0
-    release = asyncio.Event()
-
-    async def both_preflights(self, *args, **kwargs):
-        nonlocal arrived
-        result = await original(self, *args, **kwargs)
-        arrived += 1
-        if arrived == 2:
-            release.set()
-        await release.wait()
-        return result
-
-    monkeypatch.setattr(AccessEvidenceResolver, "prepare_camera_evidence", both_preflights)
+    # The new production coordinator serializes finalization. Concurrent ready
+    # inputs must still consume at most one original trip and never replay it.
     results = await asyncio.wait_for(asyncio.gather(*(h.execute(read) for read in observations)), 8)
     assert all(result is not None for result in results)
     attempts = await rows(MissedExitRecoveryAttempt)

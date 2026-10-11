@@ -129,6 +129,9 @@ class AccessPublicationLane:
                 raise PipelineLeaseLost("publication_lease_lost")
             deadline = min(lease_deadline, asyncio.get_running_loop().time() + PUBLICATION_TIMEOUT_SECONDS)
             receipt = await self._publish(message, deadline)
+            if receipt.accepted and message.visitor_event is not None:
+                event_type, payload = message.visitor_event
+                receipt = await self._publish(PublicationMessage(message.revision, event_type, payload), deadline)
             if receipt.accepted:
                 await self.store.acknowledge(claim, message.revision)
             else:

@@ -744,3 +744,79 @@ async def test_callback_failure_keeps_committed_attempt_and_barrier_recoverable(
         effect = await session.get(HaPresenceEffect, calls[0].claim.attempt_id)
         assert effect.state == 'unknown'
         assert (await session.get(HaPresenceTarget, effect.target_key)).barrier_attempt_id == effect.id
+
+
+@pytest.mark.parametrize('field,replacement', [
+    ('is_active', False),
+    ('home_assistant_presence_input_boolean_entity_ids', ['input_boolean.replacement']),
+    ('home_assistant_presence_input_boolean_entry_action', 'turn_off'),
+    ('home_assistant_presence_input_boolean_exit_action', 'turn_on'),
+])
+async def test_actual_person_edit_aba_cannot_revive_queued_ha_authority(field, replacement):
+    from app.models import User
+    from app.schemas.directory import UpdatePersonRequest
+    from app.services.directory.people import update_person
+    proposal = await seed()
+    await reserve(proposal)
+    async with AsyncSessionLocal() as session:
+        original = getattr(await session.get(Person, proposal.person_id), field)
+        actor = User(username='synthetic-editor', full_name='Synthetic editor', password_hash='never-used')
+        session.add(actor)
+        await session.commit()
+        actor_id = actor.id
+        first_generation = (await session.get(HaPresenceDesired, proposal.person_id)).generation
+    for value in (replacement, original):
+        async with AsyncSessionLocal() as session:
+            actor = await session.get(User, actor_id)
+            await update_person(proposal.person_id, UpdatePersonRequest(**{field: value}), actor, session)
+    async with AsyncSessionLocal() as session:
+        desired = await session.get(HaPresenceDesired, proposal.person_id)
+        assert desired.generation > first_generation and not desired.eligible and desired.outcome == 'person_changed'
+        targets = list(await session.scalars(select(HaPresenceTarget).where(HaPresenceTarget.person_id == proposal.person_id)))
+        assert targets and all(target.state == 'invalidated' for target in targets)
+        assert getattr(await session.get(Person, proposal.person_id), field) == original
+    assert await prepare() is None
+    assert (await reserve(proposal)).skipped == 1
+    assert await prepare() is None
+
+
+@pytest.mark.parametrize('key,replacement', [
+    ('home_assistant_url', 'http://replacement.synthetic.invalid'),
+    ('home_assistant_token', 'replacement-synthetic-secret-never-sent'),
+])
+async def test_actual_settings_edit_aba_cannot_revive_queued_ha_authority(key, replacement):
+    proposal = await seed()
+    await reserve(proposal)
+    async with AsyncSessionLocal() as session:
+        original = settings_owner.decrypted_value(await session.get(SystemSetting, key))
+        first_generation = (await session.get(HaPresenceDesired, proposal.person_id)).generation
+    await settings_owner.update_settings({key: replacement})
+    await settings_owner.update_settings({key: original})
+    async with AsyncSessionLocal() as session:
+        desired = await session.get(HaPresenceDesired, proposal.person_id)
+        assert desired.generation > first_generation and not desired.eligible
+        assert desired.outcome == 'configuration_changed'
+        assert settings_owner.decrypted_value(await session.get(SystemSetting, key)) == original
+        assert (await session.get(HaPresenceCoordinator, 1)).config_revision == 2
+    assert await prepare() is None
+    assert (await reserve(proposal)).skipped == 1
+    assert await prepare() is None
+
+
+async def test_noop_person_binding_and_secret_setting_edits_keep_original_generation():
+    from app.models import User
+    from app.schemas.directory import UpdatePersonRequest
+    from app.services.directory.people import update_person
+    proposal = await seed(entity='input_boolean.synthetic_noop')
+    await reserve(proposal)
+    async with AsyncSessionLocal() as session:
+        original = (await session.get(HaPresenceDesired, proposal.person_id)).generation
+        actor = User(username='synthetic-noop-editor', full_name='Synthetic editor', password_hash='never-used')
+        session.add(actor)
+        await session.flush()
+        await update_person(proposal.person_id, UpdatePersonRequest(
+            home_assistant_presence_input_boolean_entity_ids=['input_boolean.synthetic_noop', 'input_boolean.synthetic_noop']), actor, session)
+    await settings_owner.update_settings({'home_assistant_token': ''})
+    async with AsyncSessionLocal() as session:
+        desired = await session.get(HaPresenceDesired, proposal.person_id)
+        assert desired.generation == original and desired.eligible

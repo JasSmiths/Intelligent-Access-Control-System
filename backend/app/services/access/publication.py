@@ -18,11 +18,13 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
-from app.models import AccessCompletionWork, AccessEvent
+from app.models import AccessCompletionWork, AccessEvent, VisitorPass
 from app.services.access.completion_database import access_session
 from app.services.access.event_reads import public_event_payload, public_event_query
 from app.services.access.pipeline_contracts import PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
+from app.services.settings import get_runtime_config_for_session
+from app.services.visitor_passes import serialize_visitor_pass
 
 PUBLICATION_SCAN_SIZE = 32
 PUBLICATION_LEASE_SECONDS = 120
@@ -42,6 +44,7 @@ class PublicationMessage:
     revision: int
     event_type: str
     payload: dict[str, Any]
+    visitor_event: tuple[str, dict[str, Any]] | None = None
 
 
 def _published_revision(work: AccessCompletionWork) -> int:
@@ -151,6 +154,37 @@ def _text_json(path: Any, maximum: int) -> Any:
 
 def _bool_json(path: Any) -> Any:
     return case((func.jsonb_typeof(path) == "boolean", path.as_boolean()), else_=False)
+
+
+def _published_result(work: AccessCompletionWork, revision: int) -> dict[str, Any]:
+    result: dict[str, Any] = {"published_revision": revision}
+    if transition := work.result.get("visitor_transition"):
+        result["visitor_transition"] = transition
+    return result
+
+
+async def _visitor_transition(
+    session: AsyncSession, event_id: uuid.UUID, payload: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """Preserve the existing visitor realtime contract after linked admission."""
+    try:
+        visitor_id = uuid.UUID(payload["visitor_pass_id"])
+    except (ValueError, TypeError, KeyError):
+        return None
+    visitor = await session.get(VisitorPass, visitor_id)
+    if visitor is None:
+        return None
+    mode = payload.get("visitor_pass_mode")
+    saga = payload.get("movement_saga")
+    if (mode == "arrival" and isinstance(saga, dict) and saga.get("admission_status") == "verified"
+            and visitor.arrival_event_id == event_id):
+        event_type = "visitor_pass.used"
+    elif mode == "departure" and visitor.departure_event_id == event_id:
+        event_type = "visitor_pass.departure_recorded"
+    else:
+        return None
+    runtime = await get_runtime_config_for_session(session)
+    return event_type, {"visitor_pass": serialize_visitor_pass(visitor, timezone_name=runtime.site_timezone)}
 
 
 async def _current_projection(session: AsyncSession, event_id: uuid.UUID) -> dict[str, Any]:
@@ -294,7 +328,13 @@ class AccessPublicationStore:
                 raise PipelineLeaseLost("publication_revision_unavailable")
             if work.expected_revision is None or revision < work.expected_revision:
                 raise PipelineLeaseLost("publication_revision_changed")
-            work.result = {"published_revision": published, "loaded_revision": revision}
+            visitor_event = (
+                await _visitor_transition(session, claim.event_id, payload)
+                if not work.result.get("visitor_transition") else None
+            )
+            work.result = {**_published_result(work, published), "loaded_revision": revision}
+            if visitor_event is not None:
+                work.result["loaded_visitor_transition"] = visitor_event[0]
             await session.flush()
             _check_claim(work, claim, await database_now(session))
             await session.commit()
@@ -303,7 +343,7 @@ class AccessPublicationStore:
         revision = payload["resource_revision"]
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
             raise PipelineLeaseLost("publication_revision_unavailable")
-        return PublicationMessage(revision, event_type, payload)
+        return PublicationMessage(revision, event_type, payload, visitor_event)
 
     async def acknowledge(self, claim: PublicationClaim, revision: int) -> bool:
         if isinstance(revision, bool) or revision < 1:
@@ -318,7 +358,10 @@ class AccessPublicationStore:
                 raise PipelineLeaseLost("publication_revision_changed")
             published = max(_published_revision(work), revision)
             now = await database_now(session)
-            work.result = {"published_revision": published}
+            result = _published_result(work, published)
+            if transition := work.result.get("loaded_visitor_transition"):
+                result["visitor_transition"] = transition
+            work.result = result
             trailing = work.expected_revision > published
             work.state, work.due_at = "queued" if trailing else "succeeded", now
             work.completed_at = None if trailing else now
@@ -338,7 +381,7 @@ class AccessPublicationStore:
             work.outcome = "transport_retry"
             original_until = work.lease_until
             work.lease_token, work.lease_until = None, None
-            work.result = {"published_revision": _published_revision(work)}
+            work.result = _published_result(work, _published_revision(work))
             await session.flush()
             if original_until is None or original_until <= await database_now(session):
                 raise PipelineLeaseLost("publication_lease_lost")

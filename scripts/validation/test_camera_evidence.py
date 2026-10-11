@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from app.db.session import AsyncSessionLocal, engine
 from app.models import AccessEvent, Person, Presence, SystemSetting, Vehicle
@@ -40,6 +40,7 @@ class Trace:
 @pytest.mark.parametrize("mutation", ["unchanged", "owner", "presence", "deactivated", "runtime_policy"])
 async def test_access_execution_re_resolves_current_facts_after_camera_transaction_ends(monkeypatch, mutation):
     async with AsyncSessionLocal() as session:
+        await session.execute(text("TRUNCATE lpr_coordinator_state, lpr_ingest_events CASCADE"))
         original = Person(display_name="Synthetic Original", is_active=True)
         other = Person(display_name="Synthetic Other", is_active=True)
         session.add_all([original, other])
@@ -79,8 +80,12 @@ async def test_access_execution_re_resolves_current_facts_after_camera_transacti
             return await service.execute(window, claim=claim, read=read, direction_read=read,
                 runtime=runtime, trace=Trace(), finalize_started_at=NOW, webhook_trace={})
     task = asyncio.create_task(execute())
+    camera_started = asyncio.create_task(entered_camera.wait())
     try:
-        await asyncio.wait_for(entered_camera.wait(), 8)
+        done, _ = await asyncio.wait({task, camera_started}, timeout=8, return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            await task  # Preserve an early owner failure instead of masking it as a waiter timeout.
+        assert camera_started in done, "Camera probe did not reach its inert boundary"
         async with AsyncSessionLocal() as session:
             if mutation == "owner":
                 (await session.get(Vehicle, vehicle_id)).person_id = other_id
@@ -126,7 +131,9 @@ async def test_access_execution_re_resolves_current_facts_after_camera_transacti
         release_camera.set()
         if not task.done():
             task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        if not camera_started.done():
+            camera_started.cancel()
+        await asyncio.gather(task, camera_started, return_exceptions=True)
         # Restore the synthetic fixture prerequisite even when an assertion fails.
         async with AsyncSessionLocal() as session:
             await session.execute(delete(SystemSetting).where(SystemSetting.key == "schedule_default_policy"))

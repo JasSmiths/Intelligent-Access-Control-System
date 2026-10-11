@@ -153,7 +153,7 @@ class Harness:
 @pytest_asyncio.fixture
 async def h(monkeypatch):
     async with AsyncSessionLocal() as s:
-        await s.execute(text('TRUNCATE lpr_coordinator_state, people, vehicles, access_events, visitor_passes, visitor_pass_reservations, movement_sagas, movement_sessions, gate_command_records, access_device_command_records, access_devices, gate_state_observations, lpr_ingest_events, notification_runs, audit_logs CASCADE'))
+        await s.execute(text('TRUNCATE ha_presence_effect_resolutions, ha_presence_effects, ha_presence_targets, ha_presence_desired, ha_presence_coordinator, access_chart_dirty_state, lpr_coordinator_state, people, vehicles, access_events, visitor_passes, visitor_pass_reservations, movement_sagas, movement_sessions, gate_command_records, access_device_command_records, access_devices, gate_state_observations, lpr_ingest_events, notification_runs, audit_logs CASCADE'))
         await s.commit()
     runtime = replace(await get_runtime_config(), site_timezone='Europe/London', schedule_default_policy='allow', lpr_zone_filter_mode='shadow', home_assistant_url='http://synthetic.invalid', home_assistant_token='synthetic-only', gate_control_provider='home_assistant', gate_failover_provider='none', gate_admission_device_key='synthetic_entry')
     fake = Harness(runtime)
@@ -235,6 +235,12 @@ async def complete_optional(h):
         await asyncio.gather(*(worker._process(claim) for claim in claims))
     while claim := await publication.store.claim():
         await publication.deliver(claim)
+
+
+async def publish_current():
+    lane = AccessPublicationLane(AccessPublicationStore(), owner.event_bus)
+    while claim := await lane.store.claim():
+        await lane.deliver(claim)
 
 
 async def rows(model):
@@ -646,7 +652,7 @@ async def test_all_simulation_scenarios_use_extracted_fakes_and_persist(h):
 
     capability = issue_isolated_full_access_flow_capability()
     report = await run_full_access_flow(FullAccessFlowRequest(cleanup=True), capability=capability)
-    assert report.status == 'passed', [(i.code, i.observed) for i in report.issues]
+    assert report.status == 'passed', [(i.code, i.scenario_id, i.step_id, i.observed) for i in report.issues]
     assert report.summary.scenarios == 7 and report.summary.simulated_gate_actions > 0
     assert tuple(result.scenario_id for result in report.scenarios) == SCENARIO_IDS
     assert all(result.status == 'passed' for result in report.scenarios)
@@ -738,6 +744,7 @@ async def test_optional_visitor_completion_preserves_committed_transition_snapsh
     pass_row, = await rows(VisitorPass)
     reservation, = await rows(VisitorPassReservationRecord)
     assert reservation.state == 'consumed' and pass_row.arrival_event_id == event.id
+    await publish_current()
     payload = next(payload for name, payload in h.publications if name == 'visitor_pass.used')
     assert payload['visitor_pass']['status'] == 'used'
     assert payload['visitor_pass']['arrival_event_id'] == str(event.id)

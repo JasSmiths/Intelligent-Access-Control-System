@@ -569,6 +569,12 @@ class HardwareFreePatchScope:
 
     async def __aenter__(self) -> Self:
         async def capture_publish(event_type: str, payload: dict[str, Any]) -> RealtimePublishReceipt:
+            if event_type == "plate_read.suppressed" and payload.get("ingest_event_id"):
+                async with AsyncSessionLocal() as session:
+                    ingest = await session.get(LprIngestEvent, uuid.UUID(payload["ingest_event_id"]))
+                    simulation = (ingest.normalized_payload.get("raw_payload", {}).get("simulation", {})
+                                  if ingest is not None else {})
+                payload = {**payload, **simulation}
             self._recorder.realtime_events.append(
                 {
                     "type": event_type,
