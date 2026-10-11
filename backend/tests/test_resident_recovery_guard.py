@@ -2,7 +2,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 import uuid
 
 import pytest
@@ -198,10 +198,16 @@ async def test_recovery_camera_timeout_is_bounded_and_discards_late_clear_entry(
 
     monkeypatch.setattr(value, "_resolve_duplicate_arrival_with_camera", delayed_camera)
     monkeypatch.setattr(owner.asyncio, "wait", timed_out)
+    # Setup consumed part of the original five-second decision window. Replace
+    # only this owner's clock; the event loop and child cleanup keep real time.
+    monkeypatch.setattr(owner, "time", SimpleNamespace(
+        monotonic=Mock(side_effect=[100.0, 100.25, 105.1]),
+    ))
     observation = read()
     prepared = await value.prepare_camera_evidence(observation, observation, None, trace)
     session.close.assert_awaited_once()
-    assert timeout_values == [5]
+    assert timeout_values == [4.75]
+    assert prepared.decision["elapsed_ms"] == 5100
     assert prepared.decision["direction"] == "unknown"
     assert prepared.decision["reason"] == "camera_timeout"
     await asyncio.sleep(0)
