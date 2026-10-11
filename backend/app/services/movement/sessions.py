@@ -8,14 +8,31 @@ from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 
+from sqlalchemy import String, func, literal, select
+from sqlalchemy.dialects.postgresql import JSONB, insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
-from app.models import AccessEvent, MovementSessionRecord
+from app.models import (
+    AccessEvent,
+    LprWindowMember,
+    MovementSessionObservation,
+    MovementSessionRecord,
+)
 from app.models.enums import AccessDecision, AccessDirection
 from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
+from app.services.access.observation_tokens import (
+    matching_session_tokens_in_session,
+    record_tokens_in_session,
+)
+from app.services.access.pipeline_contracts import EvidenceReference
 from app.services.movement_ledger import get_movement_ledger_repository
-from app.services.vehicle_visual_detections import get_vehicle_presence_tracker
+from app.services.vehicle_visual_detections import (
+    MAX_VEHICLE_PRESENCE_OBSERVATIONS,
+    get_vehicle_presence_tracker,
+)
 
 GATE_OBSERVATION_PAYLOAD_KEY = "_iacs_gate_observation"
 KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY = "_iacs_known_vehicle_plate_match"
@@ -268,6 +285,7 @@ class MovementSessionService:
         runtime: Any | None = None,
     ) -> VehicleSessionSuppression | None:
         lookup_horizon = timedelta(seconds=max(idle_seconds * 3, 3600.0))
+        tracker_ids = await self._tracker_event_ids()
         async with self._session_factory() as session:
             rows = await self._ledger_provider().movement_sessions_for_active_read(
                 session,
@@ -276,10 +294,21 @@ class MovementSessionService:
                 lookup_horizon=lookup_horizon,
                 limit=100,
             )
+            matches = await matching_session_tokens_in_session(
+                session,
+                [row.id for row in rows],
+                kind="protect_event",
+                values=tuple(context.protect_event_ids),
+            )
+            tracker_matches = await matching_session_tokens_in_session(
+                session, [row.id for row in rows], kind="protect_event", values=tracker_ids
+            )
         for row in rows:
             if not str(row.normalized_registration_number or "").strip():
                 continue
-            matched_by = self._session_match(row, context, read, runtime)
+            matched_by = self._session_match(
+                row, context, read, runtime, matches.get(row.id, set())
+            )
             if not matched_by:
                 continue
             if matched_by != "arrival_ocr_noise" and self._read_is_departure_after_entry_session(
@@ -288,7 +317,9 @@ class MovementSessionService:
                 continue
             if self._read_is_entry_after_exit_idle_expired(read, row, idle_seconds):
                 continue
-            evidence = await self._presence_evidence(row, context, read, idle_seconds)
+            evidence = await self._presence_evidence(
+                row, context, read, idle_seconds, tracker_matches.get(row.id, set())
+            )
             if read.captured_at <= row.last_seen_at + timedelta(seconds=idle_seconds) or evidence:
                 return VehicleSessionSuppression(
                     session=row,
@@ -305,6 +336,20 @@ class MovementSessionService:
         *,
         runtime: Any | None = None,
     ) -> None:
+        async with self._session_factory() as db:
+            await self.annotate_suppressed_read_in_session(db, read, suppression, runtime=runtime)
+            await db.commit()
+
+    async def annotate_suppressed_read_in_session(
+        self,
+        db: AsyncSession,
+        read: PlateRead,
+        suppression: VehicleSessionSuppression,
+        *,
+        runtime: Any | None = None,
+        ingest_id: uuid.UUID | None = None,
+    ) -> None:
+        """Caller owns suppression evidence and ingest terminalization together."""
         context = self.context_from_read(read)
         session_state = suppression.session
         suppressed_payload = self.suppressed_read_payload(read, suppression)
@@ -316,43 +361,71 @@ class MovementSessionService:
             getattr(session_state, "access_event_id", None)
             or getattr(session_state, "event_id", None)
         )
-        if not movement_session_id and not event_id:
-            return
-
-        async with self._session_factory() as db:
-            if movement_session_id:
-                row = await db.get(MovementSessionRecord, movement_session_id)
-                if row:
-                    await self._ledger_provider().record_movement_session_suppression(
-                        db,
-                        row,
-                        read_captured_at=read.captured_at,
-                        idle_expires_at=read.captured_at
-                        + timedelta(seconds=self.idle_seconds(runtime)),
-                        protect_event_ids=context.protect_event_ids,
-                        ocr_variants=ocr_variants_for_reads((read,)),
-                        last_gate_state=gate_observation_from_read(read).get("state"),
-                        reason=suppression.reason,
-                        matched_by=suppression.matched_by,
-                        presence_evidence=presence_evidence_payload(suppression.evidence)
-                        if suppression.evidence
-                        else None,
-                        suppressed_read_payload=suppressed_payload,
-                    )
-            if event_id:
-                event = await db.get(AccessEvent, event_id)
-                if event:
-                    event.raw_payload = self.raw_payload_with_suppressed_read(
-                        event.raw_payload,
-                        event_id=str(event.id),
-                        occurred_at=event.occurred_at,
-                        registration_number=event.registration_number,
-                        read=read,
-                        suppression=suppression,
-                        context=context,
-                        suppressed_read_payload=suppressed_payload,
-                    )
-            await db.commit()
+        # Finalizers already lock Event before MovementSession. Keep the same
+        # order even for telemetry-only suppression writes.
+        event = await db.get(AccessEvent, event_id, with_for_update=True) if event_id else None
+        row = (
+            await db.get(MovementSessionRecord, movement_session_id, with_for_update=True)
+            if movement_session_id
+            else None
+        )
+        if ingest_id is not None:
+            if row is None:
+                raise ValueError("Durable suppression requires its movement session.")
+            previous = await db.get(MovementSessionObservation, ingest_id)
+            if previous is not None:
+                if previous.session_id != row.id or previous.role != "suppressed":
+                    raise ValueError("Suppressed evidence already belongs to another session.")
+                return
+            await record_tokens_in_session(
+                db,
+                ingest_id,
+                ocr=ocr_variants_for_reads((read,)),
+                protect_event=sorted(context.protect_event_ids),
+            )
+            last_ordinal = await db.scalar(
+                select(func.max(MovementSessionObservation.ordinal)).where(
+                    MovementSessionObservation.session_id == row.id
+                )
+            )
+            db.add(
+                MovementSessionObservation(
+                    ingest_id=ingest_id,
+                    session_id=row.id,
+                    role="suppressed",
+                    ordinal=(last_ordinal + 1) if last_ordinal is not None else 0,
+                    suppression_reason=suppression.reason,
+                    context={"matched_by": suppression.matched_by},
+                )
+            )
+        if row is not None:
+            await self._ledger_provider().record_movement_session_suppression(
+                db,
+                row,
+                read_captured_at=read.captured_at,
+                idle_expires_at=read.captured_at + timedelta(seconds=self.idle_seconds(runtime)),
+                protect_event_ids=() if ingest_id else context.protect_event_ids,
+                ocr_variants=() if ingest_id else ocr_variants_for_reads((read,)),
+                last_gate_state=gate_observation_from_read(read).get("state"),
+                reason=suppression.reason,
+                matched_by=suppression.matched_by,
+                presence_evidence=presence_evidence_payload(suppression.evidence)
+                if suppression.evidence
+                else None,
+                suppressed_read_payload=suppressed_payload,
+            )
+        if event is not None:
+            event.raw_payload = self.raw_payload_with_suppressed_read(
+                event.raw_payload,
+                event_id=str(event.id),
+                occurred_at=event.occurred_at,
+                registration_number=event.registration_number,
+                read=read,
+                suppression=suppression,
+                context=context,
+                suppressed_read_payload=suppressed_payload,
+                durable_evidence=ingest_id is not None,
+            )
 
     async def external_admission_candidate_for_gate_open(
         self,
@@ -364,7 +437,9 @@ class MovementSessionService:
         rows = await self._active_unknown_denied_sessions(
             session, opened_at=opened_at, runtime=runtime
         )
-        return await self._external_presence_match(rows, opened_at=opened_at, runtime=runtime)
+        return await self._external_presence_match(
+            session, rows, opened_at=opened_at, runtime=runtime
+        )
 
     async def external_admission_candidate_for_read(
         self,
@@ -373,17 +448,23 @@ class MovementSessionService:
         *,
         runtime: Any | None = None,
     ) -> ExternalVehicleSessionMatch | None:
+        rows = await self._active_unknown_denied_sessions(
+            session, opened_at=read.captured_at, runtime=runtime
+        )
+        context = self.context_from_read(read)
+        matches = await matching_session_tokens_in_session(
+            session,
+            [row.id for row, _ in rows],
+            kind="protect_event",
+            values=tuple(context.protect_event_ids),
+        )
         rows = [
             (row, event)
-            for row, event in await self._active_unknown_denied_sessions(
-                session,
-                opened_at=read.captured_at,
-                runtime=runtime,
-            )
-            if self._session_matches_read(row, read)
+            for row, event in rows
+            if self._session_matches_read(row, read, matches.get(row.id, set()))
         ]
         return await self._external_presence_match(
-            rows, opened_at=read.captured_at, runtime=runtime
+            session, rows, opened_at=read.captured_at, runtime=runtime
         )
 
     async def external_departure_candidate_for_read(
@@ -398,9 +479,15 @@ class MovementSessionService:
         rows = await self._active_external_admission_sessions(
             session, read.captured_at, runtime=runtime
         )
+        matches = await matching_session_tokens_in_session(
+            session,
+            [row.id for row, _ in rows],
+            kind="protect_event",
+            values=tuple(self.context_from_read(read).protect_event_ids),
+        )
         candidates: list[tuple[Any, AccessEvent]] = []
         for row, event in rows:
-            if not self._session_matches_plate_or_event(row, read):
+            if not self._session_matches_plate_or_event(row, read, matches.get(row.id, set())):
                 continue
             if self._read_is_departure_after_entry_session(read, row):
                 candidates.append((row, event))
@@ -460,6 +547,7 @@ class MovementSessionService:
         updated_at: datetime,
         read: PlateRead,
         event: Any,
+        evidence: EvidenceReference | None = None,
     ) -> dict[str, Any]:
         context = self.context_from_read(read)
         return {
@@ -473,8 +561,14 @@ class MovementSessionService:
             "decision": event.decision.value,
             "camera_id": context.camera_id,
             "device_id": context.device_id,
-            "protect_event_ids": sorted(context.protect_event_ids),
-            "ocr_variants": ocr_variants_for_reads(reads),
+            **(
+                {"evidence": {"version": evidence.version, "window_id": str(evidence.window_id)}}
+                if evidence
+                else {
+                    "protect_event_ids": sorted(context.protect_event_ids),
+                    "ocr_variants": ocr_variants_for_reads(reads),
+                }
+            ),
             "last_gate_state": gate_observation_from_read(read).get("state"),
             "suppressed_read_count": 0,
             "suppressed_reads": [],
@@ -515,6 +609,7 @@ class MovementSessionService:
         read: PlateRead,
         movement_saga_id: uuid.UUID | str | None = None,
         runtime: Any | None = None,
+        evidence: EvidenceReference | None = None,
     ) -> None:
         context = self.context_from_read(read)
         if not context.normalized_registration_number:
@@ -528,7 +623,7 @@ class MovementSessionService:
                 gate_cycle_expires_at,
                 first_seen + timedelta(seconds=EXACT_PLATE_GATE_CYCLE_SUPPRESSION_SECONDS),
             )
-        await self._ledger_provider().upsert_movement_session(
+        row = await self._ledger_provider().upsert_movement_session(
             session,
             session_key=f"movement-session:{event.id}",
             source=read.source,
@@ -545,10 +640,41 @@ class MovementSessionService:
             idle_expires_at=updated_at + timedelta(seconds=self.idle_seconds(runtime)),
             camera_id=context.camera_id,
             device_id=context.device_id,
-            protect_event_ids=context.protect_event_ids,
-            ocr_variants=ocr_variants_for_reads(reads),
+            protect_event_ids=() if evidence else context.protect_event_ids,
+            ocr_variants=() if evidence else ocr_variants_for_reads(reads),
             last_gate_state=gate_observation_from_read(read).get("state"),
         )
+
+        if evidence is not None:
+            conflict = await session.scalar(
+                select(MovementSessionObservation.ingest_id)
+                .join(
+                    LprWindowMember,
+                    LprWindowMember.ingest_id == MovementSessionObservation.ingest_id,
+                )
+                .where(
+                    LprWindowMember.window_id == evidence.window_id,
+                    MovementSessionObservation.session_id != row.id,
+                )
+                .limit(1)
+            )
+            if conflict is not None:
+                raise ValueError("Window evidence already belongs to a different movement session.")
+            await session.execute(
+                insert(MovementSessionObservation)
+                .from_select(
+                    ["ingest_id", "session_id", "role", "ordinal", "suppression_reason", "context"],
+                    select(
+                        LprWindowMember.ingest_id,
+                        literal(row.id),
+                        literal("window"),
+                        LprWindowMember.ordinal,
+                        literal(None, type_=String()),
+                        literal({}, type_=JSONB()),
+                    ).where(LprWindowMember.window_id == evidence.window_id),
+                )
+                .on_conflict_do_nothing(index_elements=["ingest_id"])
+            )
 
     def raw_payload_with_suppressed_read(
         self,
@@ -561,6 +687,7 @@ class MovementSessionService:
         suppression: VehicleSessionSuppression,
         context: VehicleSessionContext,
         suppressed_read_payload: dict[str, Any],
+        durable_evidence: bool = False,
     ) -> dict[str, Any]:
         payload = dict(raw_payload or {})
         vehicle_session = dict(payload.get(VEHICLE_SESSION_PAYLOAD_KEY) or {})
@@ -581,14 +708,16 @@ class MovementSessionService:
             vehicle_session["last_presence_evidence"] = presence_evidence_payload(
                 suppression.evidence
             )
-        protect_event_ids = (
-            set(string_list(vehicle_session.get("protect_event_ids"))) | context.protect_event_ids
-        )
-        vehicle_session["protect_event_ids"] = sorted(protect_event_ids)
-        variants = set(string_list(vehicle_session.get("ocr_variants"))) | set(
-            ocr_variants_for_reads((read,))
-        )
-        vehicle_session["ocr_variants"] = sorted(value for value in variants if value)
+        if not durable_evidence:
+            protect_event_ids = (
+                set(string_list(vehicle_session.get("protect_event_ids")))
+                | context.protect_event_ids
+            )
+            vehicle_session["protect_event_ids"] = sorted(protect_event_ids)
+            variants = set(string_list(vehicle_session.get("ocr_variants"))) | set(
+                ocr_variants_for_reads((read,))
+            )
+            vehicle_session["ocr_variants"] = sorted(value for value in variants if value)
         suppressed_reads = list(vehicle_session.get("suppressed_reads") or [])
         suppressed_reads.append(suppressed_read_payload)
         vehicle_session["suppressed_reads"] = suppressed_reads[-MAX_SUPPRESSED_SESSION_READS:]
@@ -620,6 +749,7 @@ class MovementSessionService:
         context: VehicleSessionContext,
         read: PlateRead,
         runtime: Any | None,
+        matched_event_ids: set[str] | None = None,
     ) -> str | None:
         if self._read_matches_different_known_vehicle(session, read):
             return None
@@ -636,7 +766,7 @@ class MovementSessionService:
         )
         if same_plate:
             return "registration_number" if same_source else "cross_source_registration_number"
-        if context.protect_event_ids & session_event_ids:
+        if context.protect_event_ids & (session_event_ids | (matched_event_ids or set())):
             return "protect_event_id" if same_source else "cross_source_protect_event_id"
         if self._read_looks_like_arrival_ocr_noise(session, context, read):
             return "arrival_ocr_noise"
@@ -684,17 +814,27 @@ class MovementSessionService:
             or (context.device_id and device_id and context.device_id == device_id)
         )
 
+    async def _tracker_event_ids(self) -> tuple[str, ...]:
+        observations = await get_vehicle_presence_tracker().recent(
+            limit=MAX_VEHICLE_PRESENCE_OBSERVATIONS
+        )
+        return tuple(
+            dict.fromkeys(str(row["event_id"]) for row in observations if row.get("event_id"))
+        )
+
     async def _presence_evidence(
         self,
         session: Any,
         context: VehicleSessionContext,
         read: PlateRead,
         idle_seconds: float,
+        matched_event_ids: set[str] | None = None,
     ) -> dict[str, Any] | None:
         evidence = await get_vehicle_presence_tracker().recent_evidence(
             registration_number=context.registration_number,
             event_ids=context.protect_event_ids
-            | set(string_list(getattr(session, "protect_event_ids", None))),
+            | set(string_list(getattr(session, "protect_event_ids", None)))
+            | (matched_event_ids or set()),
             camera_id=context.camera_id or getattr(session, "camera_id", None),
             device_id=context.device_id or getattr(session, "device_id", None),
             observed_at=read.captured_at,
@@ -847,6 +987,7 @@ class MovementSessionService:
 
     async def _external_presence_match(
         self,
+        session: AsyncSession,
         rows: Sequence[tuple[Any, AccessEvent]],
         *,
         opened_at: datetime,
@@ -854,9 +995,17 @@ class MovementSessionService:
     ) -> ExternalVehicleSessionMatch | None:
         idle_seconds = self.idle_seconds(runtime)
         tracker = get_vehicle_presence_tracker()
+        matches = await matching_session_tokens_in_session(
+            session,
+            [row.id for row, _ in rows],
+            kind="protect_event",
+            values=await self._tracker_event_ids(),
+        )
         scored: list[tuple[int, float, Any, AccessEvent, dict[str, Any], str]] = []
         for row, event in rows:
-            event_ids = set(string_list(getattr(row, "protect_event_ids", None)))
+            event_ids = set(string_list(getattr(row, "protect_event_ids", None))) | matches.get(
+                row.id, set()
+            )
             evidence = await tracker.recent_evidence(
                 registration_number=getattr(row, "registration_number", None),
                 event_ids=event_ids,
@@ -871,7 +1020,7 @@ class MovementSessionService:
                 max_age_seconds=idle_seconds,
             ):
                 continue
-            priority, matched_by = self._external_presence_match_strength(row, evidence)
+            priority, matched_by = self._external_presence_match_strength(row, evidence, event_ids)
             if not priority:
                 continue
             age_seconds = _float_or_none(evidence.get("age_seconds")) or 999999.0
@@ -916,7 +1065,7 @@ class MovementSessionService:
         )
 
     def _external_presence_match_strength(
-        self, row: Any, evidence: dict[str, Any]
+        self, row: Any, evidence: dict[str, Any], matched_event_ids: set[str] | None = None
     ) -> tuple[int, str]:
         row_plate = normalize_registration_number(
             str(getattr(row, "registration_number", "") or "")
@@ -927,7 +1076,9 @@ class MovementSessionService:
         if row_plate and evidence_plate and row_plate == evidence_plate:
             return 3, "external_presence_registration_number"
         event_id = str(evidence.get("event_id") or "").strip()
-        if event_id and event_id in set(string_list(getattr(row, "protect_event_ids", None))):
+        if event_id and event_id in (
+            set(string_list(getattr(row, "protect_event_ids", None))) | (matched_event_ids or set())
+        ):
             return 2, "external_presence_protect_event_id"
         if getattr(row, "camera_id", None) and evidence.get("camera_id") == getattr(
             row, "camera_id", None
@@ -939,13 +1090,17 @@ class MovementSessionService:
             return 1, "external_presence_device"
         return 0, ""
 
-    def _session_matches_read(self, row: Any, read: PlateRead) -> bool:
-        if self._session_matches_plate_or_event(row, read):
+    def _session_matches_read(
+        self, row: Any, read: PlateRead, matched_event_ids: set[str] | None = None
+    ) -> bool:
+        if self._session_matches_plate_or_event(row, read, matched_event_ids):
             return True
         context = self.context_from_read(read)
         return self._same_camera_or_device(row, context)
 
-    def _session_matches_plate_or_event(self, row: Any, read: PlateRead) -> bool:
+    def _session_matches_plate_or_event(
+        self, row: Any, read: PlateRead, matched_event_ids: set[str] | None = None
+    ) -> bool:
         context = self.context_from_read(read)
         if context.normalized_registration_number and (
             context.normalized_registration_number
@@ -957,7 +1112,11 @@ class MovementSessionService:
         ):
             return True
         return bool(
-            context.protect_event_ids & set(string_list(getattr(row, "protect_event_ids", None)))
+            context.protect_event_ids
+            & (
+                set(string_list(getattr(row, "protect_event_ids", None)))
+                | (matched_event_ids or set())
+            )
         )
 
 

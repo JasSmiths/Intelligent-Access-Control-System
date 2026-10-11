@@ -637,3 +637,63 @@ async def test_digest_collision_retains_distinct_tokens_and_never_matches_other_
                 exact_token_match('protect_event',token)))) == [token]
         assert not list(await session.scalars(select(LprObservationToken.value).where(
             exact_token_match('protect_event','c' * 900))))
+
+
+async def test_complete_session_evidence_beyond_preview_and_suppression_commit_atomically():
+    from app.models import MovementSessionObservation, MovementSessionRecord
+    from app.services.movement.sessions import MovementSessionService
+    pipeline, windows = AccessPipelineStore(), AccessWindowStore()
+    coordinator = await pipeline.acquire_coordinator()
+    for ordinal in range(80):
+        _, _, summary = await append(pipeline, windows, coordinator,
+            value(seconds=ordinal, eventId=f"full-evidence-{ordinal}"))
+    claim = await pipeline.next_flush_window(coordinator, quiet_seconds=0, max_seconds=0)
+    sessions = MovementSessionService()
+    async with AsyncSessionLocal() as session:
+        window = await windows.load_in_session(session, summary.evidence.window_id)
+        assert len(window.preview) == 50 and window.summary.count == 80
+        event = AccessEvent(registration_number="AB12CDE", direction=AccessDirection.DENIED,
+            decision=AccessDecision.DENIED, confidence=.9, source="synthetic", occurred_at=NOW)
+        session.add(event)
+        await session.flush()
+        await sessions.remember_session_in_db(session, event, (),
+            first_seen=window.summary.first_seen, updated_at=window.summary.updated_at,
+            read=window.best_read, evidence=window.summary.evidence)
+        saga = MovementSagaRecord(idempotency_key=f"synthetic-session-{event.id}", source="synthetic",
+            occurred_at=NOW, access_event_id=event.id)
+        session.add(saga)
+        await session.flush()
+        await terminalize_window_in_session(session, claim, event_id=event.id, saga_id=saga.id)
+        await session.commit()
+        event_id = event.id
+    assert await pipeline.next_flush_window(coordinator, quiet_seconds=0, max_seconds=0) is None
+    read_claim, read = await claim_read(pipeline, coordinator,
+        value("ZZ99ZZZ", seconds=81, eventId="full-evidence-79"))
+    suppression = await sessions.suppression_for_read(read)
+    assert suppression is not None and suppression.matched_by == "movement_session_protect_event_id"
+    session_id = suppression.session.id
+    async with AsyncSessionLocal() as session:
+        row = await session.get(MovementSessionRecord, session_id)
+        assert row.protect_event_ids == [] and row.ocr_variants == []
+        assert await session.scalar(select(func.count()).select_from(MovementSessionObservation)
+            .where(MovementSessionObservation.session_id == session_id)) == 80
+        await sessions.annotate_suppressed_read_in_session(session, read, suppression, ingest_id=read_claim.ingest_id)
+        await pipeline.suppress_read_in_session(session, read_claim, reason=suppression.reason)
+        await session.rollback()
+    async with AsyncSessionLocal() as session:
+        assert await session.get(MovementSessionObservation, read_claim.ingest_id) is None
+        assert (await session.get(LprIngestEvent, read_claim.ingest_id)).status == "processing"
+        assert (await session.get(MovementSessionRecord, session_id)).suppressed_read_count == 0
+        await sessions.annotate_suppressed_read_in_session(session, read, suppression, ingest_id=read_claim.ingest_id)
+        await sessions.annotate_suppressed_read_in_session(session, read, suppression, ingest_id=read_claim.ingest_id)
+        await pipeline.suppress_read_in_session(session, read_claim, reason=suppression.reason)
+        await session.commit()
+    async with AsyncSessionLocal() as session:
+        row = await session.get(MovementSessionRecord, session_id)
+        assert row.suppressed_read_count == 1 and row.protect_event_ids == [] and row.ocr_variants == []
+        association = await session.get(MovementSessionObservation, read_claim.ingest_id)
+        assert association.session_id == session_id and association.ordinal == 80 and association.role == "suppressed"
+        assert (await session.get(LprIngestEvent, read_claim.ingest_id)).status == "skipped"
+        assert await observation_tokens.matching_session_tokens_in_session(session, [session_id],
+            kind="ocr", values=("ZZ99ZZZ",)) == {session_id: {"ZZ99ZZZ"}}
+        assert (await session.get(AccessEvent, event_id)).resource_revision == 0
