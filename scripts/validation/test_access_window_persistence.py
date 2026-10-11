@@ -697,3 +697,41 @@ async def test_complete_session_evidence_beyond_preview_and_suppression_commit_a
         assert await observation_tokens.matching_session_tokens_in_session(session, [session_id],
             kind="ocr", values=("ZZ99ZZZ",)) == {session_id: {"ZZ99ZZZ"}}
         assert (await session.get(AccessEvent, event_id)).resource_revision == 0
+
+
+async def test_suppression_locked_reload_preserves_another_transaction_after_stale_preload():
+    from app.models import MovementSessionObservation, MovementSessionRecord
+    from app.services.movement.sessions import MovementSessionService, VehicleSessionSuppression
+    first_read, second_read = value(seconds=1, eventId="suppression-first"), value(seconds=2, eventId="suppression-second")
+    first_ingest, second_ingest = await ready(first_read), await ready(second_read)
+    sessions = MovementSessionService()
+    async with AsyncSessionLocal() as session:
+        event = AccessEvent(registration_number="AB12CDE", direction=AccessDirection.DENIED,
+            decision=AccessDecision.DENIED, confidence=.9, source="synthetic", occurred_at=NOW,
+            raw_payload={"vehicle_session": {"suppressed_read_count": 0, "suppressed_reads": []}})
+        session.add(event)
+        await session.flush()
+        await sessions.remember_session_in_db(session, event, (), first_seen=NOW, updated_at=NOW,
+            read=value())
+        row = await session.scalar(select(MovementSessionRecord).where(MovementSessionRecord.access_event_id == event.id))
+        await session.commit()
+        event_id, session_id = event.id, row.id
+        suppression = VehicleSessionSuppression(row, "vehicle_session_already_active", "protect_event_id")
+    async with AsyncSessionLocal() as stale, AsyncSessionLocal() as concurrent:
+        stale_event = await stale.get(AccessEvent, event_id)
+        stale_session = await stale.get(MovementSessionRecord, session_id)
+        assert stale_session.suppressed_read_count == 0
+        await sessions.annotate_suppressed_read_in_session(concurrent, first_read, suppression, ingest_id=first_ingest)
+        await concurrent.commit()
+        assert stale_session.suppressed_read_count == 0 and stale_event.raw_payload["vehicle_session"]["suppressed_read_count"] == 0
+        await sessions.annotate_suppressed_read_in_session(stale, second_read, suppression, ingest_id=second_ingest)
+        await stale.commit()
+    async with AsyncSessionLocal() as session:
+        row = await session.get(MovementSessionRecord, session_id)
+        event = await session.get(AccessEvent, event_id)
+        assert row.suppressed_read_count == 2
+        assert event.raw_payload["vehicle_session"]["suppressed_read_count"] == 2
+        assert [item["captured_at"] for item in row.suppressed_reads] == [first_read.captured_at.isoformat(), second_read.captured_at.isoformat()]
+        assert [item["captured_at"] for item in event.raw_payload["vehicle_session"]["suppressed_reads"]] == [first_read.captured_at.isoformat(), second_read.captured_at.isoformat()]
+        assert list(await session.scalars(select(MovementSessionObservation.ordinal)
+            .where(MovementSessionObservation.session_id == session_id).order_by(MovementSessionObservation.ordinal))) == [0, 1]

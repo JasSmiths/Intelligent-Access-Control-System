@@ -363,9 +363,9 @@ class MovementSessionService:
         )
         # Finalizers already lock Event before MovementSession. Keep the same
         # order even for telemetry-only suppression writes.
-        event = await db.get(AccessEvent, event_id, with_for_update=True) if event_id else None
+        event = await db.get(AccessEvent, event_id, with_for_update=True, populate_existing=True) if event_id else None
         row = (
-            await db.get(MovementSessionRecord, movement_session_id, with_for_update=True)
+            await db.get(MovementSessionRecord, movement_session_id, with_for_update=True, populate_existing=True)
             if movement_session_id
             else None
         )
