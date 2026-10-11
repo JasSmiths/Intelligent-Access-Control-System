@@ -6,11 +6,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.models import LeaderboardState
-from app.models.enums import AccessDecision, AccessDirection
-from app.modules.notifications.base import NotificationContext
 from app.services import leaderboard as leaderboard_module
-from app.services.leaderboard import KNOWN_TOP_STATE_KEY, LeaderboardService
+from app.services.leaderboard import LeaderboardService
 from app.services.leaderboard_reads import snapshot_payload
 from app.services.snapshots import access_event_snapshot_relative_path
 
@@ -24,53 +21,6 @@ class FakeSessionContext:
 
     async def __aexit__(self, *_args):
         return None
-
-
-class FakeLeaderboardSession:
-    def __init__(self, event, state=None) -> None:
-        self.event = event
-        self.state = state
-        self.added: list[Any] = []
-        self.commits = 0
-
-    async def get(self, model, key):
-        if model.__name__ == "AccessEvent":
-            return self.event
-        if model is LeaderboardState and key == KNOWN_TOP_STATE_KEY:
-            return self.state
-        return None
-
-    def add(self, row) -> None:
-        self.added.append(row)
-        if isinstance(row, LeaderboardState):
-            self.state = row
-
-    async def commit(self) -> None:
-        self.commits += 1
-
-
-class FakeEventBus:
-    def __init__(self) -> None:
-        self.events: list[Any] = []
-
-    async def publish(self, event_type, payload):
-        self.events.append((event_type, payload))
-
-
-class FakeNotificationService:
-    def __init__(self) -> None:
-        self.contexts: list[NotificationContext] = []
-
-    async def notify(self, context):
-        self.contexts.append(context)
-
-
-def _event(vehicle_id):
-    return SimpleNamespace(
-        vehicle_id=vehicle_id,
-        decision=AccessDecision.GRANTED,
-        direction=AccessDirection.ENTRY,
-    )
 
 
 def _leader(*, vehicle_id, person_id, registration_number="VIP123", read_count=3, name="Steph Smith"):
@@ -239,120 +189,3 @@ async def test_unknown_information_uses_only_shared_cache(monkeypatch) -> None:
     assert result["status"] == "unavailable"
     assert "vehicle" not in result
     lookup.assert_awaited_once_with("NOPE123", cached_only=True)
-
-
-@pytest.mark.asyncio
-async def test_first_known_leader_initializes_state_without_overtake(monkeypatch) -> None:
-    vehicle_id = uuid.uuid4()
-    person_id = uuid.uuid4()
-    event_id = uuid.uuid4()
-    session = FakeLeaderboardSession(_event(vehicle_id))
-    service = LeaderboardService()
-    fake_bus = FakeEventBus()
-    fake_notifications = FakeNotificationService()
-
-    async def fake_top(_session):
-        return _leader(vehicle_id=vehicle_id, person_id=person_id, read_count=1)
-
-    monkeypatch.setattr(leaderboard_module, "AsyncSessionLocal", lambda: FakeSessionContext(session))
-    monkeypatch.setattr(leaderboard_module, "event_bus", fake_bus)
-    monkeypatch.setattr(leaderboard_module, "get_notification_service", lambda: fake_notifications)
-    monkeypatch.setattr(service, "_current_top_known_leader", fake_top)
-
-    result = await service.evaluate_known_overtake(event_id)
-
-    assert result["initialized"] is True
-    assert session.state.registration_number == "VIP123"
-    assert session.state.read_count == 1
-    assert fake_bus.events == []
-    assert fake_notifications.contexts == []
-
-
-@pytest.mark.asyncio
-async def test_same_known_leader_updates_state_without_overtake(monkeypatch) -> None:
-    vehicle_id = uuid.uuid4()
-    person_id = uuid.uuid4()
-    event_id = uuid.uuid4()
-    state = LeaderboardState(
-        key=KNOWN_TOP_STATE_KEY,
-        registration_number="VIP123",
-        vehicle_id=vehicle_id,
-        person_id=person_id,
-        read_count=2,
-    )
-    session = FakeLeaderboardSession(_event(vehicle_id), state)
-    service = LeaderboardService()
-    fake_bus = FakeEventBus()
-
-    async def fake_top(_session):
-        return _leader(vehicle_id=vehicle_id, person_id=person_id, read_count=3)
-
-    monkeypatch.setattr(leaderboard_module, "AsyncSessionLocal", lambda: FakeSessionContext(session))
-    monkeypatch.setattr(leaderboard_module, "event_bus", fake_bus)
-    monkeypatch.setattr(service, "_current_top_known_leader", fake_top)
-    prior = AsyncMock(return_value=_leader(vehicle_id=vehicle_id, person_id=person_id, read_count=2))
-    monkeypatch.setattr(leaderboard_module, "known_leader_from_state_in_session", prior)
-
-    result = await service.evaluate_known_overtake(event_id)
-
-    assert result["changed"] is False
-    prior.assert_awaited_once_with(session, registration_number="VIP123", vehicle_id=vehicle_id, person_id=person_id, read_count=2)
-    assert state.read_count == 3
-    assert state.last_event_id == event_id
-    assert fake_bus.events == []
-
-
-@pytest.mark.asyncio
-async def test_changed_known_leader_emits_overtake_event_and_notification(monkeypatch) -> None:
-    new_vehicle_id = uuid.uuid4()
-    new_person_id = uuid.uuid4()
-    old_vehicle_id = uuid.uuid4()
-    old_person_id = uuid.uuid4()
-    event_id = uuid.uuid4()
-    state = LeaderboardState(
-        key=KNOWN_TOP_STATE_KEY,
-        registration_number="OLD123",
-        vehicle_id=old_vehicle_id,
-        person_id=old_person_id,
-        read_count=4,
-    )
-    session = FakeLeaderboardSession(_event(new_vehicle_id), state)
-    service = LeaderboardService()
-    fake_bus = FakeEventBus()
-    fake_notifications = FakeNotificationService()
-    new_leader = _leader(
-        vehicle_id=new_vehicle_id,
-        person_id=new_person_id,
-        registration_number="NEW123",
-        read_count=5,
-        name="Steph Smith",
-    )
-    old_leader = _leader(
-        vehicle_id=old_vehicle_id,
-        person_id=old_person_id,
-        registration_number="OLD123",
-        read_count=4,
-        name="Jason Smith",
-    )
-
-    async def fake_top(_session):
-        return new_leader
-
-    async def fake_previous(_session, _state):
-        return old_leader
-
-    monkeypatch.setattr(leaderboard_module, "AsyncSessionLocal", lambda: FakeSessionContext(session))
-    monkeypatch.setattr(leaderboard_module, "event_bus", fake_bus)
-    monkeypatch.setattr(leaderboard_module, "get_notification_service", lambda: fake_notifications)
-    monkeypatch.setattr(service, "_current_top_known_leader", fake_top)
-    monkeypatch.setattr(service, "_leader_from_state", fake_previous)
-
-    result = await service.evaluate_known_overtake(event_id)
-
-    assert result["changed"] is True
-    assert state.registration_number == "NEW123"
-    assert fake_bus.events[0][0] == "leaderboard_overtake"
-    assert fake_bus.events[0][1]["overtaken_name"] == "Jason Smith"
-    assert fake_notifications.contexts[0].event_type == "leaderboard_overtake"
-    assert fake_notifications.contexts[0].facts["new_winner_name"] == "Steph Smith"
-    assert fake_notifications.contexts[0].facts["read_count"] == "5"

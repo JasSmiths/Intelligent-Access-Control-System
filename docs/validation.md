@@ -474,6 +474,22 @@ bridge is tested with multiple durable receipts, missing provenance, replay and 
 already exhausted original budget. Runtime worker lifecycle, atomic core reservation,
 complete integrated P6 harness and burst/open-window performance remain separate gates.
 
+The [chart coalescer suite](../scripts/validation/test_leaderboard_coalescer_persistence.py)
+checks progress during arrivals on every actual aggregation, silent/live trailing
+provenance, latest-generation crash reclaim, atomic leader/intent rollback, original
+expiry, a real blocked final-configuration clock boundary, legacy unattempted
+retirement and unchanged attempted UNKNOWN recovery. The [historical candidate
+suite](../scripts/validation/test_historical_candidates_persistence.py) covers
+concurrent startup/periodic discovery of one provider identity, immutable original
+facts, drain outside the discovery window or with discovery disabled, actual HA
+root-busy whole-transaction rollback, five-attempt holds and one media preparation
+across retries. Provider and actual file-thread cancellation must drain before
+releasing ownership; rollback retains media and a committed link prevents cleanup.
+Only terminal skipped, proved-unlinked token paths may be deleted. The existing
+historical pipeline case also reads the actual `/api/v1` list/detail and durable
+publication consumers. These are isolated correctness fixtures; integrated P6
+lifecycle/full-harness and burst performance gates remain separate.
+
 Malformed retained verification states, visitor UUIDs and result-readiness envelopes
 must become named durable holds. Their negative fixtures verify accepted source
 results remain retained and no SQL conversion or exception/requeue loop substitutes

@@ -8,14 +8,19 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import NotificationRule, User
 from app.services.access.authorization import assert_current_recognition_domain_authorization
 from app.services.automation_authorization import notification_origin_denial
+from app.services.leaderboard_notifications import (
+    chart_notification_denial,
+    chart_notification_requires_check,
+)
 from app.services.mutation_context import load_active_admin
 from app.services.notification_planning import notification_rule_origin
 from app.services.notification_requests import confirmed_attempt_denial
@@ -59,6 +64,9 @@ class NotificationAuthorization:
         item: NotificationPlanItem | None = None,
     ) -> str | NotificationActionAuthorization | None:
         """Current originating domain authority joins the durable attempt transaction."""
+        chart_denial = await self._chart_notice_denial(session, payload, run_id)
+        if chart_denial:
+            return chart_denial
         vehicle_denial = await vehicle_information_notice_denial(session, payload, run_id)
         if vehicle_denial:
             return vehicle_denial
@@ -108,13 +116,18 @@ class NotificationAuthorization:
             if vehicle_denial:
                 return None, vehicle_denial
             config = await self.config(session)
-            return config, await self._authorize_action_config_in_session(
+            policy = await self._authorize_action_config_in_session(
                 session,
                 action,
                 config,
                 payload=payload,
                 run_id=run_id,
             )
+            # Refresh after every potentially blocking authority/configuration
+            # read, immediately before the durable pending->attempting decision.
+            if policy is None:
+                policy = await self._chart_notice_denial(session, payload, run_id)
+            return config, policy
         policy = await self.authorize_attempt(session, payload, run_id, action=action, item=item)
         if policy is not None:
             return None, policy
@@ -126,6 +139,16 @@ class NotificationAuthorization:
             payload=payload,
             run_id=run_id,
         )
+
+    async def _chart_notice_denial(
+        self, session: AsyncSession, payload: dict[str, Any], run_id: uuid.UUID
+    ) -> str | None:
+        if not chart_notification_requires_check(payload):
+            return None
+        now = await session.scalar(select(func.clock_timestamp()))
+        if not isinstance(now, datetime):
+            return "leaderboard_origin_unavailable"
+        return chart_notification_denial(payload, run_id, now)
 
     async def _authorize_action_config_in_session(
         self,

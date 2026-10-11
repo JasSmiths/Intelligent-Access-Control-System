@@ -67,6 +67,21 @@ recognition authority. Suppressed movements remain in history. Reconciliation
 resolves pending receipts and admission, while historical/backfill processing
 never replays hardware. Unknown plates never actuate devices.
 
+[Historical candidates](../backend/app/services/historical_candidates.py) reserve
+one canonical Protect-provider/event identity before domain mutation. The first
+validated capture, discovery source/reason and deterministic event ID remain
+immutable. The existing restart/reconciliation owner drains at most 32 due
+candidates before checking discovery availability or its current time window.
+One token-owned thumbnail preparation runs outside database sessions with a
+20-second budget; settled media is reused across complete transaction retries.
+Interrupted preparation becomes an explicit hold. A final 30-second transaction
+commits candidate completion, event, movement, audit, initial publication and silent
+chart dirty work together, with HA invalidation as its last domain participant.
+Five failed historical-candidate attempts produce a durable hold; this budget is
+separate from the core pipeline's attempt policy. Old differently keyed candidate
+rows remain readable during drain. Before P6 activation, any pre-cutover rows for
+the same Protect event must be reconciled to the canonical provider identity.
+
 [Optional enrichment](../backend/app/services/access/enrichment.py), including
 vehicle data and snapshots, runs separately from the core decision. Copy only
 enrichment-owned fields into freshly loaded records so an older object cannot
@@ -660,7 +675,19 @@ stopping event delivery/diagnostics or disposing the database.
 
 [Chart reads](../backend/app/services/leaderboard_reads.py) share one typed known
 leader aggregate with the durable evaluator; winner policy, claims and notification
-intents belong to their P6 owner. Ranking still aggregates full history. Only
+intents belong to [LeaderboardService](../backend/app/services/leaderboard.py) and
+its [dirty store](../backend/app/services/leaderboard_dirty.py). Participant writes
+join the access/directory mutation; the inertly constructed worker starts through
+application lifecycle composition. It waits for two quiet seconds, capped at ten
+seconds from the first mark, and runs one calculation plus one trailing generation.
+A valid claimed result commits leader progress and its deterministic notification
+intent atomically, acknowledges only that claim, and preserves later dirty work.
+Continuous arrivals cannot discard every result. Silent historical/directory marks
+create no notification authority; a live claim keeps its original five-minute
+origin/deadline even when later live or silent marks arrive. Dispatch checks that
+deadline again after blocking authorization/configuration work. Legacy unattempted
+chart notices without origin are retired; confirmed manual sends and attempted
+receipt recovery retain their existing authority. Ranking still aggregates full history. Only
 selected scalar person/vehicle fields and small media references leave SQL; data
 URL bodies are not transferred. Unknown plates rank first, then a lateral latest
 snapshot lookup examines only those selected plates. A path with unknown byte size

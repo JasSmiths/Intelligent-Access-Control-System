@@ -565,15 +565,46 @@ async def test_historical_backfill_commits_without_hardware_and_replay_is_idempo
     from app.services import restart_backfill as backfill
     await resident()
     monkeypatch.setattr(backfill, 'get_runtime_config', AsyncMock(return_value=h.runtime))
-    monkeypatch.setattr(backfill.MissedAccessEventBackfillService, '_attach_protect_thumbnail', AsyncMock())
+    monkeypatch.setattr(backfill.MissedAccessEventBackfillService, '_prepare_protect_thumbnail',
+        AsyncMock(return_value={"status":"unavailable", "reason":"synthetic media unavailable"}))
     candidate = backfill.ProtectBackfillCandidate('synthetic-backfill-1', 'SYNTH01', datetime.now(UTC)-timedelta(minutes=15),
                                                 .99, None, None, {}, {})
-    assert await backfill.MissedAccessEventBackfillService()._create_backfill_event(candidate)
-    assert not await backfill.MissedAccessEventBackfillService()._create_backfill_event(candidate)
+    payload = backfill.asdict(candidate)
+    payload['captured_at'] = candidate.captured_at.isoformat()
+    payload['backfill_reason'] = 'Synthetic historical repair'
+    payload['discovery_source'] = backfill.MISSED_EVENT_BACKFILL_SOURCE
+    service = backfill.MissedAccessEventBackfillService()
+    assert await service.candidate_store.reserve(protect_event_id=candidate.protect_event_id,
+        captured_at=candidate.captured_at, candidate=payload)
+    result = backfill.MissedAccessEventBackfillResult()
+    assert await service._drain_candidates(result, limit=1) == 1 and result.backfilled == 1
+    assert not await service.candidate_store.reserve(protect_event_id=candidate.protect_event_id,
+        captured_at=candidate.captured_at, candidate=payload)
+    assert await service._drain_candidates(result, limit=1) == 0
     event, = await rows(AccessEvent); saga, = await rows(MovementSagaRecord)
     assert 'backfill' in event.source and saga.state == MovementSagaState.COMPLETED
     assert not saga.gate_command_required and not await rows(GateCommandRecord) and not h.gate_calls
     assert any(a.action == 'access_event.restart_backfilled' for a in await rows(AuditLog))
+    # Exercise the actual public consumers of the committed historical event.
+    from fastapi import FastAPI
+    import httpx
+    from app.api.dependencies import current_user
+    from app.api.v1.events import router
+    from app.services.access.publication import AccessPublicationStore
+    app = FastAPI(); app.include_router(router, prefix='/api/v1')
+    app.dependency_overrides[current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://synthetic') as client:
+        detail = await client.get(f'/api/v1/events/{event.id}')
+        listed = await client.get('/api/v1/events', params={'limit':1})
+    assert detail.status_code == listed.status_code == 200
+    assert detail.json() == listed.json()[0]
+    assert detail.json()['resource_revision'] == 1
+    assert detail.json()['movement_saga']['id'] == str(saga.id)
+    publications = AccessPublicationStore(); claim = await publications.claim()
+    message = await publications.load_message(claim)
+    assert message.event_type == 'access_event.finalized' and message.revision == 1
+    assert message.payload['access_event_id'] == str(event.id)
+    assert message.payload['movement_saga']['id'] == str(saga.id)
 
 
 async def test_all_simulation_scenarios_use_extracted_fakes_and_persist(h):

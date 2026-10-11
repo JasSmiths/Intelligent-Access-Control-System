@@ -1049,3 +1049,36 @@ and source fingerprint
 The approved commit mapping adds only this status prose; runtime, fixtures, schema,
 dependencies and harness bytes match the successful evidence. Remaining P6/P8/P9
 owners, final merged validation and integrated conformance are separate gates.
+
+
+### Resumed chart/historical checkpoint
+
+The chart/history slice uses the existing 0013 singleton and candidate tables.
+One evaluator commits claimed leader progress and deterministic original-deadline
+intent while retaining trailing work; directory and historical changes mark silently.
+Historical discovery reserves canonical Protect identity with immutable first facts,
+prepares token-owned media outside the transaction, and atomically commits repair,
+audit, publication, chart dirty work and final HA invalidation. Uncertain preparation
+and five failed candidate attempts remain explicit holds. No schema, extra scheduler,
+compatibility sender or general cleanup framework was added.
+
+Fresh selected evidence is retained under
+`/Users/jas/.codex/worktrees/iacs-maintainability-frontend/validation-evidence/chart-history`.
+Initial `focused-kfc8m59x` passed all 13 chart cases and 11 historical cases; its
+historical blocker-connection observation and obsolete shared sender mock failures
+remain retained. Corrected `corrected-21yowc32` passed all 12 historical cases and
+the existing historical pipeline case, including actual API/publication consumers:
+26 distinct PostgreSQL cases pass across the unchanged chart evidence and corrected
+historical evidence. Both runs prove cleanup, source/dependency integrity and
+operational equality. Architecture, the 22 source/29 harness checks, current
+29 affected unit cases and all 117 strict targets pass. The checked-body set has
+one pending old enrichment-caller error, resolved by core's coordinated deletion.
+Initial type inventory and read-only lint-cache invocation failures remain retained;
+the corrected lint passes. Astra High approved the exact owner integration checkpoint with no scoped source
+findings: receipt `d4d0fea8f8d6a0b7b0eb2f0a3e44ad21d91d78576cc544df8356c9fcc85e51a6`,
+patch `027a68f82a5671b026e90de8019e4cfea3293d2677c9d308da5c4bb2539f06f0`.
+The commit mapping preserves those runtime/test bytes; only this approval prose
+differs from the frozen candidate. Core owns retirement of the old enrichment caller and lifecycle composition;
+this slice removes its legacy chart evaluator/tests. The integrated P6 full harness,
+burst performance, P8/P9 and final programme gates remain open. Earlier missing raw
+logs remain historical records as disclosed above.
