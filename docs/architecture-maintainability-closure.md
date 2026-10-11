@@ -1099,13 +1099,13 @@ Evidence lives under
 `/Users/jas/.codex/worktrees/iacs-maintainability-programme/validation-evidence`.
 `p6-focused-4dj2f1bz` retains the original activation failures and green intake16,
 media30, accepted-results45 and information12 cases. `p6-focused-17a6i7z8` supplies
-corrected camera5, resident8 and publication28 cases; its pipeline and two HA fixture
+corrected camera5, resident9 and publication28 cases; its pipeline and two HA fixture
 failures remain retained. `p6-focused-pu857lc6` supplies HA49 and window39 cases,
 including the total retry/restart, owned close, complete evidence, backlog and
 4/80-window measurements; its remaining synthetic cleanup failure is retained.
 `p6-focused-ib9399ld` supplies corrected pipeline30, including all seven inert
 simulation scenarios with scoped cleanup and unrelated sentinel preservation.
-Together these mapped ten suites cover 262 distinct PostgreSQL cases. Each run's
+Together these mapped ten suites cover 263 distinct PostgreSQL cases. Each run's
 manifest binds exact frozen source, HEAD/tree, patch and dependencies; cleanup,
 source/dependency integrity, production and operational equality pass. The
 141-case composed inert unit selection also passes. This is focused feedback,
