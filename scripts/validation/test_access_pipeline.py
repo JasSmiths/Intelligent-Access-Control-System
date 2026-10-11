@@ -17,7 +17,7 @@ assert {p.name for p in Path('/sys/class/net').iterdir()} == {'lo'}
 assert '@127.0.0.1:5432/iacs_validation_' in os.environ.get('IACS_DATABASE_URL', '')
 
 from app.db.session import AsyncSessionLocal, engine
-from app.models import AccessDevice, AccessDeviceCommandRecord, AccessDeviceProviderBinding, AccessEvent, Anomaly, AuditLog, GateCommandRecord, HaPresenceDesired, LprCoordinatorState, LprIngestEvent, AccessCompletionWork, MovementSagaRecord, MovementSessionRecord, NotificationRun, Person, Presence, Schedule, Vehicle, VisitorPass, VisitorPassReservationRecord
+from app.models import AccessDevice, AccessDeviceCommandRecord, AccessDeviceProviderBinding, AccessEvent, Anomaly, AuditLog, GateCommandRecord, HaPresenceDesired, LprCoordinatorState, LprDebounceWindow, LprWindowMember, LprIngestEvent, AccessCompletionWork, MovementSagaRecord, MovementSessionRecord, NotificationRun, Person, Presence, Schedule, Vehicle, VisitorPass, VisitorPassReservationRecord
 from app.models.enums import AccessDecision, AccessDirection, MovementSagaState, PresenceState, VisitorPassStatus, VisitorPassType
 from app.modules.gate.base import CommandDelivery, GateState
 from app.modules.access_devices.base import AccessDeviceCommandResult, AccessDeviceStateObservation
@@ -662,6 +662,9 @@ async def test_all_simulation_scenarios_use_extracted_fakes_and_persist(h):
     assert not await rows(NotificationRun)
     assert [row.id for row in await rows(MovementSagaRecord)] == [sentinel_saga_id]
     assert [row.id for row in await rows(MovementSessionRecord)] == [sentinel_session_id]
+    assert not await rows(LprIngestEvent)
+    assert not await rows(LprDebounceWindow)
+    assert not await rows(LprWindowMember)
 
 
 @pytest.mark.parametrize('gate_accepted,garage_allowed', [(True,True),(True,False),(False,True)])

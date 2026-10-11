@@ -1043,6 +1043,10 @@ async def cleanup_synthetic_data(data: SyntheticDataSet, events: Sequence[Access
             if event_ids
             else []
         )
+        ingest_ids = list(await session.scalars(select(LprIngestEvent.id).where(
+            LprIngestEvent.source == SIMULATION_SOURCE,
+            LprIngestEvent.normalized_payload["raw_payload"]["simulation"]["marker"].astext == data.marker,
+        )))
         saga_ids = list(
             (
                 await session.scalars(
@@ -1052,6 +1056,8 @@ async def cleanup_synthetic_data(data: SyntheticDataSet, events: Sequence[Access
                             MovementSagaRecord.access_event_id.in_(event_ids),
                             MovementSagaRecord.person_id.in_(person_ids),
                             MovementSagaRecord.vehicle_id.in_(vehicle_ids),
+                            MovementSagaRecord.id.in_(select(LprIngestEvent.movement_saga_id).where(
+                                LprIngestEvent.id.in_(ingest_ids))),
                         ),
                     )
                 )
@@ -1100,10 +1106,6 @@ async def cleanup_synthetic_data(data: SyntheticDataSet, events: Sequence[Access
             HaPresenceEffect.state.in_(["attempting", "accepted", "unknown"]),
         ).limit(1)) is not None:
             raise RuntimeError("Synthetic cleanup retains attempted HA effect journals.")
-        ingest_ids = list(await session.scalars(select(LprIngestEvent.id).where(
-            LprIngestEvent.source == SIMULATION_SOURCE,
-            LprIngestEvent.normalized_payload["raw_payload"]["simulation"]["marker"].astext == data.marker,
-        )))
         window_ids = list(await session.scalars(select(LprWindowMember.window_id).where(
             LprWindowMember.ingest_id.in_(ingest_ids)).distinct()))
         if window_ids and await session.scalar(select(LprWindowMember.ingest_id).where(
