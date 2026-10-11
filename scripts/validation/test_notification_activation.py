@@ -135,8 +135,9 @@ async def test_known_vehicle_refresh_extension_uses_current_owner_and_atomic_res
     from app.services import vehicle_information, vehicle_information_jobs, vehicle_information_store
     from app.modules.dvla.vehicle_enquiry import normalize_registration_number
     from app.services.automation_actions import AutomationActionExecutor
-    from app.services.workflows.action_definitions import ACTION_BY_TYPE, ActionDefinition, Configuration
+    from app.services.workflows.action_definitions import ACTION_BY_TYPE, ACTION_DEFINITIONS, ActionDefinition, Configuration
     from app.services.workflows.execution_contracts import checked_execution
+    from app.services.workflows import export_contracts
 
     class VehicleRefreshConfiguration(Configuration):
         vehicle_id: str = ""
@@ -147,6 +148,12 @@ async def test_known_vehicle_refresh_extension_uses_current_owner_and_atomic_res
         configuration=VehicleRefreshConfiguration, execution="transactional",
         effect="configuration", editor="none")
     monkeypatch.setitem(ACTION_BY_TYPE, action_type, definition)
+    monkeypatch.setattr(export_contracts, "ACTION_DEFINITIONS", (*ACTION_DEFINITIONS, definition))
+    generated = export_contracts.render_contracts()
+    assert f'"{action_type}": {{ "vehicle_id": string }}' in generated
+    assert f'"{action_type}": {{\n    "editor": "none"' in generated
+    assert definition.defaults() == {"vehicle_id": ""}
+    assert definition.catalog()["editor"] == "none"  # Test representation, no selectable vehicle UI shipped.
     _, workflow = await seed()
     async with AsyncSessionLocal() as session:
         await session.execute(text("CREATE TABLE fixture_vehicle_refresh_reservations ("
