@@ -42,6 +42,7 @@ def owned_resources(monkeypatch):
     monkeypatch.setattr(main, "init_database", AsyncMock())
     monkeypatch.setattr(main, "engine", SimpleNamespace(dispose=service("database").stop))
     monkeypatch.setattr(main, "event_bus", service("realtime"))
+    monkeypatch.setattr(main, "telemetry", service("telemetry"))
     monkeypatch.setattr(main, "report_exports", service("reports"))
     monkeypatch.setattr(main, "AccessCompletionOwner", lambda *args: service("access_completion"))
     monkeypatch.setattr(main, "HaPresenceWorker", lambda *args: service("ha_presence"))
@@ -65,7 +66,7 @@ def owned_resources(monkeypatch):
     return events, controls
 
 
-@pytest.mark.parametrize("failure", ("realtime", "vehicle_information_clients", "reports", "calendar", "access_completion", "ha_presence", *SERVICE_NAMES))
+@pytest.mark.parametrize("failure", ("realtime", "vehicle_information_clients", "telemetry", "reports", "calendar", "access_completion", "ha_presence", *SERVICE_NAMES))
 async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_resources, failure):
     events, controls = owned_resources
     controls["fail_start"] = failure
@@ -75,7 +76,7 @@ async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_re
             pytest.fail("Failed startup must not accept requests")
     started = [name for action, name in events if action == "start"]
     stopped = [name for action, name in events if action == "stop"]
-    producers = {"automation", "unifi_protect", "access_event", "movement_reconciliation", "vehicle_information", "reports", "access_completion", "ha_presence", "leaderboard"}
+    producers = {*SERVICE_NAMES, "calendar", "reports", "access_completion", "ha_presence"} - {"notification"}
     assert stopped == [
         *[name for name in reversed(started) if name in producers],
         *[name for name in reversed(started) if name not in producers],
@@ -91,7 +92,7 @@ async def test_cleanup_failure_preserves_startup_error_and_continues(owned_resou
     with pytest.raises(RuntimeError, match="synthetic startup failure"):
         async with main.lifespan(FastAPI()):
             pytest.fail("Startup failed")
-    assert events[-2:] == [("stop", "realtime"), ("stop", "database")]
+    assert events[-3:] == [("stop", "realtime"), ("stop", "vehicle_information_clients"), ("stop", "database")]
     assert ("stop", "access_device") in events
 
 
@@ -108,10 +109,16 @@ async def test_normal_shutdown_drains_owned_tasks_before_services_and_database(o
     first_stop = next(i for i, event in enumerate(events) if event[0] == "stop")
     assert all(i < first_stop for i, event in enumerate(events) if event == ("task", "stopped"))
     assert events[-1] == ("stop", "database")
-    assert events.index(("stop", "calendar")) < events.index(("stop", "visitor_pass"))
-    for producer in ("automation", "unifi_protect", "access_event", "movement_reconciliation", "vehicle_information", "reports"):
-        for sink in ("calendar", "access_device", "notification", "database"):
+    for caller, dependency in (("automation", "calendar"), ("access_event", "access_device"),
+                               ("access_completion", "unifi_protect"), ("ha_presence", "home_assistant")):
+        assert events.index(("stop", caller)) < events.index(("stop", dependency))
+    for producer in ({*SERVICE_NAMES, "calendar", "reports", "access_completion", "ha_presence"} - {"notification"}):
+        for sink in ("notification", "telemetry", "realtime", "vehicle_information_clients", "database"):
             assert events.index(("stop", producer)) < events.index(("stop", sink))
+    for before, after in (("notification", "telemetry"), ("telemetry", "realtime"),
+                          ("realtime", "vehicle_information_clients")):
+        assert events.index(("stop", before)) < events.index(("stop", after))
+
 
 
 async def test_database_initialization_failure_disposes_pool(owned_resources, monkeypatch):
@@ -162,7 +169,7 @@ async def test_timed_out_cooperative_cleanup_is_cancelled_before_later_resources
             pytest.fail('Startup failed')
     assert ('cancelled', 'access_device') in events
     assert events.index(('cancelled', 'access_device')) < events.index(('stop', 'notification'))
-    assert events[-2:] == [('stop', 'realtime'), ('stop', 'database')]
+    assert events[-3:] == [('stop', 'realtime'), ('stop', 'vehicle_information_clients'), ('stop', 'database')]
 
 
 async def test_full_lifespan_retains_calendar_observation_cleanup_before_database_disposal(owned_resources, monkeypatch):
@@ -202,3 +209,47 @@ async def test_full_lifespan_retains_calendar_observation_cleanup_before_databas
     assert (await request)["id"] == "inert-known-receipt"
     await shutdown
     assert events[-1] == ("stop", "database") and service.sdk._active is None
+
+
+async def test_repeated_lifespan_cancellation_retains_actual_completion_cleanup_before_sinks(owned_resources, monkeypatch):
+    from app.services.access.completion_worker import AccessCompletionOwner, CompletionStageOwners
+    events, _ = owned_resources
+    entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    cancellations = []
+    publication = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), wake=lambda: None)
+    actual = AccessCompletionOwner(SimpleNamespace(claim=AsyncMock(return_value=[])),
+        CompletionStageOwners(*[AsyncMock() for _ in range(4)]), publication)
+    monkeypatch.setattr(main, "AccessCompletionOwner", lambda *args: actual)
+    lifetime = main.lifespan(FastAPI())
+    await lifetime.__aenter__()
+    async def owned_operation():
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancellations.append(asyncio.current_task().cancelling())
+            cleaning.set()
+            await release.wait()
+    operation = asyncio.create_task(owned_operation())
+    actual._operations.add(operation)
+    await entered.wait()
+    original_wait = asyncio.wait_for
+    async def short_stop(awaitable, *, timeout):
+        return await original_wait(awaitable, timeout=.01)
+    monkeypatch.setattr(main.asyncio, "wait_for", short_stop)
+    shutdown = asyncio.create_task(lifetime.__aexit__(None, None, None))
+    try:
+        await cleaning.wait()
+        shutdown.cancel(); await asyncio.sleep(.02)
+        shutdown.cancel(); await asyncio.sleep(.02)
+        assert not shutdown.done() and not operation.done()
+        assert cancellations == [1]
+        assert not any(("stop", sink) in events for sink in
+            ("notification", "telemetry", "realtime", "vehicle_information_clients", "database"))
+        publication.stop.assert_not_awaited()
+    finally:
+        release.set()
+        await shutdown
+    assert operation.done() and not actual._operations
+    publication.stop.assert_awaited_once()
+    assert events[-1] == ("stop", "database")

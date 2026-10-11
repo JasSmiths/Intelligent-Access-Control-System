@@ -13,6 +13,7 @@ from app.composition import wire_application
 from app.core.config import settings, validate_startup_security_config
 from app.core.logging import configure_logging, get_logger
 from app.core.recovery_hold import is_recovery_hold
+from app.core.task_lifecycle import drain_owned
 from app.db.bootstrap import init_database
 from app.db.session import AsyncSessionLocal, engine
 from app.recovery_hold import RecoveryHoldMiddleware, verify_readable_schema
@@ -77,7 +78,7 @@ class RequestBodyTooLarge(RuntimeError):
 
 async def _stop_owned_service(name: str, stop: Callable[[], Awaitable[None]]) -> None:
     try:
-        await asyncio.wait_for(stop(), timeout=20)
+        await drain_owned(asyncio.wait_for(stop(), timeout=20))
     except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - Cleanup must drain every owned resource despite arbitrary task failures.
         # One failed resource must not keep later resources alive or conceal the
         # original startup exception. Stop methods remain responsible for children.
@@ -87,9 +88,10 @@ async def _stop_owned_service(name: str, stop: Callable[[], Awaitable[None]]) ->
 
 
 async def _cancel_owned_task(task: asyncio.Task) -> None:
-    task.cancel()
+    if not task.done() and not task.cancelling():
+        task.cancel()
     try:
-        await task
+        await drain_owned(task)
     except asyncio.CancelledError:
         pass
     except Exception as exc:  # noqa: BLE001 - Cleanup must drain every owned resource despite arbitrary task failures.
@@ -130,29 +132,31 @@ async def lifespan(app: FastAPI):
             ha_presence = HaPresenceWorker(HaPresenceAttemptStore())
             # Register before start so a partially started service is also closed.
             for name, service in (
-                ("realtime", event_bus),
                 ("vehicle_information_clients", vehicle_information_resources),
+                ("realtime", event_bus),
+                ("telemetry", telemetry),
                 ("notifications", get_notification_service()),
-                ("automations", get_automation_service()),
+                # Start dependencies before their active callers. Every active
+                # owner drains its actual publication/cleanup before the sinks.
+                ("icloud_calendar", get_icloud_calendar_service()),
                 ("visitor_passes", get_visitor_pass_service()),
                 ("access_devices", get_access_device_service()),
-                ("icloud_calendar", get_icloud_calendar_service()),
-                ("access_completion", completion),
-                ("ha_presence", ha_presence),
-                ("leaderboard", get_leaderboard_service()),
-                ("vehicle_information", get_vehicle_information_worker()),
-                ("report_exports", report_exports),
-                ("access_events", get_access_event_service()),
-                ("movement_reconciliation", get_movement_reconciliation_service()),
                 ("home_assistant", get_home_assistant_service()),
                 ("gate_malfunctions", get_gate_malfunction_service()),
                 ("unifi_protect", get_unifi_protect_service()),
+                ("ha_presence", ha_presence),
+                ("leaderboard", get_leaderboard_service()),
+                ("vehicle_information", get_vehicle_information_worker()),
+                ("access_completion", completion),
+                ("access_events", get_access_event_service()),
+                ("movement_reconciliation", get_movement_reconciliation_service()),
+                ("automations", get_automation_service()),
+                ("report_exports", report_exports),
             ):
                 owner = (
-                    producers
-                    if name
-                    in {"automations", "unifi_protect", "access_events", "movement_reconciliation", "vehicle_information", "report_exports", "access_completion", "ha_presence", "leaderboard"}
-                    else resources
+                    resources
+                    if name in {"vehicle_information_clients", "realtime", "telemetry", "notifications"}
+                    else producers
                 )
                 owner.push_async_callback(_stop_owned_service, name, service.stop)
                 await service.start()
