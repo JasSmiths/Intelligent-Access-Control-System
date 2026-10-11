@@ -57,7 +57,8 @@ def recognition_deadline(captured_at: datetime, first_received_at: datetime) -> 
     )
 
 
-async def recognition_deadline_for_event(session: AsyncSession, event: AccessEvent) -> datetime:
+async def recognition_origin_for_event(session: AsyncSession, event: AccessEvent) -> datetime:
+    """Original durable receipt, including an authorized resident derivative."""
     received_at = await session.scalar(
         select(func.min(LprIngestEvent.received_at)).where(
             LprIngestEvent.access_event_id == event.id
@@ -96,7 +97,11 @@ async def recognition_deadline_for_event(session: AsyncSession, event: AccessEve
         )
     if received_at is None:
         raise RecognitionAuthorizationDenied("A durable first recognition receipt is required.")
-    return recognition_deadline(event.occurred_at, received_at)
+    return received_at
+
+
+async def recognition_deadline_for_event(session: AsyncSession, event: AccessEvent) -> datetime:
+    return recognition_deadline(event.occurred_at, await recognition_origin_for_event(session, event))
 
 
 async def assert_current_recognition_authorization(

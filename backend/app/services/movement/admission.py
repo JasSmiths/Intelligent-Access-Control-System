@@ -24,8 +24,15 @@ from app.models import (
 from app.models.enums import AccessDecision, AccessDirection, MovementSagaState
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.lpr.base import PlateRead
+from app.services.access.authorization import (
+    RecognitionAuthorizationDenied,
+    recognition_origin_for_event,
+)
+from app.services.access.pipeline_contracts import EvidenceReference
 from app.services.access.publication import mark_public_event_changed_in_session
 from app.services.access_device_commands import AccessDeviceCommandJournal
+from app.services.ha_presence_contracts import HaPresenceReservation
+from app.services.ha_presence_reservations import reserve_all_in_session
 from app.services.movement.presence import PresenceTransition, apply_eligible_event_in_session
 from app.services.movement.sessions import MovementSessionService
 from app.services.movement_ledger import (
@@ -43,6 +50,7 @@ class AdmissionSessionInput:
     updated_at: datetime
     read: PlateRead
     runtime: Any
+    evidence: EvidenceReference | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +63,7 @@ class AdmissionResult:
     presence_result: str
     requires_reconciliation: bool
     changed: bool
+    ha_reservation: HaPresenceReservation | None
 
 
 async def finalize_in_session(
@@ -230,6 +239,7 @@ async def finalize_in_session(
             read=session_input.read,
             movement_saga_id=saga.id,
             runtime=session_input.runtime,
+            evidence=session_input.evidence,
         )
     previous_summary = (event.raw_payload or {}).get("movement_saga") or {}
     gate_receipt = (
@@ -280,6 +290,18 @@ async def finalize_in_session(
             session, event=event, saga=saga, status=status, receipt=gate_receipt
         )
     await session.flush()
+    ha_reservation = None
+    if transition.changed and event.person_id is not None:
+        origin_at = None
+        if mode != "historical":
+            try:
+                origin_at = await recognition_origin_for_event(session, event)
+            except RecognitionAuthorizationDenied:
+                pass  # Missing original authority invalidates optional HA work.
+        ha_reservation = HaPresenceReservation(
+            person_id=event.person_id, event_id=event.id, presence_event_id=event.id,
+            presence_state="present" if event.direction == AccessDirection.ENTRY else "exited",
+            origin_at=origin_at, live_eligible=mode != "historical")
     return AdmissionResult(
         event,
         saga,
@@ -289,6 +311,7 @@ async def finalize_in_session(
         transition.result,
         reconciliation,
         changed,
+        ha_reservation,
     )
 
 
@@ -392,10 +415,12 @@ async def recover_unattempted_visitor_reservations(
     count = 0
     for identity in identities:
         async with AsyncSessionLocal() as session:
-            count += int(
-                await recover_unattempted_reservation_in_session(session, reservation_id=identity)
-            )
+            proposals: list[HaPresenceReservation] = []
+            recovered = await recover_unattempted_reservation_in_session(
+                session, reservation_id=identity, ha_reservations=proposals)
+            await reserve_all_in_session(session, proposals)
             await session.commit()
+            count += int(recovered)
     return count, identities[-1] if len(identities) == limit else None
 
 
@@ -403,6 +428,7 @@ async def recover_unattempted_reservation_in_session(
     session: AsyncSession,
     *,
     reservation_id: uuid.UUID,
+    ha_reservations: list[HaPresenceReservation],
 ) -> bool:
     """Operation advisory -> saga -> event -> parent -> visitor -> reservation.
 
@@ -553,5 +579,7 @@ async def recover_unattempted_reservation_in_session(
         intent_id=intent_id,
         dispatch_deadline=reservation.dispatch_deadline,
     )
-    await finalize_in_session(session, saga_id=saga.id, gate_command_id=parent.id)
+    result = await finalize_in_session(session, saga_id=saga.id, gate_command_id=parent.id)
+    if result.ha_reservation is not None:
+        ha_reservations.append(result.ha_reservation)
     return True

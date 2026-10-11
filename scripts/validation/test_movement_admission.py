@@ -404,3 +404,37 @@ async def test_unchanged_held_parent_keeps_original_completion_and_update_timest
         assert parent.state == GateCommandState.RECONCILIATION_REQUIRED
         assert parent.requires_reconciliation and parent.accepted is False
         assert (parent.updated_at, parent.completed_at, parent.command_metadata) == before
+
+
+@pytest.mark.parametrize("mode", ["live", "external", "historical"])
+async def test_presence_proposal_keeps_original_receipt_for_live_lpr_external_and_invalidates_history(mode):
+    from app.models import LprIngestEvent
+    from app.services.lpr_ingest import LprIngestRepository
+    owner = await person()
+    async with AsyncSessionLocal() as session:
+        origin = await session.scalar(select(func.clock_timestamp())) - timedelta(seconds=2)
+    event_id, saga_id = await movement(owner, at=origin, direction=AccessDirection.EXIT)
+    read = PlateRead("SYN123", 1, "synthetic", origin, {})
+    repository = LprIngestRepository()
+    ingest, _ = await repository.persist_read(read, received_at=origin, idempotency_key=str(uuid.uuid4()),
+        normalized_payload={"registration_number": "SYN123", "confidence": 1, "source": "synthetic",
+            "captured_at": origin.isoformat(), "raw_payload": {}, "candidate_registration_numbers": []})
+    await repository.complete_observation(ingest.id, ingest.capture_token,
+        {"state": "closed", "observed_at": origin.isoformat()})
+    async with AsyncSessionLocal() as session:
+        row = await session.get(LprIngestEvent, ingest.id)
+        row.status, row.access_event_id, row.movement_saga_id = "succeeded", event_id, saga_id
+        await session.commit()
+    async with AsyncSessionLocal() as session:
+        result = await finalize_in_session(session, saga_id=saga_id, mode=mode,
+            historical_evidence={"source": "synthetic-external-or-history"} if mode != "live" else None)
+        proposal = result.ha_reservation
+        assert result.presence_changed and proposal is not None
+        assert proposal.person_id == owner and proposal.event_id == proposal.presence_event_id == event_id
+        assert proposal.presence_state == "exited"
+        assert proposal.live_eligible is (mode != "historical")
+        assert proposal.origin_at == (None if mode == "historical" else origin)
+        await session.commit()
+        repeated = await finalize_in_session(session, saga_id=saga_id, mode=mode,
+            historical_evidence={"source": "synthetic-external-or-history"} if mode != "live" else None)
+        assert repeated.ha_reservation is None

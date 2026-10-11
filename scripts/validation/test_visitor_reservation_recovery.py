@@ -123,7 +123,7 @@ async def test_recovery_requires_strictly_after_deadline_at_database_checkpoint(
             return await scalar(statement, *args, **kwargs)
 
         monkeypatch.setattr(session, "scalar", fixed_clock)
-        assert await recover_unattempted_reservation_in_session(session, reservation_id=item.id) is expected
+        assert await recover_unattempted_reservation_in_session(session, reservation_id=item.id, ha_reservations=[]) is expected
         await session.commit()
     assert (await truth(item)).reservation.state == ("released" if expected else "reserved")
 
@@ -255,7 +255,7 @@ async def test_recovery_lock_wins_delayed_claim_waits_and_reads_terminal_truth()
     async with AsyncSessionLocal() as recovery:
         await ledger.lock_gate_operation_in_session(recovery, item.key)
         delayed = asyncio.create_task(ledger.claim_gate_command(intent(item)))
-        assert await recover_unattempted_reservation_in_session(recovery, reservation_id=item.id)
+        assert await recover_unattempted_reservation_in_session(recovery, reservation_id=item.id, ha_reservations=[])
         await recovery.commit()
         lease = await asyncio.wait_for(delayed, 5)
     assert lease.already_completed and lease.record.state == GateCommandState.REJECTED
@@ -298,7 +298,7 @@ async def test_restore_hold_permits_no_absence_proof_or_review_mutation(monkeypa
     monkeypatch.setattr(admission, "is_recovery_hold", lambda: True)
     assert await recover_unattempted_visitor_reservations() == (0, None)
     async with AsyncSessionLocal() as session:
-        assert not await recover_unattempted_reservation_in_session(session, reservation_id=item.id)
+        assert not await recover_unattempted_reservation_in_session(session, reservation_id=item.id, ha_reservations=[])
         await session.commit()
     result = await truth(item)
     assert result.parent is None and result.reservation.state == "reserved"

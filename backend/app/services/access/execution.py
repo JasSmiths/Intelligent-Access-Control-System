@@ -59,6 +59,7 @@ from app.services.access.reads import (
     lpr_ingest_id_from_read,
 )
 from app.services.gate_commands import GateCommandOutcome
+from app.services.ha_presence_reservations import reserve_all_in_session
 from app.services.lpr_ingest import LprIngestRepository
 from app.services.movement.admission import AdmissionSessionInput, finalize_in_session
 from app.services.movement.sessions import (
@@ -307,6 +308,7 @@ class AccessExecution:
             await reserve_observation_outputs(session, event=event, person=person, vehicle=vehicle,
                 visitor_pass=visitor_pass, visitor_pass_mode=visitor_pass_mode, anomalies=anomalies)
 
+            await reserve_all_in_session(session, [admission.ha_reservation] if admission.ha_reservation else [])
             await session.commit()
 
         if gate_command_required:
@@ -325,6 +327,7 @@ class AccessExecution:
                 # Return the canonical transition snapshot even if optional enrichment fails.
                 if visitor_pass is not None:
                     visitor_pass = await session.get(VisitorPass, visitor_pass.id)
+                await reserve_all_in_session(session, [admission.ha_reservation] if admission.ha_reservation else [])
                 await session.commit()
                 event, movement_saga = admission.event, admission.saga
                 presence_updated = admission.presence_changed

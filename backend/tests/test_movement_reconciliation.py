@@ -1,16 +1,12 @@
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
-from types import SimpleNamespace
 
 import pytest
 
-from app.models import AccessEvent, GateCommandRecord, MovementSagaRecord, Person
+from app.models import GateCommandRecord, MovementSagaRecord
 from app.models.enums import (
-    AccessDecision,
-    AccessDirection,
     GateCommandState,
     MovementSagaState,
-    TimingClassification,
 )
 from app.modules.gate.base import GateState
 from app.services.movement_reconciliation import (
@@ -30,15 +26,6 @@ class FakeFlushSession:
 class FakeClockSession(FakeFlushSession):
     async def scalar(self, _statement):
         return datetime.now(tz=UTC)
-
-
-class FakePresenceCommitSession:
-    def __init__(self, person: Person | None) -> None:
-        self.person = person
-
-    async def get(self, model, _key):
-        assert model is Person  # This orchestration helper never writes Presence.
-        return self.person
 
 
 def test_latest_reconciliation_command_includes_accepted_unverified_command() -> None:
@@ -62,73 +49,6 @@ def test_latest_reconciliation_command_includes_accepted_unverified_command() ->
     )
 
     assert _latest_reconciliation_command([verified, unverified]) is unverified
-
-
-@pytest.mark.asyncio
-async def test_commit_presence_queues_input_boolean_job_for_live_reconciliation() -> None:
-    service = MovementReconciliationService()
-    now = datetime(2026, 5, 15, 18, 0, tzinfo=UTC)
-    person = Person(id=uuid4(), first_name="Jason", last_name="Smith", display_name="Jason Smith")
-    event = AccessEvent(
-        id=uuid4(),
-        person_id=person.id,
-        registration_number="PE70DHX",
-        direction=AccessDirection.ENTRY,
-        decision=AccessDecision.GRANTED,
-        confidence=0.98,
-        source="ubiquiti",
-        occurred_at=now,
-        timing_classification=TimingClassification.NORMAL,
-    )
-    saga = MovementSagaRecord(
-        idempotency_key="movement-live",
-        source="ubiquiti",
-        occurred_at=now,
-        state=MovementSagaState.RECONCILIATION_REQUIRED,
-        access_event=event,
-        decision_payload={},
-        intent_payload={},
-        state_history=[],
-    )
-    session = FakePresenceCommitSession(person)
-    jobs: list[tuple[Person, AccessEvent]] = []
-
-    await service._queue_presence_effects(session,
-        SimpleNamespace(event=event, saga=saga, presence_changed=True, admission_status="verified"), jobs)
-    assert jobs == [(person, event)]
-
-
-@pytest.mark.asyncio
-async def test_commit_presence_skips_input_boolean_job_for_historical_repair() -> None:
-    service = MovementReconciliationService()
-    now = datetime(2026, 5, 15, 18, 0, tzinfo=UTC)
-    person = Person(id=uuid4(), first_name="Jason", last_name="Smith", display_name="Jason Smith")
-    event = AccessEvent(
-        id=uuid4(),
-        person_id=person.id,
-        registration_number="PE70DHX",
-        direction=AccessDirection.EXIT,
-        decision=AccessDecision.GRANTED,
-        confidence=0.98,
-        source="ubiquiti",
-        occurred_at=now,
-        timing_classification=TimingClassification.NORMAL,
-    )
-    saga = MovementSagaRecord(
-        idempotency_key="movement-historical",
-        source="ubiquiti",
-        occurred_at=now,
-        state=MovementSagaState.RECONCILIATION_REQUIRED,
-        access_event=event,
-        decision_payload={"historical_repair": True},
-        intent_payload={},
-        state_history=[],
-    )
-    jobs: list[tuple[Person, AccessEvent]] = []
-
-    await service._queue_presence_effects(FakePresenceCommitSession(person),
-        SimpleNamespace(event=event, saga=saga, presence_changed=True, admission_status="historical"), jobs)
-    assert jobs == []
 
 
 @pytest.mark.asyncio
@@ -172,7 +92,7 @@ async def test_reconcile_stale_leased_command_holds_unknown_when_gate_stays_clos
 
     monkeypatch.setattr(service, "_publish_saga_failed", fake_publish_failed)
 
-    count = await service._reconcile_saga(FakeFlushSession(), saga)
+    count = await service._reconcile_saga(FakeFlushSession(), saga, ha_reservations=[])
 
     assert count == 1
     assert command.state == GateCommandState.RECONCILIATION_REQUIRED
@@ -263,7 +183,7 @@ async def test_recent_pending_saga_without_command_waits_for_grace_period() -> N
     saga.created_at = now
     saga.updated_at = now
 
-    count = await service._reconcile_saga(FakeFlushSession(), saga)
+    count = await service._reconcile_saga(FakeFlushSession(), saga, ha_reservations=[])
 
     assert count == 0
     assert saga.state == MovementSagaState.PHYSICAL_COMMAND_PENDING

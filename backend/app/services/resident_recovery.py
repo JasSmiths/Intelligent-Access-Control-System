@@ -48,6 +48,8 @@ from app.models.enums import (
     TimingClassification,
 )
 from app.modules.notifications.base import NotificationContext
+from app.services.ha_presence_contracts import HaCoordinationBusy
+from app.services.ha_presence_reservations import reserve_all_in_session
 from app.services.notification_runs import NotificationRunStore
 from app.services.resident_recovery_evidence import (
     MAX_SAMPLES,
@@ -542,7 +544,7 @@ async def handle_resident_action(action_id: str, *, gate_intent_factory, execute
                 linked_read = PlateRead(vehicle.registration_number, original.confidence, event.source,
                     original.occurred_at, {**original_best, "direction": "entry", "resident_recovery": recovery})
                 session_input = admission_input_factory((linked_read,), original.occurred_at, now, linked_read, config)
-                await finalize_admission(session, saga_id=saga_id, session_input=session_input, publish_change=False)
+                admission = await finalize_admission(session, saga_id=saga_id, session_input=session_input, publish_change=False)
                 await reserve_observation_outputs(session, event=event, person=person, vehicle=vehicle,
                     visitor_pass=None, visitor_pass_mode=None, anomalies=[])
                 from app.services.telemetry import TELEMETRY_CATEGORY_ACCESS, write_audit_log
@@ -552,10 +554,14 @@ async def handle_resident_action(action_id: str, *, gate_intent_factory, execute
                          "attempt_id": str(attempt.id), "authority": "resident_confirmation"})
                 dispatch = (context.id, event.id, saga.id, context.expires_at, person.display_name,
                             vehicle.registration_number, config.gate_admission_device_key, context.metadata_["target_plan"])
+            await reserve_all_in_session(session, [admission.ha_reservation] if admission.ha_reservation else [])
             await session.commit()
         except Exception as exc:  # noqa: BLE001 - fence scoped capability on any unexpected domain failure.
             # NOWAIT contention is a deferred tap, not a spent/revoked capability.
-            if isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "55P03":
+            if isinstance(exc, HaCoordinationBusy) or (
+                isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "55P03"
+            ):
+                await session.rollback()
                 return True
             # Rollback nested domain work; record only bounded reason codes, never a token/error payload.
             reason = str(exc) if isinstance(exc, ValueError) and re.fullmatch(r"[a-z_]{1,120}", str(exc)) else "current_authority_unavailable"
@@ -582,7 +588,8 @@ async def handle_resident_action(action_id: str, *, gate_intent_factory, execute
             metadata={"resident_context_id": str(context_id), "person_id": str(snapshot.person_id),
                       "authority": "resident_confirmation"}))
         async with AsyncSessionLocal() as session:
-            await finalize_admission(session, saga_id=saga_id, gate_command_id=outcome.command_id)
+            admission = await finalize_admission(session, saga_id=saga_id, gate_command_id=outcome.command_id)
+            await reserve_all_in_session(session, [admission.ha_reservation] if admission.ha_reservation else [])
             await session.commit()
     return True
 
