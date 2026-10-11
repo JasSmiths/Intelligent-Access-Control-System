@@ -163,6 +163,9 @@ def validate_policy_runtime_coverage(runtime_names: Iterable[str]) -> None:
         raise ValueError("Duplicate access-device runtime provider.")
     if any(name != policy.provider for name, policy in BINDING_POLICIES.items()):
         raise ValueError("Access-device policy key must match its provider.")
+    if any(not policy.configured_setting_keys <= policy.target_setting_keys
+           for policy in BINDING_POLICIES.values()):
+        raise ValueError("Configured access-device settings must be target settings.")
     missing_runtime = sorted(BINDING_POLICIES.keys() - set(names))
     missing_policy = sorted(set(names) - BINDING_POLICIES.keys())
     if missing_runtime or missing_policy:

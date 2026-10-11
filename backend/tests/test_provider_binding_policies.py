@@ -159,3 +159,12 @@ def test_complete_settings_object_reaches_all_third_policy_callbacks(monkeypatch
 def test_configured_setting_keys_keep_gate_service_locking_distinction():
     assert policies.configured_setting_keys() == {"home_assistant_url", "home_assistant_token", "esphome_devices"}
     assert policies.target_setting_keys() == policies.configured_setting_keys() | {"home_assistant_gate_open_service"}
+
+
+def test_configured_settings_outside_target_fingerprint_fail_closed(monkeypatch):
+    from dataclasses import replace
+    original = policies.BINDING_POLICIES["home_assistant"]
+    invalid = replace(original, configured_setting_keys=original.configured_setting_keys | {"fixture_unfenced"})
+    monkeypatch.setitem(policies.BINDING_POLICIES, "home_assistant", invalid)
+    with pytest.raises(ValueError, match="must be target settings"):
+        policies.validate_policy_runtime_coverage(registry.access_device_provider_keys())
