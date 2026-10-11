@@ -30,7 +30,7 @@ from app.services.settings import (
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
-    emit_audit_log,
+    record_audit_log,
 )
 from app.services.unifi_protect import get_unifi_protect_service
 from app.services.vehicle_information import get_vehicle_information_service
@@ -193,7 +193,7 @@ async def test_connection(
                 status_code=400, detail=f"Unknown integration: {request.integration}"
             )
     except Exception as exc:
-        emit_audit_log(
+        await record_audit_log(
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
             action="integration.test",
             actor=actor_from_user(user),
@@ -208,7 +208,7 @@ async def test_connection(
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    emit_audit_log(
+    await record_audit_log(
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action="integration.test",
         actor=actor_from_user(user),

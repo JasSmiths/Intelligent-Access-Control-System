@@ -63,9 +63,10 @@ from app.services.maintenance import set_mode as set_maintenance_mode
 from app.services.notification_rules import set_automation_activation
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_AUTOMATION,
+    audit_log_event_payload,
     current_trace_id,
-    emit_audit_log,
     payload_shape,
+    publish_audit_log_hint,
     write_audit_log,
 )
 from app.services.type_helpers import as_dict
@@ -343,7 +344,9 @@ class AutomationService:
         origin_id: str | None = None,
     ) -> list[dict[str, Any]]:
         origin_id = origin_id or str(uuid.uuid4())
-        async with AsyncSessionLocal() as session:
+        audit_payload = None
+        session = AsyncSessionLocal()
+        try:
             identities = await reserve_trigger(
                 session,
                 trigger_key,
@@ -354,30 +357,37 @@ class AutomationService:
                 source=source,
                 trace_id=current_trace_id(),
             )
+            if not identities:
+                audit = await write_audit_log(
+                    session,
+                    category=TELEMETRY_CATEGORY_AUTOMATION,
+                    action="automation_trigger.unmatched",
+                    actor=actor,
+                    target_entity="AutomationTrigger",
+                    target_id=trigger_key,
+                    target_label=trigger_key.replace("_", " ").replace(".", " ").title(),
+                    outcome="skipped",
+                    level="info",
+                    trace_id=current_trace_id(),
+                    metadata={
+                        "reason_code": "no_matching_automation",
+                        "trigger_key": trigger_key,
+                        "source": source,
+                        "payload_shape": payload_shape(payload or {}),
+                    },
+                )
             await session.commit()
+            if not identities:
+                audit_payload = audit_log_event_payload(audit)
+        finally:
+            await drain_owned(session.close())
+        if audit_payload is not None:
+            await publish_audit_log_hint(audit_payload)
         results = []
         self.dispatcher.wake()
         for identity in identities:
             await self.dispatcher.run_once(identity)
             results.append(await self.run_response(identity))
-        if not identities:
-            emit_audit_log(
-                category=TELEMETRY_CATEGORY_AUTOMATION,
-                action="automation_trigger.unmatched",
-                actor=actor,
-                target_entity="AutomationTrigger",
-                target_id=trigger_key,
-                target_label=trigger_key.replace("_", " ").replace(".", " ").title(),
-                outcome="skipped",
-                level="info",
-                trace_id=current_trace_id(),
-                metadata={
-                    "reason_code": "no_matching_automation",
-                    "trigger_key": trigger_key,
-                    "source": source,
-                    "payload_shape": payload_shape(payload or {}),
-                },
-            )
         if trigger_key == "webhook.received" and not results:
             unrecognized_payload = {**(payload or {}), "reason": "no_matching_automation"}
             results.extend(

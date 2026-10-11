@@ -171,7 +171,6 @@ async def h(monkeypatch):
     monkeypatch.setattr(devices_owner, 'get_access_device_provider', lambda name: fake)
     monkeypatch.setattr(devices_owner, 'COMMAND_CONFIRMATION_TIMEOUT_SECONDS', 0)
     monkeypatch.setattr(devices_owner, 'CLOSE_COMMAND_CONFIRMATION_TIMEOUT_SECONDS', 0)
-    monkeypatch.setattr(devices_owner, 'emit_audit_log', lambda **kwargs: None)
     monkeypatch.setattr(owner, 'is_maintenance_mode_active', AsyncMock(return_value=False))
     monkeypatch.setattr(owner.telemetry, 'start_trace', lambda *a, **kw: Trace())
     monkeypatch.setattr(owner, 'get_lpr_zone_shadow_service', lambda: SimpleNamespace(record_decision=AsyncMock()))

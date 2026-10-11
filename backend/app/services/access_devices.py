@@ -15,11 +15,13 @@ from sqlalchemy.orm import selectinload
 
 from app.core.logging import get_logger
 from app.core.recovery_hold import require_effects_enabled
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import (
     AccessDevice,
     AccessDeviceCommandRecord,
     AccessDeviceProviderBinding,
+    AuditLog,
     GateCommandRecord,
     GateStateObservation,
     Schedule,
@@ -59,7 +61,6 @@ from app.services.settings import RuntimeConfig, get_runtime_config, get_runtime
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     current_trace_id,
-    emit_audit_log,
     telemetry,
 )
 
@@ -117,17 +118,15 @@ class AccessDeviceService:
         await self._start_state_subscriptions()
 
     async def stop(self) -> None:
+        await drain_owned(self._stop_owned())
+
+    async def _stop_owned(self) -> None:
         for task in self._subscription_tasks.values():
             task.cancel()
         if self._subscription_tasks:
             await asyncio.gather(*self._subscription_tasks.values(), return_exceptions=True)
         self._subscription_tasks.clear()
         self._subscription_status.clear()
-        for provider_name in access_device_provider_keys():
-            provider = get_access_device_provider(provider_name)
-            close = getattr(provider, "close", None)
-            if close is not None:
-                await close()
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -135,6 +134,12 @@ class AccessDeviceService:
             except asyncio.CancelledError:
                 pass
         self._poll_task = None
+        # No producer may reopen a client after resource disposal.
+        for provider_name in access_device_provider_keys():
+            provider = get_access_device_provider(provider_name)
+            close = getattr(provider, "close", None)
+            if close is not None:
+                await close()
 
     async def restart(self) -> None:
         await self.stop()
@@ -713,6 +718,8 @@ class AccessDeviceService:
                 origin_context=origin_context,
             )
             await session.commit()
+        for audit in claim.outcome_audits:
+            await self._journal.publish_outcome_hint(audit)
         if not claim.acquired:
             return self._operation_from_record(device, claim.record)
         dispatch = _DeviceDispatch(
@@ -749,6 +756,7 @@ class AccessDeviceService:
             )
             if observation:
                 try:
+                    outcome_audits: list[AuditLog] = []
                     async with AsyncSessionLocal() as session:
                         await self._validate_target_dispatch(session, device, action, dispatch)
                         row = await self._journal.complete_prepared(
@@ -756,8 +764,11 @@ class AccessDeviceService:
                             claim,
                             detail="Target already reports the requested physical state.",
                             observation=observation,
+                            outcome_audits=outcome_audits,
                         )
                         await session.commit()
+                    for audit in outcome_audits:
+                        await self._journal.publish_outcome_hint(audit)
                 except ValueError as exc:
                     row = await self._journal.finish_without_send(claim, detail=str(exc))
                 result = self._operation_from_record(device, row)
@@ -883,6 +894,7 @@ class AccessDeviceService:
                     "Automatic entry did not establish a closed-gate send precondition."
                 )
             entry_sample = await self._observe_entry_policy(dispatch.plan)
+        outcome_audits: list[AuditLog] = []
         async with AsyncSessionLocal() as session:
             config = await self._validate_target_dispatch(session, device, action, dispatch)
             if dispatch.plan.get("automatic_entry_policy"):
@@ -896,9 +908,12 @@ class AccessDeviceService:
                 dispatch.claim,
                 provider=provider,
                 external_id=device.bindings[provider].external_id,
+                outcome_audits=outcome_audits,
             )
             await session.commit()
-            return allowed, config
+        for audit in outcome_audits:
+            await self._journal.publish_outcome_hint(audit)
+        return allowed, config
 
     async def open_access_gates(
         self,
@@ -1263,15 +1278,28 @@ class AccessDeviceService:
                 )
             )
             if dispatch:
-                row = await self._journal.finish_attempt(
-                    dispatch.claim,
-                    delivery=delivery,
-                    state=state,
-                    detail=detail,
-                    observation=observation,
-                    acceptance_basis=result.metadata.get("acceptance_basis"),
-                    has_fallback=index + 1 < len(provider_names),
-                )
+                try:
+                    row = await self._journal.finish_attempt(
+                        dispatch.claim,
+                        delivery=delivery,
+                        state=state,
+                        detail=detail,
+                        observation=observation,
+                        acceptance_basis=result.metadata.get("acceptance_basis"),
+                        has_fallback=index + 1 < len(provider_names),
+                    )
+                except Exception:  # noqa: BLE001 - Preattempt remains durable; lost outcome persistence must never permit fallback.
+                    logger.warning("access_device_outcome_persistence_unavailable")
+                    return AccessDeviceOperationResult(
+                        device=device, action=action, accepted=False, state=GateState.UNKNOWN,
+                        detail="Command outcome persistence is unavailable; reconciliation is required before another command.",
+                        primary_provider=provider_names[0], used_provider=provider_name,
+                        failover_used=index > 0, delivery=CommandDelivery.UNKNOWN,
+                        metadata={"command_id": str(dispatch.claim.record.id),
+                                  "requires_reconciliation": True, "verified": False,
+                                  "receipt_persistence_unknown": True,
+                                  "uncommitted_provider_delivery": delivery.value},
+                    )
                 if row.state != "prepared":
                     return self._operation_from_record(device, row)
             if delivery == CommandDelivery.NOT_SENT:
@@ -1551,34 +1579,6 @@ class AccessDeviceService:
             status=span_status,
             error=result.detail if span_status == "error" else None,
         )
-        audit_outcome = (
-            "success"
-            if dispatch_state == "verified"
-            else "accepted"
-            if dispatch_state == "accepted"
-            else "failed"
-            if dispatch_state == "attempted"
-            else "requires_review"
-            if dispatch_state == "uncertain"
-            else "skipped"
-        )
-        emit_audit_log(
-            category=TELEMETRY_CATEGORY_INTEGRATIONS,
-            action=f"access_device.command.{dispatch_state}",
-            actor="IACS",
-            target_entity="AccessDevice",
-            target_id=result.device.key,
-            target_label=result.device.name,
-            outcome=audit_outcome,
-            level="error"
-            if audit_outcome == "failed"
-            else "warning"
-            if dispatch_state in {"accepted", "uncertain"}
-            else "info",
-            trace_id=trace_id,
-            metadata=payload,
-        )
-
     def _command_evidence_outcome(
         self,
         result: AccessDeviceOperationResult,

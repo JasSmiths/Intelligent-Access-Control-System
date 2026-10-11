@@ -5,17 +5,21 @@ import re
 import secrets
 import time
 import uuid
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 from urllib.parse import parse_qsl, urlencode
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import AuditLog, TelemetrySpan, TelemetryTrace, User
 from app.services.event_bus import event_bus
@@ -317,8 +321,24 @@ def audit_log_event_payload(row: AuditLog) -> dict[str, Any]:
     }
 
 
-def emit_audit_log(**kwargs: Any) -> None:
-    telemetry.enqueue_audit(kwargs)
+async def record_audit_log(**kwargs: Any) -> None:
+    """Await mandatory audit durability independently of lossy diagnostics."""
+    session = AsyncSessionLocal()
+    try:
+        row = await write_audit_log(session, **kwargs)
+        await session.commit()
+        payload = audit_log_event_payload(row)
+    finally:
+        await drain_owned(session.close())
+    await publish_audit_log_hint(payload)
+
+
+async def publish_audit_log_hint(payload: dict[str, Any]) -> None:
+    """Best-effort invalidation after the owning audit transaction has closed."""
+    try:
+        await event_bus.publish("audit.log.created", payload)
+    except Exception:  # noqa: BLE001 - A realtime observer cannot undo committed mandatory audit.
+        logger.warning("audit_realtime_hint_unavailable")
 
 
 @dataclass
@@ -502,35 +522,205 @@ class ActiveSpan:
         self.finish(status="error" if exc else "ok", error=exc)
 
 
+DIAGNOSTIC_RECORD_LIMIT = 1024
+DIAGNOSTIC_BYTE_LIMIT = 16 * 1024 * 1024
+DIAGNOSTIC_BATCH_LIMIT = 100
+DIAGNOSTIC_DRAIN_SECONDS = 10.0
+
+
+@dataclass(frozen=True)
+class _DiagnosticRecord:
+    sequence: int
+    kind: Literal["trace", "span"]
+    payload: bytes
+
+
 class TelemetryService:
-    def __init__(self) -> None:
-        self._tasks: set[asyncio.Task] = set()
+    """One bounded diagnostic writer; mandatory audit never enters this FIFO."""
+
+    def __init__(self, *, sessions: Callable[[], AsyncSession] | None = None) -> None:
+        self._sessions = sessions or (lambda: AsyncSessionLocal())
+        self._queue: deque[_DiagnosticRecord] = deque()
+        self._writer: asyncio.Task[None] | None = None
+        self._wake = asyncio.Event()
+        self._progress = asyncio.Event()
+        self._accepting = False
+        self._stopping = False
+        self._retained_records = 0
+        self._retained_bytes = 0
+        self._accepted = 0
+        self._settled = 0
+        self._dropped: dict[str, int] = {}
+        self._hint_failures = 0
+        self._inflight_committed = False
+        self._inflight_hints = 0
+
+    async def start(self) -> None:
+        if self._writer is not None and not self._writer.done():
+            return
+        self._accepting = True
+        self._stopping = False
+        self._writer = asyncio.create_task(self._run(), name="telemetry-diagnostic-writer")
+
+    async def stop(self) -> None:
+        self._accepting = False
+        self._stopping = True
+        self._wake.set()
+        task = self._writer
+        if task is not None:
+            try:
+                # Repeated shutdown cancellation cannot abandon DB close or a
+                # committed batch's hint while its bytes still occupy capacity.
+                await drain_owned(self._stop_writer(task))
+            finally:
+                if task.done():
+                    self._writer = None
+
+    async def _stop_writer(self, task: asyncio.Task[None]) -> None:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=DIAGNOSTIC_DRAIN_SECONDS)
+        except TimeoutError:
+            # The deadline ends diagnostic work, not ownership of its cleanup.
+            # Cancel the sole writer once, then drain actual DB close.
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "accepting": self._accepting,
+            "writer_running": self._writer is not None and not self._writer.done(),
+            "queued_records": len(self._queue),
+            "retained_records": self._retained_records,
+            "retained_serialized_bytes": self._retained_bytes,
+            "record_limit": DIAGNOSTIC_RECORD_LIMIT,
+            "serialized_byte_limit": DIAGNOSTIC_BYTE_LIMIT,
+            "batch_limit": DIAGNOSTIC_BATCH_LIMIT,
+            "accepted_records": self._accepted,
+            "settled_records": self._settled,
+            "dropped_records": dict(self._dropped),
+            "realtime_hint_failures": self._hint_failures,
+        }
 
     def start_trace(self, name: str, *, category: str, **kwargs: Any) -> ActiveTrace:
         return ActiveTrace(service=self, name=name, category=category, **kwargs)
 
     def enqueue_trace(self, trace: TelemetryTrace) -> None:
-        self._schedule(self._persist_trace(trace))
-        self._schedule(
-            event_bus.publish(
-                "telemetry.trace.created",
-                {
-                    "trace_id": trace.trace_id,
-                    "name": trace.name,
-                    "category": trace.category,
-                    "status": trace.status,
-                    "level": trace.level,
-                    "duration_ms": trace.duration_ms,
-                    "registration_number": trace.registration_number,
-                },
-            )
-        )
+        self._enqueue("trace", trace)
 
     def enqueue_span(self, span: TelemetrySpan) -> None:
-        self._schedule(self._persist_span(span))
+        self._enqueue("span", span)
 
-    def enqueue_audit(self, kwargs: dict[str, Any]) -> None:
-        self._schedule(self._persist_audit(kwargs))
+    def _enqueue(self, kind: Literal["trace", "span"], row: TelemetryTrace | TelemetrySpan) -> None:
+        if not self._accepting:
+            self._drop("not_started_or_stopping", 1)
+            return
+        if self._retained_records >= DIAGNOSTIC_RECORD_LIMIT:
+            self._drop("record_capacity", 1)
+            return
+        # Retain immutable encoded rows, not caller-owned mutable ORM objects.
+        # The byte budget is serialized diagnostic payload, not a process RSS claim.
+        values = {column.key: getattr(row, column.key) for column in row.__table__.columns
+                  if getattr(row, column.key) is not None}
+        payload = json.dumps(values, default=str, ensure_ascii=False, separators=(",", ":")).encode()
+        if len(payload) + self._retained_bytes > DIAGNOSTIC_BYTE_LIMIT:
+            self._drop("byte_capacity", 1)
+            return
+        self._accepted += 1
+        self._queue.append(_DiagnosticRecord(self._accepted, kind, payload))
+        self._retained_records += 1
+        self._retained_bytes += len(payload)
+        self._wake.set()
+
+    def _drop(self, reason: str, count: int) -> None:
+        self._dropped[reason] = self._dropped.get(reason, 0) + count
+
+    async def _run(self) -> None:
+        try:
+            while True:
+                self._wake.clear()
+                if not self._queue:
+                    if self._stopping:
+                        return
+                    await self._wake.wait()
+                    continue
+                batch = [self._queue.popleft() for _ in range(min(len(self._queue), DIAGNOSTIC_BATCH_LIMIT))]
+                count, size, settled = len(batch), sum(len(row.payload) for row in batch), batch[-1].sequence
+                self._inflight_committed = False
+                self._inflight_hints = 0
+                try:
+                    await self._write_batch(batch)
+                except asyncio.CancelledError:
+                    if self._inflight_committed:
+                        # The rows are durable; only unfinished realtime hints
+                        # were abandoned. Never count these rows as dropped.
+                        self._hint_failures += self._inflight_hints
+                    else:
+                        # A cancellation during commit cannot prove absence.
+                        self._drop("shutdown_unconfirmed", count)
+                    raise
+                except Exception:  # noqa: BLE001 - Diagnostics are lossy; mandatory audit uses another path.
+                    if self._inflight_committed:
+                        self._hint_failures += self._inflight_hints
+                        logger.warning("telemetry_committed_batch_cleanup_unavailable")
+                    else:
+                        self._drop("persistence_failed", count)
+                        logger.warning("telemetry_diagnostic_batch_failed")
+                finally:
+                    # _write_batch has drained its actual session close.
+                    # Release encoded bodies before returning their budget.
+                    batch.clear()
+                    self._retained_records -= count
+                    self._retained_bytes -= size
+                    self._settled = settled
+                    self._progress.set()
+        finally:
+            self._accepting = False
+            count, size = len(self._queue), sum(len(row.payload) for row in self._queue)
+            self._queue.clear()
+            if count:
+                self._drop("shutdown_queued", count)
+            self._retained_records -= count
+            self._retained_bytes -= size
+            self._settled = self._accepted
+            self._progress.set()
+
+    async def _write_batch(self, batch: list[_DiagnosticRecord]) -> None:
+        traces: list[dict[str, Any]] = []
+        session = self._sessions()
+        try:
+            await session.execute(text("SET LOCAL statement_timeout = '30s'"))
+            await session.execute(text("SET LOCAL lock_timeout = '5s'"))
+            for record in batch:
+                values = json.loads(record.payload)
+                for name in ("started_at", "ended_at"):
+                    if values.get(name) is not None:
+                        values[name] = datetime.fromisoformat(values[name])
+                if record.kind == "trace":
+                    if values.get("access_event_id") is not None:
+                        values["access_event_id"] = uuid.UUID(values["access_event_id"])
+                    session.add(TelemetryTrace(**values))
+                    traces.append(values)
+                else:
+                    session.add(TelemetrySpan(**values))
+            await session.commit()
+            self._inflight_committed = True
+            self._inflight_hints = len(traces)
+        finally:
+            await drain_owned(session.close())
+        for trace in traces:
+            try:
+                await event_bus.publish("telemetry.trace.created", {
+                    name: trace.get(name) for name in (
+                        "trace_id", "name", "category", "status", "level", "duration_ms", "registration_number"
+                    )
+                })
+            except Exception:  # noqa: BLE001 - Durable diagnostics survive unavailable realtime hints.
+                self._hint_failures += 1
+                logger.warning("telemetry_realtime_hint_unavailable")
+            self._inflight_hints -= 1
 
     def record_span(
         self,
@@ -575,8 +765,13 @@ class TelemetryService:
         )
 
     async def flush(self) -> None:
-        if self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        # Only the prefix accepted before this call belongs to its barrier.
+        # Continuous producers must not postpone every diagnostic read forever.
+        target = self._accepted
+        while self._settled < target:
+            self._progress.clear()
+            if self._settled < target:
+                await self._progress.wait()
 
     async def store_artifact(
         self,
@@ -588,7 +783,7 @@ class TelemetryService:
         span_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        return await drain_owned(asyncio.to_thread(
             self._write_artifact,
             content,
             content_type=content_type,
@@ -596,7 +791,7 @@ class TelemetryService:
             trace_id=trace_id,
             span_id=span_id,
             metadata=metadata,
-        )
+        ))
 
     def artifact_path(self, artifact_id: str) -> tuple[Path, dict[str, Any]]:
         if not re.fullmatch(r"[a-f0-9]{32}", artifact_id):
@@ -610,23 +805,6 @@ class TelemetryService:
         if not file_path.exists():
             raise FileNotFoundError(artifact_id)
         return file_path, metadata
-
-    async def _persist_trace(self, trace: TelemetryTrace) -> None:
-        async with AsyncSessionLocal() as session:
-            session.add(trace)
-            await session.commit()
-
-    async def _persist_span(self, span: TelemetrySpan) -> None:
-        async with AsyncSessionLocal() as session:
-            session.add(span)
-            await session.commit()
-
-    async def _persist_audit(self, kwargs: dict[str, Any]) -> None:
-        async with AsyncSessionLocal() as session:
-            row = await write_audit_log(session, **kwargs)
-            await session.commit()
-            await session.refresh(row)
-            await event_bus.publish("audit.log.created", audit_log_event_payload(row))
 
     def _write_artifact(
         self,
@@ -667,25 +845,6 @@ class TelemetryService:
             "size_bytes": len(content),
             "url": f"/api/v1/telemetry/artifacts/{artifact_id}",
         }
-
-    def _schedule(self, coro: Any) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            if hasattr(coro, "close"):
-                coro.close()
-            logger.debug("telemetry_without_running_loop")
-            return
-        task = loop.create_task(coro)
-        self._tasks.add(task)
-        task.add_done_callback(self._task_done)
-
-    def _task_done(self, task: asyncio.Task) -> None:
-        self._tasks.discard(task)
-        try:
-            task.result()
-        except Exception:
-            logger.exception("telemetry_persist_failed")
 
 
 def _is_secret_key(key: str) -> bool:

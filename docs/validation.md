@@ -422,6 +422,21 @@ query count, returned rows, payload size, Python allocation peaks and the indexe
 snapshot-read plan. Nullable NI/commercial fields are inert fixtures, never live
 provider calls.
 
+### Diagnostics and observer checks
+
+The [writer fixtures](../backend/tests/test_diagnostic_writer.py) exercise actual
+20/2,000-record blocked intake, the shared 1,024-record/16-MiB budget, accepted-prefix
+flush and the ten-second work deadline with actual cleanup ownership. The
+[observer fixtures](../backend/tests/test_observer_lifetimes.py) cover nested inline
+publication, repeated cancellation, scheduler coalescing and HA refresh reentry.
+The registered [PostgreSQL suite](../scripts/validation/test_diagnostics_audit_persistence.py)
+proves 250 diagnostic rows use three INSERT batches and required audits survive closed
+diagnostic intake; HA and unmatched-trigger audit failures roll back their participant
+transaction. [Command-journal fixtures](../backend/tests/test_access_device_command_journal.py)
+use actual SQL audit failure to prove uncertain delivery fencing, truthful recovery,
+idempotent outcome audit and full post-close hint compatibility. These selected checks
+support owner integration; the full integrated harness remains the stage gate.
+
 ### Generated workflow contract freshness
 
 The full and db-free harness run

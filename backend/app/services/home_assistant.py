@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import GateStateObservation
 from app.modules.gate.base import GateState
@@ -21,7 +22,12 @@ from app.modules.notifications.base import NotificationContext
 from app.services.event_bus import event_bus
 from app.services.integration_effects import MAINTENANCE_HA_ENTITY_ID, HomeAssistantEffects
 from app.services.settings import get_runtime_config
-from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, emit_audit_log
+from app.services.telemetry import (
+    TELEMETRY_CATEGORY_INTEGRATIONS,
+    audit_log_event_payload,
+    publish_audit_log_hint,
+    write_audit_log,
+)
 from app.services.type_helpers import as_dict
 from app.services.workflows.catalog import INTEGRATION_DEGRADED_EVENT_TYPE
 
@@ -339,16 +345,6 @@ class HomeAssistantIntegrationService:
                 last_changed=last_changed,
                 source=source,
             )
-            emit_audit_log(
-                category=TELEMETRY_CATEGORY_INTEGRATIONS,
-                action="gate.state_changed",
-                actor="System",
-                target_entity="Gate",
-                target_id=entity_id,
-                target_label=name,
-                diff={"old": {"state": previous_state}, "new": {"state": self._last_gate_state.value}},
-                metadata={"raw_state": state_value, "source": "home_assistant"},
-            )
         await event_bus.publish(
             "gate.state_changed",
             {
@@ -434,7 +430,6 @@ class HomeAssistantIntegrationService:
                 self._mark_connected()
             elif failures:
                 self._mark_unhealthy(failures[0][1])
-            await self._publish_connection_status_if_changed(previous_status)
             if gate_entities:
                 first_gate_state = self._state_cache.get(str(gate_entities[0]["entity_id"]), {}).get("state")
                 if first_gate_state:
@@ -452,9 +447,12 @@ class HomeAssistantIntegrationService:
                             source="home_assistant_refresh",
                         )
             maintenance_state = self._state_cache.get(MAINTENANCE_HA_ENTITY_ID, {}).get("state")
-            if maintenance_state:
-                await self._sync_maintenance_mode_state(maintenance_state)
             self._last_state_refresh_at = now
+        # Inline listeners may request another HA refresh. Publish effects/hints
+        # only after the source refresh lock has been released.
+        await self._publish_connection_status_if_changed(previous_status)
+        if maintenance_state:
+            await self._sync_maintenance_mode_state(maintenance_state)
 
     async def _refresh_entity_state(self, entity_id: str) -> tuple[str, bool, str | None]:
         try:
@@ -587,7 +585,9 @@ class HomeAssistantIntegrationService:
     ) -> None:
         state = gate_state_from_cover_state(raw_state).value
         changed_at = self._parse_datetime(last_changed)
-        async with AsyncSessionLocal() as session:
+        audit_payload = None
+        session = AsyncSessionLocal()
+        try:
             if changed_at:
                 existing = await session.scalar(
                     select(GateStateObservation.id).where(
@@ -619,7 +619,25 @@ class HomeAssistantIntegrationService:
                     source=source,
                 )
             )
+            if previous_state is not None and previous_state != state:
+                audit = await write_audit_log(
+                    session,
+                    category=TELEMETRY_CATEGORY_INTEGRATIONS,
+                    action="gate.state_changed",
+                    actor="System",
+                    target_entity="Gate",
+                    target_id=entity_id,
+                    target_label=name,
+                    diff={"old": {"state": previous_state}, "new": {"state": state}},
+                    metadata={"raw_state": raw_state, "source": source},
+                )
             await session.commit()
+            if previous_state is not None and previous_state != state:
+                audit_payload = audit_log_event_payload(audit)
+        finally:
+            await drain_owned(session.close())
+        if audit_payload is not None:
+            await publish_audit_log_hint(audit_payload)
 
     def _parse_datetime(self, value: str | None) -> datetime | None:
         if not value:

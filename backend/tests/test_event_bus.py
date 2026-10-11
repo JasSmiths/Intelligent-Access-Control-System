@@ -302,3 +302,51 @@ def test_transport_receipt_cannot_claim_redis_acceptance_without_stream_identity
     from app.services.realtime_contracts import RealtimePublishReceipt
     with pytest.raises(ValueError):RealtimePublishReceipt('redis_stream',True)
     with pytest.raises(ValueError):RealtimePublishReceipt('in_process',True,stream_id='1-0')
+
+
+@pytest.mark.asyncio
+async def test_filtered_inline_listener_blocks_publisher_without_creating_listener_task():
+    bus = EventBus(enable_redis=False)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def listener(event):
+        assert not bus._lock.locked()
+        calls.append(event.type)
+        entered.set()
+        await release.wait()
+
+    bus.subscribe(listener, event_types=frozenset({'fixture.accepted'}))
+    await bus.publish('fixture.unrelated', {})
+    assert calls == []
+    published = asyncio.create_task(bus.publish('fixture.accepted', {}))
+    await entered.wait()
+    assert not published.done()
+    assert not any(task.get_name().startswith('event-bus-listener:') for task in asyncio.all_tasks())
+    release.set()
+    await published
+    assert calls == ['fixture.accepted']
+    await bus.stop()
+
+
+@pytest.mark.asyncio
+async def test_inline_listener_can_publish_nested_hint_and_failed_listener_isolated():
+    bus = EventBus(enable_redis=False)
+    seen = []
+
+    async def failed(_event):
+        raise RuntimeError('synthetic listener failure')
+
+    async def nested(event):
+        seen.append(event.type)
+        await bus.publish('fixture.child', {})
+
+    async def child(event):
+        seen.append(event.type)
+
+    bus.subscribe(failed, event_types=frozenset({'fixture.parent'}))
+    bus.subscribe(nested, event_types=frozenset({'fixture.parent'}))
+    bus.subscribe(child, event_types=frozenset({'fixture.child'}))
+    await asyncio.wait_for(bus.publish('fixture.parent', {}), timeout=1)
+    assert seen == ['fixture.parent', 'fixture.child']
+    await bus.stop()
