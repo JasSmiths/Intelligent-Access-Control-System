@@ -11,7 +11,6 @@
     "app/services/access/reads.py",
     "app/services/access/evidence.py",
     "app/services/access/execution.py",
-    "app/services/access/enrichment.py",
     "app/services/access/payloads.py",
     "app/services/access/hardware.py",
     "app/services/access_events.py",

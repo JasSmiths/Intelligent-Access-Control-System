@@ -1082,3 +1082,42 @@ differs from the frozen candidate. Core owns retirement of the old enrichment ca
 this slice removes its legacy chart evaluator/tests. The integrated P6 full harness,
 burst performance, P8/P9 and final programme gates remain open. Earlier missing raw
 logs remain historical records as disclosed above.
+
+
+### Composed P6 focused checkpoint (2026-10-11)
+
+Core source through `22ca2d4` retires RAM queue/windows, inline enrichment and the
+old HA sender. Durable intake/window terminalization, event/Saga, required intents,
+optional reservations, initial publication and chart work join the owning decision
+transaction. All Presence and HA mutation callers use the last in-session HA
+participant; person/configuration edits invalidate prior generations, including
+A→B→A changes. The existing publication lane retains named linked visitor signals
+with at-least-once acknowledgment semantics. No schema, generic framework or
+Vehicle deletion protocol was added. Source-only Astra approvals do not close P6.
+
+Evidence lives under
+`/Users/jas/.codex/worktrees/iacs-maintainability-programme/validation-evidence`.
+`p6-focused-4dj2f1bz` retains the original activation failures and green intake16,
+media30, accepted-results45 and information12 cases. `p6-focused-17a6i7z8` supplies
+corrected camera5, resident8 and publication28 cases; its pipeline and two HA fixture
+failures remain retained. `p6-focused-pu857lc6` supplies HA49 and window39 cases,
+including the total retry/restart, owned close, complete evidence, backlog and
+4/80-window measurements; its remaining synthetic cleanup failure is retained.
+`p6-focused-ib9399ld` supplies corrected pipeline30, including all seven inert
+simulation scenarios with scoped cleanup and unrelated sentinel preservation.
+Together these mapped ten suites cover 262 distinct PostgreSQL cases. Each run's
+manifest binds exact frozen source, HEAD/tree, patch and dependencies; cleanup,
+source/dependency integrity, production and operational equality pass. The
+141-case composed inert unit selection also passes. This is focused feedback,
+not a full integrated harness result.
+
+The distinct-window output preserves matching window, chosen rank and member count.
+At 4 windows the Python allocation peak was 1,285,330 before / 326,374 after; at
+80 it was 11,615,283 / 437,021. Vendor-body retention changed from 4/80 inputs to
+one current input; ordered summaries use one/two 50-row pages, with no vendor
+payload column in matching SQL. Target retained vendor JSON was 10,508,000 bytes.
+Plans and raw measurements are in the window suite artifacts. These compare local
+load/append allocation only, not RSS or throughput; after timings were not faster.
+Optional-provider-A blocking while core-B commits is proven by the actual composed
+pipeline fixtures, separate from this memory comparison. Full P6/P8 composition,
+required harness/browser checks and exact final-candidate review remain open.

@@ -36,8 +36,10 @@ owner explicitly; vendor modules never construct business services.
 ## From a plate read to presence
 
 1. The LPR adapter produces a plate read. Webhook security validates the request
-   before durable intake. AccessEventService stores intake, manages workers and
-   debounce windows, and records explainable suppression.
+   before durable intake. AccessEventService stores immutable intake and one
+   fenced coordinator consumes ready identities in durable receipt order. Window
+   summaries, complete member associations and explainable suppression commit
+   together; no RAM queue or debounce window establishes authority.
    [Pure candidate ranking](../backend/app/services/access/plate_matching.py)
    preserves exact/fuzzy priority. The worker queries normalized active exact
    candidates through a partial index before loading registrations for fuzzy
@@ -47,8 +49,10 @@ owner explicitly; vendor modules never construct business services.
    The movement FSM resolves direction; the
    [pure access policy](../backend/app/services/access/decision.py) builds the plan.
 3. [Execution](../backend/app/services/access/execution.py) persists the event,
-   movement saga, session/pass state, anomalies, and required delivery intents.
-   It commits the decision before any hardware dispatch.
+   movement saga, session/pass state, anomalies, required delivery intents,
+   optional completion reservations, publication and chart dirty work in the same
+   transaction that terminalizes every window member. HA reservation is the last
+   domain participant. The decision commits before any hardware dispatch.
 4. If a gate command is required, the hardware stage uses the command coordinator
    and rechecks [current recognition authority](../backend/app/services/access/authorization.py).
    Command receipts distinguish delivery, acceptance, and verification.
@@ -82,22 +86,27 @@ separate from the core pipeline's attempt policy. Old differently keyed candidat
 rows remain readable during drain. Before P6 activation, any pre-cutover rows for
 the same Protect event must be reconciled to the canonical provider identity.
 
-[Optional enrichment](../backend/app/services/access/enrichment.py), including
-vehicle data and snapshots, runs separately from the core decision. Copy only
-enrichment-owned fields into freshly loaded records so an older object cannot
-overwrite newer access or vehicle state. Realtime publication helps the console
-refresh; durable records and audit remain the evidence of what happened.
+[Optional completion](../backend/app/services/access/completion_worker.py),
+including visual evidence, snapshots and visitor linkage, runs under fixed owned
+capacity after the core commit. Vehicle information uses its existing independent
+job owner. These owners retain original receipt deadlines and apply only their
+fields to freshly locked records. Required camera evidence remains part of core
+resolution; its five-second decision deadline does not detach child cleanup.
 
-The P6 publication owner is being introduced separately from the active access
-runtime. Its [store](../backend/app/services/access/publication.py) reserves a
-current compact projection in the caller's transaction; its independent
-[lane](../backend/app/services/access/publication_worker.py) sends one loaded
-revision and retains a trailing revision if the event changes during delivery.
+The [publication store](../backend/app/services/access/publication.py) reserves
+initial delivery in the same transaction as event creation. Its independent
+[lane](../backend/app/services/access/publication_worker.py) reads the canonical
+[event resource](../backend/app/services/access/event_reads.py) shared by HTTP,
+sends one revision and retains a trailing revision after concurrent changes.
+The Dashboard reconciles actual GET and realtime resources by revision. A bounded
+ambiguous legacy Saga association presents an explicit held conflict and cannot
+select arbitrary authority. Linked visitor transition signals use the same lane
+and acknowledgment; transport acceptance before acknowledgment loss can repeat a
+signal. This is at-least-once delivery, not an exactly-once browser guarantee.
 The shared [transport receipt](../backend/app/services/realtime_contracts.py)
-reports Redis stream acceptance or explicit in-process acceptance, never browser
-receipt or local business completion. Committed-fact delivery has no optional
-five-minute expiry. Runtime replacement and the matching frontend update behavior
-remain part of the incomplete P6 stage.
+reports Redis stream acceptance or explicit in-process acceptance. Durable records
+and mandatory audit remain evidence; committed-fact delivery has no optional
+five-minute expiry.
 
 The separate [completion repository](../backend/app/services/access/completion_store.py)
 reserves four closed optional stages in the core event transaction. Its
@@ -116,8 +125,17 @@ checkpoint may hydrate a result accepted within the original deadline after
 canonical admission arrives later. This link is a bounded database projection,
 not new provider work or admission authority. Its envelope alone does not prove
 an accepted result or arrival: the applicator must lock and validate the retained
-result, exact reservation/current arrival, plate and field ownership. These
-applicators and runtime composition remain pending in P6.
+result, exact reservation/current arrival, plate and field ownership.
+
+Core preparation and resumed finalization share a total three-attempt ingest
+budget, including the initial attempt. Exhaustion holds the whole frozen window;
+stop retains open windows for restart rather than finalizing them early. The
+health endpoint reports durable queue depth, pending windows and original receipt
+age through indexed scalar reads, while readiness uses only local worker state.
+Authenticated `/api/v1/events/{event_id}/candidates` pages at most 50 sanitized
+members with a window-bound cursor. Event preview totals and references distinguish
+that bounded preview from complete evidence. Runtime source is composed; final
+P6 integrated validation and approval remain separate gates in the closure record.
 
 ## Other application flows
 

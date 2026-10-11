@@ -469,10 +469,9 @@ assert preparers select identity columns without raw evidence/photo columns; thi
 a SQL selection proof, not an RSS or throughput benchmark. Controlled test clock
 advancement separates T+4-minute acceptance from T+6-minute linking without renewing
 provider or hardware authority. Other expiry fixtures cross actual PostgreSQL time
-while blocked on a lock. Linkers have no provider capability. The temporary enqueue
-bridge is tested with multiple durable receipts, missing provenance, replay and an
-already exhausted original budget. Runtime worker lifecycle, atomic core reservation,
-complete integrated P6 harness and burst/open-window performance remain separate gates.
+while blocked on a lock. Linkers have no provider capability. Vehicle information
+is reserved in the owning transaction with original receipt provenance; the old
+enqueue bridge is retired. Complete integrated P6 validation remains a separate gate.
 
 The [chart coalescer suite](../scripts/validation/test_leaderboard_coalescer_persistence.py)
 checks progress during arrivals on every actual aggregation, silent/live trailing
@@ -708,3 +707,28 @@ The complete 11-pair comparison retains equal public outputs and three samples
 per phase. Its target chart is slightly slower and selected unknown-snapshot
 bitmap scans remain material; lower Python allocation does not establish bounded
 scanned work, a general speedup, process RSS or PostgreSQL memory bounds.
+
+
+### Composed core checkpoints
+
+The [actual pipeline suite](../scripts/validation/test_access_pipeline.py) drives
+persisted intake, coordinator claims and window execution. Its blocked visual
+completion and blocked vehicle-information fixtures require a subsequent core
+decision to commit while optional work remains blocked, then prove cancellation
+and replay cannot issue another gate command. Required camera preparation is not
+an optional latency fixture. Camera and database-close fixtures retain actual
+child cleanup through repeated cancellation and reject success selected after
+the original decision deadline.
+
+The [window suite](../scripts/validation/test_access_window_persistence.py) covers
+expired restart/reclaim against the total original three-attempt budget, whole
+window holds, stop/restart retention, actual health backlog and authenticated
+80-member evidence pagination beyond the 50-item preview. Its 4/80 distinct-window
+comparison builds equivalent pending state with 128 KiB vendor bodies, compares
+first matching window/rank and retained work, captures indexed 50-row query pages
+and EXPLAIN ANALYZE/BUFFERS output. Python allocation peaks measure load/append,
+not setup, PostgreSQL memory or process RSS; local timings are not production
+claims. Near-limit webhook comparisons separately retain complete evidence and
+bounded preview equivalence. Preserve original failing runs and the affected-suite
+correction mappings in the closure record; selected checks do not replace the
+required full composed harness or browser checks.

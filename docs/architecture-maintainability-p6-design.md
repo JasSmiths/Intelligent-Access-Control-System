@@ -1,5 +1,11 @@
 # P6 concrete design draft — read-only preparation
 
+Historical design record. Its “current” and pending-approval descriptions refer
+to the preparation snapshots below. The implemented flow and current extension
+owners are documented in [Architecture](architecture.md); current stage and
+evidence disposition are in the [closure record](architecture-maintainability-closure.md).
+
+
 Prepared by Sol Ultra from approved P2/P4 candidate source. This is a proposal for
 Astra's design review, not an implementation approval or a claim of exact legacy
 recovery. P4 backend is approved/committed; P5 source is frozen for its full gate. P5 cleanup
