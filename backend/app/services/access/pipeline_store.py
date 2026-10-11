@@ -232,7 +232,8 @@ async def finalization_failed_in_session(
             session, claim, reason="processing_attempts_exhausted", detail=detail
         )
         return False
-    row.attempt_count += 1
+    # The next fenced reclaim charges the next execution attempt. Recording a
+    # handled failure must not charge that same attempt a second time.
     row.last_error, window.last_error = detail[:500], detail[:500]
     await session.flush()
     await assert_window_in_session(session, claim)

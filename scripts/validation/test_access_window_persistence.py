@@ -735,3 +735,187 @@ async def test_suppression_locked_reload_preserves_another_transaction_after_sta
         assert [item["captured_at"] for item in event.raw_payload["vehicle_session"]["suppressed_reads"]] == [first_read.captured_at.isoformat(), second_read.captured_at.isoformat()]
         assert list(await session.scalars(select(MovementSessionObservation.ordinal)
             .where(MovementSessionObservation.session_id == session_id).order_by(MovementSessionObservation.ordinal))) == [0, 1]
+
+
+async def test_finalizing_restart_charges_original_budget_and_holds_every_member():
+    from app.services.access.pipeline_store import finalization_failed_in_session
+    pipeline, windows = AccessPipelineStore(), AccessWindowStore()
+    coordinator = await pipeline.acquire_coordinator()
+    _, _, summary = await append(pipeline, windows, coordinator, value(), flush=True)
+    second, _, _ = await append(pipeline, windows, coordinator, value(seconds=1), flush=True)
+    claim = await pipeline.next_flush_window(coordinator, quiet_seconds=0, max_seconds=0)
+    assert claim is not None
+    async with AsyncSessionLocal() as session:
+        window = await session.get(LprDebounceWindow, claim.window_id)
+        chosen_id = window.best_ingest_id
+        chosen = await session.get(LprIngestEvent, chosen_id)
+        assert chosen.attempt_count == 1
+        assert await finalization_failed_in_session(session, claim, detail='handled first failure', max_attempts=3)
+        assert chosen.attempt_count == 1
+        await session.commit()
+    original_origin = summary.min_received_at
+    for expected in (2, 3):
+        # Simulate a lost process/expired operation without a failure checkpoint.
+        async with AsyncSessionLocal() as session:
+            state = await session.get(LprCoordinatorState, 1, with_for_update=True)
+            state.lease_until = await database_now(session) - timedelta(seconds=1)
+            window = await session.get(LprDebounceWindow, claim.window_id, with_for_update=True)
+            window.lease_until = state.lease_until
+            await session.commit()
+        coordinator = await pipeline.acquire_coordinator()
+        claim = await pipeline.next_flush_window(coordinator, quiet_seconds=0, max_seconds=0)
+        assert claim is not None
+        async with AsyncSessionLocal() as session:
+            assert (await session.get(LprIngestEvent, chosen_id)).attempt_count == expected
+            assert (await session.get(LprDebounceWindow, claim.window_id)).min_received_at == original_origin
+    resumed_id = claim.window_id
+    async with AsyncSessionLocal() as session:
+        state = await session.get(LprCoordinatorState, 1, with_for_update=True)
+        state.lease_until = await database_now(session) - timedelta(seconds=1)
+        await session.commit()
+    coordinator = await pipeline.acquire_coordinator()
+    assert await pipeline.next_flush_window(coordinator, quiet_seconds=0, max_seconds=0) is None
+    async with AsyncSessionLocal() as session:
+        held = await session.get(LprDebounceWindow, resumed_id)
+        assert held.state == 'held' and held.member_count == 2
+        members = list(await session.scalars(select(LprIngestEvent).where(LprIngestEvent.window_id == resumed_id)))
+        assert len(members) == 2 and second.ingest_id in {row.id for row in members}
+        assert all(row.status == 'held' and row.terminal_reason == 'processing_attempts_exhausted' for row in members)
+        assert (await session.get(LprIngestEvent, chosen_id)).attempt_count == 3
+        assert await session.scalar(select(func.count()).select_from(AccessEvent)) == 0
+        assert await session.scalar(select(func.count()).select_from(LprWindowMember).where(
+            LprWindowMember.window_id == resumed_id)) == 2
+    await pipeline.release_coordinator(coordinator)
+
+
+async def test_stop_retains_open_window_without_early_finalization():
+    from app.services.access_events import AccessEventService
+    pipeline, windows = AccessPipelineStore(), AccessWindowStore()
+    coordinator = await pipeline.acquire_coordinator()
+    _, _, summary = await append(pipeline, windows, coordinator, value(), flush=True)
+    service = AccessEventService()
+    await service.start()
+    await asyncio.sleep(0)
+    await service.stop()
+    async with AsyncSessionLocal() as session:
+        stored = await session.get(LprDebounceWindow, summary.evidence.window_id)
+        assert stored.state == 'open' and stored.member_count == 1
+        assert await session.scalar(select(func.count()).select_from(AccessEvent)) == 0
+        assert await session.scalar(select(func.count()).select_from(LprWindowMember)) == 1
+    await pipeline.release_coordinator(coordinator)
+    restarted = await pipeline.acquire_coordinator()
+    assert await pipeline.next_flush_window(restarted, quiet_seconds=0, max_seconds=0) is not None
+    await pipeline.release_coordinator(restarted)
+
+
+async def test_actual_coordinator_connection_close_is_owned_through_repeated_cancellation(monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    pipeline = AccessPipelineStore()
+    coordinator = await pipeline.acquire_coordinator()
+    closing, release = asyncio.Event(), asyncio.Event()
+    original_close = AsyncSession.close
+    closes = []
+
+    async def blocked_close(session):
+        # This query proves close still owns the real transaction/connection
+        # while cleanup is blocked, rather than only a mocked session wrapper.
+        closes.append(await session.scalar(text('SELECT pg_backend_pid()')))
+        closing.set()
+        await release.wait()
+        await original_close(session)
+
+    monkeypatch.setattr(AsyncSession, 'close', blocked_close)
+    operation = asyncio.create_task(pipeline.boundary(coordinator), name='fixture-coordinator-boundary')
+    try:
+        await asyncio.wait_for(closing.wait(), 5)
+        operation.cancel()
+        await asyncio.sleep(0)
+        operation.cancel()
+        await asyncio.sleep(0)
+        assert not operation.done() and len(closes) == 1
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+        assert len(closes) == 1 and engine.pool.checkedout() == 0
+    finally:
+        release.set()
+        await asyncio.gather(operation, return_exceptions=True)
+        monkeypatch.setattr(AsyncSession, 'close', original_close)
+    await pipeline.release_coordinator(coordinator)
+
+
+async def test_authenticated_complete_candidate_api_pages_beyond_preview_and_rejects_other_window(monkeypatch):
+    import httpx
+    from fastapi import FastAPI
+    from types import SimpleNamespace
+    from app.api.dependencies import current_user
+    from app.api.v1 import events
+    pipeline, windows = AccessPipelineStore(), AccessWindowStore()
+    coordinator = await pipeline.acquire_coordinator()
+    for index in range(80):
+        _, _, summary = await append(pipeline, windows, coordinator, value(seconds=index,
+            vendor_secret='must never be public', webhook_trace={'request_id': 'safe', 'authorization': 'secret'}))
+    claim = await pipeline.next_flush_window(coordinator, quiet_seconds=0, max_seconds=0)
+    assert claim is not None
+    await commit_window(windows, claim)
+    async with AsyncSessionLocal() as session:
+        event_id = (await session.get(LprDebounceWindow, claim.window_id)).access_event_id
+        loaded = await windows.load_in_session(session, claim.window_id)
+        assert len(loaded.preview) == 50 and loaded.summary.count == 80
+    assert await pipeline.next_flush_window(coordinator, quiet_seconds=0, max_seconds=0) is None
+    _, _, _ = await append(pipeline, windows, coordinator, value(plate='OTHER123'))
+    other_claim = await pipeline.next_flush_window(coordinator, quiet_seconds=0, max_seconds=0)
+    await commit_window(windows, other_claim)
+    async with AsyncSessionLocal() as session:
+        other_id = (await session.get(LprDebounceWindow, other_claim.window_id)).access_event_id
+    app = FastAPI()
+    app.include_router(events.router, prefix='/api/v1')
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://synthetic') as client:
+        assert (await client.get(f'/api/v1/events/{event_id}/candidates')).status_code == 401
+        app.dependency_overrides[current_user] = lambda: SimpleNamespace(id=uuid.uuid4())
+        first = await client.get(f'/api/v1/events/{event_id}/candidates')
+        assert first.status_code == 200
+        page = first.json()
+        assert page['total'] == 80 and len(page['items']) == 50 and page['next_cursor']
+        assert 'vendor_secret' not in first.text and 'authorization' not in first.text and 'secret' not in first.text
+        last = await client.get(f'/api/v1/events/{event_id}/candidates', params={'cursor': page['next_cursor']})
+        assert last.status_code == 200 and len(last.json()['items']) == 30 and last.json()['next_cursor'] is None
+        identities = [item['ingest_id'] for item in page['items'] + last.json()['items']]
+        assert len(set(identities)) == 80
+        assert (await client.get(f'/api/v1/events/{other_id}/candidates', params={'cursor': page['next_cursor']})).status_code == 422
+        assert (await client.get(f'/api/v1/events/{event_id}/candidates', params={'cursor': 'not-a-cursor'})).status_code == 422
+        assert (await client.get(f'/api/v1/events/{event_id}/candidates', params={'limit': 51})).status_code == 422
+    await pipeline.release_coordinator(coordinator)
+
+
+async def test_health_reports_durable_queue_window_counts_and_original_oldest_age(monkeypatch):
+    import httpx
+    from fastapi import FastAPI
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from app.api.v1 import health
+    pipeline, windows = AccessPipelineStore(), AccessWindowStore()
+    coordinator = await pipeline.acquire_coordinator()
+    _, _, summary = await append(pipeline, windows, coordinator, value(), flush=True)
+    pending = await ready(value(plate='WAIT123'), received_at=NOW + timedelta(seconds=10))
+    service = SimpleNamespace(status=lambda: {'status': 'ok', 'worker_running': True}, backlog_status=pipeline.backlog_status)
+    monkeypatch.setattr(health, 'get_access_event_service', lambda: service)
+    monkeypatch.setattr(health, '_realtime_check', lambda: {'status': 'ok', 'started': True})
+    monkeypatch.setattr(health, '_maintenance_check', AsyncMock(return_value={'status': 'ok'}))
+    monkeypatch.setattr(health, '_home_assistant_check', AsyncMock(return_value={'status': 'disabled'}))
+    app = FastAPI()
+    app.state.startup_complete = True
+    app.include_router(health.router, prefix='/api/v1')
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://synthetic') as client:
+        response = await client.get('/api/v1/health')
+        assert response.status_code == 200
+        backlog = response.json()['checks']['access_events']
+        assert backlog['queue_depth'] == 1 and backlog['pending_windows'] == 1
+        assert datetime.fromisoformat(backlog['oldest_pending_at']) == summary.min_received_at
+        assert backlog['oldest_pending_age_seconds'] > 0
+        service.backlog_status = AsyncMock(side_effect=AssertionError('Readiness must not read backlog'))
+        ready_response = await client.get('/api/v1/health/ready')
+        assert ready_response.status_code == 200 and ready_response.json() == {'ready': True}
+    async with AsyncSessionLocal() as session:
+        assert (await session.get(LprIngestEvent, pending)).received_at == NOW + timedelta(seconds=10)
+    await pipeline.release_coordinator(coordinator)
