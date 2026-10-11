@@ -18,6 +18,7 @@ from app.services import access_events
 @pytest.mark.asyncio
 async def test_actual_plate_query_uses_index_with_generic_prepared_plan(monkeypatch, tmp_path):
     captured = []
+    scope_closes = []
     async with AsyncSessionLocal() as session:
         await session.execute(insert(Vehicle), [
             {"id": uuid.uuid4(), "registration_number": "ab-10 cde" if i == 1000 else f"PL{i:06d}",
@@ -33,13 +34,18 @@ async def test_actual_plate_query_uses_index_with_generic_prepared_plan(monkeypa
             async def __aexit__(self, *args):
                 pass
 
+            async def close(self):
+                # This query spy borrows the enclosing fixture transaction.
+                # Its actual connection remains owned by the outer session.
+                scope_closes.append(True)
+
             async def scalars(self, statement):
                 captured.append(statement)
                 return await session.scalars(statement)
 
         monkeypatch.setattr(access_events, "AsyncSessionLocal", QuerySession)
         assert await access_events.AccessEventService()._matching_vehicle_registrations(("AB10CDE",)) == ["ab-10 cde"]
-        assert len(captured) == 1
+        assert len(captured) == 1 and scope_closes == [True]
         compiled = captured[0].compile(dialect=dialect(), compile_kwargs={"render_postcompile": True})
         assert list(compiled.params.values()) == ["AB10CDE"]
         await session.execute(text("SET LOCAL plan_cache_mode = force_generic_plan"))

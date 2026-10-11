@@ -779,10 +779,10 @@ async def update_settings(
                 ),
                 metadata={"keys": sorted(changed_keys), "source": source},
             )
-        from app.services.home_assistant_configuration import HA_SETTING_KEYS
+        from app.services.ha_presence_contracts import HA_SETTING_KEYS
 
         if set(changed_keys) & set(HA_SETTING_KEYS):
-            from app.services.ha_presence_reservations import invalidate_configuration_in_session
+            from app.services.ha_presence_database import invalidate_configuration_in_session
 
             await invalidate_configuration_in_session(session)
         await session.commit()

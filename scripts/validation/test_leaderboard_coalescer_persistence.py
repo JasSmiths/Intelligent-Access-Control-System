@@ -4,7 +4,6 @@ import asyncio
 import socket
 import uuid
 from datetime import timedelta
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -38,15 +37,13 @@ async def resources(monkeypatch):
     monkeypatch.setattr(socket.socket, 'connect', connect)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', no_http)
     monkeypatch.setattr(owner.event_bus, 'publish', AsyncMock())
-    notice = SimpleNamespace(run_store=NotificationRunStore(), dispatcher=SimpleNamespace(wake=Mock()))
-    monkeypatch.setattr(owner, 'get_notification_service', lambda: notice)
     async with AsyncSessionLocal() as session:
         assert await session.scalar(text('SELECT current_database()')) == DATABASE_NAME
         assert await session.scalar(text('SELECT count(*) FROM system_settings')) == 0
         await session.execute(text('TRUNCATE access_chart_dirty_state,leaderboard_state,notification_runs,access_events,people,vehicles CASCADE'))
         await session.commit()
     try:
-        yield notice
+        yield
     finally:
         await engine.dispose()
 
@@ -201,14 +198,13 @@ async def test_expired_original_deadline_commits_leader_without_new_notice():
 async def test_notification_intake_failure_rolls_back_leader_and_ack_then_same_claim_retries(resources, monkeypatch):
     service = LeaderboardService(); await prior()
     await add_winner(service, 1, 2); await ready(); claim = await service.dirty_store.claim()
-    original = resources.run_store.enqueue_in_session
-    monkeypatch.setattr(resources.run_store, 'enqueue_in_session', AsyncMock(side_effect=RuntimeError('synthetic intake failure')))
-    with pytest.raises(RuntimeError, match='synthetic intake'):
-        await service.evaluate_claim(claim)
+    with monkeypatch.context() as patch:
+        patch.setattr(NotificationRunStore, 'enqueue_in_session', AsyncMock(side_effect=RuntimeError('synthetic intake failure')))
+        with pytest.raises(RuntimeError, match='synthetic intake'):
+            await service.evaluate_claim(claim)
     assert (await state()).acknowledged_generation == 0 and not await notices()
     async with AsyncSessionLocal() as session:
         assert (await session.get(LeaderboardState, KNOWN_TOP_STATE_KEY)).registration_number == 'OLD'
-    monkeypatch.setattr(resources.run_store, 'enqueue_in_session', original)
     await service.evaluate_claim(claim)
     assert len(await notices()) == 1 and (await state()).acknowledged_generation == 1
 

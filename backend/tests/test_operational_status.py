@@ -187,7 +187,12 @@ async def test_health_rollup_surfaces_degraded_integrations(monkeypatch) -> None
                 "queue_depth": 0,
                 "pending_windows": 0,
                 "last_error": None,
-            }
+            },
+            backlog_status=AsyncMock(return_value={
+                "queue_depth": 0,
+                "pending_windows": 0,
+                "oldest_pending_age_seconds": None,
+            }),
         ),
     )
     monkeypatch.setattr(health_api, "get_maintenance_status", fake_maintenance_status)
@@ -199,6 +204,7 @@ async def test_health_rollup_surfaces_degraded_integrations(monkeypatch) -> None
     assert result["checks"]["database"]["status"] == "ok"
     assert result["checks"]["access_events"]["status"] == "ok"
     assert result["checks"]["access_events"]["worker_running"] is True
+    assert result["checks"]["access_events"]["oldest_pending_age_seconds"] is None
     assert result["checks"]["maintenance"]["status"] == "maintenance"
     assert result["checks"]["home_assistant"]["status"] == "degraded"
     assert result["checks"]["home_assistant"]["last_error"] == "Home Assistant returned 401: Unauthorized"

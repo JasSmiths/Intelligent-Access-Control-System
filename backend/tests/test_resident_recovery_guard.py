@@ -40,6 +40,9 @@ class FakeSession:
     async def __aexit__(self, *args):
         pass
 
+    async def close(self):
+        pass
+
     async def get(self, model, identity, **kwargs):
         return SimpleNamespace(state=PresenceState.PRESENT)
 
@@ -175,7 +178,9 @@ async def test_recovery_camera_timeout_is_bounded_and_discards_late_clear_entry(
     value, _person, _vehicle = resolver(monkeypatch)
     monkeypatch.setattr(recovery, "evaluate_phone", AsyncMock(return_value=(
         False, "phone_journey_missing", {"exact_plate": True})))
-    monkeypatch.setattr(owner, "AsyncSessionLocal", FakeSession)
+    session = FakeSession()
+    session.close = AsyncMock(wraps=session.close)
+    monkeypatch.setattr(owner, "AsyncSessionLocal", lambda: session)
     timeout_values = []
     cancelled = asyncio.Event()
 
@@ -195,6 +200,7 @@ async def test_recovery_camera_timeout_is_bounded_and_discards_late_clear_entry(
     monkeypatch.setattr(owner.asyncio, "wait", timed_out)
     observation = read()
     prepared = await value.prepare_camera_evidence(observation, observation, None, trace)
+    session.close.assert_awaited_once()
     assert timeout_values == [5]
     assert prepared.decision["direction"] == "unknown"
     assert prepared.decision["reason"] == "camera_timeout"

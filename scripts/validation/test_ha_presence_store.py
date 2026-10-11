@@ -24,7 +24,7 @@ from app.services import (
 from app.services.auth_root import AUTH_ROOT_LOCK_KEY
 from app.services.ha_presence_attempts import HaPresenceAttemptStore
 from app.services.ha_presence_contracts import HaCoordinationBusy, HaLeaseLost, HaPresenceReservation
-from app.services.ha_presence_database import database_now
+from app.services.ha_presence_database import database_now, invalidate_configuration_in_session
 
 pytestmark = pytest.mark.asyncio
 
@@ -394,7 +394,7 @@ async def test_configuration_nowait_contention_maps_to_full_caller_busy():
         person = await owner.get(Person, proposal.person_id, with_for_update=True)
         person.display_name = 'Must roll back'
         with pytest.raises(HaCoordinationBusy):
-            await asyncio.wait_for(reservations.invalidate_configuration_in_session(owner), 1)
+            await asyncio.wait_for(invalidate_configuration_in_session(owner), 1)
         await owner.rollback()
         await blocker.rollback()
     async with AsyncSessionLocal() as session:

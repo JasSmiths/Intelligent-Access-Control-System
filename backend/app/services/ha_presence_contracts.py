@@ -8,6 +8,9 @@ from typing import Literal
 
 from app.modules.home_assistant.input_boolean_contracts import FrozenHaConnection, HaAction
 
+HA_SETTING_KEYS = ("home_assistant_token", "home_assistant_url")
+
+
 HaInvalidationReason = Literal["person_changed", "simulation_reset", "synthetic_cleanup", "binding_retired"]
 
 

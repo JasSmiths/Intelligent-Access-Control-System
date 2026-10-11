@@ -24,7 +24,7 @@ from app.services.leaderboard_reads import (
     unknown_leaders_in_session,
 )
 from app.services.leaderboard_worker import LeaderboardWorker
-from app.services.notifications import get_notification_service
+from app.services.notification_runs import NotificationRunStore
 from app.services.type_helpers import as_dict
 from app.services.vehicle_information import get_vehicle_information_service
 from app.services.workflows.notification_payloads import notification_context_payload
@@ -66,7 +66,6 @@ class LeaderboardService:
         async with self.dirty_store.session() as session:
             top = await self._current_top_known_leader(session)
         payload: dict[str, Any] | None = None
-        queued = False
         async with self.dirty_store.session() as session:
             dirty, _ = await self.dirty_store.lock_owned(session, claim)
             if top is not None:
@@ -94,15 +93,12 @@ class LeaderboardService:
                 notice["leaderboard_origin"] = chart_notification_origin(
                     claim.generation, claim.live_event_id, claim.live_origin_at
                 )
-                await get_notification_service().run_store.enqueue_in_session(
+                await NotificationRunStore().enqueue_in_session(
                     session, notice, run_id=chart_notification_id(claim.generation)
                 )
-                queued = True
             dirty, _ = await self.dirty_store.lock_owned(session, claim)
             self.dirty_store.acknowledge(dirty, claim)
             await session.commit()
-        if queued:
-            get_notification_service().dispatcher.wake()
         if payload is not None:
             try:
                 await event_bus.publish("leaderboard_overtake", payload)

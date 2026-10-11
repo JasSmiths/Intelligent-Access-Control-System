@@ -33,6 +33,13 @@ class SessionContext:
     async def flush(self):
         return None
 
+    async def execute(self, statement):
+        # These fixtures model legacy session JSON, with no indexed membership.
+        # Complete durable associations are exercised by the PostgreSQL suite.
+        assert "movement_session_observations" in str(statement)
+        assert "lpr_observation_tokens" in str(statement)
+        return []
+
 
 class Ledger:
     def __init__(self, rows):
@@ -279,6 +286,11 @@ async def test_presence_evidence_extends_session_but_current_lpr_evidence_is_ign
     current_read = read("MJ17MDZ", seen_at + timedelta(seconds=31), event_id="current-event", camera_id="camera-1")
 
     class CurrentLprEvidence:
+        async def recent(self, *, limit):
+            assert limit > 0
+            evidence = await self.recent_evidence()
+            return [evidence] if evidence else []
+
         async def recent_evidence(self, **_kwargs):
             return {
                 "source": "webhook",
@@ -289,6 +301,11 @@ async def test_presence_evidence_extends_session_but_current_lpr_evidence_is_ign
             }
 
     class PriorCameraEvidence:
+        async def recent(self, *, limit):
+            assert limit > 0
+            evidence = await self.recent_evidence()
+            return [evidence] if evidence else []
+
         async def recent_evidence(self, **_kwargs):
             return {
                 "source": "unifi_realtime",
@@ -371,6 +388,11 @@ async def test_external_admission_candidate_requires_current_protect_vehicle_evi
         def __init__(self, evidence):
             self.evidence = evidence
 
+        async def recent(self, *, limit):
+            assert limit > 0
+            evidence = await self.recent_evidence()
+            return [evidence] if evidence else []
+
         async def recent_evidence(self, **_kwargs):
             return self.evidence
 
@@ -434,6 +456,11 @@ async def test_external_admission_camera_only_evidence_must_be_unambiguous(monke
     second = session_row("UNK456", denied_at + timedelta(seconds=2), camera_id="gate-camera")
 
     class CameraOnlyTracker:
+        async def recent(self, *, limit):
+            assert limit > 0
+            evidence = await self.recent_evidence()
+            return [evidence] if evidence else []
+
         async def recent_evidence(self, **_kwargs):
             return {
                 "source": "uiprotect_camera",

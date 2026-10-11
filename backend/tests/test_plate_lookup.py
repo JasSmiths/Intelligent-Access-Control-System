@@ -23,22 +23,19 @@ async def test_exact_query_does_not_materialize_directory(monkeypatch):
         assert list(compiled.params.values()) == [["AB10CDE"]]
         queries.append(str(query.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})))
         return SimpleNamespace(all=lambda: ["ab-10 cde"])
-    session = SimpleNamespace(scalars=scalars)
-    class Context:
-        async def __aenter__(self): return session
-        async def __aexit__(self, *args): pass
-    monkeypatch.setattr(access_events, "AsyncSessionLocal", Context)
+    session = SimpleNamespace(scalars=scalars, close=AsyncMock())
+    monkeypatch.setattr(access_events, "AsyncSessionLocal", lambda: session)
     assert await access_events.AccessEventService()._matching_vehicle_registrations(("AB10CDE",)) == ["ab-10 cde"]
     assert len(queries) == 1
+    session.close.assert_awaited_once()
     assert "regexp_replace" in queries[0] and "is_active IS true" in queries[0]
 
 
 async def test_missing_exact_match_performs_one_fuzzy_directory_read(monkeypatch):
     results = iter([[], ["AB10CDF", "PL000001"]])
     scalars = AsyncMock(side_effect=lambda *_: SimpleNamespace(all=lambda: next(results)))
-    class Context:
-        async def __aenter__(self): return SimpleNamespace(scalars=scalars)
-        async def __aexit__(self, *args): pass
-    monkeypatch.setattr(access_events, "AsyncSessionLocal", Context)
+    session = SimpleNamespace(scalars=scalars, close=AsyncMock())
+    monkeypatch.setattr(access_events, "AsyncSessionLocal", lambda: session)
     assert await access_events.AccessEventService()._matching_vehicle_registrations(("AB10CDE",)) == ["AB10CDF", "PL000001"]
     assert scalars.await_count == 2
+    session.close.assert_awaited_once()

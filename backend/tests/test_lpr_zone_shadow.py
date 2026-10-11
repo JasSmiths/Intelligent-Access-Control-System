@@ -129,23 +129,19 @@ async def test_live_mode_suppresses_invalid_present_zone_status(monkeypatch: pyt
         },
     )
     recorded: list[dict[str, object]] = []
-    published_reasons: list[str] = []
 
     class FakeZoneShadowService:
         async def record_decision(self, _: PlateRead, **kwargs: object) -> list[dict[str, object]]:
             recorded.append(kwargs)
             return []
 
-    async def fake_publish_suppressed_read(_: PlateRead, *, reason: str) -> None:
-        published_reasons.append(reason)
-
     monkeypatch.setattr("app.services.access_events.get_lpr_zone_shadow_service", lambda: FakeZoneShadowService())
-    monkeypatch.setattr(service, "_publish_suppressed_read", fake_publish_suppressed_read)
 
     suppressed = await service._suppress_by_live_lpr_zone_filter(read)
 
     assert suppressed
-    assert published_reasons == [LPR_ZONE_FILTER_SUPPRESSION_REASON]
+    assert recorded[0]["decision_override"].should_suppress_live
+    assert recorded[0]["decision_override"].actual_outcome == "live_zone_filter_suppressed"
     assert recorded[0]["access_event_id"] is None
     assert recorded[0]["actual_outcome"] == "live_zone_filter_suppressed"
 
@@ -166,9 +162,10 @@ async def test_shadow_mode_does_not_suppress_invalid_present_zone_status(monkeyp
         },
     )
 
-    async def fail_if_suppressed(_: PlateRead, *, reason: str) -> None:
-        raise AssertionError(f"Shadow mode should not suppress, got {reason}")
+    class NoLiveRecord:
+        async def record_decision(self, *_args, **_kwargs):
+            raise AssertionError("Shadow mode must not record a live suppression")
 
-    monkeypatch.setattr(service, "_publish_suppressed_read", fail_if_suppressed)
+    monkeypatch.setattr("app.services.access_events.get_lpr_zone_shadow_service", lambda: NoLiveRecord())
 
     assert not await service._suppress_by_live_lpr_zone_filter(read)

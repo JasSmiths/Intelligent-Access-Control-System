@@ -6,13 +6,21 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.task_lifecycle import drain_owned
-from app.models import HaPresenceCoordinator, Person
-from app.services.ha_presence_contracts import HaCurrentPerson
+from app.models import (
+    HaPresenceCoordinator,
+    HaPresenceDesired,
+    HaPresenceTarget,
+    Person,
+    SystemSetting,
+)
+from app.services.auth_root import try_reload_auth_root_for_transaction
+from app.services.ha_presence_contracts import HA_SETTING_KEYS, HaCoordinationBusy, HaCurrentPerson
 
 HA_LEASE_SECONDS = 30
 HA_RENEWAL_SECONDS = 5
@@ -64,3 +72,44 @@ async def lock_current_people(
         row.home_assistant_presence_input_boolean_entry_action,
         row.home_assistant_presence_input_boolean_exit_action,
     ) for row in rows}
+
+
+async def lock_home_assistant_setting_rows(session: AsyncSession) -> list[SystemSetting]:
+    """Exact missing-row and NOWAIT authority shared by reads and invalidation."""
+    for key in HA_SETTING_KEYS:
+        acquired = await session.scalar(text(
+            "SELECT pg_try_advisory_xact_lock(hashtext(:setting))"
+        ), {"setting": f"iacs:setting:{key}"})
+        if acquired is not True:
+            raise HaCoordinationBusy("ha_setting_busy")
+    return list((await session.scalars(select(SystemSetting).where(
+        SystemSetting.key.in_(HA_SETTING_KEYS),
+    ).order_by(SystemSetting.key).with_for_update(nowait=True)
+        .execution_options(populate_existing=True))).all())
+
+
+async def invalidate_configuration_in_session(session: AsyncSession) -> int:
+    """No Person locks: settings owner already completed all ordinary mutations."""
+    try:
+        if await try_reload_auth_root_for_transaction(session) is None:
+            raise HaCoordinationBusy("ha_auth_root_busy")
+        # Current setting rows are already caller-owned by the writer. The same port
+        # also covers a missing setting's advisory authority without a new lock graph.
+        await lock_home_assistant_setting_rows(session)
+        coordinator = await lock_ha_coordinator(session)
+        now = await database_now(session)
+        coordinator.next_generation += 1
+        coordinator.config_revision += 1
+        generation = coordinator.next_generation
+        await session.execute(update(HaPresenceDesired).values(
+            generation=generation, eligible=False, outcome="configuration_changed",
+        ))
+        await session.execute(update(HaPresenceTarget).values(
+            generation=generation, state="invalidated", updated_at=now,
+        ))
+        await session.flush()
+        return generation
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) == "55P03":
+            raise HaCoordinationBusy("ha_current_authority_busy") from exc
+        raise

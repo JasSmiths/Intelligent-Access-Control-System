@@ -22,6 +22,19 @@ full harness, affected browser checks and
 fresh complete-candidate Astra High review remain required. These focused
 approvals do not close P6, P8 or P9.
 
+The first composed full run at `2719d503`, retained as
+`final-composed/iacs-validation-_a667g8w`, is failed evidence and does not close any
+stage: five of 226 result entries failed (architecture, backend units, report
+lifespan, plate-query fixture and recovery-hold fixture). It recorded 1,484 passing
+backend units and 1,136 passing PostgreSQL cases across 62 suites, with eleven
+unit failures, two PostgreSQL failures and seven setup errors. Cleanup and source
+integrity passed; the operational checkout remained unchanged. The dependency
+cycles and obsolete test adapters are corrected in the next candidate, whose
+fresh full harness and runtime image checks remain pending. Logs and source
+snapshots stay available; disposable database/dependency scratch may be removed
+after verified cleanup. Earlier historical raw evidence remains unavailable as
+stated below, regardless of historical retained-evidence wording.
+
 ## Source and implementation gates
 
 - Reviewed baseline: original checkout `/Users/jas/Documents/Intelligent Access System`,

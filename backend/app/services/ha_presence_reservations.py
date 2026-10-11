@@ -206,33 +206,3 @@ async def invalidate_people_in_session(
         if getattr(exc.orig, "sqlstate", None) == "55P03":
             raise HaCoordinationBusy("ha_current_authority_busy") from exc
         raise
-
-
-async def invalidate_configuration_in_session(session: AsyncSession) -> int:
-    """No Person locks: settings owner already completed all ordinary mutations."""
-    try:
-        if await try_reload_auth_root_for_transaction(session) is None:
-            raise HaCoordinationBusy("ha_auth_root_busy")
-        # Current setting rows are already caller-owned by the writer. The same port
-        # also covers a missing setting's advisory authority without a new lock graph.
-        try:
-            await lock_home_assistant_connection(session)
-        except HaConfigurationUnavailable:
-            pass
-        coordinator = await lock_ha_coordinator(session)
-        now = await database_now(session)
-        coordinator.next_generation += 1
-        coordinator.config_revision += 1
-        generation = coordinator.next_generation
-        await session.execute(update(HaPresenceDesired).values(
-            generation=generation, eligible=False, outcome="configuration_changed",
-        ))
-        await session.execute(update(HaPresenceTarget).values(
-            generation=generation, state="invalidated", updated_at=now,
-        ))
-        await session.flush()
-        return generation
-    except DBAPIError as exc:
-        if getattr(exc.orig, "sqlstate", None) == "55P03":
-            raise HaCoordinationBusy("ha_current_authority_busy") from exc
-        raise
