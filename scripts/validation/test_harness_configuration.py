@@ -44,6 +44,31 @@ class RuntimePdfSmokeTests(unittest.TestCase):
             self.assertEqual(pdf_image_identity('synthetic')['user'], 'iacs')
 
 
+class OwnedContainerCleanupTests(unittest.TestCase):
+    def test_owned_cleanup_removes_only_its_labeled_container_and_anonymous_volumes(self):
+        from types import SimpleNamespace
+        harness = Harness.__new__(Harness)
+        harness.prefix = 'iacs-validation-fixture'
+        harness.owned = ['owned', 'unrelated']
+        harness.results = {}
+        harness.capture = lambda *args: ''
+        receipts = {}
+        harness.write = lambda name, value: receipts.update({name: value})
+        removed = []
+        def command(arguments, **kwargs):
+            if arguments[:2] == ['docker', 'inspect']:
+                label = harness.prefix if arguments[-1] == 'owned' else 'another-validation-run'
+                return SimpleNamespace(returncode=0, stdout=json.dumps([{'Config': {'Labels': {'iacs.validation': label}}}]))
+            self.assertEqual(arguments, ['docker', 'rm', '-f', '-v', 'owned'])
+            removed.append(arguments[-1])
+            return SimpleNamespace(returncode=0)
+        with patch('validate.subprocess.run', command):
+            harness.cleanup()
+        self.assertEqual(removed, ['owned'])
+        self.assertEqual(receipts['cleanup.json'], {'failures': ['unrelated'], 'remaining': ''})
+        self.assertEqual(harness.results['cleanup'], 1)
+
+
 class TypeCoverageTests(unittest.TestCase):
     def test_preserves_baseline_coverage_and_flags_with_strict_as_checked_subset(self):
         baseline = json.loads((ROOT / 'scripts/validation/type_coverage_baseline.json').read_text())

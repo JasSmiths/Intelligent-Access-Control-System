@@ -241,7 +241,7 @@ class Harness:
                 if (row['Config'].get('Labels') or {}).get('iacs.validation') != self.prefix:
                     failures.append(name)
                     continue
-                result = subprocess.run(['docker', 'rm', '-f', name], capture_output=True, timeout=30)
+                result = subprocess.run(['docker', 'rm', '-f', '-v', name], capture_output=True, timeout=30)
                 if result.returncode:
                     failures.append(name)
             except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
