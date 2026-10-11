@@ -32,6 +32,7 @@ from app.services.ha_presence_attempts import HaPresenceAttemptStore
 from app.services.ha_presence_worker import HaPresenceWorker
 from app.services.home_assistant import get_home_assistant_service
 from app.services.icloud_calendar import get_icloud_calendar_service
+from app.services.leaderboard import get_leaderboard_service
 from app.services.lpr_webhook_security import verify_lpr_webhook_request
 from app.services.maintenance import is_maintenance_mode_active
 from app.services.movement_reconciliation import get_movement_reconciliation_service
@@ -138,6 +139,7 @@ async def lifespan(app: FastAPI):
                 ("icloud_calendar", get_icloud_calendar_service()),
                 ("access_completion", completion),
                 ("ha_presence", ha_presence),
+                ("leaderboard", get_leaderboard_service()),
                 ("vehicle_information", get_vehicle_information_worker()),
                 ("report_exports", report_exports),
                 ("access_events", get_access_event_service()),
@@ -149,7 +151,7 @@ async def lifespan(app: FastAPI):
                 owner = (
                     producers
                     if name
-                    in {"automations", "unifi_protect", "access_events", "movement_reconciliation", "vehicle_information", "report_exports", "access_completion", "ha_presence"}
+                    in {"automations", "unifi_protect", "access_events", "movement_reconciliation", "vehicle_information", "report_exports", "access_completion", "ha_presence", "leaderboard"}
                     else resources
                 )
                 owner.push_async_callback(_stop_owned_service, name, service.stop)

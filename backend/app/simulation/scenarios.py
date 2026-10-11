@@ -74,6 +74,7 @@ from app.services.access_events import AccessEventService
 from app.services.event_bus import event_bus
 from app.services.gate_commands import GateCommandIntent, GateCommandOutcome
 from app.services.ha_presence_reservations import invalidate_people_in_session
+from app.services.leaderboard import get_leaderboard_service
 from app.services.realtime_contracts import RealtimePublishReceipt
 from app.services.settings import get_runtime_config
 from app.services.telemetry import telemetry
@@ -1190,6 +1191,7 @@ async def cleanup_synthetic_data(data: SyntheticDataSet, events: Sequence[Access
         if person_ids:
             await session.execute(delete(Person).where(Person.id.in_(person_ids), Person.notes == data.marker))
         await session.execute(delete(Schedule).where(Schedule.id == data.schedule_id, Schedule.description == data.marker))
+        await get_leaderboard_service().mark_dirty_in_session(session)
         await invalidate_people_in_session(session, person_ids, reason="synthetic_cleanup")
         await session.commit()
 

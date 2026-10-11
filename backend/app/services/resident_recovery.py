@@ -48,9 +48,14 @@ from app.models.enums import (
     TimingClassification,
 )
 from app.modules.notifications.base import NotificationContext
+from app.services.access.authorization import (
+    RecognitionAuthorizationDenied,
+    recognition_origin_for_event,
+)
 from app.services.access.publication import reserve_initial_publication_in_session
 from app.services.ha_presence_contracts import HaCoordinationBusy
 from app.services.ha_presence_reservations import reserve_all_in_session
+from app.services.leaderboard import get_leaderboard_service
 from app.services.notification_runs import NotificationRunStore
 from app.services.resident_recovery_evidence import (
     MAX_SAMPLES,
@@ -554,6 +559,11 @@ async def handle_resident_action(action_id: str, *, gate_intent_factory, execute
                     outcome="authorized", metadata={"person_id": str(person.id), "original_event_id": str(original.id),
                          "attempt_id": str(attempt.id), "authority": "resident_confirmation"})
                 await reserve_initial_publication_in_session(session, event.id)
+                try:
+                    chart_origin = await recognition_origin_for_event(session, event)
+                except RecognitionAuthorizationDenied:
+                    chart_origin = None
+                await get_leaderboard_service().mark_access_in_session(session, event, origin_at=chart_origin)
                 dispatch = (context.id, event.id, saga.id, context.expires_at, person.display_name,
                             vehicle.registration_number, config.gate_admission_device_key, context.metadata_["target_plan"])
             await reserve_all_in_session(session, [admission.ha_reservation] if admission.ha_reservation else [])
@@ -577,6 +587,7 @@ async def handle_resident_action(action_id: str, *, gate_intent_factory, execute
                 await session.commit()
             return True
     if dispatch:
+        get_leaderboard_service().wake()
         context_id, event_id, saga_id, expires, name, plate, gate_key, target_plan = dispatch
         async def authorize_dispatch(session: AsyncSession) -> None:
             await authorize_recovery_dispatch(session, context_id=context_id, event_id=event_id)

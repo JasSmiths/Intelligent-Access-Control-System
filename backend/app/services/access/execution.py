@@ -76,6 +76,7 @@ from app.services.access.reads import (
 from app.services.access.window_store import AccessWindowStore, StoredWindow
 from app.services.gate_commands import GateCommandOutcome
 from app.services.ha_presence_reservations import reserve_all_in_session
+from app.services.leaderboard import get_leaderboard_service
 from app.services.movement.admission import AdmissionSessionInput, finalize_in_session
 from app.services.movement.sessions import (
     VEHICLE_SESSION_PAYLOAD_KEY,
@@ -390,7 +391,11 @@ class AccessExecution:
                     session, event, origin_at=window.summary.min_received_at
                 )
             await reserve_initial_publication_in_session(session, event.id)
-            if visitor_pass_mode == "departure":
+            await get_leaderboard_service().mark_access_in_session(
+                session, event, origin_at=window.summary.min_received_at
+            )
+            persisted_window = await assert_window_in_session(session, claim, completed=True)
+            if visitor_pass_mode == "departure" and persisted_window.reason == "visitor_pass_departure_plate":
                 await AccessWindowStore().activate_visitor_resolution_in_session(
                     session, claim, max_seconds=runtime.lpr_debounce_max_seconds
                 )
@@ -399,6 +404,7 @@ class AccessExecution:
             )
             await assert_window_in_session(session, claim, completed=True)
             await session.commit()
+        get_leaderboard_service().wake()
 
         if gate_command_required:
             gate_outcome = await open_gate_for_access_event(
@@ -796,6 +802,7 @@ class AccessExecution:
         )
         await reserve_information_in_session(session, event, origin_at=observed_at)
         await reserve_initial_publication_in_session(session, event.id)
+        await get_leaderboard_service().mark_access_in_session(session, event, origin_at=observed_at)
         await reserve_all_in_session(
             session, [admission.ha_reservation] if admission.ha_reservation else []
         )

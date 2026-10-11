@@ -15,7 +15,7 @@ from app.api.v1 import health
 SERVICE_NAMES = (
     "notification", "automation", "visitor_pass",
     "access_device", "vehicle_information", "access_event", "movement_reconciliation", "home_assistant",
-    "gate_malfunction", "unifi_protect",
+    "gate_malfunction", "unifi_protect", "leaderboard",
 )
 
 
@@ -75,7 +75,7 @@ async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_re
             pytest.fail("Failed startup must not accept requests")
     started = [name for action, name in events if action == "start"]
     stopped = [name for action, name in events if action == "stop"]
-    producers = {"automation", "unifi_protect", "access_event", "movement_reconciliation", "vehicle_information", "reports", "access_completion", "ha_presence"}
+    producers = {"automation", "unifi_protect", "access_event", "movement_reconciliation", "vehicle_information", "reports", "access_completion", "ha_presence", "leaderboard"}
     assert stopped == [
         *[name for name in reversed(started) if name in producers],
         *[name for name in reversed(started) if name not in producers],

@@ -72,6 +72,7 @@ from app.services.access.window_store import AccessWindowStore
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_controller import UnsupportedModuleError, get_gate_controller
 from app.services.gate_malfunctions import active_stuck_open_malfunction_at
+from app.services.leaderboard import get_leaderboard_service
 from app.services.lpr_ingest import (
     LPR_GATE_CAPTURE_TIMEOUT_SECONDS,
     LprIngestRepository,
@@ -772,6 +773,7 @@ class AccessEventService:
             )
             if result is not None:
                 await session.commit()
+                get_leaderboard_service().wake()
 
     async def _recent_iacs_gate_open_command(
         self, session: AsyncSession, observed_at: datetime
