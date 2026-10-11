@@ -166,6 +166,58 @@ async def test_history_paging_stale_write_and_bounded_directory_reads(records):
         with pytest.raises(ValueError):await read_mot_history(session,vehicle.id,cursor="bad",limit=10)
 
 
+@pytest.mark.parametrize("mileage", ["0", "12345"])
+async def test_mileage_extension_uses_saved_history_and_reset_rejects_stale_result(records, monkeypatch, mileage):
+    """A fixture-only aggregate proves extension ownership without adding vehicle fields."""
+    from app.services.vehicle_information_store import INFORMATION_SUMMARY_FIELDS, invalidate_information_in_session
+
+    def forbidden_provider():
+        raise AssertionError("Saved mileage reads must not call providers")
+
+    monkeypatch.setattr(jobs, "get_vehicle_information_service", forbidden_provider)
+    vehicle, _event = records
+    result = lookup(vehicle.registration_number, tests=0)
+    recorded_at = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    result.results["dvsa"].record.tests = [
+        MotTest(number="missing", completed_at=recorded_at + timedelta(days=1), result="PASSED", mileage=None),
+        MotTest(number="recorded", completed_at=recorded_at, result="PASSED", mileage=mileage,
+            mileage_unit="mi", mileage_read="READ", source="DVSA"),
+    ]
+    async with AsyncSessionLocal() as session:
+        saved = await session.get(Vehicle, vehicle.id, with_for_update=True)
+        await apply_information(session, saved, result, timezone="Europe/London")
+        await session.commit()
+    async with AsyncSessionLocal() as session:
+        history = await read_mot_history(session, vehicle.id, cursor=None, limit=2)
+        assert history.total == 2 and history.items[0].mileage is None
+        latest = next(item for item in history.items if item.mileage is not None)
+        # A future aggregate can project the checked history contract at this owner.
+        summary = {"value": latest.mileage, "unit": latest.mileage_unit,
+            "source": latest.source, "date": latest.completed_at}
+        assert summary == {"value": mileage, "unit": "mi", "source": "DVSA", "date": recorded_at}
+        assert MotTest.model_validate(latest.model_dump(mode="json")) == latest
+        saved = await session.get(Vehicle, vehicle.id, with_for_update=True)
+        assert (saved.make, saved.model) == ("Original", "Manual model")
+        await invalidate_information_in_session(session, saved)
+        saved.registration_number = "NEW" + uuid.uuid4().hex[:9].upper()
+        await session.commit()
+    async with AsyncSessionLocal() as session:
+        saved = await session.get(Vehicle, vehicle.id, with_for_update=True)
+        assert all(getattr(saved, field) is None for field in INFORMATION_SUMMARY_FIELDS)
+        assert await session.get(VehicleInformationSnapshot, vehicle.id) is None
+        history = await read_mot_history(session, vehicle.id, cursor=None, limit=2)
+        assert history.items == [] and history.total == 0 and history.outcome == "not_checked"
+        # A completion for the old registration cannot restore its saved mileage.
+        await apply_information(session, saved, result, timezone="Europe/London")
+        await session.commit()
+    async with AsyncSessionLocal() as session:
+        saved = await session.get(Vehicle, vehicle.id)
+        assert await session.get(VehicleInformationSnapshot, vehicle.id) is None
+        assert all(getattr(saved, field) is None for field in INFORMATION_SUMMARY_FIELDS)
+        assert (saved.make, saved.model) == ("Original", "Manual model")
+        assert (await read_mot_history(session, vehicle.id, cursor=None, limit=2)).items == []
+
+
 async def test_real_shared_redis_throttle_and_unknown_cache():
     from app.modules.dvsa.client import DvsaError
     cache=Redis.from_url(settings.redis_url,decode_responses=True)

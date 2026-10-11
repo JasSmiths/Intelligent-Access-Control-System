@@ -745,3 +745,12 @@ vehicle then unambiguous owner then default selection, London's repeated DST hou
 and a separately committed edit denying actual final recognition authority despite
 stale preloaded state. A real dated rule would extend these owners and corresponding
 request/read contracts; this fixture ships no new rule format or calendar behavior.
+
+The [mileage extension exercise](../scripts/validation/test_vehicle_information.py)
+projects value, unit, source and recorded date from the existing typed, bounded
+MOT snapshot read. Its test-only projection distinguishes missing mileage from
+zero, preserves manually maintained vehicle fields, and uses the existing
+information invalidator and registration fence to prevent an old completion
+restoring a reset aggregate. A shipped summary would extend this feature's
+read contract and rendering owner; it needs no new provider fetch on a read.
+No mileage field or summary feature is shipped by the exercise.

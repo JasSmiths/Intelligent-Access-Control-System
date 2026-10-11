@@ -6,6 +6,21 @@ requires evidence and Astra High approval before new closure. Prior Astra Ultra
 approvals below remain historical records. Planned retention is
 an explicit disposition requiring approval, not a claim that code was fixed.
 
+## Current implementation and remaining gates
+
+The durable access coordinator, canonical revisioned event projection and bounded
+completion/publication owners are integrated; RAM windows and inline optional
+completion have been retired. Astra High approved the focused P6 checkpoint
+`30c4938` with 263 distinct PostgreSQL cases and bounded 4/80-window allocation
+and output evidence. Calendar/P7 has its approved full and browser gates.
+E1's provider-setting invariant and E2/E3's real transaction/current-authority
+exercises are source-approved; E2/E3 also passed 42 PostgreSQL cases. E4 now has
+an existing-store mileage/reset exercise awaiting execution. P8 diagnostics and
+required audit changes await composition, including shared-client shutdown and
+parent-journal seams. The combined full harness, affected browser checks and
+fresh complete-candidate Astra High review remain required. These focused
+approvals do not close P6, P8 or P9.
+
 ## Source and implementation gates
 
 - Reviewed baseline: original checkout `/Users/jas/Documents/Intelligent Access System`,
@@ -259,7 +274,7 @@ conformance and non-report P8 owners remain pending.
 | AM-02 feature reads and invalidation | Shell, coordinator, directory/history/report/dashboard features; P1/P3 | Composed refresh regressions; account/cancel/page/selected/draft checks; bounded subject search | Closed / Astra approved P3 exact candidate |
 | AM-03 provider validation and identity | Device configuration and pure provider policies; P4 | Fingerprint parity, binding races and E1 third-provider fixture | Closed backend / Astra approved P4 exact candidate |
 | AM-04 integration editor lifetime | Keyed provider editors and dialog frame; P4 | Dirty/busy dismissal, stale reads, accepted-operation receipts, browser evidence | Closed frontend / Astra approved P4 exact candidate |
-| AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Astra-approved schema/state design; restart/crash/deadline/late-linkage checks; E2/E4 conformance | Pending / pending |
+| AM-05 optional access completion | Durable intake/windows and completion worker; P6 | Focused 263-case PostgreSQL checkpoint and 4/80-window allocation/output evidence; full composed gate and E4 execution remain | Focused checkpoint approved / integrated full gate pending |
 | AM-06 access tail and chart reads | Durable intake/completion, charts and compact reads; P6/P7 | Equivalent ranking/window evidence, bounded memory, complete query plans and target-scale measurements | P7 compact reads approved; P6 integration pending / Astra High approved P7 |
 | AM-07 runtime resource bounds | Event bus, diagnostics, malfunction scheduler and UniFi worker; P8 | Overflow/counters/current evidence, nested publication, shutdown and 20/2,000-input probes | Pending / pending |
 | AM-08 slow-operation transactions | Reports and calendar account sync; P8 | Report capacity/limits/cancellation/collision/authorization; account fencing/partial sync/late SDK checks | Report/calendar owners approved; P8/P9 integrated gates pending / Astra Ultra report; Astra High calendar |
@@ -299,10 +314,10 @@ conformance and non-report P8 owners remain pending.
 
 | Exercise | Stage and acceptance | Status / Astra approval |
 | --- | --- | --- |
-| E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | Backend and frontend stage fixtures approved; final integrated P9 exercise pending / Astra approved P4 backend and frontend |
-| E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | P2 conformance approved; P6/P9 integration pending / Astra approved P2 |
-| E3 ACCESS SCHEDULE dated exception | P2/P8/P9: access-schedule ownership, current authority and generated configuration contracts; separate from iCloud calendar sync | Pending / pending |
-| E4 last recorded mileage summary | P5/P6/P9: feature store owns new summary/reset and optional completion | Pending / pending |
+| E1 third managed cover provider | P4/P9: fixture provider through discovery/configuration/persistence without central provider branches | P4 stage fixtures approved; configured-setting subset guard source-approved and 34 unit cases pass / final integrated P9 gate pending |
+| E2 refresh known vehicle automation action | P2/P6/P9: definition/handler/editor/reservation without dispatcher/store branches | Concrete current-vehicle reservation/editor export/atomic audit exercise source and PostgreSQL approved / final integrated P9 gate pending |
+| E3 ACCESS SCHEDULE dated exception | P2/P8/P9: access-schedule ownership, current authority and generated configuration contracts; separate from iCloud calendar sync | Test-only dated rule, precedence/DST and actual edit-before-attempt denial source and PostgreSQL approved / final integrated P9 gate pending |
+| E4 last recorded mileage summary | P5/P6/P9: saved snapshot/read contract, information reset and stale-result fence | Test-only value/unit/source/date and missing/zero/reset fixture implemented / PostgreSQL and integrated review pending |
 | E5 MOT freshness in dashboard activity | P3/P7/P9: bounded summaries, typed updates and no provider I/O | Pending / pending |
 | P9 final integrated candidate | Complete required release-candidate validation, exact source/patch identity, no actionable findings and fresh Astra approval | Pending / pending |
 
