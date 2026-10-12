@@ -29,7 +29,7 @@ def evidence_identity():
             # A copied no-Git source tree uses the same safe source roots and an
             # explicit root-file allowlist. Never inspect arbitrary local files.
             root_files = {'AGENTS.md', 'docker-compose.yml', 'docker-compose.override.yml',
-                          'docker-compose.preview.yml', '.github/workflows/project-checks.yml'}
+                          '.github/workflows/project-checks.yml'}
             for directory, subdirectories, files in os.walk(root):
                 subdirectories[:] = [name for name in subdirectories if name not in EXCLUDED_PARTS
                                       and (Path(directory) != root or name + '/' in SOURCE_ROOTS)]

@@ -47,11 +47,10 @@ docker compose -f docker-compose.yml up --build
 ```
 
 Review [`.env.example`](../.env.example) before starting. Keep the explicit
-`-f docker-compose.yml`: the committed `docker-compose.override.yml` selects an
+`-f docker-compose.yml`: the ignored `docker-compose.override.yml` selects an
 operational image pair and installation-specific mounts, and plain
-`docker compose` automatically loads it. The standalone preview Compose file
-also targets separately prepared images and storage; it is not a development
-override.
+`docker compose` automatically loads it. The obsolete core-reset preview Compose
+file and its stopped installation were retired after programme completion.
 
 The [base Compose file](../docker-compose.yml) defines these addresses:
 
@@ -88,6 +87,25 @@ initial setup once any user exists. Read-only startup checks are:
 curl -fsS http://localhost:8089/api/v1/health
 curl -fsS http://localhost:8089/api/v1/auth/status
 ```
+
+## Local cleanup and retention
+
+Keep `docker-compose.yml` as the portable development definition and the ignored
+`docker-compose.override.yml` as the private operational image/storage receipt.
+Keep active `data/backend`, `data/postgres`, `data/redis`, logs and authentication
+secrets in place. Retain the latest deployment recovery checkpoint under
+`data/checkpoints` and the validation evidence supporting release approval.
+Delete older backup and preview trees only after their retention is explicitly
+authorized and no container mount uses them. Do not recreate a retired preview
+from historical receipts without a separately authorized deployment.
+
+Docker's unused volumes can still hold recovery databases. Inspect references
+from stopped containers as well as running ones, retain named/nonempty volumes
+for individual review, and avoid a blanket volume prune. Historical temporary
+containers can leave anonymous volumes behind even when test data used bind
+mounts. The validation harness removes its owned containers with `docker rm -f -v`
+so their anonymous volumes are removed too; it does not prune existing or
+unidentified volumes.
 
 ## Work on source and dependencies
 
