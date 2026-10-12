@@ -107,6 +107,22 @@ mounts. The validation harness removes its owned containers with `docker rm -f -
 so their anonymous volumes are removed too; it does not prune existing or
 unidentified volumes.
 
+The standalone dashboard prototype and historical design screenshot collections
+have been retired; their tracked source and images remain in Git history. The
+maintained application lives in `backend` and `frontend`, with regression,
+architecture and performance tooling under `scripts`. Keep migrations and their
+historical schema fixtures: they are required to validate upgrades and recovery.
+
+Generated build output and Python/type-check caches can be removed when no local
+process uses them. The obsolete root virtual environment and broken backend
+virtual environment were removed during cleanup. Usable development dependencies
+belong under `backend/.venv` and `frontend/node_modules`; restore them using the exact
+locked installation commands under [Work on source and dependencies](#work-on-source-and-dependencies).
+Historical browser outputs removed from the
+checkout are retained outside the repository at
+`/Users/jas/.codex/backups/iacs/folder-cleanup-20261012/historical-browser-results`;
+future browser runs write fresh outputs to `frontend/test-results`.
+
 ## Work on source and dependencies
 
 Backend `app/` is mounted read-only into the development container; the repository

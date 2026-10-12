@@ -41,6 +41,3 @@ installation: startup can migrate its database and start configured integrations
 Use the [isolated validation harness](docs/validation.md) for regression work.
 Simulation endpoints can affect hardware. Live commands, provider sends,
 production migrations, and deployment need separate authorization.
-
-[prototypes/premium-dashboard](prototypes/premium-dashboard/README.md) is a
-separate fixture-driven design prototype with its own instructions.
