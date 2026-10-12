@@ -122,7 +122,10 @@ async def test_verified_and_existing_token_adapters_share_rejection(monkeypatch,
         payload.pop("jti")
     token = auth._encode_jwt(payload)
     if failure == "signature":
-        token = token[:-1] + ("A" if token[-1] != "A" else "B")
+        header, claims, signature = token.split(".")
+        # Mutate significant signature bits, not the final Base64 padding bits.
+        signature = ("A" if signature[0] != "A" else "B") + signature[1:]
+        token = ".".join((header, claims, signature))
     if failure == "inactive":
         user.is_active = False
     class RejectionSession(FakeSession):

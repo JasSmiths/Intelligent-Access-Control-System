@@ -98,6 +98,12 @@ extension evidence and final integrated E1 conformance remain separate gates.
 
 ## Calendar ownership checks
 
+The blocked-vendor renewal fixture observes actual vendor entry, successful lease
+renewal and stop requests before asserting cleanup ownership. Renewal uses an
+independent transaction, so it starts after the vendor's source-session closure
+assertion. Wall-clock waits are watchdogs; they do not establish stage progress.
+Fixture release runs even after an assertion fails.
+
 The [calendar persistence inventory](../scripts/validation/recovery_checks.py)
 registers store, authority, reconciliation, auth-root writers, SDK/account engine,
 authentication and actual ASGI adapters separately. Fixtures prove real PostgreSQL

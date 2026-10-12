@@ -42,7 +42,7 @@ class InertCalendarClient:
         self.work_ids.add(id(operation.work))
         if self.blocked is not None and (self.blocked_on is None or self.blocked_on == apple_id):
             self.blocked.set()
-            assert self.release.wait(3), "fixture must release actual vendor cleanup"
+            assert self.release.wait(30), "fixture must release actual vendor cleanup"
         if self.failure is not None and self.failure[0] == apple_id:
             raise self.failure[1]
         starts = datetime.now(UTC) + timedelta(hours=2)
@@ -119,22 +119,47 @@ async def test_stop_and_duplicate_admission_wait_actual_vendor_thread_cleanup_an
     monkeypatch.setattr(module, "CALENDAR_RENEW_SECONDS", 0.01)
     actor, ids, client, store, sdk, owner = await setup(1)
     client.blocked = Event()
+    renewal_allowed, renewed, stop_requested = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_renew = store.renew
+    original_stop = module.CalendarNativeOwner.request_stop
+
+    async def observed_renew(*args, **kwargs):
+        # The vendor's entry assertion checks that the source transaction closed.
+        # Start independent lease transactions only after that assertion, so a
+        # legitimate concurrent renewal cannot look like a leaked source session.
+        await renewal_allowed.wait()
+        result = await original_renew(*args, **kwargs)
+        if result and args[2] is not None:
+            renewed.set()
+        return result
+
+    def observed_stop(native):
+        original_stop(native)
+        stop_requested.set()
+
+    monkeypatch.setattr(store, "renew", observed_renew)
+    monkeypatch.setattr(module.CalendarNativeOwner, "request_stop", observed_stop)
     task = asyncio.create_task(run(owner, actor))
-    await asyncio.wait_for(asyncio.to_thread(client.blocked.wait, 2), 3)
-    await asyncio.sleep(0.04)
-    stop = asyncio.create_task(sdk.stop())
-    await asyncio.sleep(0.04)
-    assert not stop.done() and not task.done()
-    with pytest.raises(CalendarSDKBusy):
-        await run(owner, actor)
-    # Renewal may use a short independent transaction. No source transaction is
-    # held for the vendor thread; let an in-flight renewer settle before reading.
-    async with AsyncSessionLocal() as session:
-        account = await session.get(ICloudCalendarAccount, ids[0])
-        assert account.sync_lease_until > datetime.now(UTC) and account.sync_lease_token is not None
-    client.release.set()
-    receipt = await task
-    await stop
+    stop = None
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(client.blocked.wait, 10), 15)
+        renewal_allowed.set()
+        await asyncio.wait_for(renewed.wait(), 10)
+        stop = asyncio.create_task(sdk.stop())
+        await asyncio.wait_for(stop_requested.wait(), 10)
+        assert not stop.done() and not task.done()
+        with pytest.raises(CalendarSDKBusy):
+            await run(owner, actor)
+        async with AsyncSessionLocal() as session:
+            account = await session.get(ICloudCalendarAccount, ids[0])
+            assert account.sync_lease_until > datetime.now(UTC) and account.sync_lease_token is not None
+    finally:
+        renewal_allowed.set()
+        client.release.set()
+        await asyncio.gather(task, *([stop] if stop is not None else []), return_exceptions=True)
+    receipt = task.result()
+    if stop is not None:
+        stop.result()
     assert receipt.interrupted and receipt.checkpoints[0].status == "interrupted"
     assert len(client.calls) == 1 and engine.pool.checkedout() == 0
 
