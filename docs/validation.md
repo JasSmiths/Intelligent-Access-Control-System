@@ -716,8 +716,9 @@ repairs separately from changes to application behavior.
 
 On restart, preserve historical results but disclose absent raw evidence rather
 than treating the ledger as a current gate. The resumed calendar/P7 comparison and
-required checks use the persistent evidence sibling recorded in the
-[closure ledger](architecture-maintainability-closure.md#calendarp7-validation-resumed-on-2026-10-11).
+required checks use the persistent evidence sibling at
+`/Users/jas/.codex/worktrees/iacs-maintainability-frontend/validation-evidence`.
+The comparison is recorded in `p7-compact-comparison/comparison.json` there.
 The complete 11-pair comparison retains equal public outputs and three samples
 per phase. Its target chart is slightly slower and selected unknown-snapshot
 bitmap scans remain material; lower Python allocation does not establish bounded
@@ -758,10 +759,44 @@ The harness removes only containers whose exact validation label matches its
 owned prefix, including their anonymous image-declared volumes; it never prunes
 unidentified volumes. Source and harness guards protect that cleanup boundary.
 
-The completed programme uses one external final evidence index under the programme
-worktree parent's `validation-evidence/final-candidate/evidence-index.json`. It
-records the full run plus the reviewed unit-only amendment, exact unchanged
-PostgreSQL/frontend mappings, fresh and retained browser cases, runtime image
-smoke, benchmark limits and the final independent review disposition. Earlier
-failed runs remain failed evidence; they are not described as all-green runs.
-Historical raw evidence lost after restart remains unavailable.
+## Retained programme validation evidence
+
+The completed maintainability programme's final evidence index is
+`/Users/jas/.codex/worktrees/iacs-maintainability-programme/validation-evidence/final-candidate/evidence-index.json`.
+It binds approved source commit `c8dd4a4eca88c5351a72a7171d1cc6da70326641`
+and tree `a312785f075f2c832eede0a343c1dfd4e8bf9ea6` to commands, logs,
+source mappings, runtime image identities and independent review approval.
+This is historical validation of those exact bytes, not a gate for later edits
+or a statement of the current deployment state.
+
+The mapped composed gate combines full run `iacs-validation-9v9u9m9t` with
+whole-backend/static amendment `unit-amendment-uf0y3y3h`: 1,495 backend cases,
+1,145 PostgreSQL cases across 62 suites, 376 frontend cases and the frontend
+build passed. The 35 journal cases skipped in the database-free invocation
+passed in the PostgreSQL journal suite. Source/configuration checks passed
+22/30 cases; architecture and 141 checked/117 strict type targets passed
+without baseline expansion or rule relaxation. Browser evidence maps 182
+distinct cases: 36 freshly run Chromium/WebKit cases and 146 unchanged retained
+cases. Runtime PDF, installed SDK import and performance evidence retain their
+exact-source mappings and stated limits.
+
+This is a mapped composed gate, not one all-green full run. The full run's
+exact-clock assertion failure was replaced by the deterministic fixture in
+`c92cf2d` and the passing whole-backend/static amendment. Earlier failed runs
+remain failed evidence. Historical raw evidence under
+`/private/tmp/iacs-maintainability-programme` was lost after restart and remains
+unavailable; recorded approval facts do not imply those raw files are retained.
+Keep the external final evidence index and its referenced files.
+
+The superseded review, remediation plan, P6 design and detailed closure ledger
+were removed from the current documentation after programme completion. They
+remain in Git history at `e5ec5c9`; for example, retrieve the historical ledger
+without changing the checkout:
+
+```sh
+git show e5ec5c9:docs/architecture-maintainability-closure.md
+```
+
+Use [Architecture](architecture.md) for implemented owners and extension rules,
+[Development](development.md) for setup and recovery, and
+[Integrations and safety](integrations.md) for provider and physical effects.
