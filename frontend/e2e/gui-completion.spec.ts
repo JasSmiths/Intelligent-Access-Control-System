@@ -110,8 +110,10 @@ test("keeps alert filters level and contained across themes and viewport sizes",
   expect(unexpected).toEqual([]);
 });
 
-test("resolves a dashboard-linked alert group without a UUID error", async ({ page }, testInfo) => {
+for (const alertCount of [1, 3]) {
+test(`removes a dashboard-linked group from ${alertCount} open alerts after resolving`, async ({ page }, testInfo) => {
   const unexpected = await installFixtures(page);
+  if (alertCount > 1) await page.setViewportSize({ width: 390, height: 844 });
   const memberId = "d882ffcb-4a35-4c77-bda5-fb8c1b0bab31";
   const member = {
     id: memberId, alert_ids: [memberId], grouped: false, type: "unauthorized_plate",
@@ -122,14 +124,23 @@ test("resolves a dashboard-linked alert group without a UUID error", async ({ pa
   };
   const groupAlert = { ...member, id: "group:unauthorized_plate:2026-09-23:TEST123",
     grouped: true, local_date: "2026-09-23", member_hash: "reviewed-members" };
+  const others = Array.from({ length: alertCount - 1 }, (_, index) => ({
+    ...member, id: `other-${index}`, alert_ids: [`other-${index}`], type: "outside_schedule",
+    message: `Other alert ${index}`, registration_number: `OTHER${index}`,
+  }));
   let resolved = false;
   const detailReads: string[] = [];
   await page.route("**/api/v1/alerts**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     let body: unknown;
-    if (request.method() === "GET" && path === "/api/v1/alerts") body = resolved ? [] : [groupAlert];
-    else if (request.method() === "GET" && path === "/api/v1/alerts/history") body = history(resolved ? [] : [groupAlert]);
+    const open = resolved ? others : [groupAlert, ...others];
+    const closed = resolved ? [{ ...groupAlert, status: "resolved", resolved_at: now }] : [];
+    if (request.method() === "GET" && path === "/api/v1/alerts") body = open;
+    else if (request.method() === "GET" && path === "/api/v1/alerts/history") {
+      const status = new URL(request.url()).searchParams.get("status");
+      body = history(status === "resolved" ? closed : status === "all" ? [...closed, ...open] : open);
+    }
     else if (request.method() === "GET" && path === `/api/v1/alerts/${memberId}`) {
       detailReads.push(path);
       body = resolved ? { ...member, status: "resolved", resolved_at: now } : groupAlert;
@@ -137,8 +148,8 @@ test("resolves a dashboard-linked alert group without a UUID error", async ({ pa
       expect(request.postDataJSON()).toMatchObject({ group_id: groupAlert.id, count: 1, member_hash: groupAlert.member_hash });
       body = { confirmation_token: "reviewed-group", count: 1 };
     } else if (request.method() === "PATCH" && path === "/api/v1/alerts/action") {
-      expect(request.postDataJSON()).toMatchObject({ group_id: groupAlert.id, action: "resolve", confirmation_token: "reviewed-group" });
-      resolved = true;
+      expect(request.postDataJSON()).toMatchObject({ group_id: groupAlert.id, confirmation_token: "reviewed-group" });
+      resolved = request.postDataJSON().action === "resolve";
       body = { updated: 1, alert_ids: [memberId] };
     } else { await route.fallback(); return; }
     await route.fulfill({ json: body });
@@ -146,14 +157,29 @@ test("resolves a dashboard-linked alert group without a UUID error", async ({ pa
   await page.goto("/");
   await page.getByRole("button", { name: /Unauthorised Plate, Access Denied/ }).click();
   await expect(page).toHaveURL(new RegExp(`/alerts\\?alert=${memberId}$`));
-  await page.getByRole("button", { name: "Resolve", exact: true }).click();
+  await page.getByRole("button", { name: "Resolve", exact: true }).first().click();
   await page.getByRole("button", { name: "Resolve Alert", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Reopen", exact: true })).toBeVisible();
+  await expect(page.locator(".alert-review-row")).toHaveCount(alertCount - 1);
+  await expect(page.getByRole("button", { name: "Reopen", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Showing the selected alert from outside this page.")).toHaveCount(0);
   await expect(page.locator(".error-banner")).toHaveCount(0);
   expect(detailReads).toContain(`/api/v1/alerts/${memberId}`);
   expect(unexpected).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath("resolved-alert-after.png"), fullPage: false, animations: "disabled" });
+  await page.getByRole("tab", { name: "Resolved", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Reopen", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "All", exact: true }).click();
+  await expect(page.locator(".alert-review-row")).toHaveCount(alertCount);
+  await expect(page.getByRole("button", { name: "Reopen", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "Resolved", exact: true }).click();
+  await page.getByRole("button", { name: "Reopen", exact: true }).click();
+  await expect(page.locator(".alert-review-row")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Resolve", exact: true })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Open", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Resolve", exact: true })).toHaveCount(alertCount);
+  expect(unexpected).toEqual([]);
 });
+}
 
 test("opens all route families with isolated loaded fixtures across viewport sizes", async ({ page }, testInfo) => {
   test.setTimeout(300_000);

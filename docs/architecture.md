@@ -321,6 +321,11 @@ separately from empty results; background failures retain usable data with an
 explicit stale/error state. Accepted mutations remain accepted when a later read
 fails.
 
+[Alerts](../frontend/src/views/AlertsView.tsx) hydrate linked records outside the
+current history page while respecting the selected Open, Resolved or All status
+tab. Resolving or reopening a linked alert removes it from a status tab it no
+longer matches; the URL selection cannot pin it back into that tab.
+
 [Integration composition](../frontend/src/features/integrations/IntegrationModal.tsx)
 resolves complete provider editors by the existing provider key. The
 [catalog](../frontend/src/features/integrations/catalog.tsx) explicitly distinguishes

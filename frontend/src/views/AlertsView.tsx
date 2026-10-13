@@ -60,8 +60,10 @@ export function AlertsView({ refreshAlerts, targetId }: { refreshAlerts: () => P
   if (from) params.set("from", from);
   if (to) params.set("to", to);
   const history = useHistoryPage<Anomaly>("/api/v1/alerts/history", params);
-  const alerts = focused && !history.items.some((alert) => alertMatchesFocus(alert, focusedAlertId))
-    ? [focused, ...history.items] : history.items;
+  const focusedAlert = focused && alertMatchesFocus(focused, focusedAlertId)
+    && (statusFilter === "all" || focused.status === statusFilter) ? focused : null;
+  const alerts = focusedAlert && !history.items.some((alert) => alertMatchesFocus(alert, focusedAlertId))
+    ? [focusedAlert, ...history.items] : history.items;
 
   React.useEffect(() => {
     if (history.loading) return;
@@ -194,7 +196,7 @@ export function AlertsView({ refreshAlerts, targetId }: { refreshAlerts: () => P
       {history.newActivity ? <button className="history-new-activity" type="button" onClick={history.refresh}>New activity available. Return to latest.</button> : null}
       {history.error ? <ErrorState title="Alerts unavailable" description={history.error} onRetry={history.refresh} retrying={history.loading} /> : null}
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
-      {focused ? <div className="callout">Showing the selected alert from outside this page.</div> : null}
+      {focusedAlert ? <div className="callout">Showing the selected alert from outside this page.</div> : null}
       {history.loading ? (
         <LoadingState label="Loading alerts" />
       ) : alerts.length ? (
