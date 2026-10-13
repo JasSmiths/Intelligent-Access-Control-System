@@ -276,6 +276,14 @@ queries, selected identities, cursors, errors and event predicates belong to the
 features rather than shell state or navigation requirements. The dashboard
 prototype is a separate fixture app.
 
+The [document head](../frontend/index.html) selects the saved light/dark/system
+appearance synchronously and owns the critical canvas colors and color-scheme
+declaration, so refreshes can paint the correct background before app assets load.
+[Theme controls](../frontend/src/app/theme.tsx) adopt that initial selection and
+persist later changes; unavailable storage falls back to system appearance without
+blocking startup. Keep the initial canvas styles inline rather than deferring
+them to React or an application stylesheet.
+
 [API types and domain clients](../frontend/src/api/) define frontend contracts.
 Use [client.ts](../frontend/src/api/client.ts) for HTTP and the existing
 confirmation helpers for protected mutations. Backend permission and confirmation

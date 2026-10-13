@@ -153,7 +153,7 @@ function DashboardSession({
       <div className="dashboard-intro">
         <div>
           <h1>{greeting}, {firstName}</h1>
-          <p>Your site at a glance. Presence, access and activity.</p>
+          <p>Crest House - Presence, Access and Security.</p>
         </div>
         <div className="intro-clock">
           <Clock3 size={18} />

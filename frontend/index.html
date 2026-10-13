@@ -2,6 +2,29 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      // Apply the saved appearance before app scripts or styles can paint.
+      (() => {
+        let theme = "system";
+        try {
+          const saved = localStorage.getItem("iacs-theme");
+          if (saved === "light" || saved === "dark") theme = saved;
+        } catch {
+          // Unavailable storage uses the system appearance.
+        }
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
+    <style>
+      /* Keep the page canvas available while the application assets load. */
+      :root { color-scheme: light; --bg: #f3f5f8; --text: #192536; background: var(--bg); }
+      :root[data-theme="dark"] { color-scheme: dark; --bg: #10151e; --text: #edf3fb; }
+      @media (prefers-color-scheme: dark) {
+        :root[data-theme="system"], :root:not([data-theme]) { color-scheme: dark; --bg: #10151e; --text: #edf3fb; }
+      }
+      body { margin: 0; background: var(--bg); color: var(--text); }
+    </style>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Intelligent Access Control</title>

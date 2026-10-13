@@ -46,6 +46,14 @@ screenshots use the same output directory. Browser emulation does not establish
 physical-device keyboard, zoom, hinge or safe-area behavior. Report unavailable
 device checks as limits.
 
+The [theme startup fixture](../frontend/e2e/theme-startup.spec.ts) withholds application
+code to check the initial canvas, then loads and reloads the dashboard with
+saved, system, missing and invalid appearance settings in Chromium/WebKit. It
+also covers unavailable storage, theme controls, system appearance changes and
+desktop/tablet/phone/short-landscape screenshots. Run with
+`CI=1 npm run test:e2e -- e2e/theme-startup.spec.ts`. This checks document painting;
+verify Safari's pull-to-refresh transition separately on a physical iPhone.
+
 The [search palette suite](../frontend/e2e/search-palette.spec.ts) covers phone
 result scrolling with a synthetic keyboard viewport, direct tap/Enter navigation,
 desktop previews, tablet/landscape resizing, animated dismissal and focus

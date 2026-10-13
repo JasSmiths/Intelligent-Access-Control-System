@@ -12,10 +12,18 @@ export function ThemeControl({ theme, setTheme }: { theme: ThemeMode; setTheme: 
   );
 }
 export function useTheme(): [ThemeMode, (mode: ThemeMode) => void] {
-  const [theme, setThemeState] = React.useState<ThemeMode>(() => (localStorage.getItem("iacs-theme") as ThemeMode | null) ?? "system");
+  // The document head selects the initial appearance before React loads.
+  const [theme, setThemeState] = React.useState<ThemeMode>(() => {
+    const initial = document.documentElement.dataset.theme;
+    return initial === "light" || initial === "dark" ? initial : "system";
+  });
   React.useEffect(() => {
-    localStorage.setItem("iacs-theme", theme);
     document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("iacs-theme", theme);
+    } catch {
+      // Appearance controls still work when storage is unavailable.
+    }
   }, [theme]);
   return [theme, setThemeState];
 }
