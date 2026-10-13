@@ -217,7 +217,9 @@ async def get_camera_by_identifier(api: Any, identifier: str) -> Any:
     if best_camera is not None and best_score >= 2:
         return best_camera
     try:
-        return await api.get_camera(identifier)
+        from uiprotect.data import Camera, ModelType
+
+        return await api.get_device(ModelType.CAMERA, identifier, Camera)
     except Exception as exc:
         raise UnifiProtectError(f"UniFi Protect camera not found: {identifier}") from exc
 
@@ -274,14 +276,18 @@ async def list_unifi_protect_events(
     until: datetime | None = None,
 ) -> list[Any]:
     try:
-        from uiprotect.data import EventType
+        from uiprotect.data import Event, EventType
     except ImportError as exc:
         detail = _uiprotect_import_error_message(exc)
         raise UnifiProtectError(detail) from exc
 
+    if not 1 <= limit <= 100:
+        raise UnifiProtectError("UniFi Protect event limit must be between 1 and 100.")
+
     start = since or datetime.now(tz=UTC) - timedelta(hours=24)
     end = until or datetime.now(tz=UTC) + timedelta(seconds=10)
-    types = None
+    # Explicit types avoid the SDK's whole-window pagination workaround.
+    types = [EventType(value) for value in EventType.device_events()]
     if event_type:
         try:
             types = [EventType(event_type)]
@@ -289,22 +295,39 @@ async def list_unifi_protect_events(
             raise UnifiProtectError(f"Unsupported UniFi Protect event type: {event_type}") from exc
 
     try:
-        events = await api.get_events(
+        response = await api.get_events_raw(
             start=start,
             end=end,
             limit=max(limit * 3, limit),
             types=types,
             sorting="desc",
+            _allow_manual_paginate=False,
         )
     except Exception as exc:
         raise UnifiProtectError(_protect_error_message(exc)) from exc
 
-    filtered = [
-        event
-        for event in events
-        if not camera_id or str(getattr(event, "camera_id", "")) == camera_id
-    ]
-    return filtered[:limit]
+    if not isinstance(response, list):
+        raise UnifiProtectError("UniFi Protect returned an invalid event response.")
+    events = []
+    for payload in response[:limit * 3]:
+        # Preserve the old typed getter's device-event/score filtering. Future
+        # event types are ignored; malformed known events fail without raw data.
+        if (not isinstance(payload, dict)
+                or payload.get("type") not in EventType.device_events_set()):
+            continue
+        if event_type and payload.get("type") != event_type:
+            continue
+        if payload.get("modelKey", "event") != "event":
+            continue
+        try:
+            event = Event.from_unifi_dict(**{**payload, "modelKey": "event"}, api=api)
+        except Exception as exc:  # Do not expose a vendor validation error's raw input.
+            raise UnifiProtectError("UniFi Protect returned an invalid event response.") from exc
+        if event.score >= 0 and (not camera_id or event.camera_id == camera_id):
+            events.append(event)
+            if len(events) == limit:
+                break
+    return events
 
 
 async def get_unifi_protect_snapshot(
@@ -318,7 +341,19 @@ async def get_unifi_protect_snapshot(
     camera = await get_camera_by_identifier(api, camera_id)
     try:
         if channel == "package":
-            content = await camera.get_package_snapshot(width=width, height=height)
+            from uiprotect.data import ModelType, PermissionNode
+
+            if not camera.feature_flags.has_package_camera:
+                raise UnifiProtectError("Device does not have a package camera.")
+            user = api.bootstrap.auth_user
+            if not (user.can(ModelType.CAMERA, PermissionNode.READ_LIVE, camera)
+                    or user.can(ModelType.CAMERA, PermissionNode.READ_MEDIA, camera)):
+                raise UnifiProtectError("No permission to read the package camera.")
+            # The supported public endpoint selects native quality, not w/h.
+            content = await api.get_public_api_camera_snapshot(
+                camera.id, package=True,
+                high_quality=bool((width and width > 1920) or (height and height > 1080)),
+            )
         else:
             content = await camera.get_snapshot(width=width, height=height)
     except Exception as exc:
@@ -351,7 +386,15 @@ async def get_unifi_protect_event_thumbnail(
 async def get_unifi_protect_event_video(api: Any, event_id: str) -> ProtectMedia:
     event = await get_event_by_id(api, event_id)
     try:
-        content = await event.get_video()
+        camera = event.camera
+        if camera is None:
+            raise UnifiProtectError("UniFi Protect event does not have an available camera.")
+        if event.end is None:
+            raise UnifiProtectError("UniFi Protect event is ongoing.")
+        if event.end <= event.start:
+            raise UnifiProtectError("UniFi Protect event has an invalid video time range.")
+        # Camera.get_video retains the SDK's READ_MEDIA permission check.
+        content = await camera.get_video(start=event.start, end=event.end)
     except Exception as exc:
         raise UnifiProtectError(_protect_error_message(exc)) from exc
     if not content:
@@ -481,22 +524,58 @@ def _serialize_camera_features(camera: Any) -> dict[str, Any]:
 
 
 def _serialize_camera_detections(camera: Any) -> dict[str, Any]:
-    mappings = {
-        "person": "is_person_currently_detected",
-        "vehicle": "is_vehicle_currently_detected",
-        "license_plate": "is_license_plate_currently_detected",
-        "package": "is_package_currently_detected",
-        "animal": "is_animal_currently_detected",
-        "face": "is_face_currently_detected",
-        "speaking": "is_speak_currently_detected",
-        "barking": "is_bark_currently_detected",
-        "smoke": "is_smoke_currently_detected",
-        "siren": "is_siren_currently_detected",
-        "baby_cry": "is_baby_cry_currently_detected",
-        "car_horn": "is_car_horn_currently_detected",
-        "glass_break": "is_glass_break_currently_detected",
+    from uiprotect.data import SmartDetectObjectType as Detect
+    from uiprotect.data.public_devices import PublicCamera
+
+    if isinstance(camera, PublicCamera):
+        # Public camera predicates remain supported and use the SDK's cached
+        # public-event projection. Private cameras use typed last-event reads.
+        public_types = {
+            "person": "is_person_currently_detected",
+            "vehicle": "is_vehicle_currently_detected",
+            "animal": "is_animal_currently_detected",
+            "speaking": "is_speaking_currently_detected",
+            "barking": "is_bark_currently_detected",
+            "smoke": "is_smoke_currently_detected",
+            "siren": "is_siren_currently_detected",
+            "baby_cry": "is_baby_cry_currently_detected",
+            "car_horn": "is_car_horn_currently_detected",
+            "glass_break": "is_glass_break_currently_detected",
+        }
+        return {"active": [label for label, attr in public_types.items() if getattr(camera, attr)]}
+
+    types = {
+        "person": Detect.PERSON,
+        "vehicle": Detect.VEHICLE,
+        "license_plate": Detect.LICENSE_PLATE,
+        "package": Detect.PACKAGE,
+        "animal": Detect.ANIMAL,
+        "face": Detect.FACE,
+        "speaking": Detect.SPEAK,
+        "barking": Detect.BARK,
+        "smoke": Detect.SMOKE,
+        "siren": Detect.SIREN,
+        "baby_cry": Detect.BABY_CRY,
+        "car_horn": Detect.CAR_HORN,
+        "glass_break": Detect.GLASS_BREAK,
     }
-    active = [label for label, attr in mappings.items() if bool(getattr(camera, attr, False))]
+    active: list[str] = []
+    if not getattr(camera, "is_recording_enabled", False):
+        return {"active": active}
+    for label, smart_type in types.items():
+        # Supported per-type SDK lookups use its bounded active-event index;
+        # these are in-memory reads, never a scan or a provider request.
+        if (audio_type := smart_type.audio_type) is not None:
+            if audio_type not in getattr(camera, "active_audio_detect_types", set()):
+                continue
+            event = camera.get_last_smart_audio_detect_event(audio_type)
+        else:
+            if (not getattr(camera, "is_smart_detected", False)
+                    or smart_type not in getattr(camera, "active_smart_detect_types", set())):
+                continue
+            event = camera.get_last_smart_detect_event(smart_type)
+        if event is not None and event.end is None and smart_type in event.smart_detect_types:
+            active.append(label)
     return {"active": active}
 
 

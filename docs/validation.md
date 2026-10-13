@@ -677,6 +677,23 @@ retain accepted receipts after repeated caller cancellation and actual cleanup,
 preserve failure before acceptance and verify ordinary read cancellation.
 These fixtures do not contact UniFi, actuate devices or establish production sizing.
 
+[Installed SDK fixtures](../backend/tests/test_unifi_protect_sdk.py) construct the
+locked client and models with socket connections denied and only HTTP transport
+replaced. They check raw event conversion/filtering and request bounds, exact
+clip camera/time exports and media denial, ongoing/empty failures, snapshots,
+package-channel permissions, current visual/audio detections, LPR/vehicle metadata
+and three-channel subscription cleanup. Real public WebSocket frames verify
+vehicle evidence at event start/end and SDK disconnect invalidation. Existing
+runtime/lifecycle fixtures
+retain cancellation, disconnect/gap invalidation and provider-replacement checks.
+
+The [SDK workload](../scripts/benchmarks/unifi_sdk.py) runs the same small and
+20,000-event source fixtures against baseline/candidate source snapshots and their
+own exact locked SDKs. Retain equivalent public-output hashes, request/response row
+counts, Python peak allocation and JSON bytes, plus 20/2,000 private and public camera projections.
+It denies sockets and makes no SQL calls; SQL plans are not applicable to this
+vendor-read comparison. Synthetic elapsed times are not production guarantees.
+
 Retain source/tool/lock identities with before/after callback workload evidence.
 Queue/context accounting bounds retained work; SDK response and synchronous
 extractor allocation before admission is a separate transient cost. Supplemental

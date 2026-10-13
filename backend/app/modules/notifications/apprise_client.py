@@ -46,8 +46,8 @@ class AppriseNotificationSender(NotificationSender):
             for url in urls:
                 notifier.add(url)
             if attachments:
-                return notifier.notify(title=title, body=body, attach=attachments)
-            return notifier.notify(title=title, body=body)
+                return bool(notifier.notify(title=title, body=body, attach=attachments))
+            return bool(notifier.notify(title=title, body=body))
 
         sent = await asyncio.to_thread(notify)
         logger.info(

@@ -34,7 +34,6 @@ def test_camera_serialization_exposes_metadata_not_stream_urls() -> None:
         last_smart_detect_event_id=None,
         last_smart_audio_detect=None,
         last_smart_audio_detect_event_id=None,
-        is_person_currently_detected=True,
         channels=[
             SimpleNamespace(
                 id="0",
@@ -62,6 +61,11 @@ def test_camera_serialization_exposes_metadata_not_stream_urls() -> None:
         has_mic=True,
     )
 
+    from uiprotect.data import SmartDetectObjectType
+
+    camera.active_smart_detect_types = {SmartDetectObjectType.PERSON}
+    camera.get_last_smart_detect_event = lambda _: SimpleNamespace(
+        end=None, smart_detect_types=[SmartDetectObjectType.PERSON])
     payload = serialize_unifi_camera(camera)
 
     assert payload["id"] == "cam-1"
@@ -165,7 +169,6 @@ def test_stream_metadata_update_does_not_refresh_vehicle_presence() -> None:
         model=EnumValue("camera"),
         channels=[],
         is_video_ready=True,
-        is_vehicle_currently_detected=True,
     )
     service._handle_websocket_message(
         SimpleNamespace(
@@ -194,14 +197,19 @@ def test_detection_update_still_refreshes_vehicle_presence() -> None:
         model=EnumValue("camera"),
         channels=[],
         is_video_ready=True,
-        is_vehicle_currently_detected=True,
     )
+    from uiprotect.data import SmartDetectObjectType
+
+    camera.is_recording_enabled = camera.is_smart_detected = True
+    camera.active_smart_detect_types = {SmartDetectObjectType.VEHICLE}
+    camera.get_last_smart_detect_event = lambda _: SimpleNamespace(
+        end=None, smart_detect_types=[SmartDetectObjectType.VEHICLE])
     service._handle_websocket_message(
         SimpleNamespace(
             action=EnumValue("update"),
             new_obj=camera,
             old_obj=None,
-            changed_data={"modelKey": "camera", "id": "cam-1", "isVehicleCurrentlyDetected": True},
+            changed_data={"modelKey": "camera", "id": "cam-1", "isSmartDetected": True},
         )
     )
 

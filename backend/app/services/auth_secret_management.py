@@ -296,12 +296,14 @@ async def _positive_recovery(audit_id: uuid.UUID) -> bool:
     found = False
     try:
         async with asyncio.timeout(5):
-            async with own_auth_root_connection(engine, recovery=True) as connection:
-                async with AsyncSession(bind=connection) as session:
-                    # Acquisition bounds ended at its commit; install fresh
-                    # short native bounds on this actual lookup transaction.
-                    await _outcome_bounds(session)
-                    found = await session.scalar(select(AuditLog.id).where(AuditLog.id == audit_id)) is not None
+            async with (
+                own_auth_root_connection(engine, recovery=True) as connection,
+                AsyncSession(bind=connection) as session,
+            ):
+                # Acquisition bounds ended at its commit; install fresh
+                # short native bounds on this actual lookup transaction.
+                await _outcome_bounds(session)
+                found = await session.scalar(select(AuditLog.id).where(AuditLog.id == audit_id)) is not None
     except Exception:  # noqa: BLE001 - Positive durable evidence survives close; absence alone is never rollback proof here.
         logger.warning("Auth-root durable audit recovery lookup or cleanup failed")
     return found

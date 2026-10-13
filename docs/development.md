@@ -30,7 +30,8 @@ exports; input caps do not guarantee a fixed memory footprint.
 
 Install Docker with Compose v2. The images supply Python 3.12, PostgreSQL 16 with
 pgvector, Redis, and the frontend build tools. For host-side frontend work use
-Node.js 22 and npm; use host Python 3.12 for the validation entrypoint.
+Node.js 22.22.2+ (22.x), 24.15+ (24.x), or 26+ and npm; use host Python 3.12
+for the validation entrypoint.
 The backend shared image ancestry installs locked Playwright Chromium and native
 libraries, so the non-root runtime can render reports. Check final-image packaging
 with the [runtime PDF smoke](validation.md#final-runtime-pdf-capability).
@@ -166,11 +167,31 @@ Dependency changes belong in reviewed manifests and locks. The
 complete locked Python set, including development dependencies, and the frontend
 lock, and builds both images.
 
-The backend lock includes `multidict` 6.9.1, which fixes the C-extension
+The backend lock includes `multidict` 7.1.0, which fixes the C-extension
 reference leak in [GHSA-54p9-h82j-f925](https://github.com/aio-libs/multidict/security/advisories/GHSA-54p9-h82j-f925).
 The frontend lock includes `source-map-js` 1.2.2, which rejects malformed or
 oversized indexed source-map offsets ([GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q)).
 Preserve these fixes when refreshing the dependency locks.
+
+The October 2026 refresh updates application and development dependencies,
+including `uiprotect==23.1.2` and Mako 1.4.3 (the Windows
+`TemplateLookup` traversal fix is in 1.4.2,
+[GHSA-5639-2j2p-m4mx](https://github.com/sqlalchemy/mako/security/advisories/GHSA-5639-2j2p-m4mx)).
+Apprise 2 returns a result object; the notification adapter accepts only a
+successful result and retains failure handling for partial delivery, no matching
+services and timeouts. ESPHome resolves to 46.10.0 on the container platform;
+the lock retains 45.6.2 on Intel macOS because newer ESPHome releases cap
+`cryptography` below the reviewed application version on that platform.
+Python and JavaScript Playwright have independent locked versions; install each
+package's matching browsers. The UniFi wrapper uses raw-event conversion, camera
+video exports and the current SDK camera projection contract; see the
+[SDK integration contract](integrations.md#unifi-protect-sdk-contract).
+
+SQLAlchemy stays on the patched 2.0 line (`>=2.0.54,<2.1`). Version 2.1 makes
+`Session.execute()` autoflush unconditional, including SQL budget statements;
+calendar final-flush expiry fixtures no longer reach their intended write barrier.
+Review transaction and fixture ownership separately before removing this bound;
+retain the existing expiry/rollback assertions.
 
 Use the [isolated validation harness](validation.md) for backend regression.
 If backend source is mounted into a running installation, perform code changes

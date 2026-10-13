@@ -265,6 +265,38 @@ Enabling the integration does not sweep existing vehicles. They refresh on the
 next eligible arrival, setup lookup or manual action. Deployment, production
 migration, enabling credentials and live provider tests require separate authorization.
 
+## UniFi Protect SDK contract
+
+The locked SDK is `uiprotect==23.1.2`, whose supported console requirement is
+[UniFi Protect 7.2+](https://github.com/uilibs/uiprotect#requirements). IACS retains
+local username/password and Integration API key credentials for its private
+bootstrap/media and public event/device channels. An upgrade does not enable
+new hardware actions or replay historical detections.
+
+Event reads use `get_events_raw()` and convert recognized device events into SDK
+`Event` models before the existing IACS serializer. Limits remain 1–100 results;
+one request asks for at most three times that limit. Explicit device-event types
+and disabled SDK manual pagination prevent a whole-window history scan. Camera
+filtering stays within that candidate window and may return fewer than the limit;
+IACS never fetches more pages to fill it. Unknown/non-device event types are
+ignored; a malformed recognized event fails with a sanitized error. Normal SDK
+HTTP response allocation precedes this adapter's bounded conversion.
+
+Recorded clips use the event's exact cached camera and its start/end times through
+`Camera.get_video()`. The SDK retains its media permission check. Missing cameras,
+ongoing/invalid ranges, rejected exports and empty responses fail without substituting
+a different camera or time range. Normal snapshots retain width/height parameters.
+Package snapshots use `get_public_api_camera_snapshot(package=True)` after the
+existing local-user live/media permission check and package-camera capability check;
+that supported public endpoint returns native quality rather than arbitrary width
+and height. Requests above 1920×1080 select high quality.
+
+Private camera detections come from enabled recording/detection settings and the
+SDK's supported last-event lookups. Public WebSocket cameras retain the SDK's
+current per-type predicates over its cached public events. An ended event is not current evidence;
+audio uses its own enabled types independently of the visual detection flag. These
+lookups use the SDK's active-event index/cache and perform no provider I/O.
+
 ## UniFi optional stream evidence and capacity
 
 UniFi SDK callbacks enter a single consumer with at most 256 retained records and

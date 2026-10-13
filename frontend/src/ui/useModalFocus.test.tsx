@@ -66,6 +66,7 @@ it("defers keyboard handling to a nested native dialog", () => {
   const close = vi.fn();
   render(<Modal label="Editor" close={close} />);
   const nativeDialog = document.createElement("dialog");
+  nativeDialog.open = true;
   const recipientInput = document.createElement("input");
   nativeDialog.append(recipientInput);
   document.body.append(nativeDialog);
