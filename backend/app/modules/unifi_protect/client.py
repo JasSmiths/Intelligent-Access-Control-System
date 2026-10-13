@@ -281,8 +281,9 @@ async def list_unifi_protect_events(
         detail = _uiprotect_import_error_message(exc)
         raise UnifiProtectError(detail) from exc
 
-    if not 1 <= limit <= 100:
-        raise UnifiProtectError("UniFi Protect event limit must be between 1 and 100.")
+    # Public routes cap reads at 100; restart backfill uses a bounded 250.
+    if not 1 <= limit <= 250:
+        raise UnifiProtectError("UniFi Protect event limit must be between 1 and 250.")
 
     start = since or datetime.now(tz=UTC) - timedelta(hours=24)
     end = until or datetime.now(tz=UTC) + timedelta(seconds=10)

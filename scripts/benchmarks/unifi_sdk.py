@@ -104,7 +104,7 @@ async def measure():
         }
 
     reads = []
-    for size, limit in [(30, 10), (20000, 100)]:
+    for size, limit in [(30, 10), (20000, 100), (30, 250), (20000, 250)]:
         api = client()
         requests = []
 
@@ -150,6 +150,7 @@ async def measure():
         reads.append(
             {
                 "source_rows": size,
+                "requested_limit": limit,
                 "returned_rows": len(public),
                 "requests": requests,
                 "request_count": len(requests),

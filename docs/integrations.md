@@ -274,8 +274,10 @@ bootstrap/media and public event/device channels. An upgrade does not enable
 new hardware actions or replay historical detections.
 
 Event reads use `get_events_raw()` and convert recognized device events into SDK
-`Event` models before the existing IACS serializer. Limits remain 1–100 results;
-one request asks for at most three times that limit. Explicit device-event types
+`Event` models before the existing IACS serializer. Public reads remain capped at
+100 results; restart backfill retains its bounded 250-event read. The adapter
+accepts at most 250 results and one request asks for at most three times that
+limit (750 candidates for backfill). Explicit device-event types
 and disabled SDK manual pagination prevent a whole-window history scan. Camera
 filtering stays within that candidate window and may return fewer than the limit;
 IACS never fetches more pages to fill it. Unknown/non-device event types are

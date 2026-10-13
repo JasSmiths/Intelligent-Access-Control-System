@@ -189,10 +189,10 @@ async def test_requested_event_type_is_checked_even_if_provider_ignores_filter(s
     assert api.api_request_list.await_args.kwargs["params"]["types"] == ["motion"]
 
 
-@pytest.mark.parametrize("limit", [0, 101])
+@pytest.mark.parametrize("limit", [0, 251])
 async def test_invalid_event_limit_fails_before_sdk_request(sdk, limit):
     api, _ = sdk
-    with pytest.raises(UnifiProtectError, match="between 1 and 100"):
+    with pytest.raises(UnifiProtectError, match="between 1 and 250"):
         await list_unifi_protect_events(api, limit=limit)
     api.api_request_list.assert_not_awaited()
 
@@ -212,13 +212,43 @@ async def test_malformed_known_event_has_safe_failure(sdk):
     assert "provider-secret" not in str(error.value)
 
 
-async def test_sdk_response_and_result_processing_are_bounded(sdk):
+@pytest.mark.parametrize("limit", [100, 250])
+async def test_sdk_response_and_result_processing_are_bounded(sdk, limit):
     api, _ = sdk
     api.api_request_list.return_value = [
-        event_payload(str(i), camera="other") for i in range(300)
+        event_payload(str(i), camera="other") for i in range(limit * 3)
     ] + [event_payload("outside-budget")]
-    assert await list_unifi_protect_events(api, camera_id="cam-1", limit=100) == []
-    assert api.api_request_list.await_args.kwargs["params"]["limit"] == 300
+    assert await list_unifi_protect_events(api, camera_id="cam-1", limit=limit) == []
+    assert api.api_request_list.await_args.kwargs["params"]["limit"] == limit * 3
+
+
+async def test_restart_backfill_event_read_through_service_and_installed_sdk(sdk, monkeypatch):
+    from app.services.restart_backfill import MISSED_EVENT_BACKFILL_PROTECT_LIMIT
+    from app.services.unifi_protect import UnifiProtectIntegrationService
+    from app.services.unifi_protect_operations import ProtectOperations
+
+    api, _ = sdk
+    service = UnifiProtectIntegrationService()
+    service._api = api
+    service._operations = ProtectOperations(lambda: True)
+    monkeypatch.setattr(service, "_ensure_api", AsyncMock(return_value=api))
+    api.api_request_list.return_value = [
+        event_payload(str(i)) for i in range(MISSED_EVENT_BACKFILL_PROTECT_LIMIT * 3)
+    ]
+    events = await service.list_events(
+        limit=MISSED_EVENT_BACKFILL_PROTECT_LIMIT,
+        event_type="smartDetectZone",
+        since=NOW - timedelta(hours=24),
+        until=NOW,
+    )
+    assert len(events) == MISSED_EVENT_BACKFILL_PROTECT_LIMIT
+    assert [event["id"] for event in events] == [
+        str(i) for i in range(MISSED_EVENT_BACKFILL_PROTECT_LIMIT)
+    ]
+    api.api_request_list.assert_awaited_once()
+    assert api.api_request_list.await_args.kwargs["params"]["limit"] == (
+        MISSED_EVENT_BACKFILL_PROTECT_LIMIT * 3
+    )
 
 
 async def test_clip_uses_exact_event_camera_and_time_range_through_sdk_export(sdk):
