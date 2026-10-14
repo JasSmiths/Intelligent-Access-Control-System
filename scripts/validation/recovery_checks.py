@@ -9,6 +9,12 @@ import re
 
 
 PERSISTENCE_TESTS = [
+    "scripts/validation/test_historical_discovery_upgrade.py",
+    "scripts/validation/test_historical_discovery_persistence.py",
+    "scripts/validation/test_notification_binding_upgrade.py",
+    "scripts/validation/test_notification_recipient_binding.py",
+    "scripts/validation/test_account_authority.py",
+    "scripts/validation/test_realtime_authority.py",
     "scripts/validation/test_auth_root_persistence.py",
     "scripts/validation/test_calendar_retirement.py",
     "scripts/validation/test_settings_configuration.py",
@@ -71,8 +77,10 @@ PERSISTENCE_TESTS = [
 ]
 DIAGNOSTIC_TESTS = ['scripts/validation/test_recovery_boundaries.py']
 SCHEMA_CHECKS = ['scripts/validation/test_schema_contract.py']
-HOST_TESTS = ['scripts/validation/test_source_snapshot.py', 'scripts/validation/test_harness_configuration.py']
+HOST_TESTS = ['scripts/validation/test_source_snapshot.py', 'scripts/validation/test_harness_configuration.py',
+              'scripts/validation/test_storage.py']
 REQUIRED_HELPERS = ['scripts/validation/recovery_checks.py', 'scripts/validation/database_restore.py',
+                    'scripts/validation/storage.py',
                      'backend/app/services/workflows/action_definitions.py',
                     'backend/app/services/workflows/channel_definitions.py',
                     'backend/app/services/workflows/export_contracts.py',

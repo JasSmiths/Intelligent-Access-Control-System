@@ -16,13 +16,30 @@ from unittest.mock import patch
 import recovery_checks
 from runtime_pdf_smoke import image_identity as pdf_image_identity, smoke_command
 from type_targets import TYPE_OWNERS, TypeOwner, classified_modules, type_commands, type_targets
-from validate import FullRunBusyError, Harness, arguments, full_run_lock, image_references, run
+from validate import ValidationRunBusyError, Harness, arguments, validation_run_lock, image_references, run
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 class RuntimePdfSmokeTests(unittest.TestCase):
+    def test_successful_pdf_with_failed_cleanup_is_not_success(self):
+        from unittest.mock import Mock
+        from runtime_pdf_smoke import run_smoke
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence=Path(temporary).resolve()
+            inspection=Mock();inspection.production_state.return_value={'containers':[]}
+            inspection.owned=[];inspection.results={'cleanup':1,'cleanup_evidence':1}
+            def check(name,*args,**kwargs):
+                if name=='smoke':(inspection.run/'artifacts/report.pdf').write_bytes(b'%PDF-synthetic')
+                return 0
+            inspection.check.side_effect=check
+            with patch('runtime_pdf_smoke.Harness',return_value=inspection),patch('runtime_pdf_smoke.StorageGuard'),patch('runtime_pdf_smoke.discover_sources',return_value=([],{})),patch('runtime_pdf_smoke.copy_sources',return_value={}),patch('runtime_pdf_smoke.image_identity',return_value={'id':'sha256:synthetic','size_bytes':1,'user':'iacs'}),patch('sys.stdout'):
+                self.assertEqual(run_smoke(['--image','inert','--evidence-root',str(evidence)]),1)
+            receipt=json.loads((inspection.run/'result.json').read_text())
+            self.assertEqual(receipt['status'],'failed')
+            self.assertEqual(receipt['cleanup_results'],{'cleanup':1,'cleanup_evidence':1})
+
     def test_smoke_uses_installed_runtime_without_network_or_code_overlays(self):
         command = smoke_command('sha256:synthetic', Path('/owned/results'), 'owned-smoke')
         self.assertEqual(command[command.index('--network') + 1], 'none')
@@ -261,31 +278,33 @@ class FullRunLockTests(unittest.TestCase):
         self.path = self.root / 'synthetic-full.lock'
 
     def test_competing_full_run_fails_without_waiting_or_interrupting_the_owner(self):
-        with full_run_lock('full', lock_path=self.path):
-            with self.assertRaisesRegex(FullRunBusyError, 'Another full isolated harness is active'):
-                with full_run_lock('full', lock_path=self.path):
+        with validation_run_lock('full', lock_path=self.path):
+            with self.assertRaisesRegex(ValidationRunBusyError, 'Another isolated validation run is active'):
+                with validation_run_lock('full', lock_path=self.path):
                     self.fail('A second full run acquired the same slot')
-        with full_run_lock('full', lock_path=self.path):
+        with validation_run_lock('full', lock_path=self.path):
             pass
 
     def test_exception_releases_the_owned_slot(self):
         with self.assertRaisesRegex(RuntimeError, 'synthetic'):
-            with full_run_lock('full', lock_path=self.path):
+            with validation_run_lock('full', lock_path=self.path):
                 raise RuntimeError('synthetic')
-        with full_run_lock('full', lock_path=self.path):
+        with validation_run_lock('full', lock_path=self.path):
             pass
 
-    def test_snapshot_and_db_free_do_not_create_or_take_the_full_slot(self):
-        for mode in ('snapshot', 'db-free'):
-            with full_run_lock(mode, lock_path=self.path):
-                self.assertFalse(self.path.exists())
+    def test_all_modes_share_the_same_slot(self):
+        with validation_run_lock('full', lock_path=self.path):
+            for mode in ('snapshot', 'db-free'):
+                with self.assertRaises(ValidationRunBusyError):
+                    with validation_run_lock(mode, lock_path=self.path):
+                        self.fail('Concurrent validation admitted')
 
     def test_lock_refuses_a_symlink_without_changing_its_target(self):
         target = self.root / 'synthetic-target'
         target.write_text('unchanged')
         self.path.symlink_to(target)
         with self.assertRaises(OSError):
-            with full_run_lock('full', lock_path=self.path):
+            with validation_run_lock('full', lock_path=self.path):
                 self.fail('Followed a lock symlink')
         self.assertEqual(target.read_text(), 'unchanged')
 
@@ -301,6 +320,7 @@ class IsolatedCommandTests(unittest.TestCase):
         self.run.mkdir()
         self.args = arguments(['--mode', 'full', '--reuse-dependencies', str(self.root / 'deps')])
         self.harness = Harness(self.args, self.run, self.source)
+        (self.root / 'js-deps' / 'node_modules').mkdir(parents=True)
         self.images = {name: 'sha256:' + str(index) * 64 for index, name in enumerate(('backend', 'node', 'postgres', 'redis'), 1)}
         self.calls = []
         self.fail = {}

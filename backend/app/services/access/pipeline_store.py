@@ -16,7 +16,12 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
-from app.models import LprCoordinatorState, LprDebounceWindow, LprIngestEvent
+from app.models import (
+    HistoricalDiscoveryProgress,
+    LprCoordinatorState,
+    LprDebounceWindow,
+    LprIngestEvent,
+)
 from app.services.access.completion_database import access_session
 from app.services.access.pipeline_contracts import (
     MAX_PLATE_READ_PROCESSING_ATTEMPTS,
@@ -251,15 +256,27 @@ class AccessPipelineStore:
                        LprIngestEvent.status.in_(["pending", "processing"]),
                        LprIngestEvent.window_id.is_(None))
             windows = LprDebounceWindow.state.in_(["open", "finalizing"])
-            queued, pending, ingest_at, window_at = (await session.execute(select(
+            queued, pending, ingest_at, window_at, discovery_pending, discovery_held, discovery_reason = (await session.execute(select(
                 select(func.count()).select_from(LprIngestEvent).where(*waiting).scalar_subquery(),
                 select(func.count()).select_from(LprDebounceWindow).where(windows).scalar_subquery(),
                 select(func.min(LprIngestEvent.received_at)).where(*waiting).scalar_subquery(),
                 select(func.min(LprDebounceWindow.min_received_at)).where(windows).scalar_subquery(),
+                select(func.count()).select_from(HistoricalDiscoveryProgress).where(
+                    HistoricalDiscoveryProgress.state != 'held',
+                    (HistoricalDiscoveryProgress.state != 'completed') |
+                    HistoricalDiscoveryProgress.queued_start_ms.is_not(None)).scalar_subquery(),
+                select(func.count()).select_from(HistoricalDiscoveryProgress).where(
+                    HistoricalDiscoveryProgress.state == 'held').scalar_subquery(),
+                select(HistoricalDiscoveryProgress.hold_reason).where(
+                    HistoricalDiscoveryProgress.state == 'held').order_by(
+                        HistoricalDiscoveryProgress.updated_at.desc(), HistoricalDiscoveryProgress.provider_key).limit(1).scalar_subquery(),
             ))).one()
             oldest = min((value for value in (ingest_at, window_at) if value is not None), default=None)
             now = await database_now(session)
             return {"queue_depth": queued, "pending_windows": pending,
+                    "historical_discovery_pending": discovery_pending,
+                    "historical_discovery_held": discovery_held,
+                    "historical_discovery_hold_reason": discovery_reason,
                     "oldest_pending_at": oldest.isoformat() if oldest is not None else None,
                     "oldest_pending_age_seconds": max(0.0, (now - oldest).total_seconds()) if oldest is not None else None}
 

@@ -181,6 +181,7 @@ class NotificationPlanner:
                     "target_ids": normalize_string_list(
                         action.get("target_ids"), allow_scalar=False
                     ),
+                    **({"apprise_revision": action["apprise_revision"]} if "apprise_revision" in action else {}),
                     "title": rendered_title,
                     "message": rendered_message,
                     "title_template": title_template,

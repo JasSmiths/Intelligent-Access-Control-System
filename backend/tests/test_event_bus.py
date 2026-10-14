@@ -1,5 +1,7 @@
 import asyncio
 from typing import Any
+import time
+from app.models.enums import UserRole
 
 import pytest
 
@@ -17,7 +19,11 @@ class FakeWebSocket:
     async def accept(self) -> None:
         self.accepted = True
 
-    async def close(self) -> None:
+    async def receive_text(self) -> str:
+        await asyncio.Event().wait()
+        return ""
+
+    async def close(self, *, code: int = 1000) -> None:
         self.closed = True
 
     async def send_json(self, payload: Any) -> None:
@@ -25,6 +31,15 @@ class FakeWebSocket:
             raise ValueError("socket closed")
         self._send_count += 1
         self.sent.append(payload)
+
+
+async def serve(bus, websocket):
+    async def current_role():
+        return UserRole.ADMIN
+    task = asyncio.create_task(bus.serve(websocket, authorize=current_role,
+        role=UserRole.ADMIN, expires_at=int(time.time()) + 3600))
+    await _wait_until(lambda: bool(websocket.sent))
+    return task
 
 
 class FakeRedisStreamServer:
@@ -152,8 +167,9 @@ async def test_publish_discards_failed_websocket_and_still_notifies_others() -> 
         seen.append(event)
         listener_called.set()
 
-    await bus.connect(good_socket)
-    await bus.connect(failed_socket)
+    await bus.start()
+    good_task = await serve(bus, good_socket)
+    failed_task = await serve(bus, failed_socket)
     bus.subscribe(listener)
 
     await bus.publish("access_event.finalized", {"registration_number": "AGS7X"})
@@ -168,6 +184,7 @@ async def test_publish_discards_failed_websocket_and_still_notifies_others() -> 
     assert seen[0].type == "access_event.finalized"
 
     await bus.stop()
+    await asyncio.gather(good_task, failed_task)
 
 
 @pytest.mark.asyncio
@@ -196,7 +213,7 @@ async def test_redis_stream_fans_out_remote_websockets_and_all_worker_listeners(
     try:
         await subscriber.start()
         await publisher.start()
-        await subscriber.connect(remote_socket)
+        remote_task = await serve(subscriber, remote_socket)
         publisher.subscribe(origin_listener, scope="all_workers")
         subscriber.subscribe(remote_default_listener)
         subscriber.subscribe(remote_all_worker_listener, scope="all_workers")
@@ -217,6 +234,8 @@ async def test_redis_stream_fans_out_remote_websockets_and_all_worker_listeners(
     finally:
         await publisher.stop()
         await subscriber.stop()
+        if "remote_task" in locals():
+            await remote_task
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,1777 @@
+{
+  "task": "IACS N01\u2013N05 / V03 security and reliability",
+  "completion_estimate": 100,
+  "weights": {
+    "baseline_reproduction_design": 5,
+    "accounts": 25,
+    "realtime": 25,
+    "notification_audiences": 20,
+    "recovery": 10,
+    "integration": 10,
+    "review_handover": 5
+  },
+  "root": "/Users/jas/Documents/Intelligent Access System",
+  "branch": "main",
+  "head": "53db38ffad2517e2b3076f08086be6422a287287",
+  "starting_worktree_clean": true,
+  "starting_fingerprint": "1bc3838659160f422bad2e5800473da993188f4746f0c1e338c11beaa396a557",
+  "final_tested_fingerprint": "7b8bbb5bdb9bfbc85ceeac8de13949ae76e098dc5ae38f19edbda59efa5a2905",
+  "workspace_matches_tested_source": true,
+  "fingerprint_algorithm": "SHA256 of sorted relative-path + NUL + file SHA256 hex + newline; exact bytes; see scripts/validation/source_snapshot.py",
+  "fingerprint_exclusions": "Delivery artifacts, credentials/environment files, production data/logs, dependencies, build/test/browser caches, Git internals, private runtime state; full selectors in source_snapshot.py",
+  "documentation_checks": "final-documentation-checks.json",
+  "bundle_inspection": "bundle-inspection.json (external receipt; avoids self-reference)",
+  "source_manifest": "iacs-validation-o_st031r/manifest.json",
+  "evidence_root": "/private/tmp/iacs-security-reliability-20261014",
+  "changes": [
+    {
+      "path": "AGENTS.md",
+      "status": "modified",
+      "group": "docs",
+      "starting_sha256": "dad175fb09264a47e47548d78aea9a1701b5377bf99b022fa370693d67f4f1dc",
+      "final_sha256": "896937d2f04b1a01c2928f3b2df7b6a48690c5b6e5ad4c726053bd81bf753e35",
+      "added": 9,
+      "deleted": 0
+    },
+    {
+      "path": "backend/alembic/versions/20261014_0017_notification_recipient_binding.py",
+      "status": "added",
+      "group": "migrations",
+      "starting_sha256": null,
+      "final_sha256": "37dac4a92948b852f7dc7c66449929af65d7a3676c18fd74e5220f2cbb58c3e7",
+      "added": 98,
+      "deleted": 0
+    },
+    {
+      "path": "backend/alembic/versions/20261014_0018_historical_discovery.py",
+      "status": "added",
+      "group": "migrations",
+      "starting_sha256": null,
+      "final_sha256": "5f6484f3483e58d74f96c93917970630594b7b6354c365333cd1d305f9f997ba",
+      "added": 43,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/api/v1/auth.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "65d9c34b460575aa661194c28510be4521b449e878d4c5c00cea479505d8915e",
+      "final_sha256": "517f658e8f8efe51c9a743c26925a0ff293c88d783e263e0ee73e9c85e70b109",
+      "added": 9,
+      "deleted": 11
+    },
+    {
+      "path": "backend/app/api/v1/notifications.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "cebcf84f43625a40c673e510f7bacdd09538481c50565e74aa277b82c612dca0",
+      "final_sha256": "4154bdc4581c665d26887ff4b9efed94077b6a0e0c2a9dfe10d7b8336720cf4d",
+      "added": 2,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/api/v1/realtime.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "509c5755b2cea4e0ea0ac287d91f7b805cb9cd7dd7a7d4bbf93ed190030205f1",
+      "final_sha256": "ca29c4aab305f9d81dd6f9dfe2d20fbc294e2d3e9807327181f9a8219d4ea332",
+      "added": 19,
+      "deleted": 67
+    },
+    {
+      "path": "backend/app/api/v1/users.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "9ebb12e779d7430f6f4bff9b26de4ec50edd6d323077f0af9c5b336998b2e3d0",
+      "final_sha256": "523537f49a0fe34e06553fca2b13ad98cb36346133b6803b66e6145ead1bda6b",
+      "added": 52,
+      "deleted": 293
+    },
+    {
+      "path": "backend/app/models/__init__.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "89c9f1acd3d7fe6eed334c1266db8db6e06c75b6ad6fea540f037f8a950675a9",
+      "final_sha256": "ef40b4d6f13ac04fcccf83bae6d5307a2ae62f07fe83c08e81cefdf6c96d2567",
+      "added": 2,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/models/access_pipeline.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "658b1d396006ce5072796e3bc21890813569b366b92944cb73bc6a7bdff5c826",
+      "final_sha256": "b32497fa4c390968b225436e7c6ed082cc1f23a269ff7fc8f78be8561a180f18",
+      "added": 31,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/modules/unifi_protect/client.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "844a4ede85b7d04d74cb36e7baa3019135a980d451abb38deebef95d9be1a6ef",
+      "final_sha256": "bb7432edbd7886e4893ea09cd9f89ac8029d8fd3a5b76170fd9ccaf53de97bc0",
+      "added": 67,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/access/pipeline_store.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "94d3b76ebbf2ae14956d5f851bb22b4498f690e40aff63754eda9498e1562782",
+      "final_sha256": "436e0276e7c6b56493558a9fbab91cd8391fadb4f3ef617d85e6f291ec7f21f4",
+      "added": 19,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/action_confirmations.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "990d022d1d682b64b59de9118e1845c3461912c66d020892c5cb093e37e144ad",
+      "final_sha256": "f50d0d5e22d9632dbf28cf0bd7a0e7f85c6a144f6ed38c04c33cfc351a70ad90",
+      "added": 6,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/auth.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "4b8a55dfbb4a5b474940b66d01b204a3a5a0f6f33916e4aefb12e79910b72776",
+      "final_sha256": "3595a4e7779b3154f27900bd647a9b82a8d2bfe7f2bdaa7e03829a5a8a510dae",
+      "added": 48,
+      "deleted": 6
+    },
+    {
+      "path": "backend/app/services/event_bus.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "b46649da3c2160f9df4e0baad7145744eae2eac416e4282dcfcef90d22604c2b",
+      "final_sha256": "39d2d2173b7df9fbaf0ea07481ef0626e0a2287b26748efb1ae04d3ed854b394",
+      "added": 66,
+      "deleted": 95
+    },
+    {
+      "path": "backend/app/services/historical_candidates.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "1a05046de1488b039f38b3961c32ca83bb06a96e1b47ffa64dd6e716d68c359f",
+      "final_sha256": "3cbda0a67c8d7fe7bdf835ab9a1c92e67849f9b595ecf862cb9a292d13df3384",
+      "added": 13,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/services/historical_discovery.py",
+      "status": "added",
+      "group": "production",
+      "starting_sha256": null,
+      "final_sha256": "ae3913cf20597d6117ba053e575b7edb0707f386114125cd7a3c2195e8b3926b",
+      "added": 172,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/integration_settings.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "d36288d3cc3d73635747bbe338c362de10092597f5db3cf4144c2fe26a2469bf",
+      "final_sha256": "e390e31372e006a2c397fa0042a19fd5245f5da3b56e1e4ff652f38175faae03",
+      "added": 5,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/services/notification_authorization.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "fad168fcd417819d524b0721ac877e974893a92d060b1c3798f651d3d6fa97f3",
+      "final_sha256": "b37bd227bfc54da103cf47322975c1a1111dbd711344f2e85990f5b95a0cc93d",
+      "added": 3,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/notification_planning.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "2755c89ea7a3974cea6faeb95fb8c711ea945d0b45751bae6383b6a9bc107fc3",
+      "final_sha256": "0d95bfdafaeacb4b6bd40f00646abff2780333ca8535b91feeaef8af3bc2bbe9",
+      "added": 1,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/notification_recipient_binding.py",
+      "status": "added",
+      "group": "production",
+      "starting_sha256": null,
+      "final_sha256": "217719708468fe29b25227c10a74b7e1abca09f56cea403c3022267b41e3d075",
+      "added": 55,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/notification_recipients.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "7373e786feadeeced9c0a463ba3fc844c45a4135f239abb1b9f986923fbb4307",
+      "final_sha256": "4fd54e70286979b689b65378f14929281db059ad6e32cd6a6ccc6b9f7def9793",
+      "added": 14,
+      "deleted": 22
+    },
+    {
+      "path": "backend/app/services/notification_rules.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "8e8999e011bf17603767856792a9b0b3bb160a5aecdcc2316cb5b00bf58a4245",
+      "final_sha256": "06d5a2d296ca7790484fe976281f8d2fe24622a74665a7c3183c6025310b7d41",
+      "added": 36,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/services/notification_runs.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "d0ac6b69946e58f6d1d57ca83f9f4a9e2e13ca3f353f3a5a8db8b72d1c07922f",
+      "final_sha256": "49d4c2e8e7d77cb45422d5515e36d62cd73153019d55f8790aa799dc84f4f73f",
+      "added": 23,
+      "deleted": 8
+    },
+    {
+      "path": "backend/app/services/notifications.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "d377d9d8c45442546f87ab9161b17f7f64c930e94e9fff07391977a5a013b27a",
+      "final_sha256": "ff2f18c96e12951a000d54e132240d157dd2aed9ca4901fdc77830c6b9373caf",
+      "added": 15,
+      "deleted": 19
+    },
+    {
+      "path": "backend/app/services/realtime_connections.py",
+      "status": "added",
+      "group": "production",
+      "starting_sha256": null,
+      "final_sha256": "d6e9d8b7cb23732904abe43d0e0b753996df499860de00a6fb26feba1be1cfc3",
+      "added": 190,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/restart_backfill.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "9e54e03812142a37fc67b7760d190643626d0f4244f0b4ec86f20fd2fafb0f18",
+      "final_sha256": "4e0f9f6d7d881b3bd6939eea3e8e2a5f421ab26b1f5afd2d36b602e7d2314621",
+      "added": 136,
+      "deleted": 43
+    },
+    {
+      "path": "backend/app/services/unifi_protect.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "c8fde2031bbe7e7f8749c2c6ac5e7ff7ea4fdd982b116859f4268a3ce8ba5671",
+      "final_sha256": "b8694abed8f562f1794a9a7c9759cd28d5fd186396c224210e8539bd6db35188",
+      "added": 39,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/user_accounts.py",
+      "status": "added",
+      "group": "production",
+      "starting_sha256": null,
+      "final_sha256": "a4f982a63972f80af7583e57423d4e5dd1013adad5a56dd74df7dbf291f5a0fe",
+      "added": 202,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/workflows/channel_definitions.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "06d09d8739152d3336e9b0188f397a1a5ce025aa53bada19ade388e293bdb66e",
+      "final_sha256": "2425d22087e81bf56f7fc3a44254daf10e6b9d687d3599ec142526e00e24c91f",
+      "added": 10,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/services/workflows/notification_payloads.py",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "7125ffd9d7d793eaa2c610296232d5d6427d968d00d255aa488b8b260ad0d9ad",
+      "final_sha256": "75d26873103d29d673fef473e57216a83b5dccdb2be5413bb8851c6ce8061dd3",
+      "added": 1,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_auth_sessions.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "b51fb945636a8e499cc7254ffd754dbb9ab6c9d646179c5b2e1222d56229cd40",
+      "final_sha256": "60544175b37ca3635ba5735fb45292c0675e1d67072d1cd2b1d5b71bd6c2e9d1",
+      "added": 3,
+      "deleted": 1
+    },
+    {
+      "path": "backend/tests/test_event_bus.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "074d281e735557eadbbe9cd6352b13366e80221855a14fd0c74f2327489e5fd9",
+      "final_sha256": "d7d11d017193e235e1b268dce3e898a66214b7cb3fd77ea38d7725cae52526c3",
+      "added": 23,
+      "deleted": 4
+    },
+    {
+      "path": "backend/tests/test_notification_recipient_contract.py",
+      "status": "added",
+      "group": "tests",
+      "starting_sha256": null,
+      "final_sha256": "3f3683b9b36ee036363ebff3e4050da7b670fbb7207c0ec17c4c4c561a66c36b",
+      "added": 36,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_notification_rules.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "f904808d3a427ab8e61872d1ae2f8777fa3f296cd74d145e5be5fd7bed5af282",
+      "final_sha256": "deab22e4764ca3f57fb96dc003c0a9651792e1684b82ef69078d7fde4411307a",
+      "added": 1,
+      "deleted": 1
+    },
+    {
+      "path": "backend/tests/test_notification_workflows.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "b866aadf577a7c4d688639a7c2644dab57f18de192eed375633e329b166a2ac8",
+      "final_sha256": "18e2080d3230a4f38e3072a08fcb1a4366427f952c1fc4b735b22f1ae2d4e6fc",
+      "added": 11,
+      "deleted": 71
+    },
+    {
+      "path": "backend/tests/test_realtime.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "0f897aa9e2ca734287b40e156d110eac3132354bfbd1425ef0f3cda0d8d694ce",
+      "final_sha256": "f157b6b31a96f717c79d36265561b97143a0c58e0fef899d0bef6591c85d6330",
+      "added": 7,
+      "deleted": 22
+    },
+    {
+      "path": "backend/tests/test_restart_backfill.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "3584f25b58ac644123e6b1a926674d65b763be307e6c6f1e4dde53a268999501",
+      "final_sha256": "2fb0633df7e260c315bcb869e3baf6def15e53c8824ea1c4d3c1ff9904d2b2c8",
+      "added": 2,
+      "deleted": 2
+    },
+    {
+      "path": "backend/tests/test_unifi_protect_sdk.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "75c2b139773b250694bfaec3d47aef2c805e24f1d8400d76c392ec7777bf1e58",
+      "final_sha256": "d714298c76a62f69bbfab6085995b0fc0d9dc3f1fd72c5542385cf5b6681c4d5",
+      "added": 6,
+      "deleted": 6
+    },
+    {
+      "path": "backend/tests/test_users_api.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "2670cbb178cd6fd91730ca8e82d24e9a6db99c9cc732129e6f59b152c01ef60f",
+      "final_sha256": "7e68871a47741eb1b510e5471859f2a147bd03cc97192523f0370dc73db6a07c",
+      "added": 15,
+      "deleted": 51
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "group": "docs",
+      "starting_sha256": "eb2d0d2ac6e4fd00e4a7aab570f85b9280974d7df207fd1a9ed683d5068cbe5f",
+      "final_sha256": "aef7990cce1b6e9e570568f0154322974b96a45e66b2115b8cf4cf3a322ae8c4",
+      "added": 30,
+      "deleted": 0
+    },
+    {
+      "path": "docs/development.md",
+      "status": "modified",
+      "group": "docs",
+      "starting_sha256": "208f4b0c955529cd08902539f9a306eca1a8bcf7a79da1087a2541b8d5d7806a",
+      "final_sha256": "00b6533d64d3381f648cce33e683824f6f92d7f5be9fb64218b842b0763e5d9e",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "docs/integrations.md",
+      "status": "modified",
+      "group": "docs",
+      "starting_sha256": "adfe9642612636c2eb2b91fc4483047c192df7ec8ce67b4dcf68b2f4b4ca38ca",
+      "final_sha256": "b2bf9a09622d11898e2f5ae7c326a58357b80824bb68dc17ca8c2e6e6c4ebe94",
+      "added": 49,
+      "deleted": 3
+    },
+    {
+      "path": "docs/validation.md",
+      "status": "modified",
+      "group": "docs",
+      "starting_sha256": "c087606b785bb322285f6351e128ce006e93c584578ca683eaa323562051676b",
+      "final_sha256": "5a9fe58accc0a23355fa635a618af9cba598e7b5cc2c9437f042645d43b2b45f",
+      "added": 121,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/e2e/notification-recipients.spec.ts",
+      "status": "added",
+      "group": "tests",
+      "starting_sha256": null,
+      "final_sha256": "4ae60f718c3d042cdd5b762a8370c623a3453fae8a60e3eb497934627a3c8268",
+      "added": 87,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/e2e/realtime-invalidation.spec.ts",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "51895bf2364b7515a3c95238f94abcf1f663fbaefcd3754927e3f4ea30abbff2",
+      "final_sha256": "ff5843bdaecf16eb5e63d0e843fa58e42d8246612b345c82daf4831f24ac8f35",
+      "added": 36,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/api/generated/workflows.ts",
+      "status": "modified",
+      "group": "generated",
+      "starting_sha256": "5044dbab77c39ce6e70c2a2fa593f6cd92bda98a3fb301be431d726f94af2e9a",
+      "final_sha256": "841e32efdc5510bfdf24933fbe92bb5bd31d13d03ffa8b4c0a8e16965e1cf997",
+      "added": 3,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/api/workflows.ts",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "e948a76168e8dfa8bbb7b8066063b26ded9b5e101b03fcee4c62b3232bad4677",
+      "final_sha256": "2133f1c3d83ffe484f3f78e03ace83dd4c0c4de356e13f5246efb905c7272332",
+      "added": 2,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/app/App.tsx",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "494865458ce99abfef4a0fbbe6631fba1c7ad90a185be9033e9589086a5eac57",
+      "final_sha256": "1898c4a823652bffca907a3e20ecf7d5f826dfe0e381c49066a78c481d7f1378",
+      "added": 10,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/app/operationalReads.ts",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "0f77c3dffde1c78774ce4928beec213a7bc3eb88fd2e8e593ab5f34b2bba5043",
+      "final_sha256": "60262e11fa2f410231b20a8a5ed6106bf294b0cd3409f1f4a7056a40bf44e9be",
+      "added": 2,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/app/useRealtimeConnection.test.tsx",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "4062aca3a014512ff86e6f02801d8c6497f1f099db9c770d723d1d4ea0987d27",
+      "final_sha256": "a71a65b3082a34c0e3e9613f5082304f2e590b7e1c20552884d8a87c12ca936d",
+      "added": 35,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/app/useRealtimeConnection.ts",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "71fa2ff7566073b00151af83abab2e400b4e0536de2394eee6b24b9a16938237",
+      "final_sha256": "85074b54c4188af5bff62e060aefb502db2ee197657aa6e6a25c236e69fa77e6",
+      "added": 12,
+      "deleted": 5
+    },
+    {
+      "path": "frontend/src/features/workflows/NotificationActionCard.tsx",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "665ed43317370f55a3106713a92a799cb5713c182119396dc6ab7db77fb5c550",
+      "final_sha256": "c730881ad95434f9fd22bb27340d9b899a3ffc0d7b7b102a16f4d49c370e3b27",
+      "added": 12,
+      "deleted": 4
+    },
+    {
+      "path": "frontend/src/features/workflows/NotificationSelection.tsx",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "12eaaafdbeb5c49e3ff02c2d1a349cc354833d4393b76cb3cc89c1f9c63e2187",
+      "final_sha256": "eaa626fe60feb2c5182edd0bc01d69052cd4a17accf7022b087d2d42219a0370",
+      "added": 1,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/features/workflows/notificationModel.tsx",
+      "status": "modified",
+      "group": "production",
+      "starting_sha256": "13fbbe9f28af3a2d3047b5f2dc68259238035eef97b18b6b0e24d9a908a7896d",
+      "final_sha256": "dcc8b4fa0d56a1723c5e2df22103ff09b0dfa7673a94c3a511ec62fd32d81bf2",
+      "added": 25,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/features/workflows/recipientBinding.test.tsx",
+      "status": "added",
+      "group": "tests",
+      "starting_sha256": null,
+      "final_sha256": "2f7193693b2e715b85546dec7dd3b4be712bf4e83d2acfd4a44ed119c5f33198",
+      "added": 46,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/validation/recovery_checks.py",
+      "status": "modified",
+      "group": "validation_tools",
+      "starting_sha256": "98248ae5bd724187978bd479818d6a8e8ccb462248f61028886ead7d3a45a0cb",
+      "final_sha256": "6bba61a7deb887d7fc9ad96d156fcc2fae8768f6e0eea826d7cec253c3ccd8b6",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "scripts/validation/runtime_pdf_smoke.py",
+      "status": "modified",
+      "group": "validation_tools",
+      "starting_sha256": "fe1db35a0cb53c992a9a83b54750067e2fae8ae4dbc5c6ef24b88c9ae3f25021",
+      "final_sha256": "9cad40a33c88fb721d60d8a56461190c0d0b72196c1b939f46a40f665b52ea1b",
+      "added": 47,
+      "deleted": 21
+    },
+    {
+      "path": "scripts/validation/source_snapshot.py",
+      "status": "modified",
+      "group": "validation_tools",
+      "starting_sha256": "aaf3bc3537ff64b89854c88359cb036062e39e6f934bab55ac9ec8b7199bf7dd",
+      "final_sha256": "fddb8cf4e774a39de90d5d162e1bcaf77d5e7f69bbe92724a7fd977032f00d00",
+      "added": 10,
+      "deleted": 1
+    },
+    {
+      "path": "scripts/validation/storage.py",
+      "status": "added",
+      "group": "validation_tools",
+      "starting_sha256": null,
+      "final_sha256": "ffef4376c938c2d5af8b123fafd33b117ccc6820caa9e4ce880d1a9e12578b55",
+      "added": 192,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/validation/test_access_window_persistence.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "88d028d5d21cfd216ff7c7662a263bcf5e09aa067878654ddda2a90329003e09",
+      "final_sha256": "52f5ade24e487bf3a12c7750b634f81ea0aa07276622186f10748052e9b1f605",
+      "added": 6,
+      "deleted": 1
+    },
+    {
+      "path": "scripts/validation/test_account_authority.py",
+      "status": "added",
+      "group": "tests",
+      "starting_sha256": null,
+      "final_sha256": "022145f32cfaaf80f242afb6b2b69b809e5cfa89c624837e89c6421256bbe18c",
+      "added": 583,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/validation/test_harness_configuration.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "25ac2bd97107ea7628e9f302d3a9830e5648f7aef24760275711b1c16ecd8dbd",
+      "final_sha256": "0b73c973ee95f5174a6b6fed25580a163c42948cca88bd2af16da5a5a601d498",
+      "added": 32,
+      "deleted": 12
+    },
+    {
+      "path": "scripts/validation/test_historical_candidates_persistence.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "3dbe4e9b8263640f7ba4ae30c0dc76a22b88d605509395aa52ba650fe99b9e7a",
+      "final_sha256": "be570bde076dbd46fb813a12c9e68e4440d94f56f97f4adde4244d216f24acee",
+      "added": 40,
+      "deleted": 20
+    },
+    {
+      "path": "scripts/validation/test_historical_discovery_persistence.py",
+      "status": "added",
+      "group": "tests",
+      "starting_sha256": null,
+      "final_sha256": "9bf784ecc26e06f83b2218164f44dc886c7a4cfce474fc6c85322b17a5a3ee03",
+      "added": 349,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/validation/test_historical_discovery_upgrade.py",
+      "status": "added",
+      "group": "tests",
+      "starting_sha256": null,
+      "final_sha256": "678cd4fcc472001cf04f7aa9cc9da0320b7ae36da86cfef56cc699de702cb686",
+      "added": 41,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/validation/test_integration_mutations.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "951aab9fa8432c7dd201902f89d6245b2002eec413d126733187810ff256c6f5",
+      "final_sha256": "2292f68396d0369c01e340dba7d65f0d769c04dca7295e89e3e787d523694931",
+      "added": 1,
+      "deleted": 1
+    },
+    {
+      "path": "scripts/validation/test_notification_binding_upgrade.py",
+      "status": "added",
+      "group": "tests",
+      "starting_sha256": null,
+      "final_sha256": "8c6a1862594a21577569af8d527eb8add2422171a17a5e3c59098cf062cb66c1",
+      "added": 100,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/validation/test_notification_recipient_binding.py",
+      "status": "added",
+      "group": "tests",
+      "starting_sha256": null,
+      "final_sha256": "67c3f7b6a0ede4a715e91042b323df87dfa77eaf25e2c4bfe526d2a0b722ebff",
+      "added": 274,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/validation/test_realtime_authority.py",
+      "status": "added",
+      "group": "tests",
+      "starting_sha256": null,
+      "final_sha256": "c13f93a4471f922a93fd0fd3c336c7bf1ab7b6f99c50639805701ae15423ea3b",
+      "added": 471,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/validation/test_schema_contract.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "f778f2e1fd848d78302aeec01291da35beeb65c408bfac910476676549d59174",
+      "final_sha256": "e19beff5394a51be740a3e967500e1e703f16c58631016484d7a2057ca94e8e0",
+      "added": 23,
+      "deleted": 11
+    },
+    {
+      "path": "scripts/validation/test_source_snapshot.py",
+      "status": "modified",
+      "group": "tests",
+      "starting_sha256": "d29574cd2c03be0a889f352ccbc7e55aba2c0ed67b0cad4390f1545aa8848428",
+      "final_sha256": "16903e7cefc66327bf5a80edf70cef8f200a1966843f6eb0a6ec714d075c877b",
+      "added": 9,
+      "deleted": 2
+    },
+    {
+      "path": "scripts/validation/test_storage.py",
+      "status": "added",
+      "group": "tests",
+      "starting_sha256": null,
+      "final_sha256": "a1cfcb51fd20e0ca721fe0013c0d7f4eed198c29b1256c66a33a8c140ac241ea",
+      "added": 190,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/validation/type_targets.py",
+      "status": "modified",
+      "group": "validation_tools",
+      "starting_sha256": "f70ebcb4057dabb3effd17a8e869a390f57721248a13e4f5c3ef73b4bf169662",
+      "final_sha256": "e7dd5477346a790719b3194342a60256317ab8edb13bd0d89a6409b34a8ab57e",
+      "added": 6,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/validation/validate.py",
+      "status": "modified",
+      "group": "validation_tools",
+      "starting_sha256": "43b231a990cb51c1da0566e87c46003c2acd45bff14c49bb21cfce5a5c101cd0",
+      "final_sha256": "e61b57cee621673aafbaef0928e37f9506fdc57f960b686e405dc539330a2546",
+      "added": 130,
+      "deleted": 30
+    }
+  ],
+  "change_statistics": {
+    "docs": {
+      "files": 5,
+      "added": 238,
+      "deleted": 5
+    },
+    "migrations": {
+      "files": 2,
+      "added": 141,
+      "deleted": 0
+    },
+    "production": {
+      "files": 34,
+      "added": 1300,
+      "deleted": 592
+    },
+    "tests": {
+      "files": 26,
+      "added": 2427,
+      "deleted": 211
+    },
+    "generated": {
+      "files": 1,
+      "added": 3,
+      "deleted": 3
+    },
+    "validation_tools": {
+      "files": 6,
+      "added": 394,
+      "deleted": 53
+    }
+  },
+  "requirements": [
+    {
+      "id": "N01-A",
+      "status": "fixed_and_verified",
+      "root_cause": "Login could adopt a session version whose password it never verified.",
+      "correction": "Issue only after exact verified password/version and current active authority are rechecked.",
+      "owner": "backend/app/services/auth.py:238 `complete_verified_login`",
+      "regressions": "test_account_authority.py: login/reset overlap, old password, disabled account",
+      "paired_evidence": "Baseline account behavior failures; 30 account API/PG cases pass at reviewed correction b_pa3c4x."
+    },
+    {
+      "id": "N01-B",
+      "status": "fixed_and_verified",
+      "root_cause": "Concurrent resets could collapse two version increments.",
+      "correction": "Fresh target under the root-first transaction increments once per successful reset.",
+      "owner": "backend/app/services/user_accounts.py:180 `reset_account_password`",
+      "regressions": "test_account_authority.py: concurrent/sequential reset and token invalidation",
+      "paired_evidence": "Real validator rejects pre-reset/intermediate tokens; failure/cancellation rollback covered."
+    },
+    {
+      "id": "N02",
+      "status": "fixed_and_verified",
+      "root_cause": "Standalone confirmation consumption released last-Admin locks.",
+      "correction": "Participant confirmation, invariant, mutation and required audit share one commit.",
+      "owner": "backend/app/services/user_accounts.py:75 `_mutation`",
+      "regressions": "test_account_authority.py: delete/demote/disable, deadlocks, audit/cancel",
+      "paired_evidence": "Paired account baseline 18 failures/7 controls; reviewed correction 30 cases passed."
+    },
+    {
+      "id": "N03-A",
+      "status": "fixed_and_verified",
+      "root_cause": "Connected sockets outlived expired/revoked/inactive authority.",
+      "correction": "Independent expiry timer plus current authorization before sends and on idle.",
+      "owner": "backend/app/services/realtime_connections.py:78 `RealtimeConnection`",
+      "regressions": "test_realtime_authority.py: expiry/logout/reset/disable/delete/role",
+      "paired_evidence": "Paired socket baseline 16 failures; reviewed correction 24 passed; final includes 1/10-connection load."
+    },
+    {
+      "id": "N03-B",
+      "status": "fixed_and_verified",
+      "root_cause": "Standard users received administrative audit payloads.",
+      "correction": "Explicit common hints preserve internal/full Admin delivery contracts.",
+      "owner": "backend/app/services/realtime_connections.py:31 `common_payload`",
+      "regressions": "test_realtime_authority.py: audience, internal listeners, queued role loss",
+      "paired_evidence": "Real ASGI/PostgreSQL authority and Redis coverage; no handshake-only authority."
+    },
+    {
+      "id": "N04",
+      "status": "fixed_and_verified",
+      "root_cause": "Blocked send/idle receiver and shutdown races could retain connection tasks.",
+      "correction": "One supervised lifetime, bounded waits, repeated-cancel draining and truthful incomplete cleanup.",
+      "owner": "backend/app/services/event_bus.py:50 `EventBus`",
+      "regressions": "test_realtime_authority.py; realtime-invalidation.spec.ts",
+      "paired_evidence": "Checkpoint2 faults reproduced then corrected; browser reconnect/draft/authority cases passed."
+    },
+    {
+      "id": "V03",
+      "status": "fixed_and_verified",
+      "root_cause": "Saved selected Apprise indices could silently point to another destination.",
+      "correction": "Opaque catalog revision binds deliberate selection; save and pre-attempt dispatch revalidate.",
+      "owner": "backend/app/services/notification_recipient_binding.py:27 `recipient_binding_error`",
+      "regressions": "test_notification_recipient_binding.py; test_notification_binding_upgrade.py; notification-recipients.spec.ts",
+      "paired_evidence": "Before 5 failures/1 control; after 20 API/PG +1 populated upgrade +71 affected units passed stw3rvc2."
+    },
+    {
+      "id": "N05",
+      "status": "fixed_and_verified",
+      "root_cause": "Newest-250 discovery discarded 51 of 301 events while claiming completed coverage.",
+      "correction": "Raw saturation-aware pages, bounded fixed intervals, durable frontier/page and atomic acceptance; explicit held gaps.",
+      "owner": "backend/app/services/restart_backfill.py:319 `_discover`; backend/app/services/historical_discovery.py:59 `HistoricalDiscoveryStore`",
+      "regressions": "test_historical_discovery_persistence.py; test_historical_discovery_upgrade.py",
+      "paired_evidence": "Before 301 failed/3-event control passed nnbz43cm; first fix 2 passed; expanded 26 discovery/12 historical/1 upgrade/15 pipeline passed ppr2ae8n; final has 29 discovery cases."
+    },
+    {
+      "id": "N06",
+      "status": "fixed_and_verified",
+      "root_cause": "Account creation could retain actor authority across expensive hashing.",
+      "correction": "Revalidate exact actor/session under the mutation fence after hashing.",
+      "owner": "backend/app/services/user_accounts.py:122 `create_account`",
+      "regressions": "test_account_authority.py: stale actor during creation",
+      "paired_evidence": "Additional material finding reproduced in paired baseline and actual API tests."
+    },
+    {
+      "id": "N07",
+      "status": "fixed_and_verified",
+      "root_cause": "Apprise occurrence receipts were dropped by the safe outcome whitelist.",
+      "correction": "Retain bounded opaque apprise:index receipts, including duplicate URL occurrences.",
+      "owner": "backend/app/services/notification_runs.py:56 `safe_destination_outcomes`",
+      "regressions": "test_notification_recipient_binding.py: duplicate receipts/checkpoints",
+      "paired_evidence": "Occurrence receipt and partial/unknown delivery evidence pass; no URL credentials in receipts."
+    },
+    {
+      "id": "N08",
+      "status": "fixed_and_verified",
+      "root_cause": "An empty selected voice list could fall back to the default speaker.",
+      "correction": "Reject invalid selections and definitely-not-sent empty destinations; explicit all remains explicit.",
+      "owner": "backend/app/services/notifications.py:1181 `_send_voice`",
+      "regressions": "test_notification_recipient_binding.py::test_empty_selected_voice_does_not_fall_back_to_default_speaker",
+      "paired_evidence": "Baseline wfkderem failed through actual API/dispatch; corrected stw3rvc2 passed."
+    },
+    {
+      "id": "N09",
+      "status": "fixed_and_verified",
+      "root_cause": "Retained duplicate dependencies/raw test DBs and caches exhausted host storage.",
+      "correction": "Shared read-only exact-lock reuse, pre-allocation/continuous guards, shared bulk lock and owned cleanup.",
+      "owner": "scripts/validation/storage.py; scripts/validation/validate.py; scripts/validation/runtime_pdf_smoke.py",
+      "regressions": "test_storage.py; test_harness_configuration.py; test_source_snapshot.py",
+      "paired_evidence": "70 host tests + guarded actual Linux frontend/build proof passed; focused independent corrections closed."
+    }
+  ],
+  "test_runs": [
+    {
+      "name": "full",
+      "command": "IACS_VALIDATION_BACKEND_IMAGE=iacs-backend:uiprotect-23-backfill-verified-20261013 <bundled-python3.12> scripts/validation/validate.py --reuse-dependencies /private/tmp/iacs-integration-mutations-20261014/iacs-validation-focus-rstp6hsg --evidence-root /private/tmp/iacs-security-reliability-20261014",
+      "run": "iacs-validation-o_st031r",
+      "console": "full-final-3-console.log",
+      "fingerprint": "7b8bbb5bdb9bfbc85ceeac8de13949ae76e098dc5ae38f19edbda59efa5a2905",
+      "results": {
+        "python-lock-check": 0,
+        "python-identity": 0,
+        "uv-identity": 0,
+        "frontend-lock-check": 0,
+        "frontend-tree-check": 0,
+        "npm-identity": 0,
+        "isolation-db-free": 0,
+        "snapshot-tests": 0,
+        "harness-configuration-tests": 0,
+        "storage-tests": 0,
+        "architecture-boundaries": 0,
+        "compile": 0,
+        "workflow-contracts": 0,
+        "backend-tests": 0,
+        "ruff": 0,
+        "test-names": 0,
+        "mypy": 0,
+        "typed-contracts": 0,
+        "frontend-tests": 0,
+        "frontend-build": 0,
+        "compose-config": 0,
+        "postgres-start": 0,
+        "redis-start": 0,
+        "isolation-persistence": 0,
+        "isolation-inspect": 0,
+        "migration-up": 0,
+        "migration-current": 0,
+        "migration-check": 0,
+        "database-restore-client-version": 0,
+        "database-restore-source-create": 0,
+        "database-restore-prepare": 0,
+        "database-restore-dump": 0,
+        "database-restore-target-create": 0,
+        "database-restore-load": 0,
+        "database-restore-verify": 0,
+        "database-restore-drop-0": 0,
+        "database-restore-drop-1": 0,
+        "schema-check-1": 0,
+        "suite-001-create": 0,
+        "suite-001": 0,
+        "suite-001-drop": 0,
+        "suite-002-create": 0,
+        "suite-002": 0,
+        "suite-002-drop": 0,
+        "suite-003-create": 0,
+        "suite-003": 0,
+        "suite-003-drop": 0,
+        "suite-004-create": 0,
+        "suite-004": 0,
+        "suite-004-drop": 0,
+        "suite-005-create": 0,
+        "suite-005": 0,
+        "suite-005-drop": 0,
+        "suite-006-create": 0,
+        "suite-006": 0,
+        "suite-006-drop": 0,
+        "suite-007-create": 0,
+        "suite-007": 0,
+        "suite-007-drop": 0,
+        "suite-008-create": 0,
+        "suite-008": 0,
+        "suite-008-drop": 0,
+        "suite-009-create": 0,
+        "suite-009": 0,
+        "suite-009-drop": 0,
+        "suite-010-create": 0,
+        "suite-010": 0,
+        "suite-010-drop": 0,
+        "suite-011-create": 0,
+        "suite-011": 0,
+        "suite-011-drop": 0,
+        "suite-012-create": 0,
+        "suite-012": 0,
+        "suite-012-drop": 0,
+        "suite-013-create": 0,
+        "suite-013": 0,
+        "suite-013-drop": 0,
+        "suite-014-create": 0,
+        "suite-014": 0,
+        "suite-014-drop": 0,
+        "suite-015-create": 0,
+        "suite-015": 0,
+        "suite-015-drop": 0,
+        "suite-016-create": 0,
+        "suite-016": 0,
+        "suite-016-drop": 0,
+        "suite-017-create": 0,
+        "suite-017": 0,
+        "suite-017-drop": 0,
+        "suite-018-create": 0,
+        "suite-018": 0,
+        "suite-018-drop": 0,
+        "suite-019-create": 0,
+        "suite-019": 0,
+        "suite-019-drop": 0,
+        "suite-020-create": 0,
+        "suite-020": 0,
+        "suite-020-drop": 0,
+        "suite-021-create": 0,
+        "suite-021": 0,
+        "suite-021-drop": 0,
+        "suite-022-create": 0,
+        "suite-022": 0,
+        "suite-022-drop": 0,
+        "suite-023-create": 0,
+        "suite-023": 0,
+        "suite-023-drop": 0,
+        "suite-024-create": 0,
+        "suite-024": 0,
+        "suite-024-drop": 0,
+        "suite-025-create": 0,
+        "suite-025": 0,
+        "suite-025-drop": 0,
+        "suite-026-create": 0,
+        "suite-026": 0,
+        "suite-026-drop": 0,
+        "suite-027-create": 0,
+        "suite-027": 0,
+        "suite-027-drop": 0,
+        "suite-028-create": 0,
+        "suite-028": 0,
+        "suite-028-drop": 0,
+        "suite-029-create": 0,
+        "suite-029": 0,
+        "suite-029-drop": 0,
+        "suite-030-create": 0,
+        "suite-030": 0,
+        "suite-030-drop": 0,
+        "suite-031-create": 0,
+        "suite-031": 0,
+        "suite-031-drop": 0,
+        "suite-032-create": 0,
+        "suite-032": 0,
+        "suite-032-drop": 0,
+        "suite-033-create": 0,
+        "suite-033": 0,
+        "suite-033-drop": 0,
+        "suite-034-create": 0,
+        "suite-034": 0,
+        "suite-034-drop": 0,
+        "suite-035-create": 0,
+        "suite-035": 0,
+        "suite-035-drop": 0,
+        "suite-036-create": 0,
+        "suite-036": 0,
+        "suite-036-drop": 0,
+        "suite-037-create": 0,
+        "suite-037": 0,
+        "suite-037-drop": 0,
+        "suite-038-create": 0,
+        "suite-038": 0,
+        "suite-038-drop": 0,
+        "suite-039-create": 0,
+        "suite-039": 0,
+        "suite-039-drop": 0,
+        "suite-040-create": 0,
+        "suite-040": 0,
+        "suite-040-drop": 0,
+        "suite-041-create": 0,
+        "suite-041": 0,
+        "suite-041-drop": 0,
+        "suite-042-create": 0,
+        "suite-042": 0,
+        "suite-042-drop": 0,
+        "suite-043-create": 0,
+        "suite-043": 0,
+        "suite-043-drop": 0,
+        "suite-044-create": 0,
+        "suite-044": 0,
+        "suite-044-drop": 0,
+        "suite-045-create": 0,
+        "suite-045": 0,
+        "suite-045-drop": 0,
+        "suite-046-create": 0,
+        "suite-046": 0,
+        "suite-046-drop": 0,
+        "suite-047-create": 0,
+        "suite-047": 0,
+        "suite-047-drop": 0,
+        "suite-048-create": 0,
+        "suite-048": 0,
+        "suite-048-drop": 0,
+        "suite-049-create": 0,
+        "suite-049": 0,
+        "suite-049-drop": 0,
+        "suite-050-create": 0,
+        "suite-050": 0,
+        "suite-050-drop": 0,
+        "suite-051-create": 0,
+        "suite-051": 0,
+        "suite-051-drop": 0,
+        "suite-052-create": 0,
+        "suite-052": 0,
+        "suite-052-drop": 0,
+        "suite-053-create": 0,
+        "suite-053": 0,
+        "suite-053-drop": 0,
+        "suite-054-create": 0,
+        "suite-054": 0,
+        "suite-054-drop": 0,
+        "suite-055-create": 0,
+        "suite-055": 0,
+        "suite-055-drop": 0,
+        "suite-056-create": 0,
+        "suite-056": 0,
+        "suite-056-drop": 0,
+        "suite-057-create": 0,
+        "suite-057": 0,
+        "suite-057-drop": 0,
+        "suite-058-create": 0,
+        "suite-058": 0,
+        "suite-058-drop": 0,
+        "suite-059-create": 0,
+        "suite-059": 0,
+        "suite-059-drop": 0,
+        "suite-060-create": 0,
+        "suite-060": 0,
+        "suite-060-drop": 0,
+        "suite-061-create": 0,
+        "suite-061": 0,
+        "suite-061-drop": 0,
+        "suite-062-create": 0,
+        "suite-062": 0,
+        "suite-062-drop": 0,
+        "suite-063-create": 0,
+        "suite-063": 0,
+        "suite-063-drop": 0,
+        "suite-064-create": 0,
+        "suite-064": 0,
+        "suite-064-drop": 0,
+        "suite-065-create": 0,
+        "suite-065": 0,
+        "suite-065-drop": 0,
+        "suite-066-create": 0,
+        "suite-066": 0,
+        "suite-066-drop": 0,
+        "cleanup": 0,
+        "source_integrity": 0,
+        "production_unchanged": true
+      },
+      "checks": "iacs-validation-o_st031r/checks.json",
+      "suites": [
+        {
+          "name": "backend-tests",
+          "tests": 1609,
+          "passed": 1574,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 35,
+          "artifact": "iacs-validation-o_st031r/artifacts/backend-tests/junit.xml"
+        },
+        {
+          "name": "suite-001",
+          "tests": 1,
+          "passed": 1,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-001/junit.xml"
+        },
+        {
+          "name": "suite-002",
+          "tests": 29,
+          "passed": 29,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-002/junit.xml"
+        },
+        {
+          "name": "suite-003",
+          "tests": 1,
+          "passed": 1,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-003/junit.xml"
+        },
+        {
+          "name": "suite-004",
+          "tests": 20,
+          "passed": 20,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-004/junit.xml"
+        },
+        {
+          "name": "suite-005",
+          "tests": 30,
+          "passed": 30,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-005/junit.xml"
+        },
+        {
+          "name": "suite-006",
+          "tests": 25,
+          "passed": 25,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-006/junit.xml"
+        },
+        {
+          "name": "suite-007",
+          "tests": 12,
+          "passed": 12,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-007/junit.xml"
+        },
+        {
+          "name": "suite-008",
+          "tests": 17,
+          "passed": 17,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-008/junit.xml"
+        },
+        {
+          "name": "suite-009",
+          "tests": 20,
+          "passed": 20,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-009/junit.xml"
+        },
+        {
+          "name": "suite-010",
+          "tests": 23,
+          "passed": 23,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-010/junit.xml"
+        },
+        {
+          "name": "suite-011",
+          "tests": 23,
+          "passed": 23,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-011/junit.xml"
+        },
+        {
+          "name": "suite-012",
+          "tests": 2,
+          "passed": 2,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-012/junit.xml"
+        },
+        {
+          "name": "suite-013",
+          "tests": 8,
+          "passed": 8,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-013/junit.xml"
+        },
+        {
+          "name": "suite-014",
+          "tests": 2,
+          "passed": 2,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-014/junit.xml"
+        },
+        {
+          "name": "suite-015",
+          "tests": 49,
+          "passed": 49,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-015/junit.xml"
+        },
+        {
+          "name": "suite-016",
+          "tests": 19,
+          "passed": 19,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-016/junit.xml"
+        },
+        {
+          "name": "suite-017",
+          "tests": 19,
+          "passed": 19,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-017/junit.xml"
+        },
+        {
+          "name": "suite-018",
+          "tests": 30,
+          "passed": 30,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-018/junit.xml"
+        },
+        {
+          "name": "suite-019",
+          "tests": 23,
+          "passed": 23,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-019/junit.xml"
+        },
+        {
+          "name": "suite-020",
+          "tests": 11,
+          "passed": 11,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-020/junit.xml"
+        },
+        {
+          "name": "suite-021",
+          "tests": 13,
+          "passed": 13,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-021/junit.xml"
+        },
+        {
+          "name": "suite-022",
+          "tests": 12,
+          "passed": 12,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-022/junit.xml"
+        },
+        {
+          "name": "suite-023",
+          "tests": 3,
+          "passed": 3,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-023/junit.xml"
+        },
+        {
+          "name": "suite-024",
+          "tests": 45,
+          "passed": 45,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-024/junit.xml"
+        },
+        {
+          "name": "suite-025",
+          "tests": 17,
+          "passed": 17,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-025/junit.xml"
+        },
+        {
+          "name": "suite-026",
+          "tests": 38,
+          "passed": 38,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-026/junit.xml"
+        },
+        {
+          "name": "suite-027",
+          "tests": 28,
+          "passed": 28,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-027/junit.xml"
+        },
+        {
+          "name": "suite-028",
+          "tests": 39,
+          "passed": 39,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-028/junit.xml"
+        },
+        {
+          "name": "suite-029",
+          "tests": 16,
+          "passed": 16,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-029/junit.xml"
+        },
+        {
+          "name": "suite-030",
+          "tests": 15,
+          "passed": 15,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-030/junit.xml"
+        },
+        {
+          "name": "suite-031",
+          "tests": 7,
+          "passed": 7,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-031/junit.xml"
+        },
+        {
+          "name": "suite-032",
+          "tests": 14,
+          "passed": 14,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-032/junit.xml"
+        },
+        {
+          "name": "suite-033",
+          "tests": 1,
+          "passed": 1,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-033/junit.xml"
+        },
+        {
+          "name": "suite-034",
+          "tests": 3,
+          "passed": 3,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-034/junit.xml"
+        },
+        {
+          "name": "suite-035",
+          "tests": 17,
+          "passed": 17,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-035/junit.xml"
+        },
+        {
+          "name": "suite-036",
+          "tests": 9,
+          "passed": 9,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-036/junit.xml"
+        },
+        {
+          "name": "suite-037",
+          "tests": 35,
+          "passed": 35,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-037/junit.xml"
+        },
+        {
+          "name": "suite-038",
+          "tests": 7,
+          "passed": 7,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-038/junit.xml"
+        },
+        {
+          "name": "suite-039",
+          "tests": 36,
+          "passed": 36,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-039/junit.xml"
+        },
+        {
+          "name": "suite-040",
+          "tests": 10,
+          "passed": 10,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-040/junit.xml"
+        },
+        {
+          "name": "suite-041",
+          "tests": 25,
+          "passed": 25,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-041/junit.xml"
+        },
+        {
+          "name": "suite-042",
+          "tests": 38,
+          "passed": 38,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-042/junit.xml"
+        },
+        {
+          "name": "suite-043",
+          "tests": 30,
+          "passed": 30,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-043/junit.xml"
+        },
+        {
+          "name": "suite-044",
+          "tests": 21,
+          "passed": 21,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-044/junit.xml"
+        },
+        {
+          "name": "suite-045",
+          "tests": 6,
+          "passed": 6,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-045/junit.xml"
+        },
+        {
+          "name": "suite-046",
+          "tests": 9,
+          "passed": 9,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-046/junit.xml"
+        },
+        {
+          "name": "suite-047",
+          "tests": 30,
+          "passed": 30,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-047/junit.xml"
+        },
+        {
+          "name": "suite-048",
+          "tests": 12,
+          "passed": 12,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-048/junit.xml"
+        },
+        {
+          "name": "suite-049",
+          "tests": 26,
+          "passed": 26,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-049/junit.xml"
+        },
+        {
+          "name": "suite-050",
+          "tests": 7,
+          "passed": 7,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-050/junit.xml"
+        },
+        {
+          "name": "suite-051",
+          "tests": 25,
+          "passed": 25,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-051/junit.xml"
+        },
+        {
+          "name": "suite-052",
+          "tests": 5,
+          "passed": 5,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-052/junit.xml"
+        },
+        {
+          "name": "suite-053",
+          "tests": 33,
+          "passed": 33,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-053/junit.xml"
+        },
+        {
+          "name": "suite-054",
+          "tests": 5,
+          "passed": 5,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-054/junit.xml"
+        },
+        {
+          "name": "suite-055",
+          "tests": 22,
+          "passed": 22,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-055/junit.xml"
+        },
+        {
+          "name": "suite-056",
+          "tests": 30,
+          "passed": 30,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-056/junit.xml"
+        },
+        {
+          "name": "suite-057",
+          "tests": 27,
+          "passed": 27,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-057/junit.xml"
+        },
+        {
+          "name": "suite-058",
+          "tests": 7,
+          "passed": 7,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-058/junit.xml"
+        },
+        {
+          "name": "suite-059",
+          "tests": 33,
+          "passed": 33,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-059/junit.xml"
+        },
+        {
+          "name": "suite-060",
+          "tests": 17,
+          "passed": 17,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-060/junit.xml"
+        },
+        {
+          "name": "suite-061",
+          "tests": 31,
+          "passed": 31,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-061/junit.xml"
+        },
+        {
+          "name": "suite-062",
+          "tests": 6,
+          "passed": 6,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-062/junit.xml"
+        },
+        {
+          "name": "suite-063",
+          "tests": 7,
+          "passed": 7,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-063/junit.xml"
+        },
+        {
+          "name": "suite-064",
+          "tests": 17,
+          "passed": 17,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-064/junit.xml"
+        },
+        {
+          "name": "suite-065",
+          "tests": 2,
+          "passed": 2,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-065/junit.xml"
+        },
+        {
+          "name": "suite-066",
+          "tests": 40,
+          "passed": 40,
+          "failed": 0,
+          "errors": 0,
+          "skipped": 0,
+          "artifact": "iacs-validation-o_st031r/artifacts/suite-066/junit.xml"
+        }
+      ]
+    },
+    {
+      "name": "browser",
+      "command": "<bundled-python3.12> guarded-browser.py; locked cached browser image, network none",
+      "run": "iacs-browser-8o965v08",
+      "results": {
+        "python-lock-check": 0,
+        "python-identity": 0,
+        "uv-identity": 0,
+        "frontend-lock-check": 0,
+        "frontend-tree-check": 0,
+        "npm-identity": 0,
+        "isolation-db-free": 0,
+        "frontend-build": 0,
+        "cleanup": 0,
+        "source_integrity": 0,
+        "production_unchanged": true
+      },
+      "tests": 30
+    },
+    {
+      "name": "runtime",
+      "result": {
+        "status": "passed",
+        "run": "iacs-runtime-pdf-0qrk40om",
+        "source_fingerprint": "7b8bbb5bdb9bfbc85ceeac8de13949ae76e098dc5ae38f19edbda59efa5a2905",
+        "image": {
+          "id": "sha256:20de675129d60c7228e69396b546be2431948c4f7bc2741fce558e7c5116e788",
+          "size_bytes": 2122110539,
+          "user": "iacs"
+        },
+        "pdf_sha256": "363144efc7fed1874b8425312c9d08e55e76f2cabe0098ff045f9118b08e594b",
+        "pdf_bytes": 153392,
+        "source_parity": {
+          "status": "passed",
+          "image_source_files_checked": 300,
+          "installed_wheel_py_files_checked": 266,
+          "mismatched_image_files": [],
+          "mismatched_wheel_files": [],
+          "origins": {
+            "app.services.auth": "/app/app/services/auth.py",
+            "app.services.user_accounts": "/app/app/services/user_accounts.py",
+            "app.services.realtime_connections": "/app/app/services/realtime_connections.py",
+            "app.services.notification_recipient_binding": "/app/app/services/notification_recipient_binding.py",
+            "app.services.historical_discovery": "/app/app/services/historical_discovery.py",
+            "app.modules.unifi_protect.client": "/app/app/modules/unifi_protect/client.py",
+            "tools.report_pdf_smoke": "/app/tools/report_pdf_smoke.py"
+          },
+          "bad_origins": [],
+          "no_application_lifespan_started": true
+        },
+        "parity_results": {
+          "image-parity": 0,
+          "cleanup": 0,
+          "source_integrity": 0,
+          "production_unchanged": true
+        },
+        "production_unchanged": true,
+        "production_deployed": false
+      }
+    }
+  ],
+  "skip_accounting": "skip-accounting.json",
+  "performance": "performance-comparison.json",
+  "reviews": {
+    "requested_primary": "gpt-6.1-sol/xhigh",
+    "requested_reviewer": "gpt-6-astra/medium",
+    "effective_model_effort": "unavailable/unverified",
+    "checkpoint1": "checkpoint1-manifest.json and checkpoint1.patch; advisory",
+    "checkpoint2": "checkpoint2/fixes-review.txt; corrections reviewed at00447666a6946b10c72f093887f9cb14f317a6161284724c01bfcb8c1d5e3439",
+    "checkpoint3": "checkpoint3/; overlap drift fixed/reviewed at final candidate",
+    "final_evidence_closed": true,
+    "guard_review": "guard-review-final-fixes/review-resolution.json"
+  },
+  "actual_token_usage": null,
+  "production": {
+    "migrated": false,
+    "deployed": false,
+    "new_task_changes_uncommitted": true,
+    "earlier_exception": "Explicitly approved isolation-only backend restart completed before clean source baseline; no subsequent agent production restart."
+  },
+  "blockers": [],
+  "documentation_after_code_validation": [
+    "IACS_SECURITY_RELIABILITY_HANDOVER.md",
+    "IACS_SECURITY_RELIABILITY_EVIDENCE.json"
+  ],
+  "progress_ledger": "progress.json"
+}

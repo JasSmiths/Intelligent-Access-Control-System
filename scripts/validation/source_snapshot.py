@@ -15,11 +15,17 @@ EXCLUDED_PARTS = {
 EXCLUDED_SUFFIXES = {'.key', '.pem', '.p12', '.pfx', '.pyc', '.pyo',
                      '.db', '.sqlite', '.sqlite3', '.log', '.har', '.pcap'}
 SOURCE_ROOTS = ('backend/', 'frontend/', 'scripts/', 'docs/', '.github/')
+DELIVERY_ARTIFACTS = {
+    f'IACS_{task}_{kind}.{suffix}'
+    for task in ('REMEDIATION', 'SECURITY_RELIABILITY')
+    for kind, suffix in (('HANDOVER', 'md'), ('EVIDENCE', 'json'), ('REVIEW_BUNDLE', 'zip'))
+}
 
 
 def excluded_path(relative: str) -> bool:
     path = Path(relative)
-    return (any(part in EXCLUDED_PARTS or part.startswith('.env') for part in path.parts)
+    return (relative in DELIVERY_ARTIFACTS
+            or any(part in EXCLUDED_PARTS or part.startswith('.env') for part in path.parts)
             or path.name.startswith('auth-secret.key')
             or path.suffix.lower() in EXCLUDED_SUFFIXES)
 
@@ -109,6 +115,7 @@ def copy_sources(
     destination: Path,
     paths: Iterable[str],
     includes: Iterable[str] = (),
+    check_storage=None,
 ) -> dict[str, str]:
     """Copy safe tracked files and required inclusions; hash the actual copied bytes."""
     root = root.resolve()
@@ -128,6 +135,8 @@ def copy_sources(
             raise ValueError(f'Unsafe selected source: {relative!r}') from exc
         selected.append(source)
     for source in selected:
+        if check_storage:
+            check_storage()
         target = destination / source.relative_to(root)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)

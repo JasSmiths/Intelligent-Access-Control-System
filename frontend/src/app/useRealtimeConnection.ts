@@ -16,18 +16,20 @@ type RealtimeConnectionOptions = {
   sessionKey: string | null;
   onMessage: (message: RealtimeMessage) => void;
   onRefresh: () => void;
+  onAuthorityLost: (signal: AbortSignal) => void;
   onStatus: (status: RealtimeConnectionStatus, detail: string) => void;
 };
 
 // Session identity owns the transport. Route consumers are current committed
 // callbacks, so navigation never tears down a healthy authenticated socket.
-export function useRealtimeConnection({ sessionKey, onMessage, onRefresh, onStatus }: RealtimeConnectionOptions) {
-  const callbacks = React.useRef({ sessionKey, onMessage, onRefresh, onStatus });
+export function useRealtimeConnection({ sessionKey, onMessage, onRefresh, onAuthorityLost, onStatus }: RealtimeConnectionOptions) {
+  const callbacks = React.useRef({ sessionKey, onMessage, onRefresh, onAuthorityLost, onStatus });
   React.useLayoutEffect(() => {
-    callbacks.current = { sessionKey, onMessage, onRefresh, onStatus };
-  }, [sessionKey, onMessage, onRefresh, onStatus]);
+    callbacks.current = { sessionKey, onMessage, onRefresh, onAuthorityLost, onStatus };
+  }, [sessionKey, onMessage, onRefresh, onAuthorityLost, onStatus]);
   React.useEffect(() => {
     if (!sessionKey) return;
+    const authorityController = new AbortController();
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let pingTimer: number | null = null;
@@ -265,7 +267,11 @@ export function useRealtimeConnection({ sessionKey, onMessage, onRefresh, onStat
         sendSocketProbe(nextSocket, "open");
       };
       nextSocket.onmessage = (event) => handleMessage(event, nextSocket);
-      nextSocket.onclose = () => scheduleReconnect(nextSocket);
+      nextSocket.onclose = (event) => {
+        if (!isCurrent() || socket !== nextSocket) return;
+        scheduleReconnect(nextSocket);
+        if (event.code === 1008) callbacks.current.onAuthorityLost(authorityController.signal);
+      };
       nextSocket.onerror = () => {
         console.warn("Realtime stream socket error; reconnecting");
         if (socket === nextSocket) {
@@ -305,6 +311,7 @@ export function useRealtimeConnection({ sessionKey, onMessage, onRefresh, onStat
     window.addEventListener("offline", handleOffline);
     return () => {
       stopped = true;
+      authorityController.abort();
       clearReconnectTimer();
       clearProbeTimer();
       parseTimers.forEach((timer) => window.clearTimeout(timer));

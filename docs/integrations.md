@@ -216,6 +216,47 @@ Notification delivery also retains attempted and uncertain outcomes durably.
 Unknown results require review without automatic resend; historical unfinished
 delivery records are not permission to send again.
 
+Protect discovery now keeps its active interval, captured page and queued interval
+in `historical_discovery_progress`. The discovery owner in
+[historical_discovery.py](../backend/app/services/historical_discovery.py) fences
+short transactions with a database-clock lease. Candidate acceptance and page
+advancement commit together. Provider calls run outside SQL locks; configuration
+and provider generation are checked again at acceptance. Startup and periodic
+recovery share this progress. Candidate processing errors remain separate from
+discovery coverage and never authorize hardware or notification replay.
+
+Each discovery cycle admits at most four raw pages, 32 event records and 36
+list/detail/track reads (a track operation reserves two reads), with a ten-second
+discovery deadline including connection preparation.
+The existing candidate drain separately retains its 32-item bound and 20-second
+media deadline. A saturated raw page splits its fixed millisecond interval; a
+saturated one-millisecond boundary is held as **coverage unproven**, including
+when adjacent boundary events caused saturation. It never advances as complete.
+Raw HTTP allocation still belongs to the SDK. Underfull completion assumes the
+provider honors its limit and time bounds; it cannot prove coverage against silent
+truncation, retention deletion or arbitrarily late insertion. Two-minute overlap
+rescans reduce late-insertion risk. A merged requested horizon beyond seven days
+is held; normal startup recovery remains bounded to its existing lookback.
+
+Detailed health exposes `historical_discovery_pending`,
+`historical_discovery_held` and a sanitized hold reason; recovery audits also retain
+the required start, contiguous covered-through time, request count and completion
+state. Inspect held windows without clearing progress or replaying commands.
+Progress from another configured controller retains its own opaque identity and
+cannot be consumed through the current controller. Provider-unprovable gaps need
+deliberate review against retained controller evidence.
+
+Upgrade migrations `20261014_0017` and `20261014_0018` require a separately
+authorized deployment and tested pre-upgrade database backup. The first holds
+legacy selected Apprise/ambiguous recipient work while preserving definitions,
+accepted/uncertain receipts and completed history. Re-select intended destinations
+in the workflow editor before deliberately re-enabling affected workflows. An
+unrelated edit must not silently bind an old numeric target to a new recipient.
+The second adds discovery progress without changing historical candidates. Their
+downgrades deliberately refuse to discard review holds or incomplete coverage;
+restore the corresponding pre-upgrade backup and matching application version
+when rollback is required. Local isolated migration tests do not migrate production.
+
 ## Supervised live testing
 
 Code edits and isolated fake-provider tests are authorized development work.
@@ -312,14 +353,19 @@ new hardware actions or replay historical detections.
 
 Event reads use `get_events_raw()` and convert recognized device events into SDK
 `Event` models before the existing IACS serializer. Public reads remain capped at
-100 results; restart backfill retains its bounded 250-event read. The adapter
-accepts at most 250 results and one request asks for at most three times that
-limit (750 candidates for backfill). Explicit device-event types
+100 results. The browsing adapter accepts at most 250 results internally and one
+request asks for at most three times that limit. Explicit device-event types
 and disabled SDK manual pagination prevent a whole-window history scan. Camera
 filtering stays within that candidate window and may return fewer than the limit;
 IACS never fetches more pages to fill it. Unknown/non-device event types are
 ignored; a malformed recognized event fails with a sanitized error. Normal SDK
 HTTP response allocation precedes this adapter's bounded conversion.
+
+Recovery uses a separate 100-row raw page before filtering, ascending ordering,
+explicit smart-detection types and disabled SDK manual pagination. Expanded
+millisecond bounds are conservative for either endpoint-inclusion convention.
+Captured pages use an explicit safe schema; invalid pages and conflicting
+identities hold coverage. Equal timestamps never rely on positional offsets.
 
 Recorded clips use the event's exact cached camera and its start/end times through
 `Camera.get_video()`. The SDK retains its media permission check. Missing cameras,

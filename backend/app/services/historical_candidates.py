@@ -80,18 +80,26 @@ class HistoricalCandidateStore:
             raise ValueError('A bounded historical origin is required')
         if captured_at.tzinfo is None or captured_at.utcoffset() is None:
             raise ValueError('An aware historical capture time is required')
-        identity = uuid.uuid5(_NAMESPACE, f'{PROTECT_CANDIDATE_SOURCE}:{protect_event_id}')
         async with self.session() as session:
-            now = await self.now(session)
-            inserted = await session.scalar(insert(HistoricalAccessCandidate).values(
+            inserted = await self.reserve_in_session(session, protect_event_id=protect_event_id,
+                                                     captured_at=captured_at, candidate=candidate)
+            await session.commit()
+            return inserted
+
+    async def reserve_in_session(self, session: AsyncSession, *, protect_event_id: str,
+                                 captured_at: datetime, candidate: dict[str, Any]) -> bool:
+        if not protect_event_id or len(protect_event_id) > 180 or captured_at.tzinfo is None:
+            raise ValueError('A bounded, aware historical origin is required')
+        identity = uuid.uuid5(_NAMESPACE, f'{PROTECT_CANDIDATE_SOURCE}:{protect_event_id}')
+        now = await self.now(session)
+        inserted = await session.scalar(insert(HistoricalAccessCandidate).values(
                 id=identity, source=PROTECT_CANDIDATE_SOURCE, protect_event_id=protect_event_id,
                 candidate=copy.deepcopy(candidate), captured_at=captured_at,
                 event_id=uuid.uuid5(identity, 'access-event'), state='pending', due_at=now,
                 attempt_count=0, media_state='pending', media_result={},
             ).on_conflict_do_nothing(index_elements=[HistoricalAccessCandidate.source,
                 HistoricalAccessCandidate.protect_event_id]).returning(HistoricalAccessCandidate.id))
-            await session.commit()
-            return inserted is not None
+        return inserted is not None
 
     async def claim(self) -> HistoricalClaim | None:
         async with self.session() as session:

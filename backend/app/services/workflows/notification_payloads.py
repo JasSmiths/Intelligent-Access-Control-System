@@ -137,6 +137,7 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
                 "type": action_type,
                 "target_mode": str(raw.get("target_mode") or "all"),
                 "target_ids": normalize_string_list(raw.get("target_ids"), allow_scalar=False),
+                **({"apprise_revision": raw["apprise_revision"]} if "apprise_revision" in raw else {}),
                 "title_template": str(raw.get("title_template") or ""),
                 "message_template": str(raw.get("message_template") or ""),
                 "gate_malfunction_stages": normalize_gate_malfunction_stages(

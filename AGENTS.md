@@ -37,6 +37,15 @@ Read only the guides relevant to the task:
   development work. Application confirmation requirements do not block edits or
   inert fixture tests. Use exact locked dependencies and explicit harness
   download/reuse modes.
+- Development and validation must never exhaust host disk or take production
+  offline. Follow [disk-space safety](docs/validation.md#disk-space-safety) before
+  every snapshot, install, validation/browser run, image build or backup. Respect
+  the free-space reserve and task storage budget; do not overlap bulk runs.
+  Keep one verified dependency preparation and clean up owned disposable copies
+  and stopped synthetic databases after every run, including failed or interrupted
+  runs. Preserve source, evidence, production data and required rollback points.
+  After a disk incident, bulk validation stays paused until storage safeguards
+  are implemented and checked; documentation alone does not lift that pause.
 - Preserve unrelated changes. If backend source is mounted into a running app,
   use an isolated checkout for code changes and validation.
 - Locate owners with `rg -l`, then use bounded reads. Read applicable guides once

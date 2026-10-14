@@ -19,8 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, with_expression
 
 from app.core.auth_secret import get_auth_secret
+from app.core.task_lifecycle import drain_owned
 from app.models import RevokedAuthToken, User
 from app.models.enums import UserRole
+from app.services.auth_root import reload_auth_root_for_transaction
 from app.services.profile_photos import photo_reference_expression, stored_image_url
 from app.services.settings import get_authentication_config
 
@@ -132,8 +134,7 @@ async def count_active_admins(
     return int(await session.scalar(query) or 0)
 
 
-async def create_user(
-    session: AsyncSession,
+def new_user(
     *,
     username: str,
     full_name: str | None = None,
@@ -141,7 +142,7 @@ async def create_user(
     last_name: str | None = None,
     profile_photo_data_url: str | None = None,
     mobile_phone_number: str | None = None,
-    password: str,
+    password_hash: str,
     role: UserRole = UserRole.STANDARD,
     email: str | None = None,
     is_active: bool = True,
@@ -163,12 +164,24 @@ async def create_user(
         profile_photo_data_url=profile_photo_data_url,
         email=email.strip().lower() if email else None,
         mobile_phone_number=normalize_mobile_phone_number(mobile_phone_number),
-        password_hash=await hash_password_async(password),
+        password_hash=password_hash,
         role=role,
         is_active=is_active,
         person_id=person_id,
         preferences=preferences or {"sidebarCollapsed": False},
     )
+    return user
+
+
+async def create_user(session: AsyncSession, *, username: str, password: str,
+    full_name: str | None = None, first_name: str | None = None, last_name: str | None = None,
+    profile_photo_data_url: str | None = None, mobile_phone_number: str | None = None,
+    role: UserRole = UserRole.STANDARD, email: str | None = None, is_active: bool = True,
+    person_id: uuid.UUID | None = None, preferences: dict[str, Any] | None = None) -> User:
+    user = new_user(username=username, password_hash=await hash_password_async(password), full_name=full_name,
+        first_name=first_name, last_name=last_name, profile_photo_data_url=profile_photo_data_url,
+        mobile_phone_number=mobile_phone_number, role=role, email=email, is_active=is_active,
+        person_id=person_id, preferences=preferences)
     session.add(user)
     await session.flush()
     return user
@@ -220,6 +233,35 @@ async def create_access_token(user: User, *, remember_me: bool = False) -> tuple
         "jti": secrets.token_urlsafe(18),
     }
     return _encode_jwt(payload), expires_at
+
+
+async def complete_verified_login(session: AsyncSession, *, user_id: uuid.UUID, verified_version: int,
+    verified_hash: str, username: str, remember_me: bool) -> tuple[dict[str, Any], str, datetime]:
+    """Issue only the authority whose credentials were verified before locking.
+
+    The commit is the issuance checkpoint. A subsequent reset/root rotation
+    invalidates this authority; HTTP response delivery cannot be atomic with it.
+    """
+    await session.rollback()
+    try:
+        await reload_auth_root_for_transaction(session)
+        user = await session.scalar(select(User).where(User.id == user_id).options(
+            defer(User.profile_photo_data_url, raiseload=True),
+            with_expression(User.profile_photo_reference, photo_reference_expression(User.profile_photo_data_url)))
+            .with_for_update().execution_options(populate_existing=True))
+        if (user is None or not user.is_active or user.username != username
+            or user.auth_session_version != verified_version or user.password_hash != verified_hash):
+            raise AuthError("Invalid credentials")
+        user.last_login_at = datetime.now(UTC)
+        token, expires_at = await create_access_token(user, remember_me=remember_me)
+        await session.flush()
+        await session.refresh(user, ["updated_at"])
+        result = serialize_user(user, photo_url_path="/api/v1/auth/me/photo")
+        await session.commit()
+        return result, token, expires_at
+    except BaseException:
+        await drain_owned(session.rollback())
+        raise
 
 
 async def set_session_cookie(response: Response, token: str, expires_at: datetime) -> None:
@@ -333,13 +375,13 @@ async def authenticate_request(session: AsyncSession, request: Request) -> User 
     return await authenticate_token(session, await _extract_http_token_async(request))
 
 
-async def authenticate_websocket(session: AsyncSession, websocket: WebSocket) -> User | None:
+async def extract_websocket_token(websocket: WebSocket) -> str | None:
     runtime = await get_authentication_config()
     token = websocket.cookies.get(runtime.auth_cookie_name) or websocket.query_params.get("token")
     authorization = websocket.headers.get("authorization")
     if not token and authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
-    return await authenticate_token(session, token)
+    return token
 
 
 def require_admin(user: User) -> None:

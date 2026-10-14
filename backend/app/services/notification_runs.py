@@ -24,6 +24,7 @@ ACTIVE_STATUSES = ("queued", "processing")
 DELIVERY_CERTAINTIES = {"accepted", "not_sent", "rejected", "unknown"}
 _MOBILE_RECEIPT_TARGET = re.compile(r"notify\.mobile_app_[A-Za-z0-9_]{1,192}\Z")
 _VOICE_RECEIPT_TARGET = re.compile(r"media_player\.[A-Za-z0-9_]{1,192}\Z")
+_APPRISE_RECEIPT_TARGET = re.compile(r"apprise:[0-9]{1,32}\Z")
 _NUMERIC_RECEIPT_TARGET = re.compile(r"[0-9]{1,32}\Z")
 
 
@@ -41,6 +42,7 @@ class NotificationActionAuthorization:
 
     global_denial: str | None = None
     action_skip: str | None = None
+    review_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,7 @@ def safe_destination_outcomes(value: Any) -> list[dict[str, str]]:
         # IDs are stable, non-secret endpoint labels.
         if not (
             target == "apprise"
+            or _APPRISE_RECEIPT_TARGET.fullmatch(target)
             or _MOBILE_RECEIPT_TARGET.fullmatch(target)
             or _VOICE_RECEIPT_TARGET.fullmatch(target)
             or _NUMERIC_RECEIPT_TARGET.fullmatch(target)
@@ -330,27 +333,33 @@ class NotificationRunStore:
                     if authorize_origin is not None
                     else "notification_origin_validator_missing"
                 )
-            denial, action_skip = _authorization_parts(authorization)
+            denial, action_skip, review_reason = _authorization_parts(authorization)
             row, now = await self._owned(session, run_id, token)
             if (
-                not denial
+                not denial and not review_reason
                 and row.context.get("confirmed_delivery") is not None
                 and authorize_origin is not None
             ):
                 # Actor was locked before the run. Refresh mutable configuration
                 # after the final blocking lock, not from a snapshot taken while
                 # waiting behind another transaction.
-                denial, action_skip = _authorization_parts(
+                denial, action_skip, review_reason = _authorization_parts(
                     await authorize_origin(session, row.context, run_id)
                 )
-            elif not denial and not action_skip and refresh_authorization is not None:
+            elif not denial and not action_skip and not review_reason and refresh_authorization is not None:
                 # The initial policy participant acquired its domain locks before
                 # this journal row. A transport-only configuration refresh may
                 # now run after the final blocking lock without inverting that
                 # rule-to-run lock order.
-                denial, action_skip = _authorization_parts(
+                denial, action_skip, review_reason = _authorization_parts(
                     await refresh_authorization(session, row.context, run_id)
                 )
+            if review_reason:
+                self._review(row, review_reason, now)
+                self._counts(row)
+                await self._audit_checkpoint(session, row, "review", reason=review_reason)
+                await session.commit()
+                raise ClaimLost("Notification recipients require review before delivery.")
             if denial:
                 plan = copy.deepcopy(row.delivery_plan)
                 for item in plan or []:
@@ -472,6 +481,12 @@ class NotificationRunStore:
     ):
         origin = row.context.get("confirmed_delivery")
         if not isinstance(origin, dict):
+            if delivery == "review" and isinstance(reason, str) and reason.startswith("recipient_"):
+                await write_audit_log(session, category=TELEMETRY_CATEGORY_INTEGRATIONS,
+                    action="notification.recipient_review_required", actor="notification.dispatch",
+                    target_entity="NotificationRun", target_id=row.id, target_label=row.subject,
+                    outcome="failed", level="warning", metadata={"reason": reason,
+                        "pending_delivery": "not_sent", "accepted_any": row.delivered_count > 0})
             return
         details = checkpoint if isinstance(checkpoint, dict) else {}
         review_required = bool(details.get("review_required"))
@@ -581,10 +596,10 @@ def run_summary(row: NotificationRun) -> dict[str, Any]:
     }
 
 
-def _authorization_parts(value: Any) -> tuple[str | None, str | None]:
+def _authorization_parts(value: Any) -> tuple[str | None, str | None, str | None]:
     if isinstance(value, NotificationActionAuthorization):
-        return value.global_denial, value.action_skip
-    return (str(value), None) if isinstance(value, str) and value else (None, None)
+        return value.global_denial, value.action_skip, value.review_reason
+    return (str(value), None, None) if isinstance(value, str) and value else (None, None, None)
 
 
 def _item_failure_count(item: dict[str, Any]) -> int:

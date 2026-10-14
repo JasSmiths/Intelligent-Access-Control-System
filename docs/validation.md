@@ -186,6 +186,10 @@ remain superseded evidence with explicit reasons.
 
 ## Isolated harness
 
+Complete the [disk-space safety checks](#disk-space-safety) before preparing or
+running the harness. These apply to focused, DB-free, browser and image/restore
+checks as well as full runs.
+
 [validate.py](../scripts/validation/validate.py) copies and hashes the current source,
 then executes against private resources. It does not isolate earlier edits to
 an operational bind mount: use an isolated checkout for code changes when the
@@ -221,6 +225,10 @@ repository and operational bind mounts:
 python3 scripts/validation/validate.py --allow-downloads \
   --evidence-root /private/tmp/iacs-validation-evidence
 
+# Deliberately keep one new verified preparation for later read-only reuse.
+python3 scripts/validation/validate.py --allow-downloads --retain-dependencies \
+  --evidence-root /private/tmp/iacs-validation-evidence
+
 # Full regression with an existing trusted dependency preparation.
 python3 scripts/validation/validate.py \
   --reuse-dependencies /absolute/path/to/prior-run \
@@ -235,9 +243,21 @@ Full mode is the default. Both `full` and `db-free` require an explicit
 `--allow-downloads` or `--reuse-dependencies`; the bare command refuses to guess.
 Preparation uses `uv sync --locked --extra dev --no-install-project` and
 `npm ci --ignore-scripts`. Reuse must match the copied manifests, lockfiles and
-immutable backend/Node image identities; it copies dependencies into the new
-run and verifies them offline. Reuse verifies dependency selection, not package
+immutable backend/Node image identities; it mounts the preparation read-only and
+verifies it offline without copying packages. Reuse verifies dependency selection, not package
 trust. Installation may execute package code.
+
+The [storage owner](../scripts/validation/storage.py) checks host and Docker VM
+capacity before allocation and monitors subprocesses/copies. The cached VM probe
+uses an immutable image ID with `--pull=never`. All harness modes and runtime smoke
+share one execution lock, held through protected cleanup. Reused packages remain
+read-only; a small writable package-link directory holds Vite/Vitest caches.
+Fresh installations are disposable by default; `--retain-dependencies` explicitly
+keeps a successfully verified new preparation. It cannot accompany reuse or
+snapshot mode. Keep only the preparations required by current locks/runtime IDs.
+After owned containers drain, cleanup removes recorded disposable directories only
+after checking all existing container mounts. Inspection failure preserves files
+and fails cleanup. Source, logs, artifacts and designated preparations survive.
 
 The harness runs the repository dependency/side-effect scan once as
 `architecture-boundaries`. Backend tests separately cover the scanner algorithms.
@@ -261,6 +281,87 @@ establishes source capture only. Full mode already requires the restore rehearsa
 `--database-restore` simply spells out that default. Additional `--persistence-test`,
 `--diagnostic` and `--schema-check` selections are additive and full-mode only.
 Review their side effects before running them.
+
+## Disk-space safety
+
+Development and validation must never exhaust the host disk or take production
+offline. The 14 October 2026 incident showed that repeatedly retaining dependency
+copies and synthetic databases can consume tens of gigabytes despite successful
+container cleanup. Required evidence must remain compact and separate from
+disposable working data. Moving the same data to another folder on the same disk
+does not recover capacity.
+
+1. **Inventory before every allocation.** Before each snapshot, installation,
+   focused/full/DB-free/browser run, image build or backup, record host free space,
+   task/evidence/cache sizes and Docker storage. Include existing runs outside the
+   checkout, other project checkouts and checkpoints in the inventory. Identify
+   the filesystems containing evidence and the Docker VM; check each affected
+   filesystem. On this macOS host, read-only checks include:
+
+   ```sh
+   df -h . /private/tmp
+   du -sh data/validation data/checkpoints
+   docker system df
+   ```
+
+   Also measure the selected evidence/cache directories. Replace host-specific
+   paths when working elsewhere. Estimate peak additional space, including copied
+   dependencies, temporary image layers, database/restore state and archives.
+   Missing or unreliable accounting is a reason to stop before a bulk run.
+2. **Enforce a reserve and budget.** Keep at least **30 GiB free** on every affected
+   filesystem. Admit a run only with at least the greater of **40 GiB** or
+   **30 GiB plus its estimated peak additional space** available. The default
+   budget for all task-generated disposable storage is **10 GiB**, including
+   dependencies, browsers, synthetic databases and additional test images, not
+   10 GiB per run. Exclude production data and required rollback backups from that
+   working budget, but include their occupancy in free-space accounting. If a
+   workload needs a larger budget, stop and agree the capacity/retention plan with
+   the owner before allocating it; do not silently lower the reserve.
+   Current accounting conservatively includes retained task evidence and source
+   too, so generated files cannot escape the budget by living beside evidence.
+   Accounting never grants permission to delete those retained files. Docker image
+   sizes and VM free-space changes are conservative proxies: shared layers can be
+   overcounted, and unrelated VM growth can abort a run. Polling is not a hard
+   filesystem quota; blocked filesystem calls remain a detection limitation.
+3. **Bound active work and reuse.** Run only one bulk IACS validation, dependency
+   preparation or image build at a time on this host, including ad-hoc focused
+   runners. Reuse one preparation with matching locks and immutable runtime
+   identities. Prefer a verified read-only shared preparation with separate
+   writable caches. Retire ad-hoc runners that still copy dependencies or bypass
+   admission, accounting, cancellation cleanup or the shared execution lock.
+   Remove superseded disposable state before admitting the next
+   run. Do not create a new checkout, environment, browser installation or image
+   merely to retry a check when a compatible one already exists.
+4. **Monitor and stop safely.** Check free space and task growth at least every
+   **30 seconds** during long copies, downloads, builds and database checks, and
+   between phases. At less than **40 GiB free**, stop admitting new bulk work and
+   reclaim owned disposable state. At or below the **30 GiB reserve**, or when
+   the task budget would be exceeded, cancel further task allocation and drain
+   owned work using its cleanup path. Record the incomplete check; do not delete
+   production files, kill unrelated processes or restart live services to make a
+   test finish. A guard must cover setup and failure paths, not just test success.
+5. **Clean up and retain proof after every run.** This includes failures,
+   cancellation and interrupted runs. First retain source fingerprints, test
+   inventory, commands/exit codes, failure logs and required review evidence.
+   Verify container ownership and cleanup records; check mounts on **all running
+   and stopped containers**, including ancestor/descendant paths. Then remove only
+   the run's disposable dependency copies, synthetic PostgreSQL/Redis directories
+   and generated caches. Preserve the designated reusable preparation. Check
+   exact image IDs, aliases and container references before removing superseded
+   test images; do not use forced image removal. Inspect build cache before
+   clearing unused entries, and account for other applications sharing Docker.
+   Never use blanket system/volume pruning or manually delete the Docker VM disk.
+   Unknown or nonempty legacy volumes and rollback checkpoints need individual
+   retention review. Record deleted paths/identities, cleanup failures and final
+   free space; leave source, evidence and production state intact.
+
+After a disk-exhaustion incident, bulk validation remains paused until resource
+guards and cleanup are implemented and checked for admission, growth, failure and
+cancellation. Documentation is not enforcement. Small host-only documentation
+checks and tests of those guards may proceed without starting bulk runs. Keep an
+exact continuation point; do not weaken regression coverage to fit the budget.
+See [local retention rules](development.md#local-cleanup-and-retention) for recovery
+checkpoints, image archives and other checkouts.
 
 ## Source, isolation and evidence
 
@@ -294,6 +395,24 @@ containers owned by the run. After SIGKILL or host loss, use the retained owners
 record to identify that run's resources. Do not delete unrelated resources.
 
 ## Recovery and schema proof limits
+
+Security/reliability regressions run through the actual isolated API, transport
+and PostgreSQL owners in `test_account_authority.py`, `test_realtime_authority.py`,
+`test_notification_recipient_binding.py` and `test_historical_discovery_persistence.py`
+under `scripts/validation/`. The populated upgrade fixtures are
+`test_notification_binding_upgrade.py` and `test_historical_discovery_upgrade.py`.
+These are registered full-harness suites; copied route bodies are not substitutes.
+The historical suite also exercises the real periodic loop, repeated bounded
+cycles, dense timestamps, interrupted acceptance and fresh authority/lease fences.
+All external provider boundaries remain inert and unmocked external sockets fail.
+
+Affected browser coverage is `frontend/e2e/realtime-invalidation.spec.ts` and
+`frontend/e2e/notification-recipients.spec.ts` in Chromium and WebKit, including
+desktop and phone widths. API fixtures cannot fall through to production; run with
+network isolation and the matching locked browser dependencies. Retain screenshots,
+failure traces and exact source hashes. Socket-overhead measurements use three
+synthetic accounts, one/ten connections, five warmups and 50 samples; statement
+counts and ASGI timings are proxies, not database wire bytes or production latency.
 
 [Schema checks](../scripts/validation/test_schema_contract.py) exercise frozen
 historical fixtures, fresh/staged migrations, schema parity and guarded downgrade

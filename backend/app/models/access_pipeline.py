@@ -328,6 +328,37 @@ class AccessChartDirtyState(Base):
     __table_args__ = (CheckConstraint("id = 1", name="ck_access_chart_dirty_singleton"),)
 
 
+class HistoricalDiscoveryProgress(Base):
+    """One fenced Protect discovery window, with a bounded pending union."""
+    __tablename__ = "historical_discovery_progress"
+    provider_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state: Mapped[str] = mapped_column(String(24), nullable=False)
+    start_ms: Mapped[int] = mapped_column(BigInteger(), nullable=False)
+    end_ms: Mapped[int] = mapped_column(BigInteger(), nullable=False)
+    source: Mapped[str] = mapped_column(String(120), nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    frontier: Mapped[list[Any]] = mapped_column(JSONB(), nullable=False)
+    page: Mapped[list[Any]] = mapped_column(JSONB(), nullable=False)
+    page_index: Mapped[int] = mapped_column(Integer(), nullable=False)
+    queued_start_ms: Mapped[int | None] = mapped_column(BigInteger())
+    queued_end_ms: Mapped[int | None] = mapped_column(BigInteger())
+    queued_source: Mapped[str | None] = mapped_column(String(120))
+    queued_reason: Mapped[str | None] = mapped_column(String(500))
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(Uuid())
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    hold_reason: Mapped[str | None] = mapped_column(String(120))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        CheckConstraint("state IN ('pending','leased','completed','held')", name='ck_historical_discovery_state'),
+        CheckConstraint('start_ms < end_ms AND page_index >= 0 AND page_index <= jsonb_array_length(page)',
+                        name='ck_historical_discovery_bounds'),
+        CheckConstraint('jsonb_array_length(frontier) <= 64 AND jsonb_array_length(page) <= 100',
+                        name='ck_historical_discovery_size'),
+        CheckConstraint('(queued_start_ms IS NULL AND queued_end_ms IS NULL AND queued_source IS NULL AND queued_reason IS NULL) OR (queued_start_ms IS NOT NULL AND queued_end_ms IS NOT NULL AND queued_source IS NOT NULL AND queued_reason IS NOT NULL AND queued_start_ms < queued_end_ms)',
+                        name='ck_historical_discovery_queue'),
+    )
+
+
 class HistoricalAccessCandidate(Base):
     __tablename__ = "historical_access_candidates"
     id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, nullable=False)

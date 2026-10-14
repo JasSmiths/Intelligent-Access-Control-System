@@ -1,26 +1,15 @@
 import pytest
 
-from app.api.v1.realtime import _handle_client_realtime_message
-
-
-class FakeWebSocket:
-    def __init__(self) -> None:
-        self.sent: list[dict] = []
-
-    async def send_json(self, payload: dict) -> None:
-        self.sent.append(payload)
+from app.services.realtime_connections import client_control
 
 
 @pytest.mark.asyncio
 async def test_realtime_websocket_replies_to_client_ping() -> None:
-    websocket = FakeWebSocket()
-    await _handle_client_realtime_message(
-        websocket,
+    response = client_control(
         '{"type":"client.ping","payload":{"id":"probe-1","reason":"focus","at":"2026-05-22T10:00:00Z"}}',
     )
 
-    assert len(websocket.sent) == 1
-    response = websocket.sent[0]
+    assert response is not None
     assert response["type"] == "connection.pong"
     assert response["payload"]["id"] == "probe-1"
     assert response["payload"]["reason"] == "focus"
@@ -31,14 +20,10 @@ async def test_realtime_websocket_replies_to_client_ping() -> None:
 
 @pytest.mark.asyncio
 async def test_realtime_websocket_reports_malformed_control_messages() -> None:
-    websocket = FakeWebSocket()
-
-    await _handle_client_realtime_message(websocket, "not-json")
-    await _handle_client_realtime_message(websocket, '{"type":"client.unknown"}')
-    await _handle_client_realtime_message(websocket, "[]")
-
-    assert len(websocket.sent) == 1
-    response = websocket.sent[0]
+    response = client_control("not-json")
+    assert client_control('{"type":"client.unknown"}') is None
+    assert client_control("[]") is None
+    assert response is not None
     assert response["type"] == "connection.error"
     assert response["payload"]["detail"] == "Malformed realtime control message ignored."
     assert response["created_at"]

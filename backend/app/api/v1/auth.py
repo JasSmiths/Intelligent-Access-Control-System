@@ -1,5 +1,4 @@
 import asyncio
-from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -14,6 +13,7 @@ from app.models import User
 from app.services.auth import (
     authenticate_request,
     clear_session_cookie,
+    complete_verified_login,
     count_users,
     create_access_token,
     create_initial_admin,
@@ -131,18 +131,16 @@ async def login(
     user = await session.scalar(
         select(User).where(User.username == normalize_username(request.username))
     )
-    password_ok = bool(user and user.is_active) and await verify_password_async(
-        request.password, user.password_hash
-    )
-    if not password_ok:
+    if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-
-    user.last_login_at = datetime.now(tz=UTC)
-    await session.commit()
-    await session.refresh(user)
-    token, expires_at = await create_access_token(user, remember_me=request.remember_me)
+    user_id, version, password_hash = user.id, int(user.auth_session_version or 0), user.password_hash
+    if not await verify_password_async(request.password, password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    result, token, expires_at = await complete_verified_login(session, user_id=user_id,
+        verified_version=version, verified_hash=password_hash, username=normalize_username(request.username),
+        remember_me=request.remember_me)
     await set_session_cookie(response, token, expires_at)
-    return UserResponse(**serialize_user(user, photo_url_path="/api/v1/auth/me/photo"))
+    return UserResponse(**result)
 
 
 @router.post("/logout")

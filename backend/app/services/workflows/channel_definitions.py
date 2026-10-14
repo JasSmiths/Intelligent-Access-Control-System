@@ -6,7 +6,7 @@ import builtins
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from app.services.workflows.action_definitions import (
     Configuration,
@@ -48,12 +48,21 @@ class VariableRecipients(Configuration):
 class NotificationConfiguration(Configuration):
     target_mode: NotificationTargetMode = "all"
     target_ids: list[str] = Field(default_factory=list)
+    apprise_revision: str | None = None
     title_template: str = ""
     message_template: str = ""
     gate_malfunction_stages: list[GateMalfunctionStage] = Field(default_factory=list)
     media: NotificationMedia = Field(default_factory=NotificationMedia)
     actionable: NotificationActionable = Field(default_factory=NotificationActionable)
     variable_recipients: VariableRecipients | None = None
+
+
+    @field_validator("apprise_revision")
+    @classmethod
+    def valid_apprise_revision(cls, value: str | None) -> str | None:
+        if value is not None and (len(value) != 64 or any(c not in "0123456789abcdef" for c in value)):
+            raise ValueError("A recipient binding must be an opaque configuration fingerprint.")
+        return value
 
 
 @dataclass(frozen=True)

@@ -23,6 +23,7 @@ from app.services.leaderboard_notifications import (
 )
 from app.services.mutation_context import load_active_admin
 from app.services.notification_planning import notification_rule_origin
+from app.services.notification_recipient_binding import recipient_binding_error
 from app.services.notification_requests import confirmed_attempt_denial
 from app.services.notification_runs import NotificationActionAuthorization
 from app.services.settings import RuntimeConfig
@@ -159,6 +160,8 @@ class NotificationAuthorization:
         payload: dict[str, Any] | None = None,
         run_id: uuid.UUID | None = None,
     ) -> NotificationPolicy:
+        if action is not None and (reason := recipient_binding_error(action, config.apprise_urls)):
+            return NotificationActionAuthorization(review_reason=reason)
         if action is not None and action.get("resident_recovery_output") is not None:
             from app.services.resident_recovery import authorize_mobile_output
 

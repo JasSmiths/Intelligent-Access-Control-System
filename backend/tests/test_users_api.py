@@ -110,60 +110,24 @@ async def test_user_roster_allows_admin_users() -> None:
     assert payload[1]["mobile_phone_number"] == "+447700900123"
 
 
-async def test_reset_password_requires_confirmation_before_hash(monkeypatch) -> None:
+async def test_reset_password_adapter_passes_exact_confirmation_and_prepared_hash(monkeypatch) -> None:
     admin = make_user(UserRole.ADMIN, username="admin")
     target = make_user(UserRole.STANDARD, username="target")
     session = FakeUserSession([target])
-
-    async def fail_hash(_password):
-        raise AssertionError("Password must not be reset before confirmation.")
-
-    monkeypatch.setattr(users_api, "hash_password_async", fail_hash)
-
-    app = app_for_user(admin, session)
-    transport = httpx.ASGITransport(app=app)
-
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(f"/api/v1/users/{target.id}/reset-password", json={"generate_password": True})
-
-    assert response.status_code == 428
-
-
-async def test_reset_password_consumes_confirmation_and_invalidates_sessions(monkeypatch) -> None:
-    admin = make_user(UserRole.ADMIN, username="admin")
-    target = make_user(UserRole.STANDARD, username="target")
-    target.auth_session_version = 4
-    session = FakeUserSession([target])
-    consumed: dict[str, object] = {}
-
-    async def consume(_session, **kwargs):
-        consumed.update(kwargs)
-
-    async def fake_hash(_password):
-        return "new-hash"
-
-    async def fake_audit(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(users_api, "require_confirmed_action", consume)
+    forwarded = {}
+    async def owner(_session, proof, target_id, **kwargs):
+        assert _session is session and proof.id == admin.id and target_id == target.id
+        forwarded.update(kwargs)
+    async def fake_hash(password):
+        assert password == "temporary-password"
+        return "synthetic-hash"
+    monkeypatch.setattr(users_api.user_accounts, "reset_account_password", owner)
     monkeypatch.setattr(users_api, "hash_password_async", fake_hash)
     monkeypatch.setattr(users_api, "generate_temporary_password", lambda: "temporary-password")
-    monkeypatch.setattr(users_api, "write_audit_log", fake_audit)
-
     app = app_for_user(admin, session)
-    transport = httpx.ASGITransport(app=app)
-
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            f"/api/v1/users/{target.id}/reset-password",
-            json={"generate_password": True, "confirmation_token": "server-token"},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["temporary_password"] == "temporary-password"
-    assert consumed["action"] == "user.reset_password"
-    assert consumed["payload"] == {"user_id": str(target.id), "generate_password": True}
-    assert consumed["confirmation_token"] == "server-token"
-    assert target.password_hash == "new-hash"
-    assert target.auth_session_version == 5
-    assert target.password_changed_at is not None
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers={"Authorization": "Bearer synthetic-unused-private-token"}) as client:
+        response = await client.post(f"/api/v1/users/{target.id}/reset-password",
+            json={"generate_password": True, "confirmation_token": "server-token"})
+    assert response.status_code == 200 and response.json()["temporary_password"] == "temporary-password"
+    assert forwarded == {"payload": {"user_id": str(target.id), "generate_password": True},
+        "token": "server-token", "password_hash": "synthetic-hash", "generated": True}

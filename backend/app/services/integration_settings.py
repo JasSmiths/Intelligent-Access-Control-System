@@ -69,9 +69,13 @@ def _fingerprint(domain: str, value: Any) -> str:
     return hmac.new(get_auth_secret().encode(), domain.encode() + b"\0" + body, hashlib.sha256).hexdigest()
 
 
+def apprise_revision(configured: str) -> str:
+    return _fingerprint("apprise-list-v1", [normalize_apprise_url(url) for url in split_apprise_urls(configured)])
+
+
 def apprise_destinations(configured: str) -> list[dict[str, Any]]:
     urls = [normalize_apprise_url(url) for url in split_apprise_urls(configured)]
-    revision = _fingerprint("apprise-list-v1", urls)
+    revision = apprise_revision(configured)
     return [{**summarize_apprise_url(index, url),
              "destination_id": _fingerprint("apprise-destination-v1", url), "revision": revision}
             for index, url in enumerate(urls)]

@@ -137,7 +137,7 @@ async def test_candidate_from_protect_track_normalizes_plate_and_confidence() ->
             }
 
     candidate = await MissedAccessEventBackfillService()._candidate_from_protect_event(
-        FakeProtect(),
+        FakeProtect().event_lpr_track,
         {
             "id": "protect-1",
             "type": "smartDetectZone",
@@ -159,7 +159,7 @@ async def test_candidate_from_protect_event_ignores_generic_vehicle_or_face_trac
             raise AssertionError("Generic non-LPR smart-detect events should not be probed for plates.")
 
     candidate = await MissedAccessEventBackfillService()._candidate_from_protect_event(
-        FakeProtect(),
+        FakeProtect().event_lpr_track,
         {
             "id": "protect-1",
             "type": "smartDetectZone",

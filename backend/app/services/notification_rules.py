@@ -7,7 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import NotificationRule, User
-from app.services.mutation_context import MutationError, require_active_admin
+from app.services.auth_root import reload_auth_root_for_transaction
+from app.services.mutation_context import MutationError, load_active_admin, require_active_admin
+from app.services.notification_recipient_binding import (
+    recipient_binding_error,
+    referenced_recipients,
+)
+from app.services.settings import get_runtime_config_for_session
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
     actor_from_user,
@@ -18,6 +24,27 @@ from app.services.workflows.action_definitions import WorkflowConfigurationError
 from app.services.workflows.channel_definitions import validate_notification_actions
 from app.services.workflows.notification_payloads import normalize_rule_payload
 from app.services.workflows.template_recipients import TemplateRecipientError
+
+
+async def _fresh_actor(session: AsyncSession, user: User) -> User:
+    identity, version = user.id, user.auth_session_version
+    # Settings writes take this same root fence before mutable configuration.
+    # No provider discovery/I/O belongs inside this transaction.
+    await reload_auth_root_for_transaction(session)
+    return await load_active_admin(session, identity, auth_version=version, lock=True)
+
+
+async def _validate_recipients(session: AsyncSession, actions: list[dict[str, Any]]) -> None:
+    try:
+        validate_notification_actions(actions)
+    except WorkflowConfigurationError as exc:
+        raise MutationError("invalid_actions", str(exc)) from exc
+    positional = any(any(ref.startswith("apprise:") for ref in referenced_recipients(action))
+                     or action.get("frozen_apprise_indexes") for action in actions)
+    configured = (await get_runtime_config_for_session(session)).apprise_urls if positional else ""
+    for action in actions:
+        if reason := recipient_binding_error(action, configured):
+            raise MutationError("recipient_binding", "Notification recipients need review. Select current destinations again (" + reason + ").")
 
 
 def rule_values(payload: dict[str, Any]) -> dict[str, Any]:
@@ -98,6 +125,8 @@ async def set_automation_activation(
             raise MutationError("not_found", "Notification workflow not found.")
         rule_id = selected.id
     rule = await _locked_rule(session, rule_id)
+    if active:
+        await _validate_recipients(session, rule.actions)
     rule.is_active = active
     return {"notification_rule_id": str(rule.id), "is_active": rule.is_active}
 
@@ -130,6 +159,8 @@ async def create_rule(
     actor = require_active_admin(user)
     values = rule_values(payload)
     try:
+        actor = await _fresh_actor(session, actor)
+        await _validate_recipients(session, values["actions"])
         rule = NotificationRule(**values)
         session.add(rule)
         await session.flush()
@@ -148,9 +179,12 @@ async def update_rule(
 ) -> NotificationRule:
     actor = require_active_admin(user)
     try:
+        actor = await _fresh_actor(session, actor)
         rule = await _locked_rule(session, rule_id)
         before = rule_audit_snapshot(rule)
         values = rule_values({**before, **changes})
+        if "actions" in changes or changes.get("is_active") is True:
+            await _validate_recipients(session, values["actions"])
         for key, value in values.items():
             setattr(rule, key, value)
         await _audit(session, rule, actor, "update", before, source)
@@ -168,6 +202,7 @@ async def delete_rule(
 ) -> NotificationRule:
     actor = require_active_admin(user)
     try:
+        actor = await _fresh_actor(session, actor)
         rule = await _locked_rule(session, rule_id)
         await _audit(session, rule, actor, "delete", rule_audit_snapshot(rule), source)
         await session.delete(rule)

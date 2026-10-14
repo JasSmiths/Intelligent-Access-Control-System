@@ -53,7 +53,11 @@ class SourceSnapshotTests(unittest.TestCase):
                     'frontend/node_modules/module.js', 'frontend/dist/index.html',
                     '.venv/bin/python', '__pycache__/module.pyc', '.pytest_cache/state',
                     'auth-secret.key', 'auth-secret.key.previous', 'credentials.pem',
-                    'build/generated.py', 'nested/.env/token']
+                    'build/generated.py', 'nested/.env/token',
+                    'IACS_REMEDIATION_REVIEW_BUNDLE.zip',
+                    'IACS_REMEDIATION_HANDOVER.md', 'IACS_REMEDIATION_EVIDENCE.json',
+                    'IACS_SECURITY_RELIABILITY_REVIEW_BUNDLE.zip',
+                    'IACS_SECURITY_RELIABILITY_HANDOVER.md', 'IACS_SECURITY_RELIABILITY_EVIDENCE.json']
         for relative in excluded:
             self.make_file(relative)
             with self.subTest(relative=relative), self.assertRaises(ValueError):
@@ -199,6 +203,7 @@ class HarnessSafetyTests(unittest.TestCase):
             image_references(self.snapshot)
 
     def test_db_free_execution_never_starts_services_or_runs_migrations(self):
+        (self.root / 'js-deps' / 'node_modules').mkdir(parents=True)
         args = arguments(['--mode', 'db-free', '--reuse-dependencies', '/temporary/deps'])
         harness = Harness(args, self.root, self.snapshot)
         (self.root / 'manifest.json').write_text(json.dumps({'source_fingerprint': 'synthetic-source-fingerprint'}))
@@ -228,14 +233,16 @@ class HarnessSafetyTests(unittest.TestCase):
         self.assertEqual(harness.checks['persistence-tests']['status'], 'not_attempted')
 
     def test_timeout_kills_and_waits_for_owned_host_process_group(self):
+        from types import SimpleNamespace
         args = arguments(['--check-only'])
         harness = Harness(args, self.root, self.snapshot)
+        harness.storage = SimpleNamespace(cleaning=False, check=lambda **kwargs: None)
         with patch('validate.subprocess.Popen') as popen, patch('validate.os.killpg') as kill:
             process = popen.return_value
             process.pid = 12345
             process.wait.side_effect = [subprocess.TimeoutExpired('synthetic', 1), 0]
             with self.assertRaises(subprocess.TimeoutExpired):
-                harness.check('timeout', ['synthetic'], timeout=1)
+                harness.check('timeout', ['synthetic'], timeout=0)
         kill.assert_called_once()
         self.assertEqual(process.wait.call_count, 2)
         self.assertEqual(harness.results['timeout'], 124)

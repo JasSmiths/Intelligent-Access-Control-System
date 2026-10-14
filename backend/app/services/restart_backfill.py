@@ -1,7 +1,9 @@
 import asyncio
+import copy
 import json
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,7 +35,11 @@ from app.models.enums import (
 )
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.modules.gate.base import GateState
-from app.modules.unifi_protect.client import UnifiProtectError
+from app.modules.unifi_protect.client import (
+    ProtectRecoveryPageInvalid,
+    UnifiProtectError,
+    protect_connection_key,
+)
 from app.services import ha_presence_reservations
 from app.services.access.historical import (
     HistoricalSessionInput,
@@ -48,6 +54,18 @@ from app.services.historical_candidates import (
     HistoricalCandidateStore,
     HistoricalClaim,
     HistoricalClaimLost,
+)
+from app.services.historical_discovery import (
+    DISCOVERY_RAW_LIMIT,
+    DISCOVERY_RAW_REQUEST_LIMIT,
+    DISCOVERY_RECORD_LIMIT,
+    DISCOVERY_REQUEST_LIMIT,
+    DISCOVERY_SECONDS,
+    DiscoveryClaim,
+    DiscoveryStatus,
+    HistoricalDiscoveryStore,
+    milliseconds,
+    utc_from_ms,
 )
 from app.services.leaderboard import get_leaderboard_service
 from app.services.movement.admission import AdmissionResult
@@ -79,7 +97,6 @@ MISSED_EVENT_BACKFILL_DEFAULT_LOOKBACK = timedelta(minutes=30)
 MISSED_EVENT_BACKFILL_MAX_LOOKBACK = timedelta(hours=24)
 MISSED_EVENT_BACKFILL_OVERLAP = timedelta(minutes=2)
 MISSED_EVENT_BACKFILL_DUPLICATE_WINDOW = timedelta(seconds=90)
-MISSED_EVENT_BACKFILL_PROTECT_LIMIT = 250
 MISSED_EVENT_TRAILING_OCR_SUPPRESSION_WINDOW = timedelta(seconds=45)
 MISSED_EVENT_BACKFILL_SOURCE = "unifi_protect_restart_backfill"
 MISSED_EVENT_RECONCILIATION_SOURCE = "unifi_protect_lpr_reconciliation"
@@ -111,6 +128,12 @@ class MissedAccessEventBackfillResult:
     window_start: str | None = None
     window_end: str | None = None
     reason: str | None = None
+    discovery_state: str = "pending"
+    discovery_complete: bool = False
+    covered_through: str | None = None
+    discovery_requests: int = 0
+    discovery_reason: str | None = None
+    discovery_required_start: str | None = None
 
 
 def read_backend_runtime_state() -> dict[str, Any]:
@@ -213,8 +236,11 @@ async def run_missed_access_event_reconciliation(
                 action="access_event.reconciliation_checked",
                 target_label="Protect LPR reconciliation",
             )
-        if result.errors == 0:
-            window_start = window_end
+        if result.covered_through is not None:
+            # Earlier work is already retained in the durable frontier/queue.
+            # Rewinding here would recursively subtract another overlap on each
+            # incomplete cycle and invent an ever-older discovery requirement.
+            window_start = max(window_start, _aware_utc(datetime.fromisoformat(result.covered_through)))
         await asyncio.sleep(interval_seconds)
 
 
@@ -261,47 +287,115 @@ class MissedAccessEventBackfillService:
         )
         result.window_start = window_start.isoformat()
 
-        events = await protect.list_events(
-            limit=MISSED_EVENT_BACKFILL_PROTECT_LIMIT,
-            event_type="smartDetectZone",
-            since=window_start,
-            until=startup,
-        )
-        events = sorted(events, key=lambda event: _parse_datetime(event.get("start")) or startup)
-        result.scanned = len(events)
-
-        for protect_event in events:
+        discovery = HistoricalDiscoveryStore(self.candidate_store)
+        key = protect_connection_key(await get_runtime_config())
+        claim, status = await discovery.request_and_claim(key=key, start=milliseconds(window_start),
+            end=milliseconds(startup)+1, source=self.source, reason=self.backfill_reason)
+        if claim is not None:
             try:
-                protect_id = str(protect_event.get("id") or "").strip()
-                # Stored original evidence wins before any track/provider fetch.
-                if protect_id and await self.candidate_store.contains(protect_id):
-                    result.duplicates += 1
-                    continue
-                candidate = await self._candidate_from_protect_event(protect, protect_event)
-                if not candidate or not window_start <= candidate.captured_at <= startup:
-                    result.skipped += 1
-                    continue
-                result.lpr_candidates += 1
-                payload = asdict(candidate)
-                payload["captured_at"] = candidate.captured_at.isoformat()
-                payload["backfill_reason"] = self.backfill_reason
-                payload["discovery_source"] = self.source
-                if not await self.candidate_store.reserve(
-                        protect_event_id=candidate.protect_event_id, captured_at=candidate.captured_at,
-                        candidate=payload):
-                    result.duplicates += 1
+                async with asyncio.timeout(DISCOVERY_SECONDS):
+                    status = await self._discover(protect, discovery, claim, result)
             except asyncio.CancelledError:
+                try:
+                    await drain_owned(discovery.checkpoint(claim, release=True, authoritative=False))
+                except HistoricalClaimLost:
+                    pass  # A completed/reclaimed checkpoint must not mask cancellation.
                 raise
-            except Exception:  # noqa: BLE001 - failed discovery/reservation must not advance the scan window
+            except Exception as exc:  # noqa: BLE001 - retain incomplete coverage without provider payloads.
+                result.discovery_reason = "discovery_budget_expired" if isinstance(exc, TimeoutError) else "discovery_retry_required"
                 result.errors += 1
-                logger.warning("Historical candidate discovery deferred")
+                try:
+                    status = await discovery.checkpoint(claim, release=True, authoritative=False)
+                except HistoricalClaimLost:
+                    status = DiscoveryStatus('pending', False, utc_from_ms(claim.start), 'discovery_lease_lost')
+        result.discovery_state = status.state
+        result.discovery_complete = status.complete
+        result.covered_through = status.covered_through.isoformat()
+        result.discovery_reason = status.reason or result.discovery_reason
+        result.discovery_required_start = (status.required_start or (utc_from_ms(claim.start) if claim else window_start)).isoformat()
         await self._drain_candidates(result, limit=HISTORICAL_PAGE_SIZE-drained)
-
         return result
+
+    async def _discover(self, protect: Any, store: HistoricalDiscoveryStore,
+                        claim: DiscoveryClaim, result: MissedAccessEventBackfillResult) -> DiscoveryStatus:
+        raw_requests = records = 0
+        generation = await protect.prepare_discovery(claim.key)
+        status = DiscoveryStatus('pending', False, utc_from_ms(claim.start))
+        while claim.frontier and records < DISCOVERY_RECORD_LIMIT:
+            if not claim.page:
+                if raw_requests >= DISCOVERY_RAW_REQUEST_LIMIT or result.discovery_requests >= DISCOVERY_REQUEST_LIMIT:
+                    break
+                lo, hi = claim.frontier[0]
+                raw_requests += 1
+                result.discovery_requests += 1
+                try:
+                    page, generation = await protect.recovery_page(key=claim.key, start_ms=lo, end_ms=hi)
+                except ProtectRecoveryPageInvalid:
+                    return await store.checkpoint(claim, hold='discovery_invalid_provider_response')
+                result.scanned += page.raw_count
+                next_claim = copy.deepcopy(claim)
+                async with protect.discovery_authority(claim.key, generation):
+                    if page.raw_count == DISCOVERY_RAW_LIMIT:
+                        if hi-lo <= 1:
+                            return await store.checkpoint(claim, hold='discovery_dense_boundary_unproven')
+                        mid = (lo+hi)//2
+                        next_claim.frontier[:1] = [[lo, mid], [mid, hi]]
+                    elif page.events:
+                        next_claim.page, next_claim.index = page.events, 0
+                    else:
+                        next_claim.frontier.pop(0)
+                    status = await store.checkpoint(next_claim)
+                claim.frontier, claim.page, claim.index = next_claim.frontier, next_claim.page, next_claim.index
+                if status.state != "leased":
+                    return status
+                if not claim.page:
+                    continue
+            row = claim.page[claim.index]
+            records += 1
+            candidate_payload = None
+            if await self.candidate_store.contains(row['id']):
+                result.duplicates += 1
+            elif row['type'] != 'smartDetectZone' or not _event_might_have_plate(row):
+                result.skipped += 1
+            else:
+                # Track collection admits one detail lookup and one track read.
+                if result.discovery_requests+2 > DISCOVERY_REQUEST_LIMIT:
+                    break
+                result.discovery_requests += 2
+                async def track(identity: str, current_generation: int = generation) -> dict[str, Any]:
+                    return await protect.recovery_track(claim.key, current_generation, identity)
+                candidate = await self._candidate_from_protect_event(track, row)
+                if candidate is None:
+                    if any('plate' in str(value).lower() or 'license' in str(value).lower()
+                           for value in row.get('smart_detect_types', [])):
+                        return await store.checkpoint(claim, hold='discovery_lpr_track_unresolved')
+                    result.skipped += 1
+                elif not claim.start <= milliseconds(candidate.captured_at) < claim.end:
+                    return await store.checkpoint(claim, hold='discovery_capture_time_outside_window')
+                else:
+                    result.lpr_candidates += 1
+                    candidate_payload = asdict(candidate)
+                    candidate_payload['captured_at'] = candidate.captured_at.isoformat()
+                    candidate_payload['backfill_reason'] = claim.reason
+                    candidate_payload['discovery_source'] = claim.source
+            # Copy the proposed advancement: an interrupted/rolled-back commit
+            # must never mutate the in-memory checkpoint subsequently released.
+            next_claim = DiscoveryClaim(claim.key, claim.token, claim.start, claim.end,
+                claim.source, claim.reason, [list(value) for value in claim.frontier],
+                list(claim.page), claim.index+1)
+            if next_claim.index == len(next_claim.page):
+                next_claim.frontier.pop(0)
+                next_claim.page, next_claim.index = [], 0
+            async with protect.discovery_authority(claim.key, generation):
+                status = await store.checkpoint(next_claim, candidate=candidate_payload)
+            claim.frontier, claim.page, claim.index = next_claim.frontier, next_claim.page, next_claim.index
+            if status.state != "leased":
+                return status
+        return await store.checkpoint(claim, release=True)
 
     async def _candidate_from_protect_event(
         self,
-        protect: Any,
+        track_reader: Callable[[str], Awaitable[dict[str, Any]]],
         protect_event: dict[str, Any],
     ) -> ProtectBackfillCandidate | None:
         protect_event_id = str(protect_event.get("id") or "").strip()
@@ -309,7 +403,7 @@ class MissedAccessEventBackfillService:
             return None
         if not _event_might_have_plate(protect_event):
             return None
-        track = await protect.event_lpr_track(protect_event_id)
+        track = await track_reader(protect_event_id)
 
         observations = [row for row in track.get("observations", []) if isinstance(row, dict)]
         track_candidate = _best_track_candidate(observations)
@@ -329,9 +423,8 @@ class MissedAccessEventBackfillService:
         if not registration_number or not captured_at:
             return None
 
-        event_payload = (
-            track.get("event") if isinstance(track.get("event"), dict) else protect_event
-        )
+        event = track.get("event")
+        event_payload = event if isinstance(event, dict) else protect_event
         return ProtectBackfillCandidate(
             protect_event_id=protect_event_id,
             registration_number=registration_number,

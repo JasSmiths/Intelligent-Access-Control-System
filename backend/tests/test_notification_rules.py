@@ -31,7 +31,7 @@ async def test_machine_activation_changes_only_state_and_never_commits_or_impers
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["exact", "partial", "ambiguous", "missing"])
 async def test_machine_name_lookup_preserves_exact_and_unique_partial_matching(kind):
-    rows = [NotificationRule(id=uuid.uuid4(), name=name, is_active=False)
+    rows = [NotificationRule(id=uuid.uuid4(), name=name, actions=[{"type": "in_app"}], is_active=False)
             for name in ["Synthetic Arrival", "Synthetic Departure"]]
     name = {"exact": "SYNTHETIC ARRIVAL", "partial": "Arrival", "ambiguous": "Synthetic", "missing": "unknown"}[kind]
     session = SimpleNamespace(scalars=AsyncMock(return_value=SimpleNamespace(all=lambda: rows)),

@@ -401,20 +401,32 @@ async def postgres_run(output: Path) -> int:
         else:
             record("recovery-downgrade-guard", "BLOCKED", "Historical prior-head migration failed")
 
-        if fresh is not None:
-            accepted = migrate(fresh_db, "downgrade", pre_retirement, output, "retirement-downgrade-guard")
-            marker = "matching database/files and image pair" in (output / "retirement-downgrade-guard.log").read_text()
-            after = await capture_schema(asyncpg.connect, fresh_db, output, "guard-retained-current-head")
-            connection = await asyncpg.connect(scratch_url(fresh_db).replace("+asyncpg", ""), timeout=10)
+        # Each restore-only boundary is proved at its own revision. A newer
+        # guard must not mask the historical calendar-retirement assertion.
+        for guard_revision, target_revision, label, marker_text in (
+            ('20261014_0016', pre_retirement, 'retirement-downgrade-guard', 'matching database/files and image pair'),
+            ('20261014_0017', '20261014_0016', 'recipient-binding-downgrade-guard', 'matching pre-upgrade database/image pair'),
+            ('20261014_0018', '20261014_0017', 'discovery-downgrade-guard', 'pre-upgrade backup'),
+        ):
+            guard_db = fresh_db if guard_revision == head else await create(label.split('-')[0]+'_guard')
+            if guard_revision == head and fresh is not None:
+                guard_before = fresh
+            elif migrate(guard_db, 'upgrade', guard_revision, output, label+'-prepare'):
+                guard_before = await capture_schema(asyncpg.connect, guard_db, output, label+'-before')
+            else:
+                record(label, 'BLOCKED', 'Guard revision upgrade failed')
+                continue
+            accepted = migrate(guard_db, 'downgrade', target_revision, output, label)
+            marker = marker_text in (output / (label+'.log')).read_text()
+            after = await capture_schema(asyncpg.connect, guard_db, output, label+'-after')
+            connection = await asyncpg.connect(scratch_url(guard_db).replace('+asyncpg', ''), timeout=10)
             try:
-                revision = await connection.fetchval("SELECT version_num FROM alembic_version")
+                revision = await connection.fetchval('SELECT version_num FROM alembic_version')
             finally:
                 await connection.close()
-            ok = not accepted and marker and revision == head and not differences(fresh, after)
-            record("retirement-downgrade-guard", "PASS" if ok else "FAIL",
-                   "Current retirement always requires the matching backup and image pair; empty schema and revision survive refusal")
-        else:
-            record("retirement-downgrade-guard", "BLOCKED", "Fresh current-head migration failed")
+            ok = not accepted and marker and revision == guard_revision and not differences(guard_before, after)
+            record(label, 'PASS' if ok else 'FAIL',
+                   'Restore-only guard preserves its exact schema and revision on refused downgrade')
 
         sentinel_db = await create("sentinel")
         if migrate(sentinel_db, "upgrade", first, output, "sentinel-upgrade", sentinel=True):

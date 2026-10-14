@@ -7,7 +7,7 @@ import type { UnifiProtectCamera } from "../../api/types";
 import type { NotificationAction, NotificationActionableOption, NotificationEndpoint, NotificationGateMalfunctionStage, NotificationGateMalfunctionStageOption, NotificationIntegration, NotificationVariable, NotificationVariableRecipients } from "../../api/workflows";
 import { notificationChannelMeta } from "../../lib/notifications";
 import { matchesSearchText } from "./model";
-import { concreteNotificationEndpoints, normalizeGateMalfunctionStages, normalizeNotificationActionable, normalizeNotificationMedia, notificationActionTargetChips, variableRecipientChoices } from "./notificationModel";
+import { bindNewRecipientReferences, notificationRecipientsNeedReview, concreteNotificationEndpoints, normalizeGateMalfunctionStages, normalizeNotificationActionable, normalizeNotificationMedia, notificationActionTargetChips, variableRecipientChoices } from "./notificationModel";
 import { PlainTemplateEditor, SafeVariableRichTextEditor } from "./TemplateEditor";
 
 export function NotificationActionCard({
@@ -39,6 +39,14 @@ export function NotificationActionCard({
       <button className="icon-button danger" onClick={onRemove} type="button" aria-label="Remove action"><Trash2 size={14} /></button>
     </article>;
   }
+  if (notificationRecipientsNeedReview(action, integration)) {
+    return <article className="workflow-action-card">
+      <strong>Recipients need review</strong>
+      <p role="alert">The destination list changed. Replace this action, select the intended recipients again, and check its private message details.</p>
+      <button className="icon-button danger" onClick={onRemove} type="button" aria-label="Remove action"><Trash2 size={14} /></button>
+    </article>;
+  }
+  const changeRecipients = (next: NotificationAction) => onChange(bindNewRecipientReferences(action, next, integration));
   const meta = notificationChannelMeta[action.type];
   const Icon = meta.icon;
   const supportsTitle = CHANNEL_METADATA[action.type].supports_title && !isGateMalfunctionWorkflow;
@@ -52,7 +60,7 @@ export function NotificationActionCard({
       if (restrictions.length) visibility[field] = restrictions;
       else delete visibility[field];
     }
-    onChange({...action, [field]: value, variable_recipients: Object.keys(visibility).length ? visibility : undefined});
+    changeRecipients({...action, [field]: value, variable_recipients: Object.keys(visibility).length ? visibility : undefined});
   };
   const actionMedia = normalizeNotificationMedia(action.media);
   const actionActionable = normalizeNotificationActionable(action.actionable);
@@ -78,7 +86,7 @@ export function NotificationActionCard({
   const availableRecipients = mobileEndpoints.filter((endpoint) => !editableTargetIds.includes(endpoint.id));
   const removeRecipient = (id: string) => {
     const target_ids = editableTargetIds.filter((target) => target !== id);
-    if (target_ids.length) onChange({ ...action, target_mode: "selected", target_ids });
+    if (target_ids.length) changeRecipients({ ...action, target_mode: "selected", target_ids });
   };
   const selectedGateStages = normalizeGateMalfunctionStages(action.gate_malfunction_stages);
   const activeGateStages = selectedGateStages.length
@@ -141,7 +149,7 @@ export function NotificationActionCard({
               endpoints={availableRecipients}
               onClose={() => setAddingRecipients(false)}
               onAdd={(ids) => {
-                onChange({ ...action, target_mode: "selected", target_ids: Array.from(new Set([...editableTargetIds, ...ids])) });
+                changeRecipients({ ...action, target_mode: "selected", target_ids: Array.from(new Set([...editableTargetIds, ...ids])) });
                 setAddingRecipients(false);
               }}
             />

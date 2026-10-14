@@ -1,4 +1,6 @@
+import hashlib
 import inspect
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +18,10 @@ class UnifiProtectError(RuntimeError):
     """Raised when UniFi Protect rejects or cannot complete a request."""
 
 
+class ProtectRecoveryPageInvalid(UnifiProtectError):
+    """A raw response cannot establish discovery coverage."""
+
+
 class UnifiProtectNotConfiguredError(UnifiProtectError):
     """Raised when Protect settings are incomplete."""
 
@@ -24,6 +30,67 @@ class UnifiProtectNotConfiguredError(UnifiProtectError):
 class ProtectMedia:
     content: bytes
     content_type: str
+
+
+@dataclass(frozen=True)
+class ProtectRecoveryPage:
+    raw_count: int
+    events: list[dict[str, Any]]
+
+
+def protect_connection_key(config: RuntimeConfig) -> str:
+    value = [config.unifi_protect_host.strip().lower(), config.unifi_protect_port,
+             config.unifi_protect_username]
+    return hashlib.sha256(json.dumps(value, separators=(',', ':')).encode()).hexdigest()
+
+
+async def read_protect_recovery_page(api: Any, *, start_ms: int, end_ms: int) -> ProtectRecoveryPage:
+    """Raw cardinality precedes filtering. No offset can prove dense ties safe.
+
+    The locked SDK forwards millisecond bounds and an explicit limit directly
+    when types are supplied and manual pagination is disabled. Expanded bounds
+    make either inclusive/exclusive endpoint convention conservative.
+    """
+    from uiprotect.data import Event, EventType
+    try:
+        raw = await api.get_events_raw(
+            start=datetime.fromtimestamp((start_ms-1)/1000, UTC),
+            end=datetime.fromtimestamp((end_ms+1)/1000, UTC), limit=100,
+            types=[EventType.SMART_DETECT], sorting='asc', _allow_manual_paginate=False)
+    except Exception as exc:
+        raise UnifiProtectError('Protect recovery page is unavailable.') from exc
+    if not isinstance(raw, list) or len(raw) > 100:
+        raise ProtectRecoveryPageInvalid('protect_recovery_invalid_page')
+    if len(raw) == 100:
+        return ProtectRecoveryPage(100, [])
+    events: dict[str, dict[str, Any]] = {}
+    for value in raw:
+        if not isinstance(value, dict):
+            raise ProtectRecoveryPageInvalid('protect_recovery_invalid_event')
+        identity, at = value.get('id'), value.get('start')
+        if (not isinstance(identity, str) or not identity.strip() or len(identity) > 180
+                or type(at) is not int or not start_ms-1 <= at <= end_ms+1):
+            raise ProtectRecoveryPageInvalid('protect_recovery_invalid_event')
+        if not start_ms <= at < end_ms:
+            continue
+        if value.get('type') not in EventType.device_events_set():
+            raise ProtectRecoveryPageInvalid('protect_recovery_unknown_event_type')
+        try:
+            event = Event.from_unifi_dict(**{**value, 'modelKey': 'event'}, api=api)
+            # Explicit safe schema; never persist arbitrary provider metadata.
+            safe = {key: item for key, item in serialize_unifi_event(event).items()
+                    if key in {'id', 'type', 'camera_id', 'camera_name', 'start', 'score', 'smart_detect_types'}}
+            if len(json.dumps(safe)) > 4096 or value.get('modelKey', 'event') != 'event':
+                raise ValueError
+        except Exception as exc:
+            raise ProtectRecoveryPageInvalid('protect_recovery_invalid_event') from exc
+        if identity in events and events[identity] != safe:
+            raise ProtectRecoveryPageInvalid('protect_recovery_conflicting_identity')
+        events[identity] = safe
+    # Match the established typed event getter's invalid-score exclusion, after
+    # raw cardinality and identity validation have established page coverage.
+    eligible = (row for row in events.values() if row['score'] >= 0)
+    return ProtectRecoveryPage(len(raw), sorted(eligible, key=lambda r: (r['start'], r['id'])))
 
 
 def is_unifi_protect_configured(config: RuntimeConfig) -> bool:

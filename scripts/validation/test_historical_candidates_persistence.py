@@ -38,6 +38,11 @@ async def historical_resources(isolated_resources, monkeypatch, tmp_path):
     async with AsyncSessionLocal() as session:
         await session.execute(text('TRUNCATE historical_access_candidates,access_chart_dirty_state,access_completion_work,ha_presence_desired,ha_presence_targets,ha_presence_coordinator CASCADE'))
         await session.commit()
+    from app.modules.unifi_protect.client import ProtectRecoveryPage, protect_connection_key
+    from app.services.unifi_protect import UnifiProtectIntegrationService
+    async with AsyncSessionLocal() as session:
+        await session.execute(text('TRUNCATE historical_discovery_progress'))
+        await session.commit()
     runtime = replace(await get_runtime_config(), schedule_default_policy='allow')
     monkeypatch.setattr(owner, 'get_runtime_config', AsyncMock(return_value=runtime))
     monkeypatch.setattr(owner.settings, 'data_dir', tmp_path)
@@ -46,9 +51,13 @@ async def historical_resources(isolated_resources, monkeypatch, tmp_path):
     async def thumbnail(*args, **kwargs):
         assert engine.pool.checkedout() == fixture.active_fixture_connections, 'Historical media held a database connection'
         return SimpleNamespace(content=image.getvalue())
-    protect = SimpleNamespace(configured=AsyncMock(return_value=False), list_events=AsyncMock(return_value=[]),
-        event_lpr_track=AsyncMock(side_effect=AssertionError('Original candidate was fetched again')),
-        event_thumbnail=AsyncMock(side_effect=thumbnail))
+    protect = UnifiProtectIntegrationService()
+    protect._api_discovery_key = protect_connection_key(runtime)
+    protect._ensure_api = AsyncMock(return_value=object())
+    protect.configured = AsyncMock(return_value=False)
+    protect.recovery_page = AsyncMock(return_value=(ProtectRecoveryPage(0, []), 0))
+    protect.event_lpr_track = AsyncMock(side_effect=AssertionError('Original candidate was fetched again'))
+    protect.event_thumbnail = AsyncMock(side_effect=thumbnail)
     monkeypatch.setattr(owner, 'get_unifi_protect_service', lambda: protect)
     charts = LeaderboardService(); monkeypatch.setattr(charts, 'wake', Mock())
     monkeypatch.setattr(owner, 'get_leaderboard_service', lambda: charts)
@@ -134,8 +143,9 @@ async def test_old_startup_candidate_drains_when_discovery_disabled_and_outside_
 async def test_repeated_discovery_uses_stored_original_before_track_fetch(historical_resources):
     store, original = await reserve(candidate(at=datetime.now(UTC)-timedelta(minutes=1)))
     historical_resources.protect.configured.return_value = True
-    historical_resources.protect.list_events.return_value = [{'id':original.protect_event_id, 'start':original.captured_at.isoformat(),
-        'smart_detect_types':['licensePlate'], 'changed':'provider now says something else'}]
+    from app.modules.unifi_protect.client import ProtectRecoveryPage
+    historical_resources.protect.recovery_page.return_value = (ProtectRecoveryPage(1, [{'id':original.protect_event_id, 'start':original.captured_at.isoformat(),
+        'type':'smartDetectZone', 'smart_detect_types':['licensePlate']}]), 0)
     result = await MissedAccessEventBackfillService().run()
     assert result.backfilled == 1 and result.duplicates == 1
     assert (await rows(HistoricalAccessCandidate))[0].candidate['protect_event'] == {'original':'immutable'}
@@ -308,30 +318,39 @@ async def test_terminal_skipped_proved_unlinked_claim_deletes_only_its_token_pat
     assert (await rows(HistoricalAccessCandidate))[0].media_state == 'discarded'
 
 
-async def test_concurrent_startup_and_periodic_discovery_share_one_provider_identity(historical_resources):
+async def test_concurrent_startup_and_periodic_discovery_share_one_provider_identity(historical_resources, monkeypatch):
+    from app.modules.unifi_protect.client import ProtectRecoveryPage, protect_connection_key
+    from app.services.unifi_protect import UnifiProtectIntegrationService
     value = candidate(at=datetime.now(UTC)-timedelta(minutes=1), plate='UNKNOWN1')
-    historical_resources.protect.configured.return_value = True
-    historical_resources.protect.list_events.return_value = [{'id':value.protect_event_id,
-        'start':value.captured_at.isoformat(), 'smart_detect_types':['licensePlate']}]
-    both_tracks, release = asyncio.Event(), asyncio.Event()
-    tracks = 0
+    async with AsyncSessionLocal() as session:
+        await session.execute(text('TRUNCATE historical_discovery_progress'))
+        await session.commit()
+    protect = UnifiProtectIntegrationService()
+    protect._api_discovery_key = protect_connection_key(await get_runtime_config())
+    protect._ensure_api = AsyncMock(return_value=object())
+    protect.configured = AsyncMock(return_value=True)
+    protect.recovery_page = AsyncMock(return_value=(ProtectRecoveryPage(1, [{'id':value.protect_event_id,
+        'type':'smartDetectZone', 'start':value.captured_at.isoformat(), 'smart_detect_types':['licensePlate']}]), 0))
+    started, release = asyncio.Event(), asyncio.Event()
     async def track(*args, **kwargs):
-        nonlocal tracks
-        tracks += 1
-        if tracks == 2:
-            both_tracks.set()
+        started.set()
         await release.wait()
         return {'event':{'id':value.protect_event_id, 'start':value.captured_at.isoformat()},
             'observations':[{'registration_number':'UNKNOWN1', 'captured_at':value.captured_at.isoformat(), 'confidence':.99}]}
-    historical_resources.protect.event_lpr_track.side_effect = track
+    protect.event_lpr_track = AsyncMock(side_effect=track)
+    protect.event_thumbnail = historical_resources.protect.event_thumbnail
+    monkeypatch.setattr(owner, 'get_unifi_protect_service', lambda: protect)
+    at = datetime.now(UTC)
     startup = MissedAccessEventBackfillService(source=MISSED_EVENT_BACKFILL_SOURCE, backfill_reason='Original startup reason')
     periodic = MissedAccessEventBackfillService(source=MISSED_EVENT_RECONCILIATION_SOURCE, backfill_reason='Original periodic reason')
-    tasks = [asyncio.create_task(service.run()) for service in (startup, periodic)]
+    task = asyncio.create_task(startup.run(startup_at=at))
     try:
-        await asyncio.wait_for(both_tracks.wait(), 5)
+        await asyncio.wait_for(started.wait(), 5)
+        busy = await asyncio.wait_for(periodic.run(startup_at=at), 5)
+        assert not busy.discovery_complete
     finally:
         release.set()
-    results = await asyncio.wait_for(asyncio.gather(*tasks), 10)
+    results = [await asyncio.wait_for(task, 10), busy]
     saved, = await rows(HistoricalAccessCandidate)
     event, = await rows(AccessEvent); saga, = await rows(MovementSagaRecord)
     assert saved.source == 'unifi_protect_lpr' and saved.state == 'completed'
@@ -339,5 +358,6 @@ async def test_concurrent_startup_and_periodic_discovery_share_one_provider_iden
     assert event.source == saved.candidate['discovery_source']
     assert event.raw_payload['backfill']['reason'] == saved.candidate['backfill_reason']
     assert sum(result.backfilled for result in results) == 1
-    historical_resources.protect.event_thumbnail.assert_awaited_once()
+    protect.event_lpr_track.assert_awaited_once()
+    protect.event_thumbnail.assert_awaited_once()
     assert not await rows(GateCommandRecord)

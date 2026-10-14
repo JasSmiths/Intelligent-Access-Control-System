@@ -156,10 +156,20 @@ export function App() {
     if (applyIntegrationRealtimeEvent(parsed, setIntegrationStatus)) return;
     if (parsed.type.startsWith("telemetry.")) return;
   }, [readSignals, setRealtimeStatus]);
+  const revalidateRealtimeAuthority = React.useCallback((signal: AbortSignal) => {
+    api.get<AuthStatus>("/api/v1/auth/status?include_photo=false", { signal })
+      .then((status) => {
+        if (!signal.aborted && activeSignals.current === readSignals) setAuthStatus(status);
+      })
+      .catch(() => {
+        if (!signal.aborted && activeSignals.current === readSignals) setRealtimeStatus("degraded", "Unable to verify session; reconnecting");
+      });
+  }, [readSignals, setRealtimeStatus]);
   useRealtimeConnection({
     sessionKey: realtimeSessionKey,
     onMessage: handleRealtimeMessage,
     onRefresh: refreshFromRealtimeLifecycle,
+    onAuthorityLost: revalidateRealtimeAuthority,
     onStatus: setRealtimeStatus
   });
   React.useEffect(() => {

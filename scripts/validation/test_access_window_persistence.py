@@ -972,9 +972,14 @@ async def test_distinct_pending_windows_keep_vendor_backlog_out_of_retained_work
     assert result.evidence.window_id == expected_window == summaries[-1].evidence.window_id
     assert result.count == 2 and result.best_ingest_id == summaries[-1].best_ingest_id
     pages = [(sql, parameters) for sql, parameters in captured
-             if 'FROM lpr_debounce_windows' in sql and 'LIMIT' in sql]
+             if sql.lstrip().startswith('SELECT lpr_debounce_windows.') and 'LIMIT' in sql]
     assert len(pages) == (count + 49) // 50
     assert all('normalized_payload' not in sql for sql, _ in pages)
+    diagnostics = [sql for sql, _ in captured if sql.lstrip().startswith('SELECT (SELECT count')
+                   and 'FROM historical_discovery_progress' in sql]
+    assert len(diagnostics) == 1
+    assert all('normalized_payload' not in sql and 'historical_access_candidates' not in sql
+               for sql in diagnostics)
     if count == 80:
         assert after_peak < before_peak / 3
     plans = []

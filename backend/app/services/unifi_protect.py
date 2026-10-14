@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 from app.core.logging import get_logger
 from app.core.task_lifecycle import drain_owned
 from app.modules.unifi_protect.client import (
+    ProtectRecoveryPage,
     UnifiProtectError,
     build_unifi_protect_client,
     close_unifi_protect_client,
@@ -24,7 +25,9 @@ from app.modules.unifi_protect.client import (
     list_bootstrap_cameras,
     list_unifi_protect_events,
     load_unifi_protect_bootstrap,
+    protect_connection_key,
     public_unifi_protect_configured_value,
+    read_protect_recovery_page,
     serialize_unifi_camera,
     serialize_unifi_event,
     subscribe_unifi_protect,
@@ -70,6 +73,7 @@ class UnifiProtectIntegrationService:
 
     def __init__(self) -> None:
         self._api: Any | None = None
+        self._api_discovery_key: str | None = None
         self._lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
         self._media_semaphore = asyncio.Semaphore(4)
@@ -298,6 +302,40 @@ class UnifiProtectIntegrationService:
             "time_of_day_source": day_night_source,
         }
 
+    @property
+    def discovery_generation(self) -> int:
+        return self._provider_generation
+
+    async def prepare_discovery(self, key: str) -> int:
+        await self._ensure_api(subscribe=True)
+        self._assert_discovery_authority(key, self._provider_generation)
+        return self._provider_generation
+
+    def _assert_discovery_authority(self, key: str, generation: int) -> None:
+        if (self._stopped or self._stopping or self._api_discovery_key != key
+                or self._provider_generation != generation):
+            raise UnifiProtectError('Protect discovery authority changed.')
+
+    @asynccontextmanager
+    async def discovery_authority(self, key: str, generation: int) -> AsyncIterator[None]:
+        # Only short SQL checkpoints enter this fence; no vendor I/O under it.
+        async with self._lock:
+            self._assert_discovery_authority(key, generation)
+            yield
+
+    async def recovery_page(self, *, key: str, start_ms: int, end_ms: int) -> tuple[ProtectRecoveryPage, int]:
+        async def read(api: Any) -> tuple[ProtectRecoveryPage, int]:
+            generation = self._provider_generation
+            self._assert_discovery_authority(key, generation)
+            return await read_protect_recovery_page(api, start_ms=start_ms, end_ms=end_ms), generation
+        return await self._run_current(read)
+
+    async def recovery_track(self, key: str, generation: int, event_id: str) -> dict[str, Any]:
+        self._assert_discovery_authority(key, generation)
+        result = await self.event_lpr_track(event_id)
+        self._assert_discovery_authority(key, generation)
+        return result
+
     async def list_events(
         self,
         *,
@@ -468,6 +506,7 @@ class UnifiProtectIntegrationService:
                         self._provider_generation += 1
                         generation = self._provider_generation
                         self._api = api
+                        self._api_discovery_key = protect_connection_key(config)
                         self._connected = True
                         self._last_error = None
                         operations = ProtectOperations(

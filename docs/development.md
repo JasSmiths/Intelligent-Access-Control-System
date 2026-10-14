@@ -91,6 +91,23 @@ curl -fsS http://localhost:8089/api/v1/auth/status
 
 ## Local cleanup and retention
 
+A development or validation run must never exhaust host disk or take production
+offline. The 14 October 2026 incident accumulated repeated dependency copies,
+stopped synthetic databases and Docker build cache. This must not recur. Apply
+the [disk-space safety procedure](validation.md#disk-space-safety) before creating
+more working data; neither `/private/tmp` nor an evidence directory is an
+unlimited storage allowance.
+
+Retain resources according to their purpose:
+
+| Resource | Retention rule |
+| --- | --- |
+| Dependencies and browsers | One verified preparation per required lock/runtime identity. Keep at most one active disposable copy; remove completed copies before another run. Do not silently substitute incompatible dependencies to save space. |
+| Synthetic databases and runtime files | Retain commands, fixtures, results and failure diagnostics, then remove run-owned state after container cleanup and a fresh mount check. A failed test is not a reason to retain an entire database indefinitely. If raw state is needed to diagnose a failure, record its size, owner and bounded retention before another run. |
+| Review and validation evidence | Keep the starting source needed for task-only diffs, reviewed/tested source identities, new files, sanitized logs, results and required review artifacts. Evidence retention does not require retaining installed packages, browser downloads or raw database directories. |
+| Tooling and test images | Reuse compatible immutable images. Remove superseded task images only after checking exact identities, all tags and running/stopped container references; preserve current production and required rollback images. |
+| Other checkouts | Preserve uncommitted work and task ownership. Never delete or reset a checkout merely to recover space; use the supported worktree lifecycle after its owner releases it. |
+
 Keep `docker-compose.yml` as the portable development definition and the ignored
 `docker-compose.override.yml` as the private operational image/storage receipt.
 Keep active `data/backend`, `data/postgres`, `data/redis`, logs and authentication
@@ -99,6 +116,14 @@ secrets in place. Retain the latest deployment recovery checkpoint under
 Delete older backup and preview trees only after their retention is explicitly
 authorized and no container mount uses them. Do not recreate a retired preview
 from historical receipts without a separately authorized deployment.
+
+Inventory existing checkpoints before making another full backup. Reuse an
+existing image archive when its verified image identities satisfy the new
+checkpoint, recording the shared archive reference and checksum. Database and
+application-data backups represent separate recovery points even when their sizes
+match. Consolidate duplicate archives only when rollback instructions remain
+usable; do not remove a complete checkpoint on the strength of an image match.
+Never place credentials or production backups in portable review bundles.
 
 Docker's unused volumes can still hold recovery databases. Inspect references
 from stopped containers as well as running ones, retain named/nonempty volumes
@@ -236,6 +261,10 @@ Handoff includes a plain-English result, the exact worktree and branch/HEAD,
 commit state, checks and retained evidence, unresolved limitations and deployment
 status. Explain measured performance using the tested dataset and operation; do
 not turn a synthetic substep benchmark into an end-to-end latency claim.
+Also report starting/final free space, peak task storage when measured, retained
+dependency/image identities, disposable cleanup results and any remaining storage
+owner or retention decision. A release handoff must not leave unbounded temporary
+data behind.
 
 ## Configuration, authentication, and proxying
 

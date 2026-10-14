@@ -24,7 +24,6 @@ from app.modules.notifications.apprise_client import (
 from app.modules.notifications.apprise_urls import (
     normalize_apprise_url,
     split_apprise_urls,
-    summarize_apprise_url,
 )
 from app.modules.notifications.base import (
     ComposedNotification,
@@ -40,6 +39,7 @@ from app.services.actionable_notifications import (
     get_actionable_notification_service,
 )
 from app.services.event_bus import RealtimeEvent, event_bus
+from app.services.integration_settings import apprise_destinations, apprise_revision
 from app.services.mutation_context import load_active_admin
 from app.services.notification_authorization import NotificationAuthorization
 from app.services.notification_dispatch import NotificationDispatcher
@@ -264,9 +264,8 @@ class NotificationService:
         apprise_urls = [
             normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)
         ]
-        apprise_endpoints = [
-            summarize_apprise_url(index, url) for index, url in enumerate(apprise_urls)
-        ]
+        apprise_endpoints = apprise_destinations(config.apprise_urls)
+        revision = apprise_revision(config.apprise_urls)
         mobile_endpoints: list[dict[str, Any]] = []
         if apprise_endpoints:
             mobile_endpoints.append(
@@ -283,6 +282,7 @@ class NotificationService:
                 "provider": "Apprise",
                 "label": str(endpoint["type"]),
                 "detail": str(endpoint["preview"]),
+                "apprise_revision": revision,
             }
             for endpoint in apprise_endpoints
         )
@@ -298,6 +298,7 @@ class NotificationService:
                 "name": "Mobile Notification",
                 "provider": "Apprise / Home Assistant",
                 "configured": bool(apprise_urls or home_assistant_mobile_endpoints),
+                "apprise_revision": revision,
                 "endpoints": mobile_endpoints,
             },
             {
@@ -463,13 +464,10 @@ class NotificationService:
                     value[
                         "frozen_mobile_targets"
                     ] = await self.recipients.select_home_assistant_mobile_targets(config, value)
-                    # Endpoint indexes are safe to retain; URLs may contain secrets.
-                    configured = [
-                        normalize_apprise_url(url)
-                        for url in split_apprise_urls(config.apprise_urls)
-                    ]
-                    selected = self.recipients.select_apprise_urls(config.apprise_urls, value)
-                    value["frozen_apprise_indexes"] = [configured.index(url) for url in selected]
+                    # Keep occurrence identity: equal URLs can have different
+                    # per-recipient template restrictions.
+                    selected = self.recipients.select_apprise_targets(config.apprise_urls, value)
+                    value["frozen_apprise_indexes"] = [index for index, _ in selected]
         return plan, configuration_binding(config, plan)
 
     async def reserve_confirmed_in_session(
@@ -942,16 +940,17 @@ class NotificationService:
             configured = [
                 normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)
             ]
-            urls = [configured[index] for index in action["frozen_apprise_indexes"]]
+            apprise_targets = [(index, configured[index]) for index in action["frozen_apprise_indexes"]]
             home_assistant_targets = action["frozen_mobile_targets"]
         else:
-            urls = self.recipients.select_apprise_urls(config.apprise_urls, action)
+            apprise_targets = self.recipients.select_apprise_targets(config.apprise_urls, action)
             home_assistant_targets = await self.recipients.select_home_assistant_mobile_targets(
                 config, action
             )
+        urls = [url for _, url in apprise_targets]
         if not urls and not home_assistant_targets:
             raise NotificationDeliveryError(
-                "No mobile notification endpoints are configured or selected."
+                "No mobile notification recipients are configured or selected.", delivery="not_sent"
             )
         snapshot = await self._snapshot_attachment(action.get("media") or {})
         attachments = [snapshot.path] if snapshot else []
@@ -960,11 +959,8 @@ class NotificationService:
         delivered_any = False
         try:
             if "recipient_content" in action:
-                configured = [
-                    normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)
-                ]
-                for url in urls:
-                    endpoint = f"apprise:{configured.index(url)}"
+                for index, url in apprise_targets:
+                    endpoint = f"apprise:{index}"
                     scoped_action = {
                         **action,
                         **content_for_recipient(action, endpoint, context.subject),

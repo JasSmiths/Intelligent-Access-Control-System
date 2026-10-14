@@ -12,6 +12,36 @@ This guide explains how to find and extend the current owners. Use
 
 ## Backend ownership
 
+Account mutation authority belongs to
+[user_accounts.py](../backend/app/services/user_accounts.py), not route-loaded
+user objects. Password work finishes before the transaction; fresh actor/session,
+target and last-active-Admin checks, confirmation and required audit share one
+commit. Login similarly rechecks the exact credential/session version verified
+before issuing a token. Extend mutations through this owner rather than adding a
+second actor check or confirmation commit in a route.
+
+[realtime_connections.py](../backend/app/services/realtime_connections.py) owns
+each connection's current authority, expiry, bounded queue, sender and receiver
+lifetimes. Standard users receive explicit UI hint projections; internal listeners
+retain their full delivery contracts. Add a supported hint through the projection
+and typed frontend invalidation contract together. Shutdown and cancellation must
+drain owned children before reporting completion.
+
+[notification_recipient_binding.py](../backend/app/services/notification_recipient_binding.py)
+owns selection validity. Selected Apprise indices require the opaque catalog
+revision captured by deliberate selection. Rule saves and dispatch both revalidate
+that binding against current authoritative configuration; unrelated edits preserve
+it. To change recipient behavior, update this contract and the existing workflow
+editor, without adding another delivery-state framework or exposing URL credentials.
+
+Historical discovery separates bounded raw collection in the Protect adapter,
+leased progress in
+[historical_discovery.py](../backend/app/services/historical_discovery.py), and
+existing silent candidate processing in
+[restart_backfill.py](../backend/app/services/restart_backfill.py). A new historical
+fact may extend the safe captured schema; coverage decisions and durable acceptance
+remain under the discovery owner. Hardware execution never belongs to this path.
+
 [main.py](../backend/app/main.py) constructs the application and owns startup and
 shutdown. [API registration](../backend/app/api/router.py) defines the supported
 route groups. Request handlers validate input, authenticate callers, and adapt

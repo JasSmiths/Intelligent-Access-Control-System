@@ -17,8 +17,8 @@ const paths: Record<OperationalDataKey, string> = {
 function eventMatches(key: OperationalDataKey, event: RealtimeMessage) {
   if (key === "anomalies") return ["alerts.updated", "access_event.finalized", "access_event.updated", "access_event.finalize_failed"].includes(event.type);
   const resource = auditResource(event);
-  if (key === "maintenanceStatus") return resource === "settings";
-  return event.type.startsWith("schedule.") || ["access_device", "esphome", "home_assistant", "schedule", "settings"].includes(resource);
+  if (key === "maintenanceStatus") return resource === "settings" || event.type === "maintenance_mode.changed";
+  return ["home_assistant.status", "access_device.status"].includes(event.type) || event.type.startsWith("schedule.") || ["access_device", "esphome", "home_assistant", "schedule", "settings"].includes(resource);
 }
 function useOperationalRead<Key extends OperationalDataKey>(key: Key, enabled: boolean, signals: ReadSignals, setter: Setters[Key]) {
   const identity = `${signals.accountKey}:${key}`;

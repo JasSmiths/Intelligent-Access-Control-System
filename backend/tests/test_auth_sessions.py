@@ -107,7 +107,9 @@ async def test_existing_request_and_websocket_adapters_use_verified_user_without
     else:
         async def unused():
             raise AssertionError("Auth must not receive a WebSocket message")
-        assert await auth.authenticate_websocket(session, WebSocket(scope, unused, unused)) is user
+        extracted = await auth.extract_websocket_token(WebSocket(scope, unused, unused))
+        assert extracted == token
+        assert await auth.authenticate_token(session, extracted) is user
 
 
 @pytest.mark.parametrize("failure", ["signature", "expired", "missing_jti", "revoked", "inactive", "missing_user"])

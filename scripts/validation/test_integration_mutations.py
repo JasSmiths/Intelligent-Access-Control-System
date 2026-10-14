@@ -47,7 +47,7 @@ async def api(isolated_resources, monkeypatch):
     app.include_router(action_confirmations.router, prefix="/api/v1/action-confirmations")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app, raise_app_exceptions=False),
         base_url="http://synthetic.invalid", headers={"Authorization": f"Bearer {token}"}, trust_env=False) as client:
-        yield SimpleNamespace(client=client, coordinator=coordinator, restarts=restarts, user_id=user_id)
+        yield SimpleNamespace(client=client, coordinator=coordinator, restarts=restarts, user_id=user_id, app=app)
     await coordinator.stop()
     async with AsyncSessionLocal() as session:
         await session.execute(text("TRUNCATE system_settings, action_confirmations, audit_logs CASCADE"))

@@ -18,12 +18,12 @@ class FakeSocket {
   readyState = FakeSocket.CONNECTING;
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
-  onclose: ((event: Event) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
   send = vi.fn<(message: string) => void>();
   close = vi.fn(() => {
     this.readyState = FakeSocket.CLOSED;
-    this.onclose?.(new Event("close"));
+    this.onclose?.(new CloseEvent("close", { code: 1000 }));
   });
   constructor(readonly url: string) { FakeSocket.instances.push(this); }
   open() { this.readyState = FakeSocket.OPEN; this.onopen?.(new Event("open")); }
@@ -35,7 +35,7 @@ class FakeSocket {
 }
 
 function options(sessionKey: string | null = "synthetic-admin:admin") {
-  return { sessionKey, onMessage: vi.fn(), onRefresh: vi.fn(), onStatus: vi.fn() };
+  return { sessionKey, onMessage: vi.fn(), onRefresh: vi.fn(), onAuthorityLost: vi.fn(), onStatus: vi.fn() };
 }
 const message = { type: "visitor_pass.updated", payload: { id: "synthetic-pass" } };
 let visibility: DocumentVisibilityState;
@@ -189,4 +189,36 @@ it("reports malformed envelopes without exposing them to route consumers", () =>
   act(() => { socket.open(); socket.message("{"); socket.message({ payload: {} }); socket.message({ type: "event", payload: null }); });
   expect(callbacks.onMessage).not.toHaveBeenCalled();
   expect(callbacks.onStatus.mock.calls.at(-1)?.[0]).toBe("degraded");
+});
+
+
+it("refreshes current authority on server rejection and waits for a verified replacement", () => {
+  const callbacks = options();
+  const { unmount } = renderHook(() => useRealtimeConnection(callbacks));
+  const old = FakeSocket.instances[0];
+  act(() => { old.open(); old.verify(); });
+  act(() => { old.readyState = FakeSocket.CLOSED; old.onclose?.(new CloseEvent("close", { code: 1008 })); });
+  expect(callbacks.onAuthorityLost).toHaveBeenCalledOnce();
+  expect(callbacks.onStatus.mock.calls.at(-1)?.[0]).toBe("reconnecting");
+  const signal = callbacks.onAuthorityLost.mock.calls[0][0] as AbortSignal;
+  act(() => vi.advanceTimersByTime(REALTIME_RECONNECT_DELAY_MS));
+  const replacement = FakeSocket.instances[1];
+  expect(callbacks.onRefresh).not.toHaveBeenCalled();
+  act(() => { replacement.open(); replacement.verify(); });
+  expect(callbacks.onRefresh).toHaveBeenCalledOnce();
+  unmount();
+  expect(signal.aborted).toBe(true);
+});
+
+it("does not treat a stale pong after overflow close as subscription health", () => {
+  const callbacks = options();
+  renderHook(() => useRealtimeConnection(callbacks));
+  const old = FakeSocket.instances[0];
+  act(() => { old.open(); old.verify(); old.close(); });
+  act(() => old.message({ type: "connection.pong", payload: {} }));
+  expect(callbacks.onStatus.mock.calls.at(-1)?.[0]).toBe("reconnecting");
+  act(() => vi.advanceTimersByTime(REALTIME_RECONNECT_DELAY_MS));
+  const replacement = FakeSocket.instances[1];
+  act(() => { replacement.open(); replacement.verify(); });
+  expect(callbacks.onRefresh).toHaveBeenCalledOnce();
 });

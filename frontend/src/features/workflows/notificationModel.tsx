@@ -29,6 +29,7 @@ export type NotificationActionMethod = {
   targetMode: NotificationTargetMode;
   requiresTarget: boolean;
   defaultTargetIds: string[];
+  apprise_revision?: string;
   unavailableReason?: string;
 };
 
@@ -117,6 +118,7 @@ export function buildNotificationActionMethods(
       targetMode: "selected",
       requiresTarget: true,
       defaultTargetIds: homeAssistantMobileTargets.some((target) => target.id === currentUserTarget) ? [currentUserTarget] : [],
+      apprise_revision: mobileIntegration?.apprise_revision,
     });
   }
 
@@ -133,6 +135,7 @@ export function buildNotificationActionMethods(
       targetMode: "selected",
       requiresTarget: true,
       defaultTargetIds: [endpoint.id],
+      apprise_revision: endpoint.apprise_revision,
     });
   }
 
@@ -279,9 +282,29 @@ export function createWorkflowDraft(): NotificationRule {
   };
 }
 
+function hasPositionalAppriseRecipients(action: NotificationAction) {
+  const selected = action.target_mode === "all" ? [] : action.target_ids;
+  const restricted = Object.values(action.variable_recipients ?? {}).flatMap((entries) => entries.flatMap((entry) => entry.target_ids));
+  return [...selected, ...restricted].some((id) => id.startsWith("apprise:"));
+}
+
+export function notificationRecipientsNeedReview(action: NotificationAction, integration?: NotificationIntegration) {
+  return Boolean(integration?.apprise_revision && hasPositionalAppriseRecipients(action)
+    && action.apprise_revision !== integration.apprise_revision);
+}
+
+export function bindNewRecipientReferences(before: NotificationAction, after: NotificationAction, integration?: NotificationIntegration): NotificationAction {
+  // Only a newly selected reference can receive the current catalog binding.
+  // Existing positional references keep their saved epoch, including stale ones.
+  if (!hasPositionalAppriseRecipients(before) && hasPositionalAppriseRecipients(after)) {
+    return {...after, apprise_revision: integration?.apprise_revision};
+  }
+  return after;
+}
+
 export function createWorkflowAction(
   type: NotificationActionType,
-  overrides: Partial<Pick<NotificationAction, "target_mode" | "target_ids">> = {}
+  overrides: Partial<Pick<NotificationAction, "target_mode" | "target_ids" | "apprise_revision">> = {}
 ): NotificationAction {
   return {
     id: draftId("action"), type, ...defaultNotificationConfig(type),
@@ -367,6 +390,7 @@ function normalizeNotificationAction(action: Partial<NotificationAction>): Notif
     type,
     target_mode: normalizeNotificationTargetMode(action.target_mode),
     target_ids: Array.isArray(action.target_ids) ? action.target_ids.map(stringifyTemplateValue).filter(Boolean) : [],
+    ...(typeof action.apprise_revision === "string" ? {apprise_revision: action.apprise_revision} : {}),
     title_template: stringifyTemplateValue(action.title_template) || templates.title_template,
     message_template: stringifyTemplateValue(action.message_template) || templates.message_template,
     ...(Object.keys(variableRecipients).length ? {variable_recipients: variableRecipients} : {}),

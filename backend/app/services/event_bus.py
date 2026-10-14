@@ -11,6 +11,9 @@ from fastapi import WebSocket
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
+from app.models.enums import UserRole
+from app.services.realtime_connections import Authorize, RealtimeConnection
 from app.services.realtime_contracts import RealtimePublishReceipt
 
 logger = get_logger(__name__)
@@ -23,6 +26,7 @@ REALTIME_STREAM_RECONNECT_SECONDS = 1.0
 REALTIME_REDIS_CONNECT_TIMEOUT_SECONDS = 0.5
 REALTIME_REDIS_SOCKET_TIMEOUT_SECONDS = 2.0
 REALTIME_WEBSOCKET_QUEUE_SIZE = 250
+REALTIME_SHUTDOWN_TIMEOUT_SECONDS = 8.0
 
 
 @dataclass(frozen=True)
@@ -35,13 +39,6 @@ class RealtimeEvent:
 EventListener = Callable[[RealtimeEvent], Awaitable[None]]
 ListenerScope = Literal["local", "all_workers"]
 RedisClientFactory = Callable[[str], redis_asyncio.Redis]
-
-
-@dataclass
-class _WebSocketConnection:
-    websocket: WebSocket
-    queue: asyncio.Queue[dict[str, Any]]
-    sender_task: asyncio.Task | None
 
 
 @dataclass(frozen=True)
@@ -71,9 +68,10 @@ class EventBus:
         enable_redis: bool = True,
         websocket_queue_size: int = REALTIME_WEBSOCKET_QUEUE_SIZE,
     ) -> None:
-        self._connections: dict[WebSocket, _WebSocketConnection] = {}
+        self._connections: dict[WebSocket, RealtimeConnection] = {}
         self._listeners: dict[EventListener, tuple[ListenerScope, frozenset[str] | None]] = {}
         self._lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
         self._redis_lock = asyncio.Lock()
         self._started = False
         self._transport = "in_process"
@@ -99,75 +97,74 @@ class EventBus:
         self._websocket_queue_drops = 0
 
     async def start(self) -> None:
-        if self._started:
-            return
-        self._started = True
-        if self._redis_enabled:
-            self._transport = "redis_stream"
-            await self._ensure_redis()
-            self._stream_task = asyncio.create_task(
-                self._redis_stream_reader(),
-                name="event-bus-redis-stream-reader",
-            )
-        logger.info("event_bus_started", extra={"transport": self._transport})
+        async with self._lifecycle_lock:
+            if self._started:
+                return
+            if self._connections or (self._stream_task is not None and not self._stream_task.done()):
+                await drain_owned(self._stop())
+            try:
+                if self._redis_enabled:
+                    self._transport = "redis_stream"
+                    await self._ensure_redis()
+                self._started = True
+                if self._redis_enabled:
+                    self._stream_task = asyncio.create_task(
+                        self._redis_stream_reader(), name="event-bus-redis-stream-reader")
+                logger.info("event_bus_started", extra={"transport": self._transport})
+            except BaseException:
+                await drain_owned(self._stop())
+                raise
 
     async def stop(self) -> None:
-        self._started = False
-        stream_task = self._stream_task
-        self._stream_task = None
-        if stream_task:
-            stream_task.cancel()
-            await asyncio.gather(stream_task, return_exceptions=True)
+        async with self._lifecycle_lock:
+            # Cancellation of a waiter cannot abandon the shutdown transition.
+            await drain_owned(self._stop())
 
+    async def _stop(self) -> None:
+        self._started = False
         async with self._lock:
             connections = list(self._connections.values())
-            self._connections.clear()
             self._listeners.clear()
-
-        for connection in connections:
-            if connection.sender_task is not None:
-                connection.sender_task.cancel()
-        if connections:
-            await asyncio.gather(
-                *(
-                    connection.sender_task
-                    for connection in connections
-                    if connection.sender_task is not None
-                ),
-                return_exceptions=True,
-            )
-        for connection in connections:
-            try:
-                await connection.websocket.close()
-            except Exception:
-                logger.debug("event_bus_websocket_close_failed", exc_info=True)
-
-        await self._close_redis()
+            for connection in connections:
+                connection.close(1001)
+        stream_task = self._stream_task
+        if stream_task:
+            stream_task.cancel()
+        waiters = [asyncio.create_task(connection.done.wait()) for connection in connections]
+        owned = [*waiters, *([stream_task] if stream_task else [])]
+        try:
+            if owned:
+                _, pending = await asyncio.wait(owned, timeout=REALTIME_SHUTDOWN_TIMEOUT_SECONDS)
+                if pending:
+                    raise RuntimeError("Realtime shutdown incomplete; cleanup remains owned.")
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+            if stream_task is not None and stream_task.done():
+                await asyncio.gather(stream_task, return_exceptions=True)
+                self._stream_task = None
+            await self._close_redis()
+        # Incomplete connections remain visible/owned for a subsequent drain.
+        async with self._lock:
+            for connection in connections:
+                if connection.done.is_set():
+                    self._connections.pop(connection.websocket, None)
         logger.info("event_bus_stopped")
 
-    async def connect(self, websocket: WebSocket) -> None:
-        await websocket.accept()
-        connection = _WebSocketConnection(
-            websocket=websocket,
-            queue=asyncio.Queue(maxsize=self._websocket_queue_size),
-            sender_task=None,
-        )
+    async def serve(self, websocket: WebSocket, *, authorize: Authorize,
+                    role: UserRole, expires_at: int) -> None:
+        connection = RealtimeConnection(websocket, authorize, role, expires_at, self._websocket_queue_size)
         async with self._lock:
-            self._connections[websocket] = connection
+            if self._started:
+                self._connections[websocket] = connection
+            else:
+                connection.close(1001)
         try:
-            await websocket.send_json({"type": "connection.ready", "payload": {}})
-            connection.sender_task = asyncio.create_task(
-                self._websocket_sender(websocket),
-                name="event-bus-websocket-sender",
-            )
-        except Exception:
-            self.disconnect(websocket)
-            raise
-
-    def disconnect(self, websocket: WebSocket) -> None:
-        connection = self._connections.pop(websocket, None)
-        if connection is not None and connection.sender_task is not None:
-            connection.sender_task.cancel()
+            await connection.run()
+        finally:
+            if connection.done.is_set():
+                self._connections.pop(websocket, None)
 
     def subscribe(
         self, listener: EventListener, *, scope: ListenerScope = "local",
@@ -186,6 +183,7 @@ class EventBus:
             "transport": self._transport,
             "connections": len(self._connections),
             "listeners": len(self._listeners),
+            "websocket_cleanup_pending": sum(connection.cleanup_pending for connection in self._connections.values()),
             "websocket_queue_size": self._websocket_queue_size,
             "websocket_queued_events": sum(
                 connection.queue.qsize() for connection in self._connections.values()
@@ -345,15 +343,9 @@ class EventBus:
 
         message = event.__dict__
         for connection in connections:
-            try:
-                connection.queue.put_nowait(message)
-            except asyncio.QueueFull:
+            was_closing = connection.closing.is_set()
+            if not connection.enqueue(message) and not was_closing and connection.close_code == 1013:
                 self._websocket_queue_drops += 1
-                self.disconnect(connection.websocket)
-                logger.warning(
-                    "event_bus_websocket_backpressure_disconnected",
-                    extra={"event_type": event.type},
-                )
 
         # Snapshot/filter under the bus lock; invoke inline outside it. Source
         # owners publish hints after releasing DB/domain locks. No task per event.
@@ -362,27 +354,6 @@ class EventBus:
                 await listener(event)
             except Exception:  # noqa: BLE001 - One observational listener must not prevent other listeners.
                 logger.warning("event_bus_listener_failed", extra={"event_type": event.type})
-
-    async def _websocket_sender(self, websocket: WebSocket) -> None:
-        while True:
-            try:
-                connection = self._connections.get(websocket)
-                if connection is None:
-                    return
-                message = await connection.queue.get()
-                try:
-                    await websocket.send_json(message)
-                finally:
-                    connection.queue.task_done()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - Transport failures must preserve reconnection and client isolation.
-                self._connections.pop(websocket, None)
-                logger.warning(
-                    "event_bus_websocket_send_failed",
-                    extra={"error": str(exc)},
-                )
-                return
 
 
 def _redis_client_from_url(redis_url: str) -> redis_asyncio.Redis:

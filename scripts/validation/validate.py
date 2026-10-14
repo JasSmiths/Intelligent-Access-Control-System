@@ -14,7 +14,9 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
+from storage import StorageGuard, StorageViolation, all_container_mounts, docker_free, remove_disposable, validation_interrupts
 
 from source_snapshot import changed_snapshot_sources, copy_sources, discover_sources, source_file, source_fingerprint
 from type_targets import classified_modules, type_commands
@@ -44,7 +46,9 @@ def arguments(argv=None):
     parser.add_argument('--check-only', action='store_true', help='Alias for --mode snapshot; no Docker/imports/install.')
     parser.add_argument('--no-migrations', action='store_true', help='Alias for --mode db-free; no DB services or persistence checks.')
     parser.add_argument('--reuse-dependencies', type=Path, metavar='PRIOR_RUN',
-                        help='Copy and verify python-deps and js-deps from an existing evidence directory.')
+                        help='Verify and mount an existing dependency preparation read-only; no package copy.')
+    parser.add_argument('--retain-dependencies', action='store_true',
+                        help='Retain a newly verified preparation for later read-only reuse; otherwise remove it after cleanup.')
     parser.add_argument('--allow-downloads', action='store_true',
                         help='Allow image pulls and exact-lock dependency installation in manifest-only containers.')
     parser.add_argument('--diagnostic', action='append', default=[], metavar='REPO_RELATIVE_TEST',
@@ -64,6 +68,8 @@ def arguments(argv=None):
         args.mode = 'snapshot'
     if args.no_migrations:
         args.mode = 'db-free'
+    if args.retain_dependencies and (not args.allow_downloads or args.reuse_dependencies or args.mode == 'snapshot'):
+        parser.error('--retain-dependencies requires a new --allow-downloads preparation')
     if args.mode != 'full' and (args.diagnostic or args.persistence_test or args.schema_check or args.database_restore):
         parser.error('Diagnostics, persistence tests and schema checks require --mode full')
     if args.mode != 'snapshot' and not (args.reuse_dependencies or args.allow_downloads):
@@ -71,23 +77,20 @@ def arguments(argv=None):
     return args
 
 
-class FullRunBusyError(RuntimeError):
+class ValidationRunBusyError(RuntimeError):
     """Another full harness owns this host's bounded execution slot."""
 
 
 @contextmanager
-def full_run_lock(mode, *, lock_path=None):
+def validation_run_lock(mode, *, lock_path=None):
     """Fail clearly instead of overlapping full runs or interrupting another run."""
-    if mode != 'full':
-        yield
-        return
     path = lock_path or Path(tempfile.gettempdir()) / f'iacs-validation-full-{os.getuid()}.lock'
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
     try:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise FullRunBusyError(f'Another full isolated harness is active on this host ({path}); retry after it finishes.') from exc
+            raise ValidationRunBusyError(f'Another isolated validation run is active on this host ({path}); retry after it finishes.') from exc
         yield
     finally:
         os.close(descriptor)
@@ -152,12 +155,55 @@ class Harness:
         self.args, self.run, self.snapshot = args, run, snapshot
         self.prefix = 'iacs-validation-' + uuid.uuid4().hex[:12]
         self.owned, self.results, self.checks = [], {}, {}
+        self.storage = None
+        self.disposable = []
 
     def write(self, name, data):
         (self.run / name).write_text(json.dumps(data, indent=2) + '\n')
 
     def capture(self, *command):
-        return subprocess.check_output(command, cwd=self.snapshot, text=True, timeout=60).strip()
+        process = subprocess.Popen(command, cwd=self.snapshot, text=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        deadline = time.monotonic() + 60
+        try:
+            while True:
+                if self.storage:
+                    self.storage.check()
+                try:
+                    output, error = process.communicate(timeout=1)
+                    if process.returncode:
+                        raise subprocess.CalledProcessError(process.returncode, command, output, error)
+                    return output.strip()
+                except subprocess.TimeoutExpired:
+                    if time.monotonic() >= deadline:
+                        raise
+        except BaseException:
+            self._kill(process)
+            raise
+
+    @staticmethod
+    def _kill(process):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+    def begin_storage(self):
+        if self.storage is None:
+            before = self.production_state()
+            validate_resource_paths(self.run.parent, self.args.reuse_dependencies, before)
+            probe = None if self.args.mode == 'snapshot' else lambda: docker_free(image_references(ROOT)['backend'])
+            self.storage = StorageGuard(self.run.parent, self.args.reuse_dependencies, vm_probe=probe)
+        try:
+            self.storage.check(force=True)
+        except StorageViolation:
+            self.results['storage_abort'] = 1
+            raise
+
+    def own_disposable(self, path):
+        self.disposable.append(path)
+        self.write('disposable-owned.json', list(map(str, self.disposable)))
 
     def production_state(self):
         names = set(self.capture('docker', 'ps', '-a', '--format', '{{.Names}}').splitlines())
@@ -170,6 +216,9 @@ class Harness:
                 'Running': row['State']['Running']} for row in rows]}
 
     def check(self, name, command, required=False, timeout=1200, classification='static'):
+        if self.storage and self.storage.cleaning:
+            raise StorageViolation('Run is stopping; no further checks may allocate resources')
+        self.begin_storage()
         print(name, flush=True)
         self.checks[name] = {'command': command, 'cwd': str(self.snapshot),
                              'classification': classification, 'status': 'running'}
@@ -179,14 +228,22 @@ class Harness:
             process = subprocess.Popen(command, cwd=self.snapshot, stdout=log,
                                        stderr=subprocess.STDOUT, start_new_session=True)
             try:
-                code = process.wait(timeout=timeout)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
-                code = 124
+                deadline = time.monotonic() + timeout
+                while True:
+                    self.storage.check()
+                    try:
+                        code = process.wait(timeout=1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if time.monotonic() >= deadline:
+                            raise
+            except (subprocess.TimeoutExpired, KeyboardInterrupt, StorageViolation) as exc:
+                self._kill(process)
+                code = 125 if isinstance(exc, StorageViolation) else 124
+                if isinstance(exc, StorageViolation):
+                    self.results['storage_abort'] = 1
+                    # Killing the CLI alone leaves detached/container writes alive.
+                    self.cleanup()
                 raise
             finally:
                 self.results[name] = code
@@ -204,19 +261,23 @@ class Harness:
 
     def image(self, ref):
         try:
-            return self.capture('docker', 'image', 'inspect', ref, '--format', '{{.Id}}')
+            identity = self.capture('docker', 'image', 'inspect', ref, '--format', '{{.Id}}')
         except subprocess.CalledProcessError:
             if not self.args.allow_downloads:
                 raise RuntimeError(f'Image unavailable locally; downloads not authorized: {ref}') from None
             name = 'pull-' + ref.split(':')[0].replace('/', '-')
             self.check(name, ['docker', 'pull', ref], True, classification='dependency-setup')
-            return self.capture('docker', 'image', 'inspect', ref, '--format', '{{.Id}}')
+            identity = self.capture('docker', 'image', 'inspect', ref, '--format', '{{.Id}}')
+        if self.storage:
+            self.storage.images[identity] = int(self.capture('docker', 'image', 'inspect', identity, '--format', '{{.Size}}'))
+            self.storage.check(force=True)
+        return identity
 
     def container(self, name, img, command, *, mounts=(), env=None, network='none', work='/tmp', detached=False):
         cname = self.prefix + '-' + name
         self.owned.append(cname)
         self.write('owned-containers.json', self.owned)
-        command_line = ['docker', 'run', '--name', cname, '--label', 'iacs.validation=' + self.prefix,
+        command_line = ['docker', 'run', '--pull=never', '--name', cname, '--label', 'iacs.validation=' + self.prefix,
                         '--network', network, '--cpus', '1', '--memory', '1536m', '--pids-limit', '256',
                         '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--no-healthcheck',
                         '--user', '0' if name == 'postgres' else f'{os.getuid()}:{os.getgid()}', '--workdir', work]
@@ -231,6 +292,8 @@ class Harness:
         return command_line + ['--entrypoint', command[0], img, *command[1:]]
 
     def cleanup(self):
+        if getattr(self, 'storage', None):
+            self.storage.cleaning = True
         failures = []
         for name in reversed(self.owned):
             try:
@@ -250,8 +313,23 @@ class Harness:
             remaining = self.capture('docker', 'ps', '-aq', '--filter', 'label=iacs.validation=' + self.prefix)
         except (OSError, subprocess.SubprocessError):
             remaining = 'inspection_failed'
-        self.write('cleanup.json', {'failures': failures, 'remaining': remaining})
         self.results['cleanup'] = int(bool(failures or remaining))
+        def receipt(name, data):
+            try:
+                self.write(name, data)
+            except OSError:
+                # Drain/delete owned disposable state even if a full disk prevents receipts.
+                self.results['cleanup_evidence'] = 1
+        receipt('cleanup.json', {'failures': failures, 'remaining': remaining})
+        if getattr(self, 'storage', None):
+            receipt('storage.json', self.storage.record())
+        if not self.results['cleanup'] and getattr(self, 'disposable', None):
+            try:
+                removed = remove_disposable(self.run, self.disposable, all_container_mounts())
+                receipt('disposable-cleanup.json', {'removed': removed, 'preserved': 'source, logs, artifacts and designated preparation'})
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                self.results['cleanup'] = 1
+                receipt('disposable-cleanup.json', {'error': type(exc).__name__, 'removed': []})
 
     def dependencies(self, images):
         python_deps, js_deps = self.run / 'python-deps', self.run / 'js-deps'
@@ -262,15 +340,14 @@ class Harness:
             for name in ('backend', 'node'):
                 if previous_images.get(name) != images[name]:
                     raise ValueError(f'Reused {name} image identity does not match this run')
-            # Tests may write dependency caches; never mutate the prior evidence.
-            for folder in ('python-deps', 'js-deps'):
-                shutil.copytree(previous / folder, self.run / folder, symlinks=True)
+            python_deps, js_deps = previous / 'python-deps', previous / 'js-deps'
         else:
             for directory, source, names in (
                 (python_deps, 'backend', ('pyproject.toml', 'uv.lock')),
                 (js_deps, 'frontend', ('package.json', 'package-lock.json')),
             ):
                 directory.mkdir()
+                self.own_disposable(directory)
                 for name in names:
                     shutil.copy2(self.snapshot / source / name, directory / name)
             self.check('python-dependencies', self.container('python-deps', images['backend'],
@@ -301,8 +378,12 @@ class Harness:
             True, classification='dependency-verification')
         self.write('dependencies.json', {'manifests': manifest_hashes(self.snapshot),
                    'reused_from': str(self.args.reuse_dependencies) if self.args.reuse_dependencies else None,
-                   'verification': 'exact copied manifests; offline uv sync --check; installed npm lock versions and tree',
+                   'verification': 'exact manifests; read-only preparation; offline uv sync --check; installed npm lock versions and tree',
                    'identities': ['python-identity.log', 'uv-identity.log', 'frontend-lock-check.log', 'npm-identity.log']})
+        if self.args.retain_dependencies:
+            self.disposable = [p for p in self.disposable if p not in (python_deps, js_deps)]
+            self.write('retained-preparation.json', {'path': str(self.run), 'images': images,
+                       'manifests': manifest_hashes(self.snapshot), 'policy': 'Keep one preparation per required lock/runtime identity.'})
         return python_deps, js_deps
 
     def execute(self):
@@ -314,6 +395,8 @@ class Harness:
         deps, jsdeps = self.dependencies(images)
         for folder in ('runtime', 'logs', 'artifacts'):
             (self.run / folder).mkdir()
+            if folder == 'runtime':
+                self.own_disposable(self.run / folder)
         database = self.prefix.replace('-', '_')
         env = {'IACS_ENVIRONMENT': 'testing', 'IACS_VALIDATION_MODE': 'db-free',
                'IACS_DATABASE_URL': 'postgresql+asyncpg://validation:synthetic-validation-only@127.0.0.1:1/' + database,
@@ -336,7 +419,8 @@ class Harness:
                 required, classification=classification)
         backend_check('isolation-db-free', ['/workspace/scripts/validation/preflight.py'], True)
         for index, relative in enumerate(HOST_TESTS):
-            backend_check('snapshot-tests' if index == 0 else 'harness-configuration-tests', ['/workspace/' + relative], True)
+            name = ('snapshot-tests', 'harness-configuration-tests', 'storage-tests')[index]
+            backend_check(name, ['/workspace/' + relative], True)
         backend_check('architecture-boundaries', ['/workspace/scripts/architecture/check_boundaries.py'],
                       classification='static')
         backend_check('compile', ['-c', "import pathlib; files=list(pathlib.Path('app').rglob('*.py'))+list(pathlib.Path('tests').rglob('*.py')); [compile(p.read_bytes(),str(p),'exec') for p in files]; print(len(files),'files compiled')"])
@@ -345,9 +429,20 @@ class Harness:
         backend_check('backend-tests', pytest_arguments('backend-tests'))
         for name, command in LINT_COMMANDS.items():
             backend_check(name, command)
+        # A small writable package-link directory keeps Vite/Vitest caches out of
+        # the shared preparation (.vite, .vite-temp and result caches included).
+        cache = self.run / 'frontend-cache'
+        cache.mkdir()
+        self.own_disposable(cache)
+        links = cache / 'node_modules'
+        links.mkdir()
+        for package in (jsdeps / 'node_modules').iterdir():
+            if package.name not in {'.vite', '.vite-temp', '.cache'}:
+                (links / package.name).symlink_to('/deps/node_modules/' + package.name)
         for name, command in [('frontend-tests', ['npm', 'test', '--', '--maxWorkers=1']), ('frontend-build', ['npm', 'run', 'build'])]:
             self.check(name, self.container(name, images['node'], command,
-                mounts=[(self.snapshot / 'frontend', '/frontend', 'rw'), (jsdeps / 'node_modules', '/frontend/node_modules', 'rw')],
+                mounts=[(self.snapshot / 'frontend', '/frontend', 'rw'), (jsdeps, '/deps', 'ro'),
+                        (links, '/frontend/node_modules', 'rw')],
                 work='/frontend'), classification='db-free')
         plugin = Path.home() / '.docker/cli-plugins/docker-compose'
         compose = ([shutil.which('docker-compose')] if shutil.which('docker-compose') else
@@ -363,6 +458,7 @@ class Harness:
             raise ValueError('The bounded full harness supports at most 999 isolated pytest suites')
         for folder in ('postgres', 'redis'):
             (self.run / folder).mkdir()
+            self.own_disposable(self.run / folder)
         self.check('postgres-start', self.container('postgres', images['postgres'], ['docker-entrypoint.sh', 'postgres'],
             mounts=[(self.run / 'postgres', '/var/lib/postgresql/data', 'rw')],
             env={'POSTGRES_USER': 'validation', 'POSTGRES_PASSWORD': 'synthetic-validation-only', 'POSTGRES_DB': database},
@@ -466,14 +562,18 @@ def run(args):
             # under a proposed evidence path until its mounts are checked.
             before = Harness(args, evidence, ROOT).production_state()
             validate_resource_paths(evidence, args.reuse_dependencies, before)
+        probe = None if args.mode == 'snapshot' else lambda: docker_free(image_references(ROOT)['backend'])
+        storage = StorageGuard(evidence, args.reuse_dependencies, vm_probe=probe)
+        storage.check(force=True)
         evidence.mkdir(parents=True, exist_ok=True)
         run = Path(tempfile.mkdtemp(prefix='iacs-validation-', dir=evidence))
         snapshot = run / 'source'
-        hashes = copy_sources(ROOT, snapshot, paths, required)
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        hashes = copy_sources(ROOT, snapshot, paths, required, check_storage=storage.check)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f'Preflight/snapshot refused: {exc}', file=sys.stderr)
         return 2
     harness = Harness(args, run, snapshot)
+    harness.storage = storage
     print('Retained results: ' + str(run), flush=True)
     harness.write('manifest.json', {
         'repository': str(ROOT), 'branch': harness.capture('git', '-C', str(ROOT), 'branch', '--show-current'),
@@ -532,9 +632,9 @@ def run(args):
 def main(argv=None):
     args = arguments(argv)
     try:
-        with full_run_lock(args.mode):
+        with validation_run_lock(args.mode), validation_interrupts():
             return run(args)
-    except (FullRunBusyError, OSError) as exc:
+    except (ValidationRunBusyError, OSError) as exc:
         print(f'Full harness refused: {exc}', file=sys.stderr)
         return 2
 

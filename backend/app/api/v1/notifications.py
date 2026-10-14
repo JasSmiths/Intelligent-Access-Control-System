@@ -397,5 +397,5 @@ def serialize_rule(rule: NotificationRule) -> dict[str, Any]:
 
 def rule_http_error(exc: MutationError) -> HTTPException:
     return HTTPException(
-        status_code={"forbidden": 403, "not_found": 404}.get(exc.code, 400), detail=str(exc)
+        status_code={"forbidden": 403, "not_found": 404, "recipient_binding": 409}.get(exc.code, 400), detail=str(exc)
     )

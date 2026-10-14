@@ -5,9 +5,12 @@ const vehicle = { id: "vehicle", registration_number: "AB12 CDE", make: "Ford", 
 const person = { id: "person", first_name: "Ada", last_name: "Resident", display_name: "Ada Resident", group_id: null, group: null, category: null, schedule_id: null, schedule: null, vehicles: [], is_active: true, profile_photo_url: null, garage_door_entity_ids: [], home_assistant_presence_input_boolean_entity_ids: [] };
 const event = { id: "event", registration_number: "AB12 CDE", direction: "entry", decision: "granted", confidence: .98, occurred_at: now, anomaly_count: 0, visitor_name: null, snapshot_url: null, movement_saga: null };
 
-async function fixtures(page: Page, initialDirectoryFailure?: "people" | "vehicles") {
+async function fixtures(page: Page, initialDirectoryFailure?: "people" | "vehicles", failGroupsAfterChange = true) {
   const unexpected: string[] = [];
   let changed = false;
+  let authenticated = true;
+  let authReads = 0;
+  let closeStream: (code: number) => void = () => { throw new Error("Stream not connected"); };
   let directoryUnavailable = Boolean(initialDirectoryFailure);
   let connected = false;
   let send: (type: string, payload: Record<string, unknown>) => void = () => { throw new Error("Fixture stream has not connected"); };
@@ -16,10 +19,10 @@ async function fixtures(page: Page, initialDirectoryFailure?: "people" | "vehicl
     const url = new URL(request.url());
     if (request.method() !== "GET") { unexpected.push(`${request.method()} ${url.pathname}`); await route.abort("blockedbyclient"); return; }
     if (directoryUnavailable && url.pathname === `/api/v1/${initialDirectoryFailure}`) { await route.fulfill({ status: 503, json: { detail: "Synthetic directory outage" } }); return; }
-    if (changed && url.pathname === "/api/v1/groups") { await route.fulfill({ status: 503, json: { detail: "Synthetic unrelated groups outage" } }); return; }
+    if (changed && failGroupsAfterChange && url.pathname === "/api/v1/groups") { await route.fulfill({ status: 503, json: { detail: "Synthetic unrelated groups outage" } }); return; }
     let body: unknown;
     switch (url.pathname) {
-      case "/api/v1/auth/status": body = { setup_required: false, authenticated: true, user: { id: "fixture-admin", username: "fixture-admin", first_name: "Alex", last_name: "Operator", full_name: "Alex Operator", role: "admin", is_active: true, preferences: { sidebarCollapsed: false } } }; break;
+      case "/api/v1/auth/status": authReads += 1; body = { setup_required: false, authenticated, user: authenticated ? { id: "fixture-admin", username: "fixture-admin", first_name: "Alex", last_name: "Operator", full_name: "Alex Operator", role: "admin", is_active: true, preferences: { sidebarCollapsed: false } } : null }; break;
       case "/api/v1/people": body = { items: [{ ...person, display_name: changed ? "Ada Updated" : person.display_name }], total: 1, next_cursor: null }; break;
       case "/api/v1/vehicles": body = { items: [{ ...vehicle, model: changed ? "Updated model" : vehicle.model }], total: 1, next_cursor: null }; break;
       case "/api/v1/events": body = [event]; break;
@@ -34,6 +37,7 @@ async function fixtures(page: Page, initialDirectoryFailure?: "people" | "vehicl
   // This intercepted socket has no server connection; every event is synthetic.
   await page.routeWebSocket("**/*", (socket) => {
     connected = true;
+    closeStream = (code) => socket.close({ code, reason: "Synthetic server closure" });
     send = (type, payload) => socket.send(JSON.stringify({ type, payload, created_at: now }));
     socket.onMessage((raw) => {
       const request = JSON.parse(String(raw));
@@ -43,6 +47,9 @@ async function fixtures(page: Page, initialDirectoryFailure?: "people" | "vehicl
   return {
     unexpected,
     recoverDirectory: () => { directoryUnavailable = false; },
+    async disconnect() { await expect.poll(() => connected).toBe(true); changed = true; closeStream(1013); },
+    revoke: () => { authenticated = false; closeStream(1008); },
+    authReads: () => authReads,
     async update(type: string, payload: Record<string, unknown> = {}) {
       await expect.poll(() => connected).toBe(true);
       changed = true;
@@ -133,3 +140,29 @@ for (const kind of ["people", "vehicles"] as const) {
     expect(fixture.unexpected).toEqual([]);
   });
 }
+
+
+test("server overflow closure reconnects and refreshes current directory data", async ({ page }) => {
+  const fixture = await fixtures(page, undefined, false);
+  await page.goto("/people");
+  const group = page.locator(".directory-group-header").first();
+  await expect(group).toBeVisible();
+  if (await group.getAttribute("aria-expanded") === "false") await group.click();
+  await expect(page.getByRole("button", { name: "Edit person Ada Resident" })).toBeVisible();
+  await fixture.disconnect();
+  await expect(page.getByRole("button", { name: "Edit person Ada Updated" })).toBeVisible();
+  await expect.poll(() => fixture.unexpected).toEqual([]);
+  await expect(page.getByRole("button", { name: "Refresh", exact: true })).toHaveAccessibleDescription(/Live|Data refreshed/);
+  expect(fixture.unexpected).toEqual([]);
+});
+
+test("server authority loss revalidates the session and leaves the protected screen", async ({ page }) => {
+  const fixture = await fixtures(page);
+  await page.goto("/people");
+  await expect(page.locator(".directory-group-header").first()).toBeVisible();
+  await fixture.update("audit.log.created", { action: "person.update" });
+  fixture.revoke();
+  await expect(page.getByRole("button", { name: /sign in/i })).toBeVisible();
+  await expect.poll(fixture.authReads).toBeGreaterThanOrEqual(2);
+  expect(fixture.unexpected).toEqual([]);
+});

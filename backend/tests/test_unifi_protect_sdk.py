@@ -223,7 +223,7 @@ async def test_sdk_response_and_result_processing_are_bounded(sdk, limit):
 
 
 async def test_restart_backfill_event_read_through_service_and_installed_sdk(sdk, monkeypatch):
-    from app.services.restart_backfill import MISSED_EVENT_BACKFILL_PROTECT_LIMIT
+    limit = 250  # Public browsing remains independently bounded.
     from app.services.unifi_protect import UnifiProtectIntegrationService
     from app.services.unifi_protect_operations import ProtectOperations
 
@@ -233,21 +233,21 @@ async def test_restart_backfill_event_read_through_service_and_installed_sdk(sdk
     service._operations = ProtectOperations(lambda: True)
     monkeypatch.setattr(service, "_ensure_api", AsyncMock(return_value=api))
     api.api_request_list.return_value = [
-        event_payload(str(i)) for i in range(MISSED_EVENT_BACKFILL_PROTECT_LIMIT * 3)
+        event_payload(str(i)) for i in range(limit * 3)
     ]
     events = await service.list_events(
-        limit=MISSED_EVENT_BACKFILL_PROTECT_LIMIT,
+        limit=limit,
         event_type="smartDetectZone",
         since=NOW - timedelta(hours=24),
         until=NOW,
     )
-    assert len(events) == MISSED_EVENT_BACKFILL_PROTECT_LIMIT
+    assert len(events) == limit
     assert [event["id"] for event in events] == [
-        str(i) for i in range(MISSED_EVENT_BACKFILL_PROTECT_LIMIT)
+        str(i) for i in range(limit)
     ]
     api.api_request_list.assert_awaited_once()
     assert api.api_request_list.await_args.kwargs["params"]["limit"] == (
-        MISSED_EVENT_BACKFILL_PROTECT_LIMIT * 3
+        limit * 3
     )
 
 

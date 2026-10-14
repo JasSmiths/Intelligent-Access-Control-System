@@ -4,7 +4,7 @@ import json
 import re
 import secrets
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -34,7 +34,7 @@ class ConfirmationRejection:
     """Scalar audit handoff; no ORM instances, payload or bearer token survive."""
 
     actor: str
-    actor_user_id: uuid.UUID
+    actor_user_id: uuid.UUID | None
     action: str
     payload_hash: str
     reason: str
@@ -327,6 +327,10 @@ async def persist_confirmation_rejection(rejection: ConfirmationRejection | None
         return  # Missing-token428 has never been an audited rejection path.
     session = AsyncSessionLocal()
     try:
+        if rejection.actor_user_id is not None:
+            live_id = await session.scalar(select(User.id).where(User.id == rejection.actor_user_id)
+                .with_for_update(read=True, key_share=True))
+            rejection = replace(rejection, actor_user_id=live_id)
         await _write_confirmation_rejection(session, rejection)
         await session.commit()
     finally:

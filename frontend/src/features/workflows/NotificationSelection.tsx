@@ -230,6 +230,7 @@ export function NotificationActionModal({
     if (!selectedMethod || !canConfirm) return;
     onSelect(createWorkflowAction(selectedMethod.actionType, {
       target_mode: selectedMethod.targetMode,
+      apprise_revision: selectedMethod.apprise_revision,
       target_ids: selectedMethod.targetMode === "all" ? [] : Array.from(selectedTargetIds),
     }));
   };

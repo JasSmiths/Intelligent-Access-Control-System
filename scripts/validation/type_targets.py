@@ -24,6 +24,9 @@ PROTECTED_PACKAGES = (
 )
 TYPE_OWNERS = (
     TypeOwner('app/services/auth.py', 'checked'),
+    TypeOwner('app/services/historical_discovery.py', 'strict'),
+    TypeOwner('app/services/user_accounts.py', 'strict'),
+    TypeOwner('app/api/v1/users.py', 'checked'),
     TypeOwner('app/api/v1/auth.py', 'checked'),
     TypeOwner('app/services/settings.py', 'checked'),
     TypeOwner('app/services/profile_photos.py', 'checked'),
@@ -43,6 +46,7 @@ TYPE_OWNERS = (
     TypeOwner('app/services/notification_runs.py', 'checked'),
     TypeOwner('app/services/notification_dispatch.py', 'strict'),
     TypeOwner('app/services/notification_rules.py', 'checked'),
+    TypeOwner('app/services/notification_recipient_binding.py', 'strict'),
     TypeOwner('app/services/mutation_context.py', 'checked'),
     TypeOwner('app/services/schedule_assignments.py', 'checked'),
     TypeOwner('app/services/schedule_operations.py', 'checked'),
@@ -50,6 +54,8 @@ TYPE_OWNERS = (
     TypeOwner('app/services/telemetry.py', 'checked'),
     TypeOwner('app/services/event_bus.py', 'strict'),
     TypeOwner('app/services/realtime_contracts.py', 'strict'),
+    TypeOwner('app/services/realtime_connections.py', 'strict'),
+    TypeOwner('app/api/v1/realtime.py', 'checked'),
     TypeOwner('app/modules/home_assistant/input_boolean_contracts.py', 'strict'),
     TypeOwner('app/modules/home_assistant/input_booleans.py', 'strict'),
     TypeOwner('app/services/ha_presence_contracts.py', 'strict'),

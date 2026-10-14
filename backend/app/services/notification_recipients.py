@@ -12,6 +12,7 @@ from app.models import Person
 from app.modules.home_assistant.client import HomeAssistantClient
 from app.modules.notifications.apprise_urls import normalize_apprise_url, split_apprise_urls
 from app.modules.notifications.base import NotificationDeliveryError
+from app.services.notification_recipient_binding import recipient_binding_error
 from app.services.settings import RuntimeConfig
 from app.services.workflow_session import SessionFactory
 from app.services.workflows.context import normalize_string_list
@@ -26,32 +27,23 @@ class NotificationRecipients:
         self.sessions = sessions
         self.clients = clients
 
-    def select_apprise_urls(self, configured: str, action: dict[str, Any]) -> list[str]:
+    def select_apprise_targets(self, configured: str, action: dict[str, Any]) -> list[tuple[int, str]]:
+        if reason := recipient_binding_error(action, configured):
+            raise NotificationDeliveryError(reason, delivery="not_sent")
         urls = [normalize_apprise_url(url) for url in split_apprise_urls(configured)]
-        if not urls:
-            return []
-        target_mode = str(action.get("target_mode") or "all")
-        endpoint_ids = normalize_string_list(action.get("target_ids"), allow_scalar=False)
-        if target_mode == "all" or "apprise:*" in endpoint_ids or not endpoint_ids:
-            return urls
-        chosen: list[str] = []
-        for endpoint_id in endpoint_ids:
-            if not endpoint_id.startswith("apprise:"):
-                continue
-            try:
-                index = int(endpoint_id.split(":", 1)[1])
-            except ValueError:
-                continue
-            if 0 <= index < len(urls):
-                chosen.append(urls[index])
-        return chosen
+        if action.get("target_mode", "all") == "all":
+            return list(enumerate(urls))
+        return [(int(value.removeprefix("apprise:")), urls[int(value.removeprefix("apprise:"))])
+                for value in action.get("target_ids", []) if value.startswith("apprise:")]
 
     async def select_home_assistant_mobile_targets(
         self, config: RuntimeConfig, action: dict[str, Any]
     ) -> list[str]:
+        if reason := recipient_binding_error(action, config.apprise_urls):
+            raise NotificationDeliveryError(reason, delivery="not_sent")
         target_mode = str(action.get("target_mode") or "all")
         endpoint_ids = normalize_string_list(action.get("target_ids"), allow_scalar=False)
-        if target_mode == "all" or "home_assistant_mobile:*" in endpoint_ids:
+        if target_mode == "all":
             return await self.all_home_assistant_mobile_targets(config)
 
         targets: list[str] = []
@@ -70,9 +62,11 @@ class NotificationRecipients:
     async def select_voice_targets(
         self, config: RuntimeConfig, action: dict[str, Any]
     ) -> list[str]:
+        if reason := recipient_binding_error(action, config.apprise_urls):
+            raise NotificationDeliveryError(reason, delivery="not_sent")
         target_mode = str(action.get("target_mode") or "all")
         endpoint_ids = normalize_string_list(action.get("target_ids"), allow_scalar=False)
-        if target_mode == "all" or "home_assistant_tts:*" in endpoint_ids:
+        if target_mode == "all":
             targets = await self.all_media_player_targets(config)
             if targets:
                 return targets
@@ -91,8 +85,6 @@ class NotificationRecipients:
                 target = config.home_assistant_default_media_player
             if target and target != "*":
                 selected_targets.append(target)
-        if not selected_targets and config.home_assistant_default_media_player:
-            selected_targets.append(config.home_assistant_default_media_player)
         return selected_targets
 
     async def voice_endpoint_catalog(self, config: RuntimeConfig) -> list[dict[str, Any]]:

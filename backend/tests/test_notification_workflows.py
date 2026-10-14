@@ -29,6 +29,7 @@ from app.services.notifications import (
     VOICE_ANNOUNCEMENTS_DISABLED_MESSAGE,
 )
 from app.services.notification_planning import presence_condition_matches
+from app.services.integration_settings import apprise_revision
 from app.services.workflows.visitor_notifications import visitor_pass_notification_contexts_from_event
 from app.services.workflows.context import render_template
 from app.services.notification_rendering import (
@@ -698,9 +699,9 @@ async def test_home_assistant_mobile_targets_accept_specific_notify_services() -
     service = NotificationService()
 
     targets = await service.recipients.select_home_assistant_mobile_targets(
-        SimpleNamespace(),
+        SimpleNamespace(apprise_urls=""),
         {
-            "target_mode": "selected",
+            "type": "mobile", "target_mode": "selected",
             "target_ids": ["home_assistant_mobile:notify.mobile_app_jason"],
         },
     )
@@ -709,9 +710,9 @@ async def test_home_assistant_mobile_targets_accept_specific_notify_services() -
 
     with pytest.raises(NotificationDeliveryError):
         await service.recipients.select_home_assistant_mobile_targets(
-            SimpleNamespace(),
+            SimpleNamespace(apprise_urls=""),
             {
-                "target_mode": "selected",
+                "type": "mobile", "target_mode": "selected",
                 "target_ids": ["home_assistant_mobile:notify.family_group"],
             },
         )
@@ -833,6 +834,7 @@ async def test_mobile_workflow_reports_partial_success_when_secondary_sender_del
             "message": "Steph arrived.",
             "target_mode": "selected",
             "target_ids": ["apprise:0", "home_assistant_mobile:notify.mobile_app_jason"],
+            "apprise_revision": apprise_revision("pover://user-token@app-token"),
         },
         context,
         SimpleNamespace(apprise_urls="pover://user-token@app-token"),
@@ -982,71 +984,9 @@ def test_schedule_condition_time_window_uses_existing_scheduler() -> None:
     assert not schedule_allows_at(schedule, datetime(2026, 4, 27, 13, 0, tzinfo=UTC), "UTC")
 
 
-async def test_notification_rule_crud_endpoints_use_db_workflow_shape(monkeypatch) -> None:
-    async def confirmed(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(notification_api, "require_confirmation", confirmed)
-    session = FakeRuleSession()
-    created = await notification_api.create_notification_rule(
-        notification_api.NotificationRuleRequest(
-            name=" Gate arrivals ",
-            trigger_event="authorized_entry",
-            conditions=[{"type": "presence", "mode": "someone_home"}],
-            actions=[
-                {
-                    "type": "in_app",
-                    "title_template": "@FirstName arrived",
-                    "message_template": "@VehicleName",
-                }
-            ],
-        ),
-        _=SimpleNamespace(id=uuid.uuid4(), role=UserRole.ADMIN, is_active=True),
-        session=session,
-    )
-
-    assert created["name"] == "Gate arrivals"
-    assert created["trigger_event"] == "authorized_entry"
-    assert created["conditions"][0]["type"] == "presence"
-    assert created["actions"][0]["type"] == "in_app"
-
-    listed = await notification_api.list_notification_rules(_=SimpleNamespace(id=uuid.uuid4(), role=UserRole.ADMIN, is_active=True), session=session)
-    assert [rule["id"] for rule in listed] == [created["id"]]
-
-    updated = await notification_api.update_notification_rule(
-        uuid.UUID(created["id"]),
-        notification_api.NotificationRuleUpdateRequest(
-            name="Gate arrivals updated",
-            actions=[
-                {
-                    "type": "mobile",
-                    "target_mode": "selected",
-                    "target_ids": ["apprise:0"],
-                    "title_template": "@Subject",
-                    "message_template": "@Message",
-                }
-            ],
-        ),
-        _=SimpleNamespace(id=uuid.uuid4(), role=UserRole.ADMIN, is_active=True),
-        session=session,
-    )
-    assert updated["name"] == "Gate arrivals updated"
-    assert updated["actions"][0]["target_ids"] == ["apprise:0"]
-
-    fetched = await notification_api.get_notification_rule(
-        uuid.UUID(created["id"]),
-        _=SimpleNamespace(id=uuid.uuid4(), role=UserRole.ADMIN, is_active=True),
-        session=session,
-    )
-    assert fetched["id"] == created["id"]
-
-    await notification_api.delete_notification_rule(
-        uuid.UUID(created["id"]),
-        request=notification_api.NotificationRuleDeleteRequest(confirmation_token="confirmed"),
-        _=SimpleNamespace(id=uuid.uuid4(), role=UserRole.ADMIN, is_active=True),
-        session=session,
-    )
-    assert session.deleted is not None
+# CRUD now runs through authenticated ASGI/confirmation/SQL owners in
+# scripts/validation/test_notification_recipient_binding.py. FakeRuleSession
+# remains useful below for route preflight and presentation tests.
 
 
 async def test_notification_rule_create_requires_confirmation_before_write() -> None:
@@ -1291,7 +1231,7 @@ async def test_voice_action_off_suppresses_and_records_telemetry(monkeypatch) ->
             calls.append((target.entity_id, message))
 
     async def fake_runtime_config():
-        return SimpleNamespace(home_assistant_default_media_player="")
+        return SimpleNamespace(home_assistant_default_media_player="", apprise_urls="")
 
     async def capture(event):
         captured_events.append(event)
@@ -1389,7 +1329,7 @@ async def test_suppressed_voice_action_does_not_block_other_workflow_actions(mon
             raise AssertionError("TTS dispatch should be suppressed")
 
     async def fake_runtime_config():
-        return SimpleNamespace(home_assistant_default_media_player="")
+        return SimpleNamespace(home_assistant_default_media_player="", apprise_urls="")
 
     async def capture(event):
         captured_events.append(event)
