@@ -8,11 +8,11 @@ Recovery previously reported success after taking the newest 250 observations, l
 
 Our validation artifacts accumulated duplicate dependencies and raw test databases and exhausted disk space. Cleanup preserved source, evidence, production data and rollback checkpoints. Validation now reuses one read-only dependency preparation, checks a 30GiB reserve plus admission headroom, limits task allocation, serializes bulk runs and removes only proved-owned disposable state. These guards are conservative checks, not a filesystem quota or protection against unrelated writers.
 
-Current status: **complete; estimated overall completion 100%**. Detailed results below distinguish focused, baseline, interrupted and final runs. The final isolated run passed 2,814 backend/database tests, all frontend checks, 30 affected browser cases, migration/schema and restore checks, and installed runtime/PDF verification. All 35 backend skips have exact passing persistence counterparts. Independent code and evidence review is closed with no unresolved material finding. All changes remain local and uncommitted. These migrations and application changes have not been deployed to production. Deployment requires separate authorization, a tested matching backup, review of held recipient workflows, and normal supervised rollout checks. Calendar retirement was already present in the starting source and remains intact. Effective model metadata and actual token counts are unavailable; genuine requested-model subagent reviews are recorded without claiming verified model identity.
+Current status: **complete; estimated overall completion 100%**. Detailed results below distinguish focused, baseline, interrupted and final runs. The final isolated run passed 2,814 backend/database tests, all frontend checks, 30 affected browser cases, migration/schema and restore checks, and installed runtime/PDF verification. All 35 backend skips have exact passing persistence counterparts. Independent code and evidence review is closed with no unresolved material finding. The owner subsequently authorized committing and pushing the remediation (07bcd6b), then held deployment when GitHub exposed a Linux test-data ownership failure. The focused correction (41fa684) runs PostgreSQL as the runner without added capabilities, preserving private permissions and fail-closed disk accounting. Complete local validation and actual Linux CI evidence are recorded below. Source changes are committed and pushed; delivery artifacts were regenerated afterward. These migrations and application changes have not been deployed to production. Deployment requires separate authorization, a tested matching backup, review of held recipient workflows, and normal supervised rollout checks. Calendar retirement was already present in the starting source and remains intact. Effective model metadata and actual token counts are unavailable; genuine requested-model subagent reviews are recorded without claiming verified model identity.
 
 ## Technical appendix
 
-Workspace: `/Users/jas/Documents/Intelligent Access System`. Branch `main`, starting/current HEAD `53db38ffad2517e2b3076f08086be6422a287287`. Starting tree was clean; no pre-existing source edits were replaced. Safe starting source: 815 files, fingerprint `1bc3838659160f422bad2e5800473da993188f4746f0c1e338c11beaa396a557`. Final candidate source fingerprint: `7b8bbb5bdb9bfbc85ceeac8de13949ae76e098dc5ae38f19edbda59efa5a2905` (832 files). HEAD alone is not the tested identity. Fingerprints use SHA-256 over sorted relative path, NUL, file SHA-256 hex and newline for each selected exact-byte source file (`scripts/validation/source_snapshot.py`). Selection includes relevant untracked first-party source. It excludes delivery artifacts, environment/credential files, production data/logs, dependencies, build/test/browser caches, Git internals and private runtime state; full exclusion rules are retained in that module. `task-only.patch` compares captured starting bytes with final working-tree bytes, including new files. No branch, staging, commit, push or remote operation was performed.
+Workspace: `/Users/jas/Documents/Intelligent Access System`. Branch `main`, starting HEAD `53db38ffad2517e2b3076f08086be6422a287287`; committed source now41fa684d7e84d5f94bd9d91c88de2df41b1a8cba. Starting tree was clean; no pre-existing source edits were replaced. Safe starting source: 815 files, fingerprint `1bc3838659160f422bad2e5800473da993188f4746f0c1e338c11beaa396a557`. Final candidate source fingerprint: `f7d66850e18e8e05f600be877a21e2b4bcb4b6e83e3502f1daae6d0a8066ac04` (832 files). HEAD alone is not the tested identity. Fingerprints use SHA-256 over sorted relative path, NUL, file SHA-256 hex and newline for each selected exact-byte source file (`scripts/validation/source_snapshot.py`). Selection includes relevant untracked first-party source. It excludes delivery artifacts, environment/credential files, production data/logs, dependencies, build/test/browser caches, Git internals and private runtime state; full exclusion rules are retained in that module. `task-only.patch` compares captured starting bytes with final working-tree bytes, including new files. Initial implementation remained local until separate user authorization. Remediation07bcd6b and focused CI correction41fa684 were then committed and pushed to existingmain; no branch switch occurred. Delivery documents describe this validation point; Git history records any subsequent documentation commit. Remote operations during the CI follow-up read Actions metadata/logs and pushed the fix; no remote source was fetched or substituted.
 
 Evidence root: `/private/tmp/iacs-security-reliability-20261014`. Paths below are relative to it unless they start `backend/`, `frontend/`, `docs/` or `scripts/`. The portable bundle maps retained evidence under `evidence/`, final changed files under `source-final/`, and starting/context sources under `source-start/`. It contains no installed dependencies or production state. Delivery documents are excluded from executable-source fingerprints; this handover/JSON and the bundle are generated after the final candidate snapshot. Architecture/integration/validation documentation is included in that snapshot.
 
@@ -20,12 +20,12 @@ Coherent batches: A account authority/confirmation, B realtime lifecycle/audienc
 
 | Task-only category | Files | Lines added/deleted |
 | --- | ---: | ---: |
-| docs | 5 | +238 / -5 |
+| docs | 5 | +241 / -5 |
 | generated | 1 | +3 / -3 |
 | migrations | 2 | +141 / -0 |
 | production | 34 | +1300 / -592 |
-| tests | 26 | +2427 / -211 |
-| validation_tools | 6 | +394 / -53 |
+| tests | 26 | +2433 / -213 |
+| validation_tools | 6 | +397 / -56 |
 
 ## Findings and verification
 
@@ -45,6 +45,7 @@ Statuses require the final full harness, runtime proof and review closure; focus
 | N07 | fixed_and_verified | Apprise occurrence receipts were dropped by the safe outcome whitelist. Retain bounded opaque apprise:index receipts, including duplicate URL occurrences. | backend/app/services/notification_runs.py:56 `safe_destination_outcomes` | test_notification_recipient_binding.py: duplicate receipts/checkpoints | Occurrence receipt and partial/unknown delivery evidence pass; no URL credentials in receipts. |
 | N08 | fixed_and_verified | An empty selected voice list could fall back to the default speaker. Reject invalid selections and definitely-not-sent empty destinations; explicit all remains explicit. | backend/app/services/notifications.py:1181 `_send_voice` | test_notification_recipient_binding.py::test_empty_selected_voice_does_not_fall_back_to_default_speaker | Baseline wfkderem failed through actual API/dispatch; corrected stw3rvc2 passed. |
 | N09 | fixed_and_verified | Retained duplicate dependencies/raw test DBs and caches exhausted host storage. Shared read-only exact-lock reuse, pre-allocation/continuous guards, shared bulk lock and owned cleanup. | scripts/validation/storage.py; scripts/validation/validate.py; scripts/validation/runtime_pdf_smoke.py | test_storage.py; test_harness_configuration.py; test_source_snapshot.py | 70 host tests + guarded actual Linux frontend/build proof passed; focused independent corrections closed. |
+| N10 | fixed_and_verified | The Linux runner could not traverse private PostgreSQL data owned by image UID999, so accounting and cleanup failed. Run synthetic PostgreSQL as the runner UID/GID, drop every capability and preserve0700 data permissions. | scripts/validation/validate.py:276 `container` | test_harness_configuration.py: test_container_user_matches_bind_owner_without_restoring_capabilities; native Linux/PostgreSQL proof; complete GitHub harness | Before:1host failure/30controls and real PG runner traversal rejected. After:31host passes, SQL/private permissions/traversal/cleanup pass. Actual Linux CI closure: ci-followup.json. |
 
 ## Ownership, behavior and extension
 
@@ -62,246 +63,246 @@ Both new downgrades refuse unsafe loss of review/coverage state. Restore the cor
 
 ## Commands, results and retained failures
 
-Main final command: bundled Python3.12 `scripts/validation/validate.py --reuse-dependencies /private/tmp/iacs-integration-mutations-20261014/iacs-validation-focus-rstp6hsg --evidence-root /private/tmp/iacs-security-reliability-20261014`, with `IACS_VALIDATION_BACKEND_IMAGE=iacs-backend:uiprotect-23-backfill-verified-20261013`. Exact container arguments, environment and exit codes: `iacs-validation-o_st031r/checks.json`. Console: `full-final-3-console.log`. The log name is generated from one evidence key; it is included under the same name in the bundle.
+Main final command: bundled Python3.12 `scripts/validation/validate.py --reuse-dependencies /private/tmp/iacs-integration-mutations-20261014/iacs-validation-focus-rstp6hsg --evidence-root /private/tmp/iacs-security-reliability-20261014`, with `IACS_VALIDATION_BACKEND_IMAGE=iacs-backend:uiprotect-23-backfill-verified-20261013`. Exact container arguments, environment and exit codes: `iacs-validation-1ts31y6o/checks.json`. Console: `full-ci-fix-console.log`. The log name is generated from one evidence key; it is included under the same name in the bundle.
 
 | Check | Result / exit | Retained log |
 | --- | --- | --- |
-| python-lock-check | passed / 0 | `iacs-validation-o_st031r/python-lock-check.log` |
-| python-identity | passed / 0 | `iacs-validation-o_st031r/python-identity.log` |
-| uv-identity | passed / 0 | `iacs-validation-o_st031r/uv-identity.log` |
-| frontend-lock-check | passed / 0 | `iacs-validation-o_st031r/frontend-lock-check.log` |
-| frontend-tree-check | passed / 0 | `iacs-validation-o_st031r/frontend-tree-check.log` |
-| npm-identity | passed / 0 | `iacs-validation-o_st031r/npm-identity.log` |
-| isolation-db-free | passed / 0 | `iacs-validation-o_st031r/isolation-db-free.log` |
-| snapshot-tests | passed / 0 | `iacs-validation-o_st031r/snapshot-tests.log` |
-| harness-configuration-tests | passed / 0 | `iacs-validation-o_st031r/harness-configuration-tests.log` |
-| storage-tests | passed / 0 | `iacs-validation-o_st031r/storage-tests.log` |
-| architecture-boundaries | passed / 0 | `iacs-validation-o_st031r/architecture-boundaries.log` |
-| compile | passed / 0 | `iacs-validation-o_st031r/compile.log` |
-| workflow-contracts | passed / 0 | `iacs-validation-o_st031r/workflow-contracts.log` |
-| backend-tests | passed / 0 | `iacs-validation-o_st031r/backend-tests.log` |
-| ruff | passed / 0 | `iacs-validation-o_st031r/ruff.log` |
-| test-names | passed / 0 | `iacs-validation-o_st031r/test-names.log` |
-| mypy | passed / 0 | `iacs-validation-o_st031r/mypy.log` |
-| typed-contracts | passed / 0 | `iacs-validation-o_st031r/typed-contracts.log` |
-| frontend-tests | passed / 0 | `iacs-validation-o_st031r/frontend-tests.log` |
-| frontend-build | passed / 0 | `iacs-validation-o_st031r/frontend-build.log` |
-| compose-config | passed / 0 | `iacs-validation-o_st031r/compose-config.log` |
-| postgres-start | passed / 0 | `iacs-validation-o_st031r/postgres-start.log` |
-| redis-start | passed / 0 | `iacs-validation-o_st031r/redis-start.log` |
-| isolation-persistence | passed / 0 | `iacs-validation-o_st031r/isolation-persistence.log` |
-| isolation-inspect | passed / 0 | `iacs-validation-o_st031r/isolation-inspect.log` |
-| migration-up | passed / 0 | `iacs-validation-o_st031r/migration-up.log` |
-| migration-current | passed / 0 | `iacs-validation-o_st031r/migration-current.log` |
-| migration-check | passed / 0 | `iacs-validation-o_st031r/migration-check.log` |
-| database-restore-client-version | passed / 0 | `iacs-validation-o_st031r/database-restore-client-version.log` |
-| database-restore-source-create | passed / 0 | `iacs-validation-o_st031r/database-restore-source-create.log` |
-| database-restore-prepare | passed / 0 | `iacs-validation-o_st031r/database-restore-prepare.log` |
-| database-restore-dump | passed / 0 | `iacs-validation-o_st031r/database-restore-dump.log` |
-| database-restore-target-create | passed / 0 | `iacs-validation-o_st031r/database-restore-target-create.log` |
-| database-restore-load | passed / 0 | `iacs-validation-o_st031r/database-restore-load.log` |
-| database-restore-verify | passed / 0 | `iacs-validation-o_st031r/database-restore-verify.log` |
-| database-restore-drop-0 | passed / 0 | `iacs-validation-o_st031r/database-restore-drop-0.log` |
-| database-restore-drop-1 | passed / 0 | `iacs-validation-o_st031r/database-restore-drop-1.log` |
-| schema-check-1 | passed / 0 | `iacs-validation-o_st031r/schema-check-1.log` |
-| suite-001-create | passed / 0 | `iacs-validation-o_st031r/suite-001-create.log` |
-| suite-001 | passed / 0 | `iacs-validation-o_st031r/suite-001.log` |
-| suite-001-drop | passed / 0 | `iacs-validation-o_st031r/suite-001-drop.log` |
-| suite-002-create | passed / 0 | `iacs-validation-o_st031r/suite-002-create.log` |
-| suite-002 | passed / 0 | `iacs-validation-o_st031r/suite-002.log` |
-| suite-002-drop | passed / 0 | `iacs-validation-o_st031r/suite-002-drop.log` |
-| suite-003-create | passed / 0 | `iacs-validation-o_st031r/suite-003-create.log` |
-| suite-003 | passed / 0 | `iacs-validation-o_st031r/suite-003.log` |
-| suite-003-drop | passed / 0 | `iacs-validation-o_st031r/suite-003-drop.log` |
-| suite-004-create | passed / 0 | `iacs-validation-o_st031r/suite-004-create.log` |
-| suite-004 | passed / 0 | `iacs-validation-o_st031r/suite-004.log` |
-| suite-004-drop | passed / 0 | `iacs-validation-o_st031r/suite-004-drop.log` |
-| suite-005-create | passed / 0 | `iacs-validation-o_st031r/suite-005-create.log` |
-| suite-005 | passed / 0 | `iacs-validation-o_st031r/suite-005.log` |
-| suite-005-drop | passed / 0 | `iacs-validation-o_st031r/suite-005-drop.log` |
-| suite-006-create | passed / 0 | `iacs-validation-o_st031r/suite-006-create.log` |
-| suite-006 | passed / 0 | `iacs-validation-o_st031r/suite-006.log` |
-| suite-006-drop | passed / 0 | `iacs-validation-o_st031r/suite-006-drop.log` |
-| suite-007-create | passed / 0 | `iacs-validation-o_st031r/suite-007-create.log` |
-| suite-007 | passed / 0 | `iacs-validation-o_st031r/suite-007.log` |
-| suite-007-drop | passed / 0 | `iacs-validation-o_st031r/suite-007-drop.log` |
-| suite-008-create | passed / 0 | `iacs-validation-o_st031r/suite-008-create.log` |
-| suite-008 | passed / 0 | `iacs-validation-o_st031r/suite-008.log` |
-| suite-008-drop | passed / 0 | `iacs-validation-o_st031r/suite-008-drop.log` |
-| suite-009-create | passed / 0 | `iacs-validation-o_st031r/suite-009-create.log` |
-| suite-009 | passed / 0 | `iacs-validation-o_st031r/suite-009.log` |
-| suite-009-drop | passed / 0 | `iacs-validation-o_st031r/suite-009-drop.log` |
-| suite-010-create | passed / 0 | `iacs-validation-o_st031r/suite-010-create.log` |
-| suite-010 | passed / 0 | `iacs-validation-o_st031r/suite-010.log` |
-| suite-010-drop | passed / 0 | `iacs-validation-o_st031r/suite-010-drop.log` |
-| suite-011-create | passed / 0 | `iacs-validation-o_st031r/suite-011-create.log` |
-| suite-011 | passed / 0 | `iacs-validation-o_st031r/suite-011.log` |
-| suite-011-drop | passed / 0 | `iacs-validation-o_st031r/suite-011-drop.log` |
-| suite-012-create | passed / 0 | `iacs-validation-o_st031r/suite-012-create.log` |
-| suite-012 | passed / 0 | `iacs-validation-o_st031r/suite-012.log` |
-| suite-012-drop | passed / 0 | `iacs-validation-o_st031r/suite-012-drop.log` |
-| suite-013-create | passed / 0 | `iacs-validation-o_st031r/suite-013-create.log` |
-| suite-013 | passed / 0 | `iacs-validation-o_st031r/suite-013.log` |
-| suite-013-drop | passed / 0 | `iacs-validation-o_st031r/suite-013-drop.log` |
-| suite-014-create | passed / 0 | `iacs-validation-o_st031r/suite-014-create.log` |
-| suite-014 | passed / 0 | `iacs-validation-o_st031r/suite-014.log` |
-| suite-014-drop | passed / 0 | `iacs-validation-o_st031r/suite-014-drop.log` |
-| suite-015-create | passed / 0 | `iacs-validation-o_st031r/suite-015-create.log` |
-| suite-015 | passed / 0 | `iacs-validation-o_st031r/suite-015.log` |
-| suite-015-drop | passed / 0 | `iacs-validation-o_st031r/suite-015-drop.log` |
-| suite-016-create | passed / 0 | `iacs-validation-o_st031r/suite-016-create.log` |
-| suite-016 | passed / 0 | `iacs-validation-o_st031r/suite-016.log` |
-| suite-016-drop | passed / 0 | `iacs-validation-o_st031r/suite-016-drop.log` |
-| suite-017-create | passed / 0 | `iacs-validation-o_st031r/suite-017-create.log` |
-| suite-017 | passed / 0 | `iacs-validation-o_st031r/suite-017.log` |
-| suite-017-drop | passed / 0 | `iacs-validation-o_st031r/suite-017-drop.log` |
-| suite-018-create | passed / 0 | `iacs-validation-o_st031r/suite-018-create.log` |
-| suite-018 | passed / 0 | `iacs-validation-o_st031r/suite-018.log` |
-| suite-018-drop | passed / 0 | `iacs-validation-o_st031r/suite-018-drop.log` |
-| suite-019-create | passed / 0 | `iacs-validation-o_st031r/suite-019-create.log` |
-| suite-019 | passed / 0 | `iacs-validation-o_st031r/suite-019.log` |
-| suite-019-drop | passed / 0 | `iacs-validation-o_st031r/suite-019-drop.log` |
-| suite-020-create | passed / 0 | `iacs-validation-o_st031r/suite-020-create.log` |
-| suite-020 | passed / 0 | `iacs-validation-o_st031r/suite-020.log` |
-| suite-020-drop | passed / 0 | `iacs-validation-o_st031r/suite-020-drop.log` |
-| suite-021-create | passed / 0 | `iacs-validation-o_st031r/suite-021-create.log` |
-| suite-021 | passed / 0 | `iacs-validation-o_st031r/suite-021.log` |
-| suite-021-drop | passed / 0 | `iacs-validation-o_st031r/suite-021-drop.log` |
-| suite-022-create | passed / 0 | `iacs-validation-o_st031r/suite-022-create.log` |
-| suite-022 | passed / 0 | `iacs-validation-o_st031r/suite-022.log` |
-| suite-022-drop | passed / 0 | `iacs-validation-o_st031r/suite-022-drop.log` |
-| suite-023-create | passed / 0 | `iacs-validation-o_st031r/suite-023-create.log` |
-| suite-023 | passed / 0 | `iacs-validation-o_st031r/suite-023.log` |
-| suite-023-drop | passed / 0 | `iacs-validation-o_st031r/suite-023-drop.log` |
-| suite-024-create | passed / 0 | `iacs-validation-o_st031r/suite-024-create.log` |
-| suite-024 | passed / 0 | `iacs-validation-o_st031r/suite-024.log` |
-| suite-024-drop | passed / 0 | `iacs-validation-o_st031r/suite-024-drop.log` |
-| suite-025-create | passed / 0 | `iacs-validation-o_st031r/suite-025-create.log` |
-| suite-025 | passed / 0 | `iacs-validation-o_st031r/suite-025.log` |
-| suite-025-drop | passed / 0 | `iacs-validation-o_st031r/suite-025-drop.log` |
-| suite-026-create | passed / 0 | `iacs-validation-o_st031r/suite-026-create.log` |
-| suite-026 | passed / 0 | `iacs-validation-o_st031r/suite-026.log` |
-| suite-026-drop | passed / 0 | `iacs-validation-o_st031r/suite-026-drop.log` |
-| suite-027-create | passed / 0 | `iacs-validation-o_st031r/suite-027-create.log` |
-| suite-027 | passed / 0 | `iacs-validation-o_st031r/suite-027.log` |
-| suite-027-drop | passed / 0 | `iacs-validation-o_st031r/suite-027-drop.log` |
-| suite-028-create | passed / 0 | `iacs-validation-o_st031r/suite-028-create.log` |
-| suite-028 | passed / 0 | `iacs-validation-o_st031r/suite-028.log` |
-| suite-028-drop | passed / 0 | `iacs-validation-o_st031r/suite-028-drop.log` |
-| suite-029-create | passed / 0 | `iacs-validation-o_st031r/suite-029-create.log` |
-| suite-029 | passed / 0 | `iacs-validation-o_st031r/suite-029.log` |
-| suite-029-drop | passed / 0 | `iacs-validation-o_st031r/suite-029-drop.log` |
-| suite-030-create | passed / 0 | `iacs-validation-o_st031r/suite-030-create.log` |
-| suite-030 | passed / 0 | `iacs-validation-o_st031r/suite-030.log` |
-| suite-030-drop | passed / 0 | `iacs-validation-o_st031r/suite-030-drop.log` |
-| suite-031-create | passed / 0 | `iacs-validation-o_st031r/suite-031-create.log` |
-| suite-031 | passed / 0 | `iacs-validation-o_st031r/suite-031.log` |
-| suite-031-drop | passed / 0 | `iacs-validation-o_st031r/suite-031-drop.log` |
-| suite-032-create | passed / 0 | `iacs-validation-o_st031r/suite-032-create.log` |
-| suite-032 | passed / 0 | `iacs-validation-o_st031r/suite-032.log` |
-| suite-032-drop | passed / 0 | `iacs-validation-o_st031r/suite-032-drop.log` |
-| suite-033-create | passed / 0 | `iacs-validation-o_st031r/suite-033-create.log` |
-| suite-033 | passed / 0 | `iacs-validation-o_st031r/suite-033.log` |
-| suite-033-drop | passed / 0 | `iacs-validation-o_st031r/suite-033-drop.log` |
-| suite-034-create | passed / 0 | `iacs-validation-o_st031r/suite-034-create.log` |
-| suite-034 | passed / 0 | `iacs-validation-o_st031r/suite-034.log` |
-| suite-034-drop | passed / 0 | `iacs-validation-o_st031r/suite-034-drop.log` |
-| suite-035-create | passed / 0 | `iacs-validation-o_st031r/suite-035-create.log` |
-| suite-035 | passed / 0 | `iacs-validation-o_st031r/suite-035.log` |
-| suite-035-drop | passed / 0 | `iacs-validation-o_st031r/suite-035-drop.log` |
-| suite-036-create | passed / 0 | `iacs-validation-o_st031r/suite-036-create.log` |
-| suite-036 | passed / 0 | `iacs-validation-o_st031r/suite-036.log` |
-| suite-036-drop | passed / 0 | `iacs-validation-o_st031r/suite-036-drop.log` |
-| suite-037-create | passed / 0 | `iacs-validation-o_st031r/suite-037-create.log` |
-| suite-037 | passed / 0 | `iacs-validation-o_st031r/suite-037.log` |
-| suite-037-drop | passed / 0 | `iacs-validation-o_st031r/suite-037-drop.log` |
-| suite-038-create | passed / 0 | `iacs-validation-o_st031r/suite-038-create.log` |
-| suite-038 | passed / 0 | `iacs-validation-o_st031r/suite-038.log` |
-| suite-038-drop | passed / 0 | `iacs-validation-o_st031r/suite-038-drop.log` |
-| suite-039-create | passed / 0 | `iacs-validation-o_st031r/suite-039-create.log` |
-| suite-039 | passed / 0 | `iacs-validation-o_st031r/suite-039.log` |
-| suite-039-drop | passed / 0 | `iacs-validation-o_st031r/suite-039-drop.log` |
-| suite-040-create | passed / 0 | `iacs-validation-o_st031r/suite-040-create.log` |
-| suite-040 | passed / 0 | `iacs-validation-o_st031r/suite-040.log` |
-| suite-040-drop | passed / 0 | `iacs-validation-o_st031r/suite-040-drop.log` |
-| suite-041-create | passed / 0 | `iacs-validation-o_st031r/suite-041-create.log` |
-| suite-041 | passed / 0 | `iacs-validation-o_st031r/suite-041.log` |
-| suite-041-drop | passed / 0 | `iacs-validation-o_st031r/suite-041-drop.log` |
-| suite-042-create | passed / 0 | `iacs-validation-o_st031r/suite-042-create.log` |
-| suite-042 | passed / 0 | `iacs-validation-o_st031r/suite-042.log` |
-| suite-042-drop | passed / 0 | `iacs-validation-o_st031r/suite-042-drop.log` |
-| suite-043-create | passed / 0 | `iacs-validation-o_st031r/suite-043-create.log` |
-| suite-043 | passed / 0 | `iacs-validation-o_st031r/suite-043.log` |
-| suite-043-drop | passed / 0 | `iacs-validation-o_st031r/suite-043-drop.log` |
-| suite-044-create | passed / 0 | `iacs-validation-o_st031r/suite-044-create.log` |
-| suite-044 | passed / 0 | `iacs-validation-o_st031r/suite-044.log` |
-| suite-044-drop | passed / 0 | `iacs-validation-o_st031r/suite-044-drop.log` |
-| suite-045-create | passed / 0 | `iacs-validation-o_st031r/suite-045-create.log` |
-| suite-045 | passed / 0 | `iacs-validation-o_st031r/suite-045.log` |
-| suite-045-drop | passed / 0 | `iacs-validation-o_st031r/suite-045-drop.log` |
-| suite-046-create | passed / 0 | `iacs-validation-o_st031r/suite-046-create.log` |
-| suite-046 | passed / 0 | `iacs-validation-o_st031r/suite-046.log` |
-| suite-046-drop | passed / 0 | `iacs-validation-o_st031r/suite-046-drop.log` |
-| suite-047-create | passed / 0 | `iacs-validation-o_st031r/suite-047-create.log` |
-| suite-047 | passed / 0 | `iacs-validation-o_st031r/suite-047.log` |
-| suite-047-drop | passed / 0 | `iacs-validation-o_st031r/suite-047-drop.log` |
-| suite-048-create | passed / 0 | `iacs-validation-o_st031r/suite-048-create.log` |
-| suite-048 | passed / 0 | `iacs-validation-o_st031r/suite-048.log` |
-| suite-048-drop | passed / 0 | `iacs-validation-o_st031r/suite-048-drop.log` |
-| suite-049-create | passed / 0 | `iacs-validation-o_st031r/suite-049-create.log` |
-| suite-049 | passed / 0 | `iacs-validation-o_st031r/suite-049.log` |
-| suite-049-drop | passed / 0 | `iacs-validation-o_st031r/suite-049-drop.log` |
-| suite-050-create | passed / 0 | `iacs-validation-o_st031r/suite-050-create.log` |
-| suite-050 | passed / 0 | `iacs-validation-o_st031r/suite-050.log` |
-| suite-050-drop | passed / 0 | `iacs-validation-o_st031r/suite-050-drop.log` |
-| suite-051-create | passed / 0 | `iacs-validation-o_st031r/suite-051-create.log` |
-| suite-051 | passed / 0 | `iacs-validation-o_st031r/suite-051.log` |
-| suite-051-drop | passed / 0 | `iacs-validation-o_st031r/suite-051-drop.log` |
-| suite-052-create | passed / 0 | `iacs-validation-o_st031r/suite-052-create.log` |
-| suite-052 | passed / 0 | `iacs-validation-o_st031r/suite-052.log` |
-| suite-052-drop | passed / 0 | `iacs-validation-o_st031r/suite-052-drop.log` |
-| suite-053-create | passed / 0 | `iacs-validation-o_st031r/suite-053-create.log` |
-| suite-053 | passed / 0 | `iacs-validation-o_st031r/suite-053.log` |
-| suite-053-drop | passed / 0 | `iacs-validation-o_st031r/suite-053-drop.log` |
-| suite-054-create | passed / 0 | `iacs-validation-o_st031r/suite-054-create.log` |
-| suite-054 | passed / 0 | `iacs-validation-o_st031r/suite-054.log` |
-| suite-054-drop | passed / 0 | `iacs-validation-o_st031r/suite-054-drop.log` |
-| suite-055-create | passed / 0 | `iacs-validation-o_st031r/suite-055-create.log` |
-| suite-055 | passed / 0 | `iacs-validation-o_st031r/suite-055.log` |
-| suite-055-drop | passed / 0 | `iacs-validation-o_st031r/suite-055-drop.log` |
-| suite-056-create | passed / 0 | `iacs-validation-o_st031r/suite-056-create.log` |
-| suite-056 | passed / 0 | `iacs-validation-o_st031r/suite-056.log` |
-| suite-056-drop | passed / 0 | `iacs-validation-o_st031r/suite-056-drop.log` |
-| suite-057-create | passed / 0 | `iacs-validation-o_st031r/suite-057-create.log` |
-| suite-057 | passed / 0 | `iacs-validation-o_st031r/suite-057.log` |
-| suite-057-drop | passed / 0 | `iacs-validation-o_st031r/suite-057-drop.log` |
-| suite-058-create | passed / 0 | `iacs-validation-o_st031r/suite-058-create.log` |
-| suite-058 | passed / 0 | `iacs-validation-o_st031r/suite-058.log` |
-| suite-058-drop | passed / 0 | `iacs-validation-o_st031r/suite-058-drop.log` |
-| suite-059-create | passed / 0 | `iacs-validation-o_st031r/suite-059-create.log` |
-| suite-059 | passed / 0 | `iacs-validation-o_st031r/suite-059.log` |
-| suite-059-drop | passed / 0 | `iacs-validation-o_st031r/suite-059-drop.log` |
-| suite-060-create | passed / 0 | `iacs-validation-o_st031r/suite-060-create.log` |
-| suite-060 | passed / 0 | `iacs-validation-o_st031r/suite-060.log` |
-| suite-060-drop | passed / 0 | `iacs-validation-o_st031r/suite-060-drop.log` |
-| suite-061-create | passed / 0 | `iacs-validation-o_st031r/suite-061-create.log` |
-| suite-061 | passed / 0 | `iacs-validation-o_st031r/suite-061.log` |
-| suite-061-drop | passed / 0 | `iacs-validation-o_st031r/suite-061-drop.log` |
-| suite-062-create | passed / 0 | `iacs-validation-o_st031r/suite-062-create.log` |
-| suite-062 | passed / 0 | `iacs-validation-o_st031r/suite-062.log` |
-| suite-062-drop | passed / 0 | `iacs-validation-o_st031r/suite-062-drop.log` |
-| suite-063-create | passed / 0 | `iacs-validation-o_st031r/suite-063-create.log` |
-| suite-063 | passed / 0 | `iacs-validation-o_st031r/suite-063.log` |
-| suite-063-drop | passed / 0 | `iacs-validation-o_st031r/suite-063-drop.log` |
-| suite-064-create | passed / 0 | `iacs-validation-o_st031r/suite-064-create.log` |
-| suite-064 | passed / 0 | `iacs-validation-o_st031r/suite-064.log` |
-| suite-064-drop | passed / 0 | `iacs-validation-o_st031r/suite-064-drop.log` |
-| suite-065-create | passed / 0 | `iacs-validation-o_st031r/suite-065-create.log` |
-| suite-065 | passed / 0 | `iacs-validation-o_st031r/suite-065.log` |
-| suite-065-drop | passed / 0 | `iacs-validation-o_st031r/suite-065-drop.log` |
-| suite-066-create | passed / 0 | `iacs-validation-o_st031r/suite-066-create.log` |
-| suite-066 | passed / 0 | `iacs-validation-o_st031r/suite-066.log` |
-| suite-066-drop | passed / 0 | `iacs-validation-o_st031r/suite-066-drop.log` |
+| python-lock-check | passed / 0 | `iacs-validation-1ts31y6o/python-lock-check.log` |
+| python-identity | passed / 0 | `iacs-validation-1ts31y6o/python-identity.log` |
+| uv-identity | passed / 0 | `iacs-validation-1ts31y6o/uv-identity.log` |
+| frontend-lock-check | passed / 0 | `iacs-validation-1ts31y6o/frontend-lock-check.log` |
+| frontend-tree-check | passed / 0 | `iacs-validation-1ts31y6o/frontend-tree-check.log` |
+| npm-identity | passed / 0 | `iacs-validation-1ts31y6o/npm-identity.log` |
+| isolation-db-free | passed / 0 | `iacs-validation-1ts31y6o/isolation-db-free.log` |
+| snapshot-tests | passed / 0 | `iacs-validation-1ts31y6o/snapshot-tests.log` |
+| harness-configuration-tests | passed / 0 | `iacs-validation-1ts31y6o/harness-configuration-tests.log` |
+| storage-tests | passed / 0 | `iacs-validation-1ts31y6o/storage-tests.log` |
+| architecture-boundaries | passed / 0 | `iacs-validation-1ts31y6o/architecture-boundaries.log` |
+| compile | passed / 0 | `iacs-validation-1ts31y6o/compile.log` |
+| workflow-contracts | passed / 0 | `iacs-validation-1ts31y6o/workflow-contracts.log` |
+| backend-tests | passed / 0 | `iacs-validation-1ts31y6o/backend-tests.log` |
+| ruff | passed / 0 | `iacs-validation-1ts31y6o/ruff.log` |
+| test-names | passed / 0 | `iacs-validation-1ts31y6o/test-names.log` |
+| mypy | passed / 0 | `iacs-validation-1ts31y6o/mypy.log` |
+| typed-contracts | passed / 0 | `iacs-validation-1ts31y6o/typed-contracts.log` |
+| frontend-tests | passed / 0 | `iacs-validation-1ts31y6o/frontend-tests.log` |
+| frontend-build | passed / 0 | `iacs-validation-1ts31y6o/frontend-build.log` |
+| compose-config | passed / 0 | `iacs-validation-1ts31y6o/compose-config.log` |
+| postgres-start | passed / 0 | `iacs-validation-1ts31y6o/postgres-start.log` |
+| redis-start | passed / 0 | `iacs-validation-1ts31y6o/redis-start.log` |
+| isolation-persistence | passed / 0 | `iacs-validation-1ts31y6o/isolation-persistence.log` |
+| isolation-inspect | passed / 0 | `iacs-validation-1ts31y6o/isolation-inspect.log` |
+| migration-up | passed / 0 | `iacs-validation-1ts31y6o/migration-up.log` |
+| migration-current | passed / 0 | `iacs-validation-1ts31y6o/migration-current.log` |
+| migration-check | passed / 0 | `iacs-validation-1ts31y6o/migration-check.log` |
+| database-restore-client-version | passed / 0 | `iacs-validation-1ts31y6o/database-restore-client-version.log` |
+| database-restore-source-create | passed / 0 | `iacs-validation-1ts31y6o/database-restore-source-create.log` |
+| database-restore-prepare | passed / 0 | `iacs-validation-1ts31y6o/database-restore-prepare.log` |
+| database-restore-dump | passed / 0 | `iacs-validation-1ts31y6o/database-restore-dump.log` |
+| database-restore-target-create | passed / 0 | `iacs-validation-1ts31y6o/database-restore-target-create.log` |
+| database-restore-load | passed / 0 | `iacs-validation-1ts31y6o/database-restore-load.log` |
+| database-restore-verify | passed / 0 | `iacs-validation-1ts31y6o/database-restore-verify.log` |
+| database-restore-drop-0 | passed / 0 | `iacs-validation-1ts31y6o/database-restore-drop-0.log` |
+| database-restore-drop-1 | passed / 0 | `iacs-validation-1ts31y6o/database-restore-drop-1.log` |
+| schema-check-1 | passed / 0 | `iacs-validation-1ts31y6o/schema-check-1.log` |
+| suite-001-create | passed / 0 | `iacs-validation-1ts31y6o/suite-001-create.log` |
+| suite-001 | passed / 0 | `iacs-validation-1ts31y6o/suite-001.log` |
+| suite-001-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-001-drop.log` |
+| suite-002-create | passed / 0 | `iacs-validation-1ts31y6o/suite-002-create.log` |
+| suite-002 | passed / 0 | `iacs-validation-1ts31y6o/suite-002.log` |
+| suite-002-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-002-drop.log` |
+| suite-003-create | passed / 0 | `iacs-validation-1ts31y6o/suite-003-create.log` |
+| suite-003 | passed / 0 | `iacs-validation-1ts31y6o/suite-003.log` |
+| suite-003-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-003-drop.log` |
+| suite-004-create | passed / 0 | `iacs-validation-1ts31y6o/suite-004-create.log` |
+| suite-004 | passed / 0 | `iacs-validation-1ts31y6o/suite-004.log` |
+| suite-004-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-004-drop.log` |
+| suite-005-create | passed / 0 | `iacs-validation-1ts31y6o/suite-005-create.log` |
+| suite-005 | passed / 0 | `iacs-validation-1ts31y6o/suite-005.log` |
+| suite-005-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-005-drop.log` |
+| suite-006-create | passed / 0 | `iacs-validation-1ts31y6o/suite-006-create.log` |
+| suite-006 | passed / 0 | `iacs-validation-1ts31y6o/suite-006.log` |
+| suite-006-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-006-drop.log` |
+| suite-007-create | passed / 0 | `iacs-validation-1ts31y6o/suite-007-create.log` |
+| suite-007 | passed / 0 | `iacs-validation-1ts31y6o/suite-007.log` |
+| suite-007-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-007-drop.log` |
+| suite-008-create | passed / 0 | `iacs-validation-1ts31y6o/suite-008-create.log` |
+| suite-008 | passed / 0 | `iacs-validation-1ts31y6o/suite-008.log` |
+| suite-008-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-008-drop.log` |
+| suite-009-create | passed / 0 | `iacs-validation-1ts31y6o/suite-009-create.log` |
+| suite-009 | passed / 0 | `iacs-validation-1ts31y6o/suite-009.log` |
+| suite-009-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-009-drop.log` |
+| suite-010-create | passed / 0 | `iacs-validation-1ts31y6o/suite-010-create.log` |
+| suite-010 | passed / 0 | `iacs-validation-1ts31y6o/suite-010.log` |
+| suite-010-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-010-drop.log` |
+| suite-011-create | passed / 0 | `iacs-validation-1ts31y6o/suite-011-create.log` |
+| suite-011 | passed / 0 | `iacs-validation-1ts31y6o/suite-011.log` |
+| suite-011-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-011-drop.log` |
+| suite-012-create | passed / 0 | `iacs-validation-1ts31y6o/suite-012-create.log` |
+| suite-012 | passed / 0 | `iacs-validation-1ts31y6o/suite-012.log` |
+| suite-012-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-012-drop.log` |
+| suite-013-create | passed / 0 | `iacs-validation-1ts31y6o/suite-013-create.log` |
+| suite-013 | passed / 0 | `iacs-validation-1ts31y6o/suite-013.log` |
+| suite-013-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-013-drop.log` |
+| suite-014-create | passed / 0 | `iacs-validation-1ts31y6o/suite-014-create.log` |
+| suite-014 | passed / 0 | `iacs-validation-1ts31y6o/suite-014.log` |
+| suite-014-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-014-drop.log` |
+| suite-015-create | passed / 0 | `iacs-validation-1ts31y6o/suite-015-create.log` |
+| suite-015 | passed / 0 | `iacs-validation-1ts31y6o/suite-015.log` |
+| suite-015-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-015-drop.log` |
+| suite-016-create | passed / 0 | `iacs-validation-1ts31y6o/suite-016-create.log` |
+| suite-016 | passed / 0 | `iacs-validation-1ts31y6o/suite-016.log` |
+| suite-016-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-016-drop.log` |
+| suite-017-create | passed / 0 | `iacs-validation-1ts31y6o/suite-017-create.log` |
+| suite-017 | passed / 0 | `iacs-validation-1ts31y6o/suite-017.log` |
+| suite-017-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-017-drop.log` |
+| suite-018-create | passed / 0 | `iacs-validation-1ts31y6o/suite-018-create.log` |
+| suite-018 | passed / 0 | `iacs-validation-1ts31y6o/suite-018.log` |
+| suite-018-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-018-drop.log` |
+| suite-019-create | passed / 0 | `iacs-validation-1ts31y6o/suite-019-create.log` |
+| suite-019 | passed / 0 | `iacs-validation-1ts31y6o/suite-019.log` |
+| suite-019-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-019-drop.log` |
+| suite-020-create | passed / 0 | `iacs-validation-1ts31y6o/suite-020-create.log` |
+| suite-020 | passed / 0 | `iacs-validation-1ts31y6o/suite-020.log` |
+| suite-020-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-020-drop.log` |
+| suite-021-create | passed / 0 | `iacs-validation-1ts31y6o/suite-021-create.log` |
+| suite-021 | passed / 0 | `iacs-validation-1ts31y6o/suite-021.log` |
+| suite-021-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-021-drop.log` |
+| suite-022-create | passed / 0 | `iacs-validation-1ts31y6o/suite-022-create.log` |
+| suite-022 | passed / 0 | `iacs-validation-1ts31y6o/suite-022.log` |
+| suite-022-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-022-drop.log` |
+| suite-023-create | passed / 0 | `iacs-validation-1ts31y6o/suite-023-create.log` |
+| suite-023 | passed / 0 | `iacs-validation-1ts31y6o/suite-023.log` |
+| suite-023-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-023-drop.log` |
+| suite-024-create | passed / 0 | `iacs-validation-1ts31y6o/suite-024-create.log` |
+| suite-024 | passed / 0 | `iacs-validation-1ts31y6o/suite-024.log` |
+| suite-024-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-024-drop.log` |
+| suite-025-create | passed / 0 | `iacs-validation-1ts31y6o/suite-025-create.log` |
+| suite-025 | passed / 0 | `iacs-validation-1ts31y6o/suite-025.log` |
+| suite-025-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-025-drop.log` |
+| suite-026-create | passed / 0 | `iacs-validation-1ts31y6o/suite-026-create.log` |
+| suite-026 | passed / 0 | `iacs-validation-1ts31y6o/suite-026.log` |
+| suite-026-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-026-drop.log` |
+| suite-027-create | passed / 0 | `iacs-validation-1ts31y6o/suite-027-create.log` |
+| suite-027 | passed / 0 | `iacs-validation-1ts31y6o/suite-027.log` |
+| suite-027-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-027-drop.log` |
+| suite-028-create | passed / 0 | `iacs-validation-1ts31y6o/suite-028-create.log` |
+| suite-028 | passed / 0 | `iacs-validation-1ts31y6o/suite-028.log` |
+| suite-028-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-028-drop.log` |
+| suite-029-create | passed / 0 | `iacs-validation-1ts31y6o/suite-029-create.log` |
+| suite-029 | passed / 0 | `iacs-validation-1ts31y6o/suite-029.log` |
+| suite-029-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-029-drop.log` |
+| suite-030-create | passed / 0 | `iacs-validation-1ts31y6o/suite-030-create.log` |
+| suite-030 | passed / 0 | `iacs-validation-1ts31y6o/suite-030.log` |
+| suite-030-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-030-drop.log` |
+| suite-031-create | passed / 0 | `iacs-validation-1ts31y6o/suite-031-create.log` |
+| suite-031 | passed / 0 | `iacs-validation-1ts31y6o/suite-031.log` |
+| suite-031-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-031-drop.log` |
+| suite-032-create | passed / 0 | `iacs-validation-1ts31y6o/suite-032-create.log` |
+| suite-032 | passed / 0 | `iacs-validation-1ts31y6o/suite-032.log` |
+| suite-032-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-032-drop.log` |
+| suite-033-create | passed / 0 | `iacs-validation-1ts31y6o/suite-033-create.log` |
+| suite-033 | passed / 0 | `iacs-validation-1ts31y6o/suite-033.log` |
+| suite-033-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-033-drop.log` |
+| suite-034-create | passed / 0 | `iacs-validation-1ts31y6o/suite-034-create.log` |
+| suite-034 | passed / 0 | `iacs-validation-1ts31y6o/suite-034.log` |
+| suite-034-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-034-drop.log` |
+| suite-035-create | passed / 0 | `iacs-validation-1ts31y6o/suite-035-create.log` |
+| suite-035 | passed / 0 | `iacs-validation-1ts31y6o/suite-035.log` |
+| suite-035-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-035-drop.log` |
+| suite-036-create | passed / 0 | `iacs-validation-1ts31y6o/suite-036-create.log` |
+| suite-036 | passed / 0 | `iacs-validation-1ts31y6o/suite-036.log` |
+| suite-036-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-036-drop.log` |
+| suite-037-create | passed / 0 | `iacs-validation-1ts31y6o/suite-037-create.log` |
+| suite-037 | passed / 0 | `iacs-validation-1ts31y6o/suite-037.log` |
+| suite-037-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-037-drop.log` |
+| suite-038-create | passed / 0 | `iacs-validation-1ts31y6o/suite-038-create.log` |
+| suite-038 | passed / 0 | `iacs-validation-1ts31y6o/suite-038.log` |
+| suite-038-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-038-drop.log` |
+| suite-039-create | passed / 0 | `iacs-validation-1ts31y6o/suite-039-create.log` |
+| suite-039 | passed / 0 | `iacs-validation-1ts31y6o/suite-039.log` |
+| suite-039-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-039-drop.log` |
+| suite-040-create | passed / 0 | `iacs-validation-1ts31y6o/suite-040-create.log` |
+| suite-040 | passed / 0 | `iacs-validation-1ts31y6o/suite-040.log` |
+| suite-040-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-040-drop.log` |
+| suite-041-create | passed / 0 | `iacs-validation-1ts31y6o/suite-041-create.log` |
+| suite-041 | passed / 0 | `iacs-validation-1ts31y6o/suite-041.log` |
+| suite-041-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-041-drop.log` |
+| suite-042-create | passed / 0 | `iacs-validation-1ts31y6o/suite-042-create.log` |
+| suite-042 | passed / 0 | `iacs-validation-1ts31y6o/suite-042.log` |
+| suite-042-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-042-drop.log` |
+| suite-043-create | passed / 0 | `iacs-validation-1ts31y6o/suite-043-create.log` |
+| suite-043 | passed / 0 | `iacs-validation-1ts31y6o/suite-043.log` |
+| suite-043-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-043-drop.log` |
+| suite-044-create | passed / 0 | `iacs-validation-1ts31y6o/suite-044-create.log` |
+| suite-044 | passed / 0 | `iacs-validation-1ts31y6o/suite-044.log` |
+| suite-044-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-044-drop.log` |
+| suite-045-create | passed / 0 | `iacs-validation-1ts31y6o/suite-045-create.log` |
+| suite-045 | passed / 0 | `iacs-validation-1ts31y6o/suite-045.log` |
+| suite-045-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-045-drop.log` |
+| suite-046-create | passed / 0 | `iacs-validation-1ts31y6o/suite-046-create.log` |
+| suite-046 | passed / 0 | `iacs-validation-1ts31y6o/suite-046.log` |
+| suite-046-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-046-drop.log` |
+| suite-047-create | passed / 0 | `iacs-validation-1ts31y6o/suite-047-create.log` |
+| suite-047 | passed / 0 | `iacs-validation-1ts31y6o/suite-047.log` |
+| suite-047-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-047-drop.log` |
+| suite-048-create | passed / 0 | `iacs-validation-1ts31y6o/suite-048-create.log` |
+| suite-048 | passed / 0 | `iacs-validation-1ts31y6o/suite-048.log` |
+| suite-048-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-048-drop.log` |
+| suite-049-create | passed / 0 | `iacs-validation-1ts31y6o/suite-049-create.log` |
+| suite-049 | passed / 0 | `iacs-validation-1ts31y6o/suite-049.log` |
+| suite-049-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-049-drop.log` |
+| suite-050-create | passed / 0 | `iacs-validation-1ts31y6o/suite-050-create.log` |
+| suite-050 | passed / 0 | `iacs-validation-1ts31y6o/suite-050.log` |
+| suite-050-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-050-drop.log` |
+| suite-051-create | passed / 0 | `iacs-validation-1ts31y6o/suite-051-create.log` |
+| suite-051 | passed / 0 | `iacs-validation-1ts31y6o/suite-051.log` |
+| suite-051-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-051-drop.log` |
+| suite-052-create | passed / 0 | `iacs-validation-1ts31y6o/suite-052-create.log` |
+| suite-052 | passed / 0 | `iacs-validation-1ts31y6o/suite-052.log` |
+| suite-052-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-052-drop.log` |
+| suite-053-create | passed / 0 | `iacs-validation-1ts31y6o/suite-053-create.log` |
+| suite-053 | passed / 0 | `iacs-validation-1ts31y6o/suite-053.log` |
+| suite-053-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-053-drop.log` |
+| suite-054-create | passed / 0 | `iacs-validation-1ts31y6o/suite-054-create.log` |
+| suite-054 | passed / 0 | `iacs-validation-1ts31y6o/suite-054.log` |
+| suite-054-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-054-drop.log` |
+| suite-055-create | passed / 0 | `iacs-validation-1ts31y6o/suite-055-create.log` |
+| suite-055 | passed / 0 | `iacs-validation-1ts31y6o/suite-055.log` |
+| suite-055-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-055-drop.log` |
+| suite-056-create | passed / 0 | `iacs-validation-1ts31y6o/suite-056-create.log` |
+| suite-056 | passed / 0 | `iacs-validation-1ts31y6o/suite-056.log` |
+| suite-056-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-056-drop.log` |
+| suite-057-create | passed / 0 | `iacs-validation-1ts31y6o/suite-057-create.log` |
+| suite-057 | passed / 0 | `iacs-validation-1ts31y6o/suite-057.log` |
+| suite-057-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-057-drop.log` |
+| suite-058-create | passed / 0 | `iacs-validation-1ts31y6o/suite-058-create.log` |
+| suite-058 | passed / 0 | `iacs-validation-1ts31y6o/suite-058.log` |
+| suite-058-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-058-drop.log` |
+| suite-059-create | passed / 0 | `iacs-validation-1ts31y6o/suite-059-create.log` |
+| suite-059 | passed / 0 | `iacs-validation-1ts31y6o/suite-059.log` |
+| suite-059-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-059-drop.log` |
+| suite-060-create | passed / 0 | `iacs-validation-1ts31y6o/suite-060-create.log` |
+| suite-060 | passed / 0 | `iacs-validation-1ts31y6o/suite-060.log` |
+| suite-060-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-060-drop.log` |
+| suite-061-create | passed / 0 | `iacs-validation-1ts31y6o/suite-061-create.log` |
+| suite-061 | passed / 0 | `iacs-validation-1ts31y6o/suite-061.log` |
+| suite-061-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-061-drop.log` |
+| suite-062-create | passed / 0 | `iacs-validation-1ts31y6o/suite-062-create.log` |
+| suite-062 | passed / 0 | `iacs-validation-1ts31y6o/suite-062.log` |
+| suite-062-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-062-drop.log` |
+| suite-063-create | passed / 0 | `iacs-validation-1ts31y6o/suite-063-create.log` |
+| suite-063 | passed / 0 | `iacs-validation-1ts31y6o/suite-063.log` |
+| suite-063-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-063-drop.log` |
+| suite-064-create | passed / 0 | `iacs-validation-1ts31y6o/suite-064-create.log` |
+| suite-064 | passed / 0 | `iacs-validation-1ts31y6o/suite-064.log` |
+| suite-064-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-064-drop.log` |
+| suite-065-create | passed / 0 | `iacs-validation-1ts31y6o/suite-065-create.log` |
+| suite-065 | passed / 0 | `iacs-validation-1ts31y6o/suite-065.log` |
+| suite-065-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-065-drop.log` |
+| suite-066-create | passed / 0 | `iacs-validation-1ts31y6o/suite-066-create.log` |
+| suite-066 | passed / 0 | `iacs-validation-1ts31y6o/suite-066.log` |
+| suite-066-drop | passed / 0 | `iacs-validation-1ts31y6o/suite-066-drop.log` |
 
 Final pytest suite summaries: `IACS_SECURITY_RELIABILITY_EVIDENCE.json`. Backend skips are accounted individually in `skip-accounting.json`; their exact passing persistence counterparts must exist before closure. No calendar-only test was removed in this task. The old SDK test was renamed to describe the preserved public browsing contract; actual recovery continuation now has real persistence tests. Existing historical concurrency mocks were migrated to the exclusive discovery lease while retaining one-event/media/no-hardware assertions.
 
@@ -319,12 +320,12 @@ Three synthetic accounts, five warmups,50samples, isolated PostgreSQL/ASGI,1CPU 
 | --- | ---: | ---: | ---: | ---: |
 | before | 10 | 0 | 0.090 | 0.096 |
 | before | 1 | 0 | 0.021 | 0.028 |
-| after | 10 | 1000 | 17.286 | 51.650 |
-| after | 1 | 100 | 0.657 | 0.915 |
+| after | 10 | 1000 | 16.724 | 54.772 |
+| after | 1 | 100 | 0.637 | 0.903 |
 
 ## Independent review and coverage limits
 
-Requested primary gpt-6.1-sol/xhigh and reviewer gpt-6-astra/medium. Supported subagent delegation was used; effective model/effort metadata is unavailable, so neither identity is represented as verified. Actual token usage is unavailable. Checkpoint1 assessed ownership/design. Checkpoint2 found exact-session proof, repeated-cancellation and lifecycle gaps; all were reproduced, fixed, tested and reviewed at00447666.... N09 guard consultations corrected admission/probe ordering, accounting/traversal failures and cleanup truth; final targeted review2847e60... closed those fixes. Checkpoint3 inspected the exact task patch and local immutable source8d2857..., found the periodic overlap defect, then reviewed the overlap correction at3239f2905f0de5d97789642e02a99798a4c8a36754891c94502adb4da76f5ee7. The final three-file score-eligibility/window-query-test delta was reviewed at `7b8bbb5bdb9bfbc85ceeac8de13949ae76e098dc5ae38f19edbda59efa5a2905`; completed full/browser/runtime evidence was subsequently inspected for closure. No automatic deference: changes follow reproduced behavior and source evidence. Evidence closure: `True`; reports and snapshot/diff manifests are under `checkpoint3/`.
+Requested primary gpt-6.1-sol/xhigh and reviewer gpt-6-astra/medium. Supported subagent delegation was used; effective model/effort metadata is unavailable, so neither identity is represented as verified. Actual token usage is unavailable. Checkpoint1 assessed ownership/design. Checkpoint2 found exact-session proof, repeated-cancellation and lifecycle gaps; all were reproduced, fixed, tested and reviewed at00447666.... N09 guard consultations corrected admission/probe ordering, accounting/traversal failures and cleanup truth; final targeted review2847e60... closed those fixes. Checkpoint3 inspected the exact task patch and local immutable source8d2857..., found the periodic overlap defect, then reviewed the overlap correction at3239f2905f0de5d97789642e02a99798a4c8a36754891c94502adb4da76f5ee7. The final three-file score-eligibility/window-query-test delta was reviewed at `f7d66850e18e8e05f600be877a21e2b4bcb4b6e83e3502f1daae6d0a8066ac04`; completed full/browser/runtime evidence was subsequently inspected for closure. No automatic deference: changes follow reproduced behavior and source evidence. Evidence closure: `True`; reports and snapshot/diff manifests are under `checkpoint3/`.
 
 Source-reading coverage (separate from automated test coverage):
 
@@ -340,6 +341,12 @@ Source-reading coverage (separate from automated test coverage):
 The changed authority, connection lifecycle, recipient-binding/dispatch and discovery/transaction/provider boundaries were reviewed. Supporting callers, migrations and frontend flows were reviewed where these changes depend on them. The entire repository is not certified or claimed fully read; unrelated providers, UI sections and business policies received regression/static coverage rather than an every-line audit. Live provider/hardware tests were deliberately not executed. Remaining risks are the provider completeness assumptions, bounded eventual revocation detection (idle2s; current check before send; authority timeout1s), possible conservative storage aborts, and operator review of held legacy recipients/coverage. Authorization checks do not make network byte delivery atomic with revocation.
 
 Documentation checks: `final-documentation-checks.json` records291local links/command paths and `git diff --check` passing. Portable bundle verification: `bundle-inspection.json` and `patch-apply-verification.json` are retained at the evidence root; the archive contains its own member manifest and patch-apply receipt. Only delivery documents/archive assembly follow final code validation. Percentage re-estimates and the disk incident/pause/resume are retained in `progress.json`; they describe completed evidence rather than elapsed time.
+
+## Linux CI follow-up N10
+
+The failed Project Checks run38646126165 passed application/static/frontend checks before aborting with StorageViolation/PermissionError immediately after synthetic PostgreSQL startup; cleanup also failed. Old root startup changed data ownership to image UID999, preventing runner UID1001 from traversing0700 directories. The3-file fix uses the runner UID/GID and removes all PostgreSQL capability additions. No disk threshold or permission guard was weakened. Native Linux tmpfs proof retains real PostgreSQL SQL before/after, unchanged0700 permissions and expected runner traversal failure/pass; this is a targeted permission proof, not the full Linux bind-mount test. Full local harness plus actual GitHub run38648177324 provide that closure.
+
+`ci-followup.json` records the exact commit, results and focused review. Focused review found no material issue atf7d66850..., while explicitly requiring the full Linux bind-mount/accounting/cleanup run. The original30browser cases remain applicable because all269frontend source hashes are unchanged; final full harness repeats frontend unit/build checks. Earlier deployment preparation built only a frontend image and performed isolated checks; production containers stayed unchanged and no migration ran. Its isolated Nginx configuration check lacked a backend DNS alias; that is preparation context, not an application defect or deployed change.
 
 ## Fresh reviewer checklist
 

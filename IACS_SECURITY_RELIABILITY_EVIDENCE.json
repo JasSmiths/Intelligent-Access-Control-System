@@ -13,15 +13,54 @@
   "root": "/Users/jas/Documents/Intelligent Access System",
   "branch": "main",
   "head": "53db38ffad2517e2b3076f08086be6422a287287",
+  "current_git_head": "41fa684d7e84d5f94bd9d91c88de2df41b1a8cba",
+  "ci_followup": {
+    "id": "N10",
+    "status": "fixed_and_verified",
+    "source_commit": "41fa684d7e84d5f94bd9d91c88de2df41b1a8cba",
+    "starting_commit": "07bcd6bf3ce976a508e8830c61e0681570bcce95",
+    "final_fingerprint": "f7d66850e18e8e05f600be877a21e2b4bcb4b6e83e3502f1daae6d0a8066ac04",
+    "github_run_id": 38648177324,
+    "github_url": "https://github.com/JasSmiths/Intelligent-Access-Control-System/actions/runs/38648177324",
+    "github_conclusion": "success",
+    "github_jobs": [
+      {
+        "name": "image-builds",
+        "conclusion": "success"
+      },
+      {
+        "name": "isolated-contracts",
+        "conclusion": "success"
+      },
+      {
+        "name": "dependency-audits",
+        "conclusion": "success"
+      }
+    ],
+    "linux_full_bind_accounting_and_cleanup": "passed",
+    "local_full_run": "iacs-validation-1ts31y6o",
+    "local_passes": 2814,
+    "skips_with_passing_counterparts": 35,
+    "evidence_root": "/private/tmp/iacs-ci-fix-07bcd6b-20261014",
+    "baseline_failure": "github-failed-job.log",
+    "linux_permission_before": "linux-before/proof.json",
+    "linux_permission_after": "linux-after/proof.json",
+    "github_successful_job_log": "github-fixed-job.log",
+    "full_results": "iacs-validation-1ts31y6o/results.json",
+    "runtime_reference": "runtime-final-reference.json",
+    "review_status": "Closed without unresolved material finding; actual Linux bind/accounting/cleanup gap verified.",
+    "linux_receipt": "/private/tmp/iacs-ci-fix-07bcd6b-20261014/github-linux-proof.json",
+    "review_report": "/private/tmp/iacs-ci-fix-07bcd6b-20261014/final-review.txt"
+  },
   "starting_worktree_clean": true,
   "starting_fingerprint": "1bc3838659160f422bad2e5800473da993188f4746f0c1e338c11beaa396a557",
-  "final_tested_fingerprint": "7b8bbb5bdb9bfbc85ceeac8de13949ae76e098dc5ae38f19edbda59efa5a2905",
+  "final_tested_fingerprint": "f7d66850e18e8e05f600be877a21e2b4bcb4b6e83e3502f1daae6d0a8066ac04",
   "workspace_matches_tested_source": true,
   "fingerprint_algorithm": "SHA256 of sorted relative-path + NUL + file SHA256 hex + newline; exact bytes; see scripts/validation/source_snapshot.py",
   "fingerprint_exclusions": "Delivery artifacts, credentials/environment files, production data/logs, dependencies, build/test/browser caches, Git internals, private runtime state; full selectors in source_snapshot.py",
   "documentation_checks": "final-documentation-checks.json",
   "bundle_inspection": "bundle-inspection.json (external receipt; avoids self-reference)",
-  "source_manifest": "iacs-validation-o_st031r/manifest.json",
+  "source_manifest": "iacs-validation-1ts31y6o/manifest.json",
   "evidence_root": "/private/tmp/iacs-security-reliability-20261014",
   "changes": [
     {
@@ -407,8 +446,8 @@
       "status": "modified",
       "group": "docs",
       "starting_sha256": "c087606b785bb322285f6351e128ce006e93c584578ca683eaa323562051676b",
-      "final_sha256": "5a9fe58accc0a23355fa635a618af9cba598e7b5cc2c9437f042645d43b2b45f",
-      "added": 121,
+      "final_sha256": "496ebe33a78f9183e19cdd4c96ccad0fcb211c45cd28fd8edee3745222e2e128",
+      "added": 124,
       "deleted": 2
     },
     {
@@ -578,9 +617,9 @@
       "status": "modified",
       "group": "tests",
       "starting_sha256": "25ac2bd97107ea7628e9f302d3a9830e5648f7aef24760275711b1c16ecd8dbd",
-      "final_sha256": "0b73c973ee95f5174a6b6fed25580a163c42948cca88bd2af16da5a5a601d498",
-      "added": 32,
-      "deleted": 12
+      "final_sha256": "52c10da83ed338e4bb48f60f5171b93786065689307b4661a008d41ed21ab4c8",
+      "added": 38,
+      "deleted": 14
     },
     {
       "path": "scripts/validation/test_historical_candidates_persistence.py",
@@ -686,15 +725,15 @@
       "status": "modified",
       "group": "validation_tools",
       "starting_sha256": "43b231a990cb51c1da0566e87c46003c2acd45bff14c49bb21cfce5a5c101cd0",
-      "final_sha256": "e61b57cee621673aafbaef0928e37f9506fdc57f960b686e405dc539330a2546",
-      "added": 130,
-      "deleted": 30
+      "final_sha256": "ba855027d034c41804c44fbf9ca7be158642db65d9cea8eed4d108cd791a3072",
+      "added": 133,
+      "deleted": 33
     }
   ],
   "change_statistics": {
     "docs": {
       "files": 5,
-      "added": 238,
+      "added": 241,
       "deleted": 5
     },
     "migrations": {
@@ -709,8 +748,8 @@
     },
     "tests": {
       "files": 26,
-      "added": 2427,
-      "deleted": 211
+      "added": 2433,
+      "deleted": 213
     },
     "generated": {
       "files": 1,
@@ -719,8 +758,8 @@
     },
     "validation_tools": {
       "files": 6,
-      "added": 394,
-      "deleted": 53
+      "added": 397,
+      "deleted": 56
     }
   },
   "requirements": [
@@ -831,15 +870,24 @@
       "owner": "scripts/validation/storage.py; scripts/validation/validate.py; scripts/validation/runtime_pdf_smoke.py",
       "regressions": "test_storage.py; test_harness_configuration.py; test_source_snapshot.py",
       "paired_evidence": "70 host tests + guarded actual Linux frontend/build proof passed; focused independent corrections closed."
+    },
+    {
+      "id": "N10",
+      "status": "fixed_and_verified",
+      "root_cause": "The Linux runner could not traverse private PostgreSQL data owned by image UID999, so accounting and cleanup failed.",
+      "correction": "Run synthetic PostgreSQL as the runner UID/GID, drop every capability and preserve0700 data permissions.",
+      "owner": "scripts/validation/validate.py:276 `container`",
+      "regressions": "test_harness_configuration.py: test_container_user_matches_bind_owner_without_restoring_capabilities; native Linux/PostgreSQL proof; complete GitHub harness",
+      "paired_evidence": "Before:1host failure/30controls and real PG runner traversal rejected. After:31host passes, SQL/private permissions/traversal/cleanup pass. Actual Linux CI closure: ci-followup.json."
     }
   ],
   "test_runs": [
     {
       "name": "full",
       "command": "IACS_VALIDATION_BACKEND_IMAGE=iacs-backend:uiprotect-23-backfill-verified-20261013 <bundled-python3.12> scripts/validation/validate.py --reuse-dependencies /private/tmp/iacs-integration-mutations-20261014/iacs-validation-focus-rstp6hsg --evidence-root /private/tmp/iacs-security-reliability-20261014",
-      "run": "iacs-validation-o_st031r",
-      "console": "full-final-3-console.log",
-      "fingerprint": "7b8bbb5bdb9bfbc85ceeac8de13949ae76e098dc5ae38f19edbda59efa5a2905",
+      "run": "iacs-validation-1ts31y6o",
+      "console": "full-ci-fix-console.log",
+      "fingerprint": "f7d66850e18e8e05f600be877a21e2b4bcb4b6e83e3502f1daae6d0a8066ac04",
       "results": {
         "python-lock-check": 0,
         "python-identity": 0,
@@ -1081,7 +1129,7 @@
         "source_integrity": 0,
         "production_unchanged": true
       },
-      "checks": "iacs-validation-o_st031r/checks.json",
+      "checks": "iacs-validation-1ts31y6o/checks.json",
       "suites": [
         {
           "name": "backend-tests",
@@ -1090,7 +1138,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 35,
-          "artifact": "iacs-validation-o_st031r/artifacts/backend-tests/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/backend-tests/junit.xml"
         },
         {
           "name": "suite-001",
@@ -1099,7 +1147,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-001/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-001/junit.xml"
         },
         {
           "name": "suite-002",
@@ -1108,7 +1156,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-002/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-002/junit.xml"
         },
         {
           "name": "suite-003",
@@ -1117,7 +1165,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-003/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-003/junit.xml"
         },
         {
           "name": "suite-004",
@@ -1126,7 +1174,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-004/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-004/junit.xml"
         },
         {
           "name": "suite-005",
@@ -1135,7 +1183,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-005/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-005/junit.xml"
         },
         {
           "name": "suite-006",
@@ -1144,7 +1192,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-006/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-006/junit.xml"
         },
         {
           "name": "suite-007",
@@ -1153,7 +1201,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-007/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-007/junit.xml"
         },
         {
           "name": "suite-008",
@@ -1162,7 +1210,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-008/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-008/junit.xml"
         },
         {
           "name": "suite-009",
@@ -1171,7 +1219,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-009/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-009/junit.xml"
         },
         {
           "name": "suite-010",
@@ -1180,7 +1228,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-010/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-010/junit.xml"
         },
         {
           "name": "suite-011",
@@ -1189,7 +1237,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-011/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-011/junit.xml"
         },
         {
           "name": "suite-012",
@@ -1198,7 +1246,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-012/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-012/junit.xml"
         },
         {
           "name": "suite-013",
@@ -1207,7 +1255,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-013/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-013/junit.xml"
         },
         {
           "name": "suite-014",
@@ -1216,7 +1264,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-014/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-014/junit.xml"
         },
         {
           "name": "suite-015",
@@ -1225,7 +1273,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-015/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-015/junit.xml"
         },
         {
           "name": "suite-016",
@@ -1234,7 +1282,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-016/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-016/junit.xml"
         },
         {
           "name": "suite-017",
@@ -1243,7 +1291,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-017/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-017/junit.xml"
         },
         {
           "name": "suite-018",
@@ -1252,7 +1300,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-018/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-018/junit.xml"
         },
         {
           "name": "suite-019",
@@ -1261,7 +1309,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-019/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-019/junit.xml"
         },
         {
           "name": "suite-020",
@@ -1270,7 +1318,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-020/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-020/junit.xml"
         },
         {
           "name": "suite-021",
@@ -1279,7 +1327,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-021/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-021/junit.xml"
         },
         {
           "name": "suite-022",
@@ -1288,7 +1336,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-022/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-022/junit.xml"
         },
         {
           "name": "suite-023",
@@ -1297,7 +1345,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-023/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-023/junit.xml"
         },
         {
           "name": "suite-024",
@@ -1306,7 +1354,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-024/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-024/junit.xml"
         },
         {
           "name": "suite-025",
@@ -1315,7 +1363,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-025/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-025/junit.xml"
         },
         {
           "name": "suite-026",
@@ -1324,7 +1372,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-026/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-026/junit.xml"
         },
         {
           "name": "suite-027",
@@ -1333,7 +1381,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-027/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-027/junit.xml"
         },
         {
           "name": "suite-028",
@@ -1342,7 +1390,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-028/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-028/junit.xml"
         },
         {
           "name": "suite-029",
@@ -1351,7 +1399,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-029/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-029/junit.xml"
         },
         {
           "name": "suite-030",
@@ -1360,7 +1408,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-030/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-030/junit.xml"
         },
         {
           "name": "suite-031",
@@ -1369,7 +1417,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-031/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-031/junit.xml"
         },
         {
           "name": "suite-032",
@@ -1378,7 +1426,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-032/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-032/junit.xml"
         },
         {
           "name": "suite-033",
@@ -1387,7 +1435,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-033/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-033/junit.xml"
         },
         {
           "name": "suite-034",
@@ -1396,7 +1444,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-034/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-034/junit.xml"
         },
         {
           "name": "suite-035",
@@ -1405,7 +1453,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-035/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-035/junit.xml"
         },
         {
           "name": "suite-036",
@@ -1414,7 +1462,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-036/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-036/junit.xml"
         },
         {
           "name": "suite-037",
@@ -1423,7 +1471,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-037/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-037/junit.xml"
         },
         {
           "name": "suite-038",
@@ -1432,7 +1480,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-038/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-038/junit.xml"
         },
         {
           "name": "suite-039",
@@ -1441,7 +1489,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-039/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-039/junit.xml"
         },
         {
           "name": "suite-040",
@@ -1450,7 +1498,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-040/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-040/junit.xml"
         },
         {
           "name": "suite-041",
@@ -1459,7 +1507,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-041/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-041/junit.xml"
         },
         {
           "name": "suite-042",
@@ -1468,7 +1516,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-042/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-042/junit.xml"
         },
         {
           "name": "suite-043",
@@ -1477,7 +1525,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-043/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-043/junit.xml"
         },
         {
           "name": "suite-044",
@@ -1486,7 +1534,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-044/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-044/junit.xml"
         },
         {
           "name": "suite-045",
@@ -1495,7 +1543,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-045/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-045/junit.xml"
         },
         {
           "name": "suite-046",
@@ -1504,7 +1552,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-046/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-046/junit.xml"
         },
         {
           "name": "suite-047",
@@ -1513,7 +1561,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-047/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-047/junit.xml"
         },
         {
           "name": "suite-048",
@@ -1522,7 +1570,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-048/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-048/junit.xml"
         },
         {
           "name": "suite-049",
@@ -1531,7 +1579,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-049/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-049/junit.xml"
         },
         {
           "name": "suite-050",
@@ -1540,7 +1588,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-050/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-050/junit.xml"
         },
         {
           "name": "suite-051",
@@ -1549,7 +1597,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-051/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-051/junit.xml"
         },
         {
           "name": "suite-052",
@@ -1558,7 +1606,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-052/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-052/junit.xml"
         },
         {
           "name": "suite-053",
@@ -1567,7 +1615,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-053/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-053/junit.xml"
         },
         {
           "name": "suite-054",
@@ -1576,7 +1624,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-054/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-054/junit.xml"
         },
         {
           "name": "suite-055",
@@ -1585,7 +1633,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-055/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-055/junit.xml"
         },
         {
           "name": "suite-056",
@@ -1594,7 +1642,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-056/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-056/junit.xml"
         },
         {
           "name": "suite-057",
@@ -1603,7 +1651,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-057/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-057/junit.xml"
         },
         {
           "name": "suite-058",
@@ -1612,7 +1660,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-058/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-058/junit.xml"
         },
         {
           "name": "suite-059",
@@ -1621,7 +1669,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-059/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-059/junit.xml"
         },
         {
           "name": "suite-060",
@@ -1630,7 +1678,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-060/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-060/junit.xml"
         },
         {
           "name": "suite-061",
@@ -1639,7 +1687,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-061/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-061/junit.xml"
         },
         {
           "name": "suite-062",
@@ -1648,7 +1696,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-062/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-062/junit.xml"
         },
         {
           "name": "suite-063",
@@ -1657,7 +1705,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-063/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-063/junit.xml"
         },
         {
           "name": "suite-064",
@@ -1666,7 +1714,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-064/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-064/junit.xml"
         },
         {
           "name": "suite-065",
@@ -1675,7 +1723,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-065/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-065/junit.xml"
         },
         {
           "name": "suite-066",
@@ -1684,7 +1732,7 @@
           "failed": 0,
           "errors": 0,
           "skipped": 0,
-          "artifact": "iacs-validation-o_st031r/artifacts/suite-066/junit.xml"
+          "artifact": "iacs-validation-1ts31y6o/artifacts/suite-066/junit.xml"
         }
       ]
     },
@@ -1711,14 +1759,14 @@
       "name": "runtime",
       "result": {
         "status": "passed",
-        "run": "iacs-runtime-pdf-0qrk40om",
-        "source_fingerprint": "7b8bbb5bdb9bfbc85ceeac8de13949ae76e098dc5ae38f19edbda59efa5a2905",
+        "run": "iacs-runtime-pdf-z3zspz7c",
+        "source_fingerprint": "f7d66850e18e8e05f600be877a21e2b4bcb4b6e83e3502f1daae6d0a8066ac04",
         "image": {
           "id": "sha256:20de675129d60c7228e69396b546be2431948c4f7bc2741fce558e7c5116e788",
           "size_bytes": 2122110539,
           "user": "iacs"
         },
-        "pdf_sha256": "363144efc7fed1874b8425312c9d08e55e76f2cabe0098ff045f9118b08e594b",
+        "pdf_sha256": "7c29844131a69b92430e547aa132078e45441b94a5f43bb9182a9e29dc297916",
         "pdf_bytes": 153392,
         "source_parity": {
           "status": "passed",
@@ -1765,7 +1813,10 @@
   "production": {
     "migrated": false,
     "deployed": false,
-    "new_task_changes_uncommitted": true,
+    "source_changes_committed": true,
+    "source_commit": "41fa684d7e84d5f94bd9d91c88de2df41b1a8cba",
+    "as_of": "Final validation point before separately authorized production deployment",
+    "delivery_documents_regenerated_after_validation": true,
     "earlier_exception": "Explicitly approved isolation-only backend restart completed before clean source baseline; no subsequent agent production restart."
   },
   "blockers": [],
