@@ -186,8 +186,12 @@ class RecoveryProfileTests(unittest.TestCase):
             self.assertEqual(command[command.index('--user') + 1], '1001:1002')
             self.assertEqual(command[command.index('--cap-drop') + 1], 'ALL')
             self.assertNotIn('--cap-add', command)
-            postgres = harness.container('postgres', 'inert-image', ['true'])
-            self.assertEqual(postgres[postgres.index('--user') + 1], '0')
+            for name in ('postgres', 'redis'):
+                with self.subTest(name=name):
+                    service = harness.container(name, 'inert-image', ['true'])
+                    self.assertEqual(service[service.index('--user') + 1], '1001:1002')
+                    self.assertEqual(service[service.index('--cap-drop') + 1], 'ALL')
+                    self.assertNotIn('--cap-add', service)
 
     def test_every_validation_test_has_one_explicit_execution_class(self):
         self.assertEqual(recovery_checks.inventory_errors(ROOT), [])

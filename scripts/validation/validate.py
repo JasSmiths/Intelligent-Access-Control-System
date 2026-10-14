@@ -280,9 +280,9 @@ class Harness:
         command_line = ['docker', 'run', '--pull=never', '--name', cname, '--label', 'iacs.validation=' + self.prefix,
                         '--network', network, '--cpus', '1', '--memory', '1536m', '--pids-limit', '256',
                         '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--no-healthcheck',
-                        '--user', '0' if name == 'postgres' else f'{os.getuid()}:{os.getgid()}', '--workdir', work]
-        if name == 'postgres':
-            command_line += ['--cap-add', 'CHOWN', '--cap-add', 'DAC_OVERRIDE', '--cap-add', 'SETUID', '--cap-add', 'SETGID']
+                        '--user', f'{os.getuid()}:{os.getgid()}', '--workdir', work]
+        # PostgreSQL supports arbitrary non-root UIDs. Keep its private data
+        # owned by the runner so Linux accounting and cleanup can traverse it.
         for source, dest, mode in mounts:
             command_line += ['-v', f'{source}:{dest}:{mode}']
         for key, value in (env or {}).items():

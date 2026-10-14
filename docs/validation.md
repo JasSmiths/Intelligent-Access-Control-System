@@ -346,7 +346,10 @@ does not recover capacity.
    Verify container ownership and cleanup records; check mounts on **all running
    and stopped containers**, including ancestor/descendant paths. Then remove only
    the run's disposable dependency copies, synthetic PostgreSQL/Redis directories
-   and generated caches. Preserve the designated reusable preparation. Check
+   and generated caches. Preserve the designated reusable preparation.
+   Synthetic PostgreSQL runs as the runner's UID/GID with all capabilities
+   dropped. Its data retains private `0700` permissions while remaining readable
+   to the same runner for disk accounting and owned cleanup on Linux. Check
    exact image IDs, aliases and container references before removing superseded
    test images; do not use forced image removal. Inspect build cache before
    clearing unused entries, and account for other applications sharing Docker.
