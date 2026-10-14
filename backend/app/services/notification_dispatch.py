@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.core.task_lifecycle import drain_owned
 from app.models import NotificationRun
 from app.modules.notifications.base import NotificationDeliveryError
 from app.services.notification_runs import (
@@ -24,6 +25,7 @@ from app.services.workflow_dispatch_ports import NotificationDispatchOwner, Noti
 from app.services.workflows.action_definitions import WorkflowConfigurationError
 from app.services.workflows.execution_contracts import (
     NotificationActionOutcome,
+    NotificationDeliveryProgress,
     NotificationPlanItem,
     checked_notification_plan,
 )
@@ -182,9 +184,10 @@ class NotificationDispatcher:
                     raise ValueError(
                         "A notification attempt needs its authorized runtime configuration."
                     )
+                progress = NotificationDeliveryProgress()
                 try:
                     async with asyncio.timeout(ACTION_TIMEOUT_SECONDS):
-                        outcome = await self.service.deliver_planned_action(item, row, config)
+                        outcome = await self.service.deliver_planned_action(item, row, config, progress=progress)
                 except NotificationDeliveryError as exc:
                     checkpoint = _checkpoint_from_delivery_error(exc)
                     await self.store.finish_action(
@@ -206,12 +209,15 @@ class NotificationDispatcher:
                     if checkpoint.get("review_required"):
                         return True
                     continue
+                except asyncio.CancelledError:
+                    if progress.destination_outcomes:
+                        checkpoint = _checkpoint_from_delivery_error(NotificationDeliveryError(
+                            "Delivery interrupted.", destination_outcomes=progress.destination_outcomes))
+                        await drain_owned(self.store.finish_action(row.id, token, index, checkpoint))
+                    raise
                 except Exception:  # noqa: BLE001 - an unclassified provider error is always ambiguous.
-                    checkpoint = {
-                        "state": "unknown",
-                        "reason": "provider_outcome_unknown",
-                        "review_required": True,
-                    }
+                    checkpoint = _checkpoint_from_delivery_error(NotificationDeliveryError(
+                        "Provider outcome unknown.", destination_outcomes=progress.destination_outcomes))
                     await self.store.finish_action(
                         row.id,
                         token,
@@ -265,6 +271,8 @@ class NotificationDispatcher:
             # If this write fails, the lease expiry follows the same conservative rule.
             try:
                 await self.store.interrupt(row.id, token)
+            except ClaimLost:
+                pass  # An interrupted destination receipt may already have closed this claim.
             except Exception:
                 logger.exception("notification_dispatch_interruption_checkpoint_failed")
             raise

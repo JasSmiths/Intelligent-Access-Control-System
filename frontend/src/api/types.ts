@@ -274,6 +274,16 @@ export type SystemSetting = {
   description: string | null;
 };
 export type SettingsMap = Record<string, unknown>;
+export type SettingsActivationReceipt = {
+  state: "not_required" | "activated" | "failed" | "partial_failure" | "pending";
+  services: Record<string, string>;
+};
+export type SettingsSaveReceipt = {
+  saved: true;
+  settings: SystemSetting[];
+  changed_keys: string[];
+  activation: SettingsActivationReceipt;
+};
 export type HomeAssistantEntity = {
   entity_id: string;
   name: string | null;

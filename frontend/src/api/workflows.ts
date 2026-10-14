@@ -41,9 +41,8 @@ export type AutomationRun = {
 export type AutomationRunPage = { items: AutomationRun[]; next_cursor: string | null };
 export const notificationRunReceiptUrl = (runId: string) => `/api/v1/notifications/runs/${encodeURIComponent(runId)}`;
 export type AutomationRule = { id: string; name: string; description: string; is_active: boolean; triggers: AutomationNode[]; trigger_keys: string[]; conditions: AutomationNode[]; actions: AutomationAction[]; next_run_at?: string | null; last_fired_at?: string | null; run_count: number; last_run_status?: string | null; last_error?: string | null; created_at?: string | null; updated_at?: string | null };
-export type AutomationCatalogItem = { type: string; label: string; description?: string; scopes?: string[]; enabled?: boolean; disabled?: boolean; disabled_reason?: string | null; integration_action?: boolean; integration_provider?: string; integration_provider_label?: string; integration_action_key?: string; default_config?: Record<string, unknown> };
-export type AutomationIntegrationCatalog = { id: string; label: string; description?: string; enabled?: boolean; disabled_reason?: string | null; actions: AutomationCatalogItem[] };
-export type AutomationCatalogGroup = { id: string; label: string; triggers?: AutomationCatalogItem[]; conditions?: AutomationCatalogItem[]; actions?: AutomationCatalogItem[]; integrations?: AutomationIntegrationCatalog[] };
+export type AutomationCatalogItem = { type: string; label: string; description?: string; scopes?: string[]; enabled?: boolean; disabled?: boolean; disabled_reason?: string | null; default_config?: Record<string, unknown> };
+export type AutomationCatalogGroup = { id: string; label: string; triggers?: AutomationCatalogItem[]; conditions?: AutomationCatalogItem[]; actions?: AutomationCatalogItem[] };
 export type AutomationVariable = NotificationVariable & { scope?: string; trigger_types?: string[] };
 export type AutomationVariableGroup = { group: string; scope?: string; items: AutomationVariable[] };
 export type AutomationCatalogResponse = { triggers: AutomationCatalogGroup[]; conditions: AutomationCatalogGroup[]; actions: AutomationCatalogGroup[]; variables: AutomationVariableGroup[]; notification_rules: Array<{ id: string; name: string; trigger_event: string }>; garage_doors: Array<{ entity_id: string; name: string; schedule_id?: string | null }>; mock_context: Record<string, string> };
@@ -65,7 +64,14 @@ async function confirmedDelete(path: string, action: string, payload: Record<str
   await api.delete(path, { confirmation_token: confirmation.confirmation_token });
 }
 
+export type NotificationRunReceipt = {
+  id: string; status: string; trigger_event: string; review_reason: string | null;
+  actions: Array<{ index: number; accepted_any: boolean; partial_failure: boolean; review_required: boolean;
+    destination_outcomes: Array<{ target: string; delivery: string }> }>;
+};
+
 export const workflowApi = {
+  getNotificationRuns: (options: ApiRequestOptions = {}) => api.get<NotificationRunReceipt[]>("/api/v1/notifications/runs?limit=20", options),
   getAutomationRuns(beforeId?: string, options: ApiRequestOptions = {}): Promise<AutomationRunPage> {
     const query = new URLSearchParams({ limit: "25" });
     if (beforeId) query.set("before_id", beforeId);

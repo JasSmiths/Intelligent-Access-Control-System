@@ -18,7 +18,6 @@ export type AuthSecretStatus = {
   detail: string;
   rotated?: boolean;
   settings_reencrypted?: number;
-  icloud_accounts_reencrypted?: number;
   action_contexts_invalidated?: number;
 };
 

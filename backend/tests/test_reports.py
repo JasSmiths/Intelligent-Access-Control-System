@@ -700,7 +700,7 @@ async def test_preview_api_retains_authentication_and_passes_aware_bounds(monkey
     async def synthetic_auth_config():
         return SimpleNamespace(auth_cookie_name="synthetic_iacs_session")
     # Exercise real credential absence/denial without loading runtime settings from a database.
-    monkeypatch.setattr(auth_service, "get_runtime_config", synthetic_auth_config)
+    monkeypatch.setattr(auth_service, "get_authentication_config", synthetic_auth_config)
     captured = {}
     async def preview(_session, **kwargs):
         captured.update(kwargs)

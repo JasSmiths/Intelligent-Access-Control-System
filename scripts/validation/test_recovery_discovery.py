@@ -20,7 +20,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def setup(monkeypatch):
-    monkeypatch.setattr(auth, "get_runtime_config", AsyncMock(return_value=SimpleNamespace(
+    monkeypatch.setattr(auth, "get_authentication_config", AsyncMock(return_value=SimpleNamespace(
         auth_access_token_minutes=30, auth_remember_days=1, auth_cookie_name="synthetic-auth")))
     async with AsyncSessionLocal() as session:
         owner = User(username="synthetic-discovery", full_name="Synthetic Owner", password_hash="unused",

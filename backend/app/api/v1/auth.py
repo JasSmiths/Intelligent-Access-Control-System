@@ -5,21 +5,18 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import current_user
 from app.api.v1.media import PhotoVariant, data_url_media_response
 from app.db.session import get_db_session
 from app.models import User
-from app.models.enums import UserRole
 from app.services.auth import (
     authenticate_request,
     clear_session_cookie,
-    compose_full_name,
     count_users,
     create_access_token,
-    create_user,
+    create_initial_admin,
     extract_http_token,
     normalize_username,
     revoke_access_token,
@@ -89,11 +86,11 @@ async def auth_status(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     include_photo: Annotated[bool, Query()] = False,
 ) -> AuthStatusResponse:
-    setup_required = await count_users(session) == 0
-    if setup_required:
-        return AuthStatusResponse(setup_required=True, authenticated=False)
-
     user = await authenticate_request(session, request)
+    if user is None and await count_users(session) == 0:
+        return AuthStatusResponse(setup_required=True, authenticated=False)
+    if user is not None and include_photo:
+        await session.refresh(user, ["profile_photo_data_url"])
     return AuthStatusResponse(
         setup_required=False,
         authenticated=bool(user),
@@ -115,36 +112,10 @@ async def first_run_setup(
     response: Response,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> UserResponse:
-    if await count_users(session) > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Initial setup is locked because a user already exists.",
-        )
-
-    try:
-        user = await create_user(
-            session,
-            username=request.username,
-            first_name=request.first_name,
-            last_name=request.last_name,
-            full_name=compose_full_name(request.first_name, request.last_name),
-            profile_photo_data_url=await normalize_profile_photo_or_400(
-                request.profile_photo_data_url
-            ),
-            mobile_phone_number=request.mobile_phone_number,
-            email=request.email,
-            password=request.password,
-            role=UserRole.ADMIN,
-            is_active=True,
-        )
-        user.last_login_at = datetime.now(tz=UTC)
-        await session.commit()
-        await session.refresh(user)
-    except IntegrityError as exc:
-        await session.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="User already exists"
-        ) from exc
+    user = await create_initial_admin(session, username=request.username,
+        first_name=request.first_name, last_name=request.last_name, password=request.password,
+        profile_photo_data_url=await normalize_profile_photo_or_400(request.profile_photo_data_url),
+        mobile_phone_number=request.mobile_phone_number, email=request.email)
 
     token, expires_at = await create_access_token(user, remember_me=True)
     await set_session_cookie(response, token, expires_at)
@@ -190,9 +161,12 @@ async def me(user: Annotated[User, Depends(current_user)]) -> UserResponse:
 
 @router.get("/me/photo")
 async def my_photo(
-    user: Annotated[User, Depends(current_user)], variant: Annotated[PhotoVariant, Query()] = "full"
+    user: Annotated[User, Depends(current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    variant: Annotated[PhotoVariant, Query()] = "full"
 ) -> Response:
-    return await data_url_media_response(user.profile_photo_data_url, variant=variant)
+    photo = await session.scalar(select(User.profile_photo_data_url).where(User.id == user.id))
+    return await data_url_media_response(photo, variant=variant)
 
 
 @router.patch("/me/preferences", response_model=UserResponse)

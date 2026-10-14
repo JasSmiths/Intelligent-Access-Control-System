@@ -184,9 +184,9 @@ async def test_settings_secret_stays_encrypted_and_absent_from_public_response_a
     assert record.value.get("encrypted") and "plain" not in record.value
     audits = await rows(AuditLog)
     assert len(audits) == 1 and audits[0].metadata_["keys"] == ["dvla_api_key"]
-    public = json.dumps({"response": response, "diff": audits[0].diff, "metadata": audits[0].metadata_})
+    public = json.dumps({"response": response.rows, "diff": audits[0].diff, "metadata": audits[0].metadata_})
     assert secret not in public and record.value["encrypted"] not in public
-    assert next(row["value"] for row in response if row["key"] == "dvla_api_key") is True
+    assert next(row["value"] for row in response.rows if row["key"] == "dvla_api_key") is True
 
 
 async def create_confirmation(actor):

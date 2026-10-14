@@ -1,4 +1,4 @@
-import { Bell, Bot, CalendarDays, Camera, CircleDot, Database, Home, MessageCircle, Search, Zap } from "lucide-react";
+import { Bell, Bot, Camera, CircleDot, Database, Home, MessageCircle, Search, Zap } from "lucide-react";
 import React from "react";
 import { isLlmProviderConfigured, llmProviderDefinitions, normalizeLlmProvider } from "../../lib/format";
 import { secretSettingKeys, stringifySetting } from "../../lib/settings";
@@ -7,7 +7,6 @@ import type { LlmProviderKey } from "../../lib/format";
 import type { SettingFieldDefinition } from "../../lib/settings";
 import type { BadgeTone } from "../../ui/primitives";
 import {
-  ICloudCalendarAccount,
   UnifiProtectStatus,
 } from "../../api/integrations";
 export function CameraAiProviderSelector({
@@ -146,8 +145,6 @@ export function integrationDefinitions(
   status: IntegrationStatus | null,
   values: SettingsMap,
   protectStatus: UnifiProtectStatus | null,
-  icloudAccounts: ICloudCalendarAccount[],
-  icloudError: string,
 ): IntegrationDefinition[] {
   const activeProvider = normalizeLlmProvider(values.llm_provider);
   const providerStatus = (key: string, secretKey?: string): Pick<IntegrationDefinition, "statusLabel" | "statusTone"> => {
@@ -156,8 +153,6 @@ export function integrationDefinitions(
     if (key === "ollama" && values.ollama_base_url) return { statusLabel: "Configured", statusTone: "blue" };
     return { statusLabel: "Not Configured", statusTone: "gray" };
   };
-  const activeIcloudAccounts = icloudAccounts.filter((account) => account.is_active);
-  const icloudNeedsAttention = activeIcloudAccounts.some((account) => ["error", "requires_reauth"].includes(account.status));
   const homeAssistantConfigured = Boolean(status?.configured || values.home_assistant_url || values.home_assistant_token);
   const homeAssistantDegraded = Boolean(homeAssistantConfigured && (status?.degraded || status?.connected === false || status?.last_error));
   const protectRealtimeDegraded = Boolean(
@@ -166,7 +161,6 @@ export function integrationDefinitions(
   const base: IntegrationDefinition[] = [
     { key: "home_assistant", editor: "managed", title: "Home Assistant", description: "Gate control, mobile app notifications, TTS announcements, and state sync.", category: "access", icon: Home, fields: integrationFieldSets.home_assistant, statusLabel: status?.connected ? "Connected" : homeAssistantDegraded ? "Degraded" : homeAssistantConfigured ? "Configured" : "Not Configured", statusTone: status?.connected ? "green" : homeAssistantDegraded ? "red" : homeAssistantConfigured ? "blue" : "gray", notificationChannels: ["mobile", "voice"] },
     { key: "esphome", editor: "managed", title: "ESPHome", description: "Direct native API access for gate and garage-door covers.", category: "access", icon: Zap, fields: [], statusLabel: values.esphome_devices ? "Configured" : "Not Configured", statusTone: values.esphome_devices ? "blue" : "gray" },
-    { key: "icloud_calendar", editor: "managed", title: "iCloud Calendar", description: "Create Visitor Passes from calendar events marked Open Gate.", category: "access", icon: CalendarDays, fields: [], statusLabel: icloudError ? "Error" : icloudNeedsAttention ? "Needs Attention" : activeIcloudAccounts.length ? `${activeIcloudAccounts.length} active accounts` : "Not Configured", statusTone: icloudError ? "red" : icloudNeedsAttention ? "amber" : activeIcloudAccounts.length ? "blue" : "gray" },
     { key: "apprise", editor: "managed", title: "Apprise", description: "Mobile and push notification fan-out.", category: "notifications", icon: Bell, fields: integrationFieldSets.apprise, statusLabel: values.apprise_urls ? "Configured" : "Not Configured", statusTone: values.apprise_urls ? "blue" : "gray", notificationChannels: ["mobile"] },
     { key: "dvsa", editor: "scalar", title: "DVSA MOT History", description: "MOT tests, advisories and vehicle models.", category: "data", icon: Search, fields: integrationFieldSets.dvsa, statusLabel: (values.dvsa_enabled === true || values.dvsa_enabled === "true") ? "Enabled" : "Disabled", statusTone: (values.dvsa_enabled === true || values.dvsa_enabled === "true") ? "blue" : "gray" },
     { key: "dvla", editor: "scalar", title: "DVLA Lookup", description: "Vehicle Enquiry Service API plate lookups.", category: "data", icon: Search, fields: integrationFieldSets.dvla, statusLabel: values.dvla_api_key ? "Configured" : "Not Configured", statusTone: values.dvla_api_key ? "blue" : "gray" },

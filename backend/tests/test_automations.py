@@ -14,14 +14,12 @@ from starlette.requests import Request
 from app.api.v1 import automations as automations_api
 from app.models import AutomationRule, AutomationRun, Presence
 from app.models.enums import PresenceState, UserRole
-from app.services import automation_integration_actions
 from app.services import automations, automation_webhooks, automation_errors
-from app.services.automation_integration_actions import registered_integration_action_types
 from app.services.automations import AutomationService
 from app.services.automation_scheduling import cron_from_recurrence, due_time_trigger, next_run_for_trigger
 from app.services.workflows.automation_definition import (
     ACTION_CATALOG, CONDITION_CATALOG, TRIGGER_CATALOG, AutomationContext, build_context_variables, context_missing_references, facts_from_payload, normalize_actions, normalize_conditions, normalize_triggers, trigger_keys_for_triggers,
-    INTEGRATION_ACTION_KEYS, automation_triggers_for_origin, generate_automation_webhook_key, is_high_entropy_webhook_key,
+    automation_triggers_for_origin, generate_automation_webhook_key, is_high_entropy_webhook_key,
 )
 from app.services.automation_intake import public_automation_context, automation_execution_context_snapshot
 
@@ -186,10 +184,6 @@ def test_automation_schema_normalization_shapes_payloads() -> None:
     assert actions[0]["reason_template"] == "@DisplayName arrived."
 
 
-def test_integration_action_normalization_sets_provider_and_action() -> None:
-    actions = normalize_actions([{"type": "integration.icloud_calendar.sync", "config": {}}])
-    assert registered_integration_action_types() == {"integration.icloud_calendar.sync"}
-    assert actions[0]["config"] == {"provider": "icloud_calendar", "action": "sync_calendars"}
 
 
 def test_missing_variable_references_skip_unavailable_trigger_scopes() -> None:
@@ -339,148 +333,12 @@ async def test_maintenance_mode_skips_actions_but_allows_disable(monkeypatch) ->
     assert allowed["maintenance_mode"]["is_active"] is False
 
 
-@pytest.mark.asyncio
-async def test_integration_icloud_sync_action_routes_to_service(monkeypatch) -> None:
-    calls = []
-
-    async def inactive() -> bool:
-        return False
-
-    async def integration_enabled(_definition) -> Any:
-        return SimpleNamespace(enabled=True, disabled_reason=None)
-
-    class Service:
-        async def sync_all(self, **kwargs):
-            calls.append(kwargs)
-            return {
-                "account_count": 1,
-                "events_scanned": 3,
-                "events_matched": 1,
-                "passes_created": 1,
-                "passes_updated": 0,
-                "passes_cancelled": 0,
-                "passes_skipped": 0,
-            }
-
-    monkeypatch.setattr(automations, "is_maintenance_mode_active", inactive)
-    monkeypatch.setattr(automation_integration_actions, "get_icloud_calendar_service", lambda: Service())
-    monkeypatch.setattr(automation_integration_actions, "integration_action_status", integration_enabled)
-
-    rule: Any = SimpleNamespace(name="Calendar sync", created_by_user_id="11111111-1111-1111-1111-111111111111")
-    context = AutomationContext(
-        trigger_key="time.cron",
-        subject="Schedule tick",
-        trigger_payload={},
-        scopes={"time", "event"},
-    )
-    context.variables = build_context_variables(context)
-
-    execution = {"run_id": str(uuid.uuid4()), "claim_token": str(uuid.uuid4()), "index": 0,
-        "operation_id": str(uuid.uuid4()), "idempotency_key": "inert-calendar-action"}
-    result = await AutomationService()._execute_action(
-        SimpleNamespace(),
-        {
-            "id": "action-1",
-            "type": "integration.icloud_calendar.sync",
-            "config": {"provider": "icloud_calendar", "action": "sync_calendars"},
-            "reason_template": "",
-        },
-        context,
-        rule=rule, execution=execution,
-    )
-
-    assert result["status"] == "success"
-    assert result["integration_provider"] == "icloud_calendar"
-    assert result["integration_action"] == "sync_calendars"
-    assert result["passes_created"] == 1
-    assert calls[0]["origin"] == "workflow"
-    assert calls[0]["execution"] is execution
-    assert str(calls[0]["run_id"]) == execution["operation_id"]
-    assert callable(calls[0]["authorize"])
-    assert str(calls[0]["actor_user_id"]) == rule.created_by_user_id
-    assert calls[0]["actor"] == "Automation Engine"
 
 
-@pytest.mark.asyncio
-async def test_disabled_integration_action_skips_without_crashing(monkeypatch) -> None:
-    async def inactive() -> bool:
-        return False
-
-    async def integration_disabled(_definition) -> Any:
-        return SimpleNamespace(enabled=False, disabled_reason="No active iCloud Calendar session.")
-
-    monkeypatch.setattr(automations, "is_maintenance_mode_active", inactive)
-    monkeypatch.setattr(automation_integration_actions, "integration_action_status", integration_disabled)
-
-    rule: Any = SimpleNamespace(name="Calendar sync", created_by_user_id=None)
-    context = AutomationContext(
-        trigger_key="time.cron",
-        subject="Schedule tick",
-        trigger_payload={},
-        scopes={"time", "event"},
-    )
-    context.variables = build_context_variables(context)
-
-    result = await AutomationService()._execute_action(
-        SimpleNamespace(),
-        {
-            "id": "action-1",
-            "type": "integration.icloud_calendar.sync",
-            "config": {"provider": "icloud_calendar", "action": "sync_calendars"},
-            "reason_template": "",
-        },
-        context,
-        rule=rule,
-    )
-
-    assert result["status"] == "skipped"
-    assert result["reason"] == "integration_disabled"
-    assert result["disabled_reason"] == "No active iCloud Calendar session."
 
 
-@pytest.mark.asyncio
-async def test_integration_catalog_marks_disabled_actions(monkeypatch) -> None:
-    async def integration_disabled(_definition) -> Any:
-        return SimpleNamespace(enabled=False, disabled_reason="No active iCloud Calendar session.")
-
-    monkeypatch.setattr(automation_integration_actions, "integration_action_status", integration_disabled)
-
-    catalog = await automation_integration_actions.integration_action_catalog()
-    action = catalog[0]["actions"][0]
-
-    assert action["type"] == "integration.icloud_calendar.sync"
-    assert action["enabled"] is False
-    assert action["disabled_reason"] == "No active iCloud Calendar session."
 
 
-@pytest.mark.asyncio
-async def test_dry_run_previews_integration_actions_without_executing(monkeypatch) -> None:
-    calls = []
-
-    class Service:
-        async def sync_all(self, **kwargs):
-            calls.append(kwargs)
-            return {"account_count": 1}
-
-    monkeypatch.setattr(automation_integration_actions, "get_icloud_calendar_service", lambda: Service())
-
-    result = await AutomationService().dry_run_rule(
-        {
-            "name": "Calendar sync preview",
-            "triggers": [{"type": "time.cron", "config": {"cron_expression": "0 9 * * *"}}],
-            "conditions": [],
-            "actions": [{"type": "integration.icloud_calendar.sync", "config": {}}],
-            "is_active": True,
-        }
-    )
-
-    assert result["dry_run"] is True
-    assert result["executed"] is False
-    assert result["would_run"] is True
-    assert "not executed" in result["message"]
-    assert result["action_previews"][0]["executed"] is False
-    assert result["action_previews"][0]["would_execute"] is True
-    assert calls == []
 
 
 
@@ -818,12 +676,6 @@ def test_hardware_admission_covers_every_registered_gate_or_garage_action():
     assert registered == HARDWARE_ACTION_TYPES
 
 
-def test_runtime_integration_registry_matches_pure_action_schema():
-    assert registered_integration_action_types() == set(INTEGRATION_ACTION_KEYS)
-    from app.services.workflows.action_definitions import ACTION_BY_TYPE
-    assert {definition.type: (ACTION_BY_TYPE[definition.type].provider,
-                              ACTION_BY_TYPE[definition.type].integration_action)
-            for definition in automation_integration_actions.INTEGRATION_ACTIONS} == INTEGRATION_ACTION_KEYS
 
 
 def test_automation_definition_and_intake_do_not_import_execution_facades():

@@ -44,7 +44,6 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
       case "/api/v1/integrations/home-assistant/status": body = { configured: false, connected: false }; break;
       case "/api/v1/integrations/unifi-protect/status": body = { configured: false, connected: false, realtime_connected: false }; break;
       case "/api/v1/integrations/unifi-protect/cameras": body = { cameras: [] }; break;
-      case "/api/v1/integrations/icloud-calendar/accounts": body = { accounts: [], recent_sync_runs: [] }; break;
       case "/api/v1/integrations/home-assistant/entities": body = { cover_entities: [] }; break;
       case "/api/v1/integrations/home-assistant/recovery-trackers": body = { trackers: [], mappings: [], reason: "not_configured" }; break;
       case "/api/v1/integrations/esphome/entities": body = { cover_entities: [] }; break;
@@ -402,7 +401,7 @@ test("does not send hidden General edits when saving Auth settings", async ({ pa
   await page.route("**/api/v1/settings", async (route) => {
     expect(route.request().method()).toBe("PATCH");
     submitted.push(route.request().postDataJSON() as Record<string, unknown>);
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(auth) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ saved: true, settings: auth, changed_keys: ["auth_cookie_name"], activation: { state: "not_required", services: {} } }) });
   });
   await page.goto("/settings/general");
   await page.getByLabel("App name").fill("Unsaved name");
@@ -775,5 +774,32 @@ test("retains unsupported notification content through trigger change and allows
   await page.getByRole("button", {name: "Confirm Selection", exact: true}).click();
   await expect(editor.locator(".workflow-action-card")).toContainText("In-App Notification");
   await page.screenshot({path: testInfo.outputPath("workflow-retained-replaced.png"), fullPage: true});
+  expect(unexpected).toEqual([]);
+});
+
+test("shows partial voice delivery truth and retired integration absence using inert receipts", async ({ page }, testInfo) => {
+  const unexpected = await installFixtures(page);
+  let reads = 0;
+  await page.route("**/api/v1/notifications/runs?limit=20", async (route) => {
+    reads += 1;
+    expect(route.request().method()).toBe("GET");
+    await route.fulfill({ json: [{ id: "synthetic-voice-run", status: "review_required", trigger_event: "vehicle.known_plate", review_reason: "provider_outcome_unknown", actions: [{ index: 0, accepted_any: true, partial_failure: true, review_required: true, destination_outcomes: [
+      { target: "media_player.first", delivery: "accepted" }, { target: "media_player.second", delivery: "unknown" }, { target: "media_player.third", delivery: "not_sent" },
+    ] }] }] });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/settings/notifications");
+  expect(reads).toBe(0);
+  await page.getByText("Recent notification delivery history", { exact: true }).click();
+  const history = page.getByRole("region", { name: "Recent notification deliveries" });
+  await expect(history.getByText("media_player.first: Accepted", { exact: true })).toBeVisible();
+  await expect(history.getByText("media_player.second: Unknown", { exact: true })).toBeVisible();
+  await expect(history.getByText("media_player.third: Not Sent", { exact: true })).toBeVisible();
+  await expect(history.getByText(/Provider acceptance does not prove audible playback/)).toBeVisible();
+  await expect(history.getByRole("button", { name: /send|retry|replay/i })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("voice-partial-receipts-phone.png"), fullPage: true });
+  await page.goto("/integrations");
+  await expect(page.getByRole("button", { name: /^Home Assistant/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /iCloud Calendar/ })).toHaveCount(0);
   expect(unexpected).toEqual([]);
 });

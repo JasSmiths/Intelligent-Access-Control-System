@@ -259,8 +259,6 @@ def automation_condition_catalog() -> list[dict[str, Any]]:
 def automation_action_catalog() -> list[dict[str, Any]]:
     groups: dict[str, dict[str, Any]] = {}
     for definition in ACTION_DEFINITIONS:
-        if definition.provider is not None:
-            continue  # Runtime integration status is composed by its owner.
         group = groups.setdefault(
             definition.group,
             {"id": definition.group, "label": definition.group_label, "actions": []},

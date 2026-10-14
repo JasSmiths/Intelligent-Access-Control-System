@@ -1,4 +1,4 @@
-import { ArrowLeft, CheckCircle2, MessageCircle, Play, PlugZap, Plus, Sparkles, Trash2 } from "lucide-react";
+import { CheckCircle2, MessageCircle, Play, PlugZap, Plus, Sparkles, Trash2 } from "lucide-react";
 import React from "react";
 import { useDirectoryOptions } from "../directory/reads";
 import { DirectoryPagination } from "../directory/DirectoryPagination";
@@ -8,7 +8,7 @@ import { fromDateTimeLocal, titleCase, toDateTimeLocal } from "../../lib/format"
 import { Badge } from "../../ui/primitives";
 import { automationCategoryIcon, automationNodeIcon, createAutomationNode } from "./automationModel";
 import { TwoPaneSelectionModal } from "./components";
-import { matchesSearchText, pluralize, stringifyTemplateValue } from "./model";
+import { matchesSearchText, stringifyTemplateValue } from "./model";
 import { AutomationActionConfigEditor } from "./AutomationActionConfigEditor";
 import { PlainTemplateEditor } from "./TemplateEditor";
 
@@ -188,7 +188,6 @@ export function AutomationSelectionModal({
   onSelect: (node: AutomationNode | AutomationAction) => void;
 }) {
   const [activeCategoryId, setActiveCategoryId] = React.useState(groups[0]?.id ?? "");
-  const [activeIntegrationId, setActiveIntegrationId] = React.useState("");
   const [searchQuery, setSearchQuery] = React.useState("");
   const query = searchQuery.trim().toLowerCase();
   const itemKey = `${kind}s` as "triggers" | "conditions" | "actions";
@@ -197,46 +196,31 @@ export function AutomationSelectionModal({
       const categoryMatches = matchesSearchText(group.label, query);
       const items = (group[itemKey] ?? []).filter((item) => {
         if (!query || categoryMatches) return true;
-        return matchesSearchText(`${item.label} ${item.description ?? ""} ${item.type} ${item.integration_provider_label ?? ""}`, query);
+        return matchesSearchText(`${item.label} ${item.description ?? ""} ${item.type}`, query);
       });
-      const integrations = (group.integrations ?? [])
-        .map((integration) => {
-          const integrationMatches = categoryMatches || matchesSearchText(`${integration.label} ${integration.description ?? ""}`, query);
-          const actions = integration.actions.filter((item) => {
-            if (!query || integrationMatches) return true;
-            return matchesSearchText(`${item.label} ${item.description ?? ""} ${item.type}`, query);
-          });
-          return { ...integration, actions };
-        })
-        .filter((integration) => integration.actions.length || matchesSearchText(`${integration.label} ${integration.description ?? ""}`, query));
-      return { ...group, [itemKey]: items, integrations };
+      return { ...group, [itemKey]: items };
     })
-    .filter((group) => (group[itemKey] ?? []).length || (group.integrations ?? []).length || matchesSearchText(group.label, query));
+    .filter((group) => (group[itemKey] ?? []).length || matchesSearchText(group.label, query));
   React.useEffect(() => {
     if (!visibleGroups.some((group) => group.id === activeCategoryId)) {
       setActiveCategoryId(visibleGroups[0]?.id ?? "");
-      setActiveIntegrationId("");
     }
   }, [activeCategoryId, visibleGroups]);
   const activeGroup = visibleGroups.find((group) => group.id === activeCategoryId) ?? visibleGroups[0];
-  const activeIntegrations = activeGroup?.integrations ?? [];
-  const selectedIntegration = activeIntegrations.find((integration) => integration.id === activeIntegrationId);
-  const showIntegrationDrilldown = kind === "action" && activeGroup?.id === "integrations" && activeIntegrations.length > 0;
   return (
     <TwoPaneSelectionModal
       activeCategoryId={activeGroup?.id ?? ""}
       categories={visibleGroups.map((group) => ({
         id: group.id,
         label: group.label,
-        count: group.id === "integrations" && group.integrations?.length ? group.integrations.length : (group[itemKey] ?? []).length,
+        count: (group[itemKey] ?? []).length,
         icon: automationCategoryIcon(group.id)
       }))}
       embedded
       onBack={onClose}
       onCategoryChange={(categoryId) => {
         setActiveCategoryId(categoryId);
-        setActiveIntegrationId("");
-      }}
+        }}
       onClose={onClose}
       onSearchChange={setSearchQuery}
       searchPlaceholder={`Search ${kind}s`}
@@ -245,54 +229,7 @@ export function AutomationSelectionModal({
       title={`Add ${titleCase(kind)}`}
       wide
     >
-      {showIntegrationDrilldown && !selectedIntegration ? (
-        <div className="two-pane-card-grid automation-selector-grid">
-          {activeIntegrations.map((integration) => {
-            const Icon = automationCategoryIcon(integration.id);
-            return (
-              <button className="two-pane-item-card automation-selector-card" key={integration.id} onClick={() => setActiveIntegrationId(integration.id)} type="button">
-                <Icon size={18} />
-                <span>
-                  <strong>{integration.label}</strong>
-                  <small>{integration.description ?? `${integration.actions.length} available ${pluralize("action", integration.actions.length)}`}</small>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      ) : showIntegrationDrilldown && selectedIntegration ? (
-        <div className="automation-drilldown-stack">
-          <div className="automation-drilldown-head">
-            <button className="secondary-button compact" onClick={() => setActiveIntegrationId("")} type="button">
-              <ArrowLeft size={14} /> Integrations
-            </button>
-            <div>
-              <strong>{selectedIntegration.label}</strong>
-              <span>{selectedIntegration.description ?? "Choose an integration action."}</span>
-            </div>
-          </div>
-          <div className="two-pane-card-grid automation-selector-grid">
-            {selectedIntegration.actions.map((item) => {
-              const Icon = automationNodeIcon(item.type);
-              const disabled = item.disabled || item.enabled === false;
-              const disabledReason = item.disabled_reason || "Integration action is unavailable.";
-              return (
-                <button
-                  className="two-pane-item-card automation-selector-card"
-                  disabled={disabled}
-                  key={item.type}
-                  onClick={() => onSelect(createAutomationNode(kind, item.type, item))}
-                  title={disabled ? disabledReason : undefined}
-                  type="button"
-                >
-                  <Icon size={18} />
-                  <span><strong>{item.label}</strong><small>{disabled ? disabledReason : item.description ?? item.type}</small></span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ) : activeGroup ? (
+      {activeGroup ? (
         <div className="two-pane-card-grid automation-selector-grid">
           {(activeGroup[itemKey] ?? []).map((item) => {
             const Icon = automationNodeIcon(item.type);

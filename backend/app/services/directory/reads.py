@@ -5,13 +5,14 @@ import hashlib
 import json
 import uuid
 
-from sqlalchemy import Select, String, case, func, literal, or_, select, tuple_
+from sqlalchemy import Select, String, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, selectinload
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import Group, Person, Vehicle, VehiclePersonAssignment
 from app.schemas.directory import DirectoryPage, GroupResponse, PersonResponse, VehicleResponse
+from app.services.profile_photos import photo_reference_expression
 from app.services.settings import get_runtime_config
 
 from .errors import DirectoryOperationError
@@ -36,12 +37,6 @@ VEHICLE_LOAD = (
     selectinload(Vehicle.schedule),
     selectinload(Vehicle.person_assignments).selectinload(VehiclePersonAssignment.person),
 )
-
-
-def _photo_reference(column: ColumnElement[str | None]) -> ColumnElement[str | None]:
-    # Stored data URLs become a small presence marker understood by stored_image_url.
-    # Existing external/path references retain their original URL semantics.
-    return case((func.left(column, 5) == "data:", literal("data:")), else_=column)
 
 
 def _scope(kind: str, q: str, active: bool | None, ids: list[uuid.UUID] | None) -> str:
@@ -113,7 +108,7 @@ async def list_people(
     label = func.lower(Person.display_name).label("sort_label")
     query = select(Person, label)
     if not include_media:
-        query = query.add_columns(_photo_reference(Person.profile_photo_data_url))
+        query = query.add_columns(photo_reference_expression(Person.profile_photo_data_url))
     if group_id is not None:
         query = query.where(Person.group_id == group_id)
     if active is not None:
@@ -179,7 +174,7 @@ async def list_people(
         vehicle_references = (
             (
                 await session.execute(
-                    select(Vehicle.id, _photo_reference(Vehicle.vehicle_photo_data_url)).where(
+                    select(Vehicle.id, photo_reference_expression(Vehicle.vehicle_photo_data_url)).where(
                         Vehicle.id.in_(vehicle_ids)
                     )
                 )
@@ -231,7 +226,7 @@ async def list_vehicles(
         )
     query = select(Vehicle)
     if not include_media:
-        query = query.add_columns(_photo_reference(Vehicle.vehicle_photo_data_url))
+        query = query.add_columns(photo_reference_expression(Vehicle.vehicle_photo_data_url))
     if registrations is not None:
         query = query.where(
             Vehicle.registration_number.in_(

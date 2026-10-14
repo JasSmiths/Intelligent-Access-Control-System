@@ -79,7 +79,7 @@ preview servers. Record requested/completed/aborted reads and define the payload
 measurement.
 
 The [integration receipt fixtures](../frontend/e2e/integration-receipts.spec.ts)
-verify that accepted settings, Apprise and calendar mutations retain their result
+verify that accepted settings and Apprise mutations retain their result
 after a provider metadata read fails, while rejected mutations remain failures.
 Composed owner tests also cover accepted pass/device/user changes, local refresh
 isolation and observed retry errors. These inert fixtures do not send to providers.
@@ -87,8 +87,7 @@ isolation and observed retry errors. These inert fixtures do not send to provide
 The [provider editor browser suite](../frontend/e2e/provider-editors.spec.ts)
 drives actual realtime invalidation while preserving each complete provider draft,
 checks dirty and pending dismissal, and retains desktop, phone, short landscape
-and dark tablet screenshots in Chromium/WebKit. It exercises iCloud handshake protection after
-password clearing and accepted protected writes. The
+and dark tablet screenshots in Chromium/WebKit. It exercises accepted protected writes and account disposal. The
 [composed editor tests](../frontend/src/features/integrations/providerEditors.test.tsx)
 cover account/provider replacement during confirmation and after write acceptance,
 late ESPHome stream reads, explicit managed/scalar coverage and provider-local
@@ -104,40 +103,26 @@ synthetic; it does not register or actuate a live provider. Backend provider-pol
 extension evidence and final integrated E1 conformance remain separate gates.
 
 
-## Calendar ownership checks
+## Retirement and remediation checks
 
-The blocked-vendor renewal fixture observes actual vendor entry, successful lease
-renewal and stop requests before asserting cleanup ownership. Renewal uses an
-independent transaction, so it starts after the vendor's source-session closure
-assertion. Wall-clock waits are watchdogs; they do not establish stage progress.
-Fixture release runs even after an assertion fails.
+The [calendar retirement suite](../scripts/validation/test_calendar_retirement.py)
+proves fresh creation, populated upgrade, atomic blockers, mixed-plan holds,
+completed/uncertain receipt preservation, manual pass survival, open USED departure
+matching and guarded irreversible downgrade with non-database sockets forbidden.
+Historical published migrations and checksum-pinned schema fixtures remain intact.
+[Auth-root persistence](../scripts/validation/test_auth_root_persistence.py) retains
+shared settings rotation, audit, cancellation and uncertain file/DB outcome coverage.
+Calendar SDK/account/editor tests were retired with their executable feature.
 
-The [calendar persistence inventory](../scripts/validation/recovery_checks.py)
-registers store, authority, reconciliation, auth-root writers, SDK/account engine,
-authentication and actual ASGI adapters separately. Fixtures prove real PostgreSQL
-locks/flush fences, logout serialization, current workflow execution, same-run
-recovery, required audit rollback, uncertain acceptance and actual cleanup.
-The [SDK tests](../backend/tests/test_icloud_calendar_boundary.py) use installed
-locked pyicloud with inert transport; transport tests include actual local TLS
-backpressure, eight retained receivers, stale abort callbacks and close/join.
-The rejected kernel send-timeout probe remains failed evidence; it is not a
-transport implementation guarantee.
-
-[Calendar browser fixtures](../frontend/e2e/calendar-recovery.spec.ts) inspect a
-workflow run without implicit mutation, confirm adoption of its exact UUID,
-retain an original lost-response request and a dirty auth draft, and replay the
-same UUID after remount. [Selected-pass owner tests](../frontend/src/features/passes/selectedMetadata.test.tsx)
-cover filtered aggregate invalidation and old GET after authoritative full-row
-replacement. Required browser checks remain Chromium/WebKit with `CI=1`, owned
-5174 and no backend proxy. Host Node24 progress is supplemental; the final locked
-Node22 build/unit and complete isolated harness remain mandatory.
-
-Calendar WIP is not a full-stage validation claim. Bounded primitives have exact
-Astra approvals recorded in the closure ledger; later API/editor/lifecycle and
-session-cleanup changes require current real gates. Keep original setup/test
-failures and copied source identities. Migration checks include empty down/re-up
-and refusal of populated ownership downgrade. No live calendar requests or
-mixed-version operational cutover is exercised by these inert checks.
+[Access efficiency](../scripts/validation/test_access_efficiency.py) measures 16 and
+2,000 registrations using two warm-ups and seven samples, photo-heavy identities,
+unknown/OCR matching, narrow camera probes, auth and four concurrent UI readers.
+Target actual/generic predecessor plans also assert identity/time index conditions,
+one emitted row per branch and no unrelated-history filtering. It retains query
+counts, loaded scalar byte proxies,
+Python allocation peaks and p50/p95. Seven samples give coarse tail estimates;
+scalar/JSON sizes are not database wire bytes or process RSS. Matching is complete
+and unchanged; no directory cap or stale authorization cache is added.
 
 ## Final runtime PDF capability
 
@@ -746,7 +731,7 @@ repairs separately from changes to application behavior.
 
 
 On restart, preserve historical results but disclose absent raw evidence rather
-than treating the ledger as a current gate. The resumed calendar/P7 comparison and
+than treating the ledger as a current gate. The historical P7 comparison and
 required checks use the persistent evidence sibling at
 `/Users/jas/.codex/worktrees/iacs-maintainability-frontend/validation-evidence`.
 The comparison is recorded in `p7-compact-comparison/comparison.json` there.

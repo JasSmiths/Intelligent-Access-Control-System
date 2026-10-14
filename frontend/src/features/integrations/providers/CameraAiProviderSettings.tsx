@@ -1,6 +1,7 @@
 import React from "react";
 import { confirmedPatch, isMutationNotStarted } from "../../../api/integrations";
-import type { SettingsMap, SystemSetting, UserAccount } from "../../../api/types";
+import type { SettingsMap, SettingsSaveReceipt, UserAccount } from "../../../api/types";
+import { settingsActivationWarning } from "../../../lib/settings";
 import { ReadSignalsContext } from "../../../lib/readSignals";
 import type { LlmProviderKey } from "../../../lib/format";
 import { useEditorLifetime } from "../../../ui/useEditorLifetime";
@@ -19,8 +20,9 @@ export function CameraAiProviderSettings({ currentUser, values, loading, onChang
     pending.current = true; setSaving(true); setError("");
     try {
       const payload = { values: { llm_provider: provider } };
-      const result = await confirmedPatch<SystemSetting[]>("/api/v1/settings", "settings.update", payload, { target_entity: "SystemSetting", target_id: "llm_provider", target_label: provider, reason: "Update LLM provider" }, payload, lifetime.isCurrent);
+      const result = await confirmedPatch<SettingsSaveReceipt>("/api/v1/settings", "settings.update", payload, { target_entity: "SystemSetting", target_id: "llm_provider", target_label: provider, reason: "Update LLM provider" }, payload, lifetime.isCurrent);
       if (isMutationNotStarted(result) || !lifetime.isCurrent()) return;
+      setError(settingsActivationWarning(result));
       void onChanged().catch(() => undefined);
     } catch (error) { if (lifetime.isCurrent()) setError(error instanceof Error ? error.message : "Unable to save camera AI provider."); }
     finally { if (lifetime.isCurrent()) { pending.current = false; setSaving(false); } }

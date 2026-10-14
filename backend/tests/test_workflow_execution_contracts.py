@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services.automation_actions import AutomationActionExecutor
-from app.services.automation_integration_actions import registered_integration_action_types
 from app.services.workflows.automation_definition import ACTION_CATALOG, AutomationContext
 from app.services.workflows.execution_contracts import (
     AutomationActionResult,
@@ -84,13 +83,13 @@ def executor():
     return AutomationActionExecutor(
         gates=AsyncMock(), devices=AsyncMock(), maintenance_active=AsyncMock(return_value=False),
         maintenance_change=AsyncMock(), notification_activation=AsyncMock(return_value={"enabled": True}),
-        integrations=AsyncMock(), authorize_hardware=AsyncMock(),
+        authorize_hardware=AsyncMock(),
     )
 
 
 def test_supported_actions_have_exactly_one_registered_handler():
     supported = {entry["type"] for group in ACTION_CATALOG for entry in group["actions"]}
-    assert set(executor().handlers) == supported | registered_integration_action_types()
+    assert set(executor().handlers) == supported
 
 
 async def test_malformed_action_cannot_reach_any_domain_owner():
@@ -102,7 +101,6 @@ async def test_malformed_action_cannot_reach_any_domain_owner():
     owner.maintenance_active.assert_not_awaited()
     owner.notification_activation.assert_not_awaited()
     owner.maintenance_change.assert_not_awaited()
-    owner.integrations.assert_not_awaited()
 
 
 def execution_checkpoint():

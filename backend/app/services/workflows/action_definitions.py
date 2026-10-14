@@ -42,11 +42,6 @@ class GarageTargets(Configuration):
         return [value.strip() for value in values if value.strip()]
 
 
-class CalendarSync(Configuration):
-    provider: Literal["icloud_calendar"] = "icloud_calendar"
-    action: Literal["sync_calendars"] = "sync_calendars"
-
-
 @dataclass(frozen=True)
 class ActionDefinition:
     type: str
@@ -56,16 +51,11 @@ class ActionDefinition:
     description: str
     configuration: builtins.type[Configuration]
     execution: Literal["transactional", "durable_effect"]
-    effect: Literal["configuration", "hardware", "integration"]
+    effect: Literal["configuration", "hardware"]
     editor: Literal["none", "notification_reference", "garage_targets"]
     paused_by_maintenance: bool = False
     continue_after_unknown: bool = False
     default_reason: str = "Automation action from @EventType."
-    provider: str | None = None
-    provider_label: str | None = None
-    provider_description: str | None = None
-    integration_action: str | None = None
-
     def defaults(self) -> dict[str, Any]:
         return self.configuration().model_dump()
 
@@ -77,13 +67,6 @@ class ActionDefinition:
             "default_config": self.defaults(),
             "editor": self.editor,
         }
-        if self.provider is not None:
-            value.update(
-                integration_action=True,
-                integration_provider=self.provider,
-                integration_provider_label=self.provider_label,
-                integration_action_key=self.integration_action,
-            )
         return value
 
 
@@ -177,22 +160,6 @@ ACTION_DEFINITIONS: tuple[ActionDefinition, ...] = (
         effect="configuration",
         editor="none",
         default_reason="Automation changed Maintenance Mode: @Subject.",
-    ),
-    ActionDefinition(
-        type="integration.icloud_calendar.sync",
-        group="integrations",
-        group_label="Integrations",
-        label="Sync Calendars Now",
-        description="Scan connected iCloud Calendars for Open Gate events.",
-        configuration=CalendarSync,
-        execution="durable_effect",
-        effect="integration",
-        editor="none",
-        default_reason="Automation ran integration action from @EventType.",
-        provider="icloud_calendar",
-        provider_label="iCloud Calendar",
-        provider_description="Create or update Visitor Passes from connected iCloud Calendar accounts.",
-        integration_action="sync_calendars",
     ),
 )
 
@@ -330,8 +297,4 @@ def historical_action_config(action_type: str, config: dict[str, Any]) -> dict[s
             value if isinstance(value, list) else [value] if isinstance(value, (str, bytes)) else []
         )
         return {"target_entity_ids": [str(item).strip() for item in values if str(item).strip()]}
-    if definition.configuration is CalendarSync:
-        return {
-            key: str(config.get(key) or default) for key, default in definition.defaults().items()
-        }
     return {}

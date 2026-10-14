@@ -10,7 +10,7 @@ from sqlalchemy import select
 from app.core.logging import get_logger
 from app.models import Person
 from app.modules.home_assistant.client import HomeAssistantClient
-from app.modules.notifications.apprise_client import normalize_apprise_url, split_apprise_urls
+from app.modules.notifications.apprise_urls import normalize_apprise_url, split_apprise_urls
 from app.modules.notifications.base import NotificationDeliveryError
 from app.services.settings import RuntimeConfig
 from app.services.workflow_session import SessionFactory

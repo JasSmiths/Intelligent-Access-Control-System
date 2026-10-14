@@ -20,7 +20,7 @@ class FakeSession:
     def __init__(self, user: User) -> None:
         self.user = user
 
-    async def get(self, _model, user_id, *, populate_existing=False):
+    async def get(self, _model, user_id, *, populate_existing=False, options=()):
         return self.user if user_id == self.user.id else None
 
     async def scalars(self, _statement):
@@ -52,7 +52,7 @@ async def test_authenticate_token_rejects_stale_session_version(monkeypatch) -> 
     async def runtime_config():
         return SimpleNamespace(auth_access_token_minutes=15, auth_remember_days=30)
 
-    monkeypatch.setattr(auth, "get_runtime_config", runtime_config)
+    monkeypatch.setattr(auth, "get_authentication_config", runtime_config)
     user = make_user()
     token, _expires = await auth.create_access_token(user)
 
@@ -84,7 +84,7 @@ async def test_existing_request_and_websocket_adapters_use_verified_user_without
     monkeypatch.setattr(auth, "get_auth_secret", lambda: "test-secret")
     async def runtime():
         return SimpleNamespace(auth_cookie_name="iacs_session")
-    monkeypatch.setattr(auth, "get_runtime_config", runtime)
+    monkeypatch.setattr(auth, "get_authentication_config", runtime)
     user = make_user()
     token = auth._encode_jwt({"sub": str(user.id), "ver": 1,
         "exp": int(datetime.now(UTC).timestamp()) + 60, "jti": "adapter-test"})
@@ -93,7 +93,7 @@ async def test_existing_request_and_websocket_adapters_use_verified_user_without
     scope = {"type": transport, "headers": values,
         "query_string": f"token={token}".encode() if query else b""}
     class AdapterSession(FakeSession):
-        async def get(self, model, identity, *, populate_existing=False):
+        async def get(self, model, identity, *, populate_existing=False, options=()):
             assert populate_existing is True
             return await super().get(model, identity, populate_existing=populate_existing)
         async def scalar(self, statement):

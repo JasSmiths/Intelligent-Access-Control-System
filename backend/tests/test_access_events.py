@@ -78,6 +78,12 @@ class FakeVehicleHistorySession(FakePresenceSession):
     async def scalars(self, _statement):
         return FakeScalarRows(self._rows)
 
+    async def scalar(self, _statement):
+        # Direction tests receive the database's already-filtered predecessor;
+        # the real SQL/filter/limit contract has a PostgreSQL persistence suite.
+        return next((row for row in self._rows if "backfill" not in str(row.source).casefold()
+            and not (isinstance(row.raw_payload, dict) and "backfill" in row.raw_payload)), None)
+
 
 class FakeVisitorPassLookupResult:
     def __init__(self, row):

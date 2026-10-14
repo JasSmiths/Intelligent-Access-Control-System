@@ -28,7 +28,8 @@ def read():
 
 def runtime():
     return SimpleNamespace(site_timezone="UTC", schedule_default_policy="allow", openai_model="synthetic",
-                           unifi_protect_snapshot_width=640, unifi_protect_snapshot_height=360)
+                           unifi_protect_snapshot_width=640, unifi_protect_snapshot_height=360,
+                           missed_exit_recovery_enabled=False)
 
 
 class ProbeSession:
@@ -51,6 +52,10 @@ class ProbeSession:
 
     async def scalars(self, statement):
         return SimpleNamespace(all=list)
+
+    async def execute(self, statement):
+        return SimpleNamespace(first=lambda: SimpleNamespace(id=uuid.UUID(int=1),
+            missed_exit_recovery_enabled=False, state=PresenceState.PRESENT))
 
 
 @pytest.fixture
@@ -218,3 +223,19 @@ async def test_vendor_cancellation_terminalizes_camera_span_without_reopening_pr
     assert CURRENT_PARENT_SPAN_ID.get() == before
     assert any(span.name == "LLM Vision Direction Tie-breaker" and span.ended_at is not None
                for span in trace.recorded_spans)
+
+
+@pytest.mark.asyncio
+async def test_inactive_present_owner_keeps_camera_direction_evidence(monkeypatch, trace):
+    resolver, person = resolver_with_inert_domain(monkeypatch)
+    person.is_active = False
+    session = ProbeSession()
+    monkeypatch.setattr(owner, "AsyncSessionLocal", lambda: session)
+    requested = AsyncMock(side_effect=owner.CameraEvidenceRequired(person))
+    monkeypatch.setattr(resolver, "resolve", requested)
+    camera = AsyncMock(return_value={"direction": "exit", "confidence": .95})
+    monkeypatch.setattr(resolver, "_resolve_duplicate_arrival_with_camera", camera)
+    observation = read()
+    result = await resolver.prepare_camera_evidence(observation, observation, None, trace)
+    assert result.person_id == person.id and result.decision["direction"] == "exit"
+    requested.assert_awaited_once()

@@ -6,9 +6,11 @@ from typing import Any
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
 from app.core.crypto import decrypt_secret, encrypt_secret
+from app.core.logging import get_logger
 from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import AccessDevice, AccessDeviceProviderBinding, SystemSetting, User
@@ -25,7 +27,15 @@ from app.modules.access_devices.binding_policies import (
 from app.modules.home_assistant.covers import normalize_cover_entities
 from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.auth_root import reload_auth_root_for_transaction
+from app.services.integration_settings import (
+    ESPHomeEdit,
+    IntegrationSettingsEdit,
+    apply_integration_edit,
+    integration_representation,
+    normalize_esphome_device_id,
+)
 from app.services.mutation_context import load_active_admin
+from app.services.settings_validation import validate_settings_values
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
     actor_from_user,
@@ -403,10 +413,6 @@ def json_list_value(value: Any) -> list[Any]:
     return parsed if isinstance(parsed, list) else []
 
 
-def normalize_esphome_device_id(value: str) -> str:
-    return "_".join(str(value or "").strip().lower().replace("-", "_").split())
-
-
 def normalize_esphome_devices(
     value: Any,
 ) -> list[dict[str, Any]]:
@@ -518,6 +524,7 @@ async def get_runtime_config_for_session(session: AsyncSession) -> RuntimeConfig
 
 def runtime_config_from_values(values: dict[str, Any]) -> RuntimeConfig:
     """Apply the settings owner's conversions to a complete candidate snapshot."""
+    values = validate_settings_values(values, {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()})
     return RuntimeConfig(
         missed_exit_recovery_enabled=bool(values["missed_exit_recovery_enabled"]),
         missed_exit_recovery_gate_latitude=values["missed_exit_recovery_gate_latitude"],
@@ -608,6 +615,48 @@ def runtime_config_from_values(values: dict[str, Any]) -> RuntimeConfig:
     )
 
 
+@dataclass(frozen=True)
+class SettingsUpdateResult:
+    rows: list[dict[str, Any]]
+    changed_keys: frozenset[str]
+    integration: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AuthenticationConfig:
+    auth_cookie_name: str
+    auth_access_token_minutes: int
+    auth_remember_days: int
+    auth_cookie_secure: bool
+
+
+async def get_authentication_config() -> AuthenticationConfig:
+    """Unrelated invalid legacy integration/policy values cannot block repair login.
+
+    This projection uses the canonical validator and no authorization cache.
+    Invalid authentication settings still fail closed; existing bearer sessions
+    can inspect/repair them without reading cookie configuration.
+    """
+    defaults = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
+    keys = tuple(AuthenticationConfig.__dataclass_fields__)
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(select(SystemSetting.key, SystemSetting.value).where(SystemSetting.key.in_(keys)))).all()
+    candidate = dict(defaults)
+    candidate.update({key: value.get("plain") for key, value in rows})
+    values = validate_settings_values(candidate, defaults)
+    return AuthenticationConfig(**{key: values[key] for key in keys})
+
+
+def setting_resource(record: SystemSetting, *, reveal: bool = False) -> dict[str, Any]:
+    return {
+        "key": record.key,
+        "category": record.category,
+        "value": decrypted_value(record) if reveal else public_value(record),
+        "is_secret": record.is_secret,
+        "description": record.description,
+    }
+
+
 async def list_settings(
     category: str | None = None, *, reveal: bool = False
 ) -> list[dict[str, Any]]:
@@ -618,16 +667,7 @@ async def list_settings(
             query = query.where(SystemSetting.category == category)
         records = (await session.scalars(query)).all()
 
-    return [
-        {
-            "key": record.key,
-            "category": record.category,
-            "value": decrypted_value(record) if reveal else public_value(record),
-            "is_secret": record.is_secret,
-            "description": record.description,
-        }
-        for record in records
-    ]
+    return [setting_resource(record, reveal=reveal) for record in records]
 
 
 async def update_settings(
@@ -635,159 +675,180 @@ async def update_settings(
     *,
     user: User | None = None,
     source: str = "system",
-) -> list[dict[str, Any]]:
+    integration_edit: IntegrationSettingsEdit | None = None,
+) -> SettingsUpdateResult:
     """Own setting writes and their mandatory audit in one transaction."""
+    if integration_edit is not None:
+        if updates:
+            raise ValueError("A compound integration edit cannot include replacement settings.")
+        # Lock selection is known before reading. No caller-provided replacement
+        # value enters the transaction; the operation runs only after fresh locks.
+        updates = {integration_edit.key: None}
     validate_dynamic_setting_keys(updates)
 
-    async with AsyncSessionLocal() as session:
-        await reload_auth_root_for_transaction(session)
-        current_actor = (
-            await load_active_admin(
-                session, user.id, auth_version=user.auth_session_version, lock=True
-            )
-            if user
-            else None
-        )
-        target_config_keys = target_setting_keys() | {
-            "gate_admission_device_key", "gate_control_provider", "gate_failover_provider",
-            "schedule_default_policy", "site_timezone",
-        }
-        if set(updates) & target_config_keys:
-            query = select(AccessDevice.id)
-            if set(updates) & {
-                "gate_control_provider",
-                "gate_failover_provider",
-                "schedule_default_policy",
-                "site_timezone",
-            }:
-                pass  # Provider order applies to every gate and garage.
-            else:
-                providers = affected_provider_names(set(updates))
-                affected = [
-                    AccessDevice.provider_bindings.any(
-                        AccessDeviceProviderBinding.provider.in_(providers)
-                    )
-                ]
-                if "gate_admission_device_key" in updates:
-                    affected.append(AccessDevice.kind == "gate")
-                query = query.where(or_(*affected))
-            target_ids = (await session.scalars(query.distinct().order_by(AccessDevice.id))).all()
-            for target_id in target_ids:
-                await AccessDeviceCommandJournal.assert_configurable(session, target_id)
-        for key in sorted(updates):
-            # Also serialize creation of a newly introduced setting with no row yet.
-            await session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtext(:setting))"),
-                {"setting": f"iacs:setting:{key}"},
-            )
-        records = {
-            record.key: record
-            for record in (
-                await session.scalars(
-                    select(SystemSetting)
-                    .order_by(SystemSetting.key)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
+    accepted: SettingsUpdateResult | None = None
+    try:
+        async with AsyncSessionLocal() as session:
+            await reload_auth_root_for_transaction(session)
+            current_actor = (
+                await load_active_admin(
+                    session, user.id, auth_version=user.auth_session_version, lock=True
                 )
-            ).all()
-        }
-        before = {key: public_value(row) for key, row in records.items() if key in updates}
-        changed_keys = []
-        if set(updates) & ({"gate_admission_device_key"} | configured_setting_keys()):
-            candidate = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
-            candidate.update({key: decrypted_value(row) for key, row in records.items()})
-            candidate.update(
-                {
-                    key: value
-                    for key, value in updates.items()
-                    if not (
-                        key in records
-                        and records[key].is_secret
-                        and value in (None, "")
-                        and key not in CLEARABLE_SECRET_KEYS
-                    )
-                }
+                if user
+                else None
             )
-            await _validate_admission_setting(session, candidate)
-        if any(key.startswith("missed_exit_recovery_") for key in updates):
-            from types import SimpleNamespace
-
-            from app.services.resident_recovery_evidence import gate_coordinates
-
-            candidate = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
-            candidate.update({key: decrypted_value(row) for key, row in records.items()})
-            candidate.update(updates)
-            if type(candidate["missed_exit_recovery_enabled"]) is not bool:
-                raise ValueError("Recovery enablement must be a boolean.")
-            if candidate["missed_exit_recovery_enabled"] and (
-                gate_coordinates(SimpleNamespace(**candidate)) is None
-                or not candidate["gate_admission_device_key"]
-            ):
-                raise ValueError(
-                    "Configure the top gate coordinates and admission gate before enabling recovery."
+            target_config_keys = target_setting_keys() | {
+                "gate_admission_device_key", "gate_control_provider", "gate_failover_provider",
+                "schedule_default_policy", "site_timezone",
+            }
+            if set(updates) & target_config_keys:
+                query = select(AccessDevice.id)
+                if set(updates) & {
+                    "gate_control_provider",
+                    "gate_failover_provider",
+                    "schedule_default_policy",
+                    "site_timezone",
+                }:
+                    pass  # Provider order applies to every gate and garage.
+                else:
+                    providers = affected_provider_names(set(updates))
+                    affected = [
+                        AccessDevice.provider_bindings.any(
+                            AccessDeviceProviderBinding.provider.in_(providers)
+                        )
+                    ]
+                    if "gate_admission_device_key" in updates:
+                        affected.append(AccessDevice.kind == "gate")
+                    query = query.where(or_(*affected))
+                target_ids = (await session.scalars(query.distinct().order_by(AccessDevice.id))).all()
+                for target_id in target_ids:
+                    await AccessDeviceCommandJournal.assert_configurable(session, target_id)
+            for key in sorted(updates):
+                # Also serialize creation of a newly introduced setting with no row yet.
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:setting))"),
+                    {"setting": f"iacs:setting:{key}"},
                 )
-            from app.models import ResidentRecoveryJourney
-
-            journeys = list(
-                (
+            records = {
+                record.key: record
+                for record in (
                     await session.scalars(
-                        select(ResidentRecoveryJourney)
-                        .order_by(ResidentRecoveryJourney.person_id)
+                        select(SystemSetting)
+                        .order_by(SystemSetting.key)
                         .with_for_update()
+                        .execution_options(populate_existing=True)
                     )
                 ).all()
-            )
-            for journey in journeys:
-                journey.samples, journey.invalid_reason = [], "recovery_settings_changed"
-        for key, value in updates.items():
-            category, _, description = DEFAULT_DYNAMIC_SETTINGS[key]
-            record = records.get(key)
-            if record:
-                if (
-                    record.is_secret
-                    and (value is None or value == "")
-                    and key not in CLEARABLE_SECRET_KEYS
-                ):
-                    continue
-                if decrypted_value(record) == value:
-                    continue
-                record.value = setting_payload(key, value)
-                record.is_secret = key in SECRET_KEYS
-            else:
-                record = SystemSetting(
-                    key=key,
-                    category=category,
-                    value=setting_payload(key, value),
-                    is_secret=key in SECRET_KEYS,
-                    description=description,
+            }
+            before = {key: public_value(row) for key, row in records.items() if key in updates}
+            previous = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
+            previous.update({key: decrypted_value(row) for key, row in records.items() if key in previous})
+            defaults = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
+            if integration_edit is not None:
+                current = validate_settings_values(previous, defaults)
+                if isinstance(integration_edit, ESPHomeEdit):
+                    current[integration_edit.key] = normalize_esphome_devices(current[integration_edit.key])
+                updates = apply_integration_edit(integration_edit, current)
+            changed_keys = []
+            candidate = dict(previous)
+            candidate.update({key: value for key, value in updates.items() if not (
+                key in SECRET_KEYS and value in (None, "") and key not in CLEARABLE_SECRET_KEYS
+            )})
+            for key in CLEARABLE_SECRET_KEYS:
+                if candidate[key] is None:
+                    candidate[key] = ""
+            # Validation is unconditional and precedes mutations, including when
+            # admission is unset. Retained malformed settings must be repaired in
+            # this same update; their values never appear in diagnostic errors.
+            defaults = {key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()}
+            candidate = validate_settings_values(candidate, defaults)
+            previous_valid = True
+            try:
+                previous = validate_settings_values(previous, defaults)
+            except ValueError:
+                previous_valid = False  # A deliberate repair may replace invalid legacy values.
+            if set(updates) & ({"gate_admission_device_key"} | configured_setting_keys()):
+                await _validate_admission_setting(session, candidate)
+            for key, value in updates.items():
+                category, _, description = DEFAULT_DYNAMIC_SETTINGS[key]
+                record = records.get(key)
+                if record:
+                    if (
+                        record.is_secret
+                        and (value is None or value == "")
+                        and key not in CLEARABLE_SECRET_KEYS
+                    ):
+                        continue
+                    if previous[key] == candidate[key] and (previous_valid or type(previous[key]) is type(candidate[key])):
+                        continue
+                    record.value = setting_payload(key, value)
+                    # JSON's default Python equality considers true == 1. An
+                    # explicit legacy type repair must still emit its UPDATE.
+                    flag_modified(record, "value")
+                    record.is_secret = key in SECRET_KEYS
+                else:
+                    record = SystemSetting(
+                        key=key,
+                        category=category,
+                        value=setting_payload(key, value),
+                        is_secret=key in SECRET_KEYS,
+                        description=description,
+                    )
+                    session.add(record)
+                    records[key] = record
+                changed_keys.append(key)
+            if any(key.startswith("missed_exit_recovery_") for key in changed_keys):
+                from app.models import ResidentRecoveryJourney
+
+                journeys = list(
+                    (
+                        await session.scalars(
+                            select(ResidentRecoveryJourney)
+                            .order_by(ResidentRecoveryJourney.person_id)
+                            .with_for_update()
+                        )
+                    ).all()
                 )
-                session.add(record)
-                records[key] = record
-            changed_keys.append(key)
-        if changed_keys:
-            await write_audit_log(
-                session,
-                category=TELEMETRY_CATEGORY_CRUD,
-                action="settings.update",
-                actor=actor_from_user(current_actor) if current_actor else "System",
-                actor_user_id=current_actor.id if current_actor else None,
-                target_entity="SystemSetting",
-                target_label=", ".join(sorted(changed_keys)[:8]),
-                diff=audit_diff(
-                    {key: before.get(key) for key in changed_keys},
-                    {key: public_value(records[key]) for key in changed_keys},
-                ),
-                metadata={"keys": sorted(changed_keys), "source": source},
-            )
-        from app.services.ha_presence_contracts import HA_SETTING_KEYS
+                for journey in journeys:
+                    journey.samples, journey.invalid_reason = [], "recovery_settings_changed"
+            if changed_keys:
+                await write_audit_log(
+                    session,
+                    category=TELEMETRY_CATEGORY_CRUD,
+                    action="settings.update",
+                    actor=actor_from_user(current_actor) if current_actor else "System",
+                    actor_user_id=current_actor.id if current_actor else None,
+                    target_entity="SystemSetting",
+                    target_label=", ".join(sorted(changed_keys)[:8]),
+                    diff=audit_diff(
+                        {key: before.get(key) for key in changed_keys},
+                        {key: public_value(records[key]) for key in changed_keys},
+                    ),
+                    metadata={"keys": sorted(changed_keys), "source": source},
+                )
+            from app.services.ha_presence_contracts import HA_SETTING_KEYS
 
-        if set(changed_keys) & set(HA_SETTING_KEYS):
-            from app.services.ha_presence_database import invalidate_configuration_in_session
+            if set(changed_keys) & set(HA_SETTING_KEYS):
+                from app.services.ha_presence_database import invalidate_configuration_in_session
 
-            await invalidate_configuration_in_session(session)
-        await session.commit()
+                await invalidate_configuration_in_session(session)
+            # Prepare the public receipt before commit. A later read must never turn
+            # an accepted save into an apparent rollback.
+            rows = [setting_resource(record) for record in sorted(records.values(), key=lambda row: (row.category, row.key))
+                    if record.key in DEFAULT_DYNAMIC_SETTINGS]
+            result = SettingsUpdateResult(rows=rows, changed_keys=frozenset(changed_keys),
+                integration=integration_representation(integration_edit, candidate) if integration_edit is not None else None)
+            await session.commit()
+            accepted = result
+    except Exception:
+        if accepted is None:
+            raise
+        # commit() acknowledged acceptance before owned context cleanup failed.
+        # Neither expose driver details nor invite resubmission of that save.
+        get_logger(__name__).warning("settings_post_commit_cleanup_failed")
     invalidate_runtime_config_cache()
-    return await list_settings()
+    assert accepted is not None
+    return accepted
 
 
 async def _validate_admission_setting(session: AsyncSession, candidate: dict[str, Any]) -> None:

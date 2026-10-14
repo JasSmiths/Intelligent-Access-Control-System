@@ -33,7 +33,6 @@ from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.ha_presence_attempts import HaPresenceAttemptStore
 from app.services.ha_presence_worker import HaPresenceWorker
 from app.services.home_assistant import get_home_assistant_service
-from app.services.icloud_calendar import get_icloud_calendar_service
 from app.services.leaderboard import get_leaderboard_service
 from app.services.lpr_webhook_security import verify_lpr_webhook_request
 from app.services.maintenance import is_maintenance_mode_active
@@ -47,6 +46,7 @@ from app.services.restart_backfill import (
     run_missed_access_event_reconciliation,
 )
 from app.services.settings import get_runtime_config
+from app.services.settings_activation import settings_activation
 from app.services.snapshot_recovery import recover_missing_access_event_snapshots_safely
 from app.services.snapshots import get_snapshot_manager
 from app.services.telemetry import (
@@ -143,7 +143,6 @@ async def lifespan(app: FastAPI):
                 ("notifications", get_notification_service()),
                 # Start dependencies before their active callers. Every active
                 # owner drains its actual publication/cleanup before the sinks.
-                ("icloud_calendar", get_icloud_calendar_service()),
                 ("visitor_passes", get_visitor_pass_service()),
                 ("access_devices", get_access_device_service()),
                 ("home_assistant", get_home_assistant_service()),
@@ -157,6 +156,7 @@ async def lifespan(app: FastAPI):
                 ("movement_reconciliation", get_movement_reconciliation_service()),
                 ("automations", get_automation_service()),
                 ("report_exports", report_exports),
+                ("settings_activation", settings_activation),
             ):
                 owner = (
                     resources
@@ -235,7 +235,7 @@ app = FastAPI(
         },
         {
             "name": "Integrations",
-            "description": "Home Assistant, Apprise, DVLA, iCloud Calendar, gate, cover, and announcement operations.",
+            "description": "Home Assistant, Apprise, DVLA, gate, cover, and announcement operations.",
         },
         {"name": "UniFi Protect", "description": "UniFi Protect cameras and media."},
         {"name": "Top Charts", "description": "Leaderboard and access rhythm rankings."},
@@ -403,7 +403,8 @@ async def auth_guard(request: Request, call_next):
         return await call_next(request)
 
     async with AsyncSessionLocal() as session:
-        user_count = await count_users(session)
+        user = await authenticate_request(session, request)
+        user_count = await count_users(session) if user is None else None
 
     if user_count == 0:
         return JSONResponse(
@@ -415,8 +416,6 @@ async def auth_guard(request: Request, call_next):
             },
         )
 
-    async with AsyncSessionLocal() as session:
-        user = await authenticate_request(session, request)
     if not user:
         return JSONResponse(
             status_code=401,

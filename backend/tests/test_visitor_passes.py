@@ -123,7 +123,7 @@ async def test_refresh_statuses_publishes_status_changed_event_payload(monkeypat
     ]
 
 
-def test_calendar_visitor_pass_uses_asymmetric_valid_window() -> None:
+def test_explicit_visitor_pass_uses_asymmetric_valid_window() -> None:
     service = VisitorPassService()
     start = datetime(2026, 4, 29, 11, 0, tzinfo=UTC)
     end = datetime(2026, 4, 29, 12, 15, tzinfo=UTC)

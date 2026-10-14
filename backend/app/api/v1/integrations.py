@@ -28,24 +28,37 @@ from app.modules.home_assistant.covers import (
     cover_entity_state_payload,
     detected_garage_door_entities,
     detected_gate_entities,
-    normalize_cover_entities,
 )
 from app.modules.notifications.apprise_client import (
-    normalize_apprise_url,
-    split_apprise_urls,
-    summarize_apprise_url,
     validate_apprise_urls,
 )
+from app.modules.notifications.apprise_urls import normalize_apprise_url
 from app.modules.notifications.base import NotificationContext, NotificationDeliveryError
 from app.services.access_devices import get_access_device_service
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.home_assistant import get_home_assistant_service
+from app.services.integration_settings import (
+    AppriseEdit,
+    CoverDiscoveryMerge,
+    ESPHomeEdit,
+    IntegrationSettingsConflict,
+    IntegrationSettingsEdit,
+    IntegrationSettingTargetMissing,
+    apprise_destinations,
+    esphome_device_summary,
+)
 from app.services.maintenance import is_maintenance_mode_active
+from app.services.mutation_context import MutationError
 from app.services.recovery_tracker_discovery import (
     RecoveryTrackerDiscovery,
     discover_recovery_trackers,
 )
-from app.services.settings import get_runtime_config, normalize_esphome_device_id, update_settings
+from app.services.settings import get_runtime_config
+from app.services.settings_activation import (
+    SettingsActivationUnavailable,
+    SettingsSaveReceipt,
+    settings_activation,
+)
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
@@ -73,23 +86,19 @@ async def _raise_if_maintenance_active() -> None:
         )
 
 
-async def update_integration_settings(
-    user: User,
-    values: dict,
-    *,
-    before: dict,
-    after: dict,
-) -> None:
+async def update_integration_settings(user: User, edit: IntegrationSettingsEdit) -> SettingsSaveReceipt:
     try:
-        await update_settings(values, user=user, source="integrations_endpoint")
+        return await settings_activation.save({}, user=user, source="integrations_endpoint", integration_edit=edit)
+    except SettingsActivationUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except IntegrationSettingsConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrationSettingTargetMissing as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MutationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if any(key.startswith("home_assistant_") for key in values):
-        service = get_home_assistant_service()
-        await service.stop()
-        await service.start()
-    if any(key.startswith(("esphome_", "gate_")) for key in values):
-        await get_access_device_service().restart()
 
 
 class GateOpenRequest(BaseModel):
@@ -127,6 +136,12 @@ class TestHomeAssistantMobileNotificationRequest(BaseModel):
 
 class AddAppriseUrlRequest(BaseModel):
     url: str = Field(min_length=6, max_length=1200)
+    confirmation_token: str | None = Field(default=None, max_length=160)
+
+
+class RemoveAppriseUrlRequest(BaseModel):
+    destination_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
     confirmation_token: str | None = Field(default=None, max_length=160)
 
 
@@ -169,7 +184,7 @@ async def gate_status(_: Annotated[User, Depends(current_user)], refresh: bool =
 @router.get("/esphome/devices")
 async def esphome_devices(_: Annotated[User, Depends(admin_user)]) -> dict:
     config = await get_runtime_config()
-    return {"devices": [_esphome_device_summary(device) for device in config.esphome_devices]}
+    return {"devices": [esphome_device_summary(device) for device in config.esphome_devices]}
 
 
 @router.post("/esphome/devices")
@@ -191,21 +206,10 @@ async def add_esphome_device(
         payload=confirmation_payload,
         confirmation_token=request.confirmation_token,
     )
-    config = await get_runtime_config()
-    devices = [dict(device) for device in config.esphome_devices]
-    device_id = _unique_esphome_device_id(request.name, devices)
-    devices.append(_esphome_device_from_request(device_id, request))
-    await update_integration_settings(
-        user,
-        {"esphome_devices": devices},
-        before={
-            "esphome_devices": [
-                _esphome_device_summary(device) for device in config.esphome_devices
-            ]
-        },
-        after={"esphome_devices": [_esphome_device_summary(device) for device in devices]},
-    )
-    return {"devices": [_esphome_device_summary(device) for device in devices]}
+    values = request.model_dump(exclude={"confirmation_token"})
+    values.update(name=request.name.strip(), host=request.host.strip(), encryption_key=request.encryption_key or "")
+    receipt = await update_integration_settings(user, ESPHomeEdit("add", values=values))
+    return {**receipt["integration"], "activation": receipt["activation"]}
 
 
 @router.patch("/esphome/devices/{device_id}")
@@ -229,34 +233,12 @@ async def update_esphome_device(
         payload=confirmation_payload,
         confirmation_token=request.confirmation_token,
     )
-    config = await get_runtime_config()
-    devices = [dict(device) for device in config.esphome_devices]
-    index = _find_esphome_device_index(devices, device_id)
-    if index is None:
-        raise HTTPException(status_code=404, detail="ESPHome device not found.")
-    before = [_esphome_device_summary(device) for device in devices]
-    device = devices[index]
-    updates = request.model_dump(exclude={"confirmation_token"}, exclude_unset=True)
-    if "name" in updates:
-        device["name"] = str(updates["name"] or "").strip()
-    if "host" in updates:
-        device["host"] = str(updates["host"] or "").strip()
-    if "port" in updates and updates["port"] is not None:
-        device["port"] = int(updates["port"])
-    if "encryption_key" in updates and updates["encryption_key"] is not None:
-        device["encryption_key"] = str(updates["encryption_key"] or "")
-    if "timeout_seconds" in updates and updates["timeout_seconds"] is not None:
-        device["timeout_seconds"] = float(updates["timeout_seconds"])
-    if "enabled" in updates and updates["enabled"] is not None:
-        device["enabled"] = bool(updates["enabled"])
-    devices[index] = device
-    await update_integration_settings(
-        user,
-        {"esphome_devices": devices},
-        before={"esphome_devices": before},
-        after={"esphome_devices": [_esphome_device_summary(row) for row in devices]},
-    )
-    return {"devices": [_esphome_device_summary(row) for row in devices]}
+    values = request.model_dump(exclude={"confirmation_token"}, exclude_unset=True)
+    for key in ("name", "host"):
+        if key in values:
+            values[key] = str(values[key] or "").strip()
+    receipt = await update_integration_settings(user, ESPHomeEdit("update", device_id=device_id, values=values))
+    return {**receipt["integration"], "activation": receipt["activation"]}
 
 
 @router.delete("/esphome/devices/{device_id}")
@@ -273,20 +255,8 @@ async def remove_esphome_device(
         payload={"device_id": device_id},
         confirmation_token=request.confirmation_token if request else None,
     )
-    config = await get_runtime_config()
-    devices = [dict(device) for device in config.esphome_devices]
-    index = _find_esphome_device_index(devices, device_id)
-    if index is None:
-        raise HTTPException(status_code=404, detail="ESPHome device not found.")
-    before = [_esphome_device_summary(device) for device in devices]
-    devices.pop(index)
-    await update_integration_settings(
-        user,
-        {"esphome_devices": devices},
-        before={"esphome_devices": before},
-        after={"esphome_devices": [_esphome_device_summary(device) for device in devices]},
-    )
-    return {"devices": [_esphome_device_summary(device) for device in devices]}
+    receipt = await update_integration_settings(user, ESPHomeEdit("remove", device_id=device_id))
+    return {**receipt["integration"], "activation": receipt["activation"]}
 
 
 @router.get("/esphome/status")
@@ -430,21 +400,8 @@ async def auto_detect_home_assistant_gates(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     detected = detected_gate_entities(states)
-    config = await get_runtime_config()
-    merged = _merge_cover_entities(
-        config.home_assistant_gate_entities,
-        detected,
-        default_open_service=config.home_assistant_gate_open_service,
-    )
-    before = {"home_assistant_gate_entities": config.home_assistant_gate_entities}
-    after = {"home_assistant_gate_entities": merged}
-    await update_integration_settings(
-        user,
-        {"home_assistant_gate_entities": merged},
-        before=before,
-        after=after,
-    )
-    return {"gate_entities": [cover_entity_state_payload(entity) for entity in merged]}
+    receipt = await update_integration_settings(user, CoverDiscoveryMerge("home_assistant_gate_entities", detected))
+    return {**receipt["integration"], "activation": receipt["activation"]}
 
 
 @router.post("/home-assistant/garage-doors/auto-detect")
@@ -466,28 +423,14 @@ async def auto_detect_home_assistant_garage_doors(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     detected = detected_garage_door_entities(states)
-    config = await get_runtime_config()
-    merged = _merge_cover_entities(
-        config.home_assistant_garage_door_entities,
-        detected,
-        default_open_service=config.home_assistant_gate_open_service,
-    )
-    before = {"home_assistant_garage_door_entities": config.home_assistant_garage_door_entities}
-    after = {"home_assistant_garage_door_entities": merged}
-    await update_integration_settings(
-        user,
-        {"home_assistant_garage_door_entities": merged},
-        before=before,
-        after=after,
-    )
-    return {"garage_door_entities": [cover_entity_state_payload(entity) for entity in merged]}
+    receipt = await update_integration_settings(user, CoverDiscoveryMerge("home_assistant_garage_door_entities", detected))
+    return {**receipt["integration"], "activation": receipt["activation"]}
 
 
 @router.get("/apprise/urls")
 async def apprise_urls(_: Annotated[User, Depends(admin_user)]) -> dict:
     config = await get_runtime_config()
-    urls = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
-    return {"urls": [summarize_apprise_url(index, url) for index, url in enumerate(urls)]}
+    return {"urls": apprise_destinations(config.apprise_urls)}
 
 
 @router.post("/apprise/urls")
@@ -509,49 +452,25 @@ async def add_apprise_url(
     except NotificationDeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    config = await get_runtime_config()
-    urls = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
-    if normalized not in urls:
-        before = {"apprise_urls": config.apprise_urls}
-        urls.append(normalized)
-        next_urls = "\n".join(urls)
-        await update_integration_settings(
-            user,
-            {"apprise_urls": next_urls},
-            before=before,
-            after={"apprise_urls": next_urls},
-        )
-    return {"urls": [summarize_apprise_url(index, url) for index, url in enumerate(urls)]}
+    receipt = await update_integration_settings(user, AppriseEdit("add", url=normalized))
+    return {**receipt["integration"], "activation": receipt["activation"]}
 
 
 @router.delete("/apprise/urls/{index}")
 async def remove_apprise_url(
     index: int,
+    request: RemoveAppriseUrlRequest,
     user: Annotated[User, Depends(admin_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    request: Annotated[IntegrationConfirmationRequest | None, Body()] = None,
 ) -> dict:
     await require_confirmed_action(
-        session,
-        user=user,
-        action="apprise.url.delete",
-        payload={"index": index},
-        confirmation_token=request.confirmation_token if request else None,
+        session, user=user, action="apprise.url.delete",
+        payload={"index": index, "destination_id": request.destination_id, "revision": request.revision},
+        confirmation_token=request.confirmation_token,
     )
-    config = await get_runtime_config()
-    urls = [normalize_apprise_url(url) for url in split_apprise_urls(config.apprise_urls)]
-    if index < 0 or index >= len(urls):
-        raise HTTPException(status_code=404, detail="Apprise URL not found.")
-    before = {"apprise_urls": config.apprise_urls}
-    urls.pop(index)
-    next_urls = "\n".join(urls)
-    await update_integration_settings(
-        user,
-        {"apprise_urls": next_urls},
-        before=before,
-        after={"apprise_urls": next_urls},
-    )
-    return {"urls": [summarize_apprise_url(row_index, url) for row_index, url in enumerate(urls)]}
+    receipt = await update_integration_settings(user, AppriseEdit("remove", index=index,
+        destination_id=request.destination_id, revision=request.revision))
+    return {**receipt["integration"], "activation": receipt["activation"]}
 
 
 @router.post("/vehicles/lookup", response_model=VehicleInformation)
@@ -918,46 +837,12 @@ async def send_test_notification(
     }
 
 
-def _esphome_device_summary(device: dict) -> dict:
-    return {
-        "id": str(device.get("id") or ""),
-        "name": str(device.get("name") or ""),
-        "host": str(device.get("host") or ""),
-        "port": int(device.get("port") or 6053),
-        "timeout_seconds": float(device.get("timeout_seconds") or 30.0),
-        "enabled": bool(device.get("enabled", True)),
-        "encryption_key_configured": bool(str(device.get("encryption_key") or "").strip()),
-    }
 
 
-def _esphome_device_from_request(device_id: str, request: ESPHomeDeviceRequest) -> dict:
-    return {
-        "id": device_id,
-        "name": request.name.strip(),
-        "host": request.host.strip(),
-        "port": request.port,
-        "encryption_key": str(request.encryption_key or ""),
-        "timeout_seconds": request.timeout_seconds,
-        "enabled": request.enabled,
-    }
 
 
-def _find_esphome_device_index(devices: list[dict], device_id: str) -> int | None:
-    for index, device in enumerate(devices):
-        if str(device.get("id") or "") == device_id:
-            return index
-    return None
 
 
-def _unique_esphome_device_id(name: str, devices: list[dict]) -> str:
-    base = normalize_esphome_device_id(name) or "esphome_device"
-    existing = {str(device.get("id") or "") for device in devices}
-    if base not in existing:
-        return base
-    suffix = 2
-    while f"{base}_{suffix}" in existing:
-        suffix += 1
-    return f"{base}_{suffix}"
 
 
 def _serialize_esphome_entity(entity) -> dict:
@@ -997,19 +882,6 @@ def _serialize_ha_service(service: HomeAssistantService) -> dict[str, str | None
     }
 
 
-def _merge_cover_entities(
-    existing: list[dict],
-    detected: list[dict],
-    *,
-    default_open_service: str = "cover.open_cover",
-) -> list[dict]:
-    merged = normalize_cover_entities(existing, default_open_service=default_open_service)
-    by_entity_id = {str(entity["entity_id"]): entity for entity in merged}
-    for entity in normalize_cover_entities(detected, default_open_service=default_open_service):
-        if entity["entity_id"] not in by_entity_id:
-            merged.append(entity)
-            by_entity_id[str(entity["entity_id"])] = entity
-    return merged
 
 
 def _suggest_mobile_app_notification_mapping(

@@ -543,42 +543,13 @@
   }
 
   .apprise-manager-header,
-  .apprise-add-actions,
-  .icloud-actions,
-  .icloud-form-actions {
+  .apprise-add-actions {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .apprise-manager-header .primary-button,
-  .icloud-actions .primary-button,
-  .icloud-actions .secondary-button,
-  .icloud-form-actions .primary-button,
-  .icloud-form-actions .secondary-button {
+  .apprise-manager-header .primary-button {
     width: 100%;
-  }
-
-  .icloud-overview {
-    grid-template-columns: 42px minmax(0, 1fr);
-  }
-
-  .icloud-overview .badge{
-    grid-column: 1 / -1;
-    justify-self: start;
-  }
-
-  .icloud-auth-grid,
-  .icloud-account-card,
-  .icloud-sync-summary > div {
-    grid-template-columns: 1fr;
-  }
-
-  .icloud-account-actions {
-    justify-content: flex-start;
-  }
-
-  .icloud-account-card .icon-button {
-    justify-self: start;
   }
 
   .users-hero.passes-hero,

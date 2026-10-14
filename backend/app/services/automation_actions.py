@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AutomationRule
-from app.services.automation_integration_actions import registered_integration_action_types
 from app.services.automation_policy import (
     HARDWARE_ACTION_TYPES,
     HARDWARE_DENIAL_DETAILS,
@@ -58,18 +57,6 @@ class MaintenanceChange(Protocol):
     ) -> dict[str, Any]: ...
 
 
-class IntegrationExecution(Protocol):
-    async def __call__(
-        self,
-        session: AsyncSession,
-        action: dict[str, Any],
-        context: AutomationContext,
-        *,
-        rule: AutomationRule,
-        execution: AutomationExecution | None = None,
-    ) -> dict[str, Any]: ...
-
-
 ActionHandler = Callable[
     [AsyncSession, dict[str, Any], AutomationContext, AutomationRule, AutomationExecution | None],
     Awaitable[dict[str, Any]],
@@ -94,12 +81,11 @@ class AutomationActionExecutor:
         maintenance_active: Callable[[], Awaitable[bool]],
         maintenance_change: MaintenanceChange,
         notification_activation: NotificationActivation,
-        integrations: IntegrationExecution,
         authorize_hardware: HardwareAuthorization,
     ) -> None:
         self.gates, self.devices = gates, devices
         self.maintenance_active, self.maintenance_change = maintenance_active, maintenance_change
-        self.notification_activation, self.integrations = notification_activation, integrations
+        self.notification_activation = notification_activation
         self.authorize_hardware = authorize_hardware
         self.handlers = self._bind_handlers()
         require_exhaustive_bindings(ACTION_BY_TYPE, self.handlers, owner="Automation executor")
@@ -114,7 +100,6 @@ class AutomationActionExecutor:
             "garage_door.close": self._garage_doors,
             "maintenance_mode.enable": self._maintenance,
             "maintenance_mode.disable": self._maintenance,
-            **{key: self._integration for key in registered_integration_action_types()},
         }
     async def execute(
         self,
@@ -305,19 +290,3 @@ class AutomationActionExecutor:
             reason=render_action_reason(action, context, rule),
         )
         return workflow_action_result(action, "success", maintenance_mode=status)
-
-    async def _integration(
-        self,
-        session: AsyncSession,
-        action: dict[str, Any],
-        context: AutomationContext,
-        rule: AutomationRule,
-        execution: AutomationExecution | None,
-    ) -> dict[str, Any]:
-        return await self.integrations(
-            session,
-            action,
-            context,
-            rule=rule,
-            execution=execution,
-        )

@@ -23,11 +23,15 @@ class EmptySession:
     async def close(self):
         return None
 
+    async def execute(self, statement):
+        return SimpleNamespace(first=lambda: SimpleNamespace(id=uuid.UUID(int=1),
+            missed_exit_recovery_enabled=True, state=None))
+
 
 def recovery_probe(monkeypatch):
     person = SimpleNamespace(id=uuid.uuid4(), display_name="Synthetic recovery")
     read = PlateRead("SYN123", 0.99, "synthetic-camera", datetime.now(UTC), {})
-    resolver = owner.AccessEvidenceResolver()
+    resolver = owner.AccessEvidenceResolver(SimpleNamespace(site_timezone="UTC", missed_exit_recovery_enabled=True))
 
     async def resolve(*args, **kwargs):
         raise owner.CameraEvidenceRequired(person, recovery=True)
@@ -58,7 +62,7 @@ async def test_recovery_camera_drains_single_cancel_and_discards_late_success(mo
     monkeypatch.setattr(resolver, "_resolve_duplicate_arrival_with_camera", camera)
     task = asyncio.create_task(resolver.prepare_camera_evidence(read, read, None, None))
     try:
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), 3)
         if cancel_parent:
             task.cancel()
         await asyncio.wait_for(cancelling.wait(), 6)

@@ -145,10 +145,10 @@ async def user_photo(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     variant: Annotated[PhotoVariant, Query()] = "full",
 ) -> Response:
-    user = await session.get(User, user_id)
-    if not user:
+    row = (await session.execute(select(User.profile_photo_data_url).where(User.id == user_id))).first()
+    if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    return await data_url_media_response(user.profile_photo_data_url, variant=variant)
+    return await data_url_media_response(row.profile_photo_data_url, variant=variant)
 
 
 @router.post("", response_model=CreateUserResponse, status_code=status.HTTP_201_CREATED)

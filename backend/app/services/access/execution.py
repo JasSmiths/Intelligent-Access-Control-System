@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -14,7 +13,6 @@ from app.db.session import AsyncSessionLocal
 from app.models import (
     AccessEvent,
     Anomaly,
-    MovementSagaRecord,
     MovementSessionRecord,
     Person,
     Presence,
@@ -52,7 +50,6 @@ from app.services.access.payloads import (
     _access_event_raw_payload,
     _movement_intent_payload,
     _raw_payload_with_movement_saga,
-    access_event_realtime_payload,
 )
 from app.services.access.pipeline_contracts import WindowClaim
 from app.services.access.pipeline_store import (
@@ -95,23 +92,6 @@ from app.services.visitor_passes import VisitorPassReservationConflict, get_visi
 logger = get_logger(__name__)
 
 
-@dataclass
-class AccessExecutionResult:
-    read: PlateRead
-    runtime: RuntimeConfig
-    event: AccessEvent
-    person: Person | None
-    vehicle: Vehicle | None
-    visitor_pass: VisitorPass | None
-    visitor_pass_mode: str | None
-    external_admission: dict[str, Any] | None
-    direction_resolution: dict[str, Any]
-    timing: TimingClassification
-    anomalies: list[Anomaly]
-    presence_updated: bool
-    movement_saga: MovementSagaRecord
-
-
 class AccessExecution:
     """Own core access transactions and dispatch through audited hardware owners."""
 
@@ -134,7 +114,7 @@ class AccessExecution:
         trace: Any,
         finalize_started_at: datetime,
         webhook_trace: dict[str, Any],
-    ) -> AccessExecutionResult | None:
+    ) -> uuid.UUID | None:
         execution_started = time.monotonic()
         external_admission = _external_admission_from_read(read)
         presence_updated = False
@@ -429,9 +409,6 @@ class AccessExecution:
                         evidence=window.summary.evidence,
                     ),
                 )
-                # Return the canonical transition snapshot even if optional enrichment fails.
-                if visitor_pass is not None:
-                    visitor_pass = await session.get(VisitorPass, visitor_pass.id)
                 await reserve_all_in_session(
                     session, [admission.ha_reservation] if admission.ha_reservation else []
                 )
@@ -450,21 +427,7 @@ class AccessExecution:
                 "gate_command_accepted": gate_outcome.accepted if gate_outcome else None,
             }
         )
-        return AccessExecutionResult(
-            read=read,
-            runtime=runtime,
-            event=event,
-            person=person,
-            vehicle=vehicle,
-            visitor_pass=visitor_pass,
-            visitor_pass_mode=visitor_pass_mode,
-            external_admission=external_admission,
-            direction_resolution=direction_resolution,
-            timing=timing,
-            anomalies=anomalies,
-            presence_updated=presence_updated,
-            movement_saga=movement_saga,
-        )
+        return event.id
 
     async def _reuse_window_in_session(
         self,
@@ -642,7 +605,7 @@ class AccessExecution:
         observed_at: datetime,
         gate_payload: dict[str, Any],
         runtime: RuntimeConfig,
-    ) -> tuple[AccessEvent, list[Anomaly], dict[str, Any]] | None:
+    ) -> uuid.UUID | None:
         """Persist an observed external admission in the caller-owned transaction."""
         session_id = str(getattr(match.session, "id", "") or "")
         movement_saga = await self._movement_ledger.create_movement_saga(
@@ -807,13 +770,4 @@ class AccessExecution:
         await reserve_all_in_session(
             session, [admission.ha_reservation] if admission.ha_reservation else []
         )
-        realtime_payload = access_event_realtime_payload(
-            event,
-            anomaly_count=len(anomalies),
-            visitor_pass=None,
-            visitor_pass_mode=None,
-        )
-        saga_payload = (event.raw_payload or {}).get("movement_saga")
-        if isinstance(saga_payload, dict):
-            realtime_payload["movement_saga"] = saga_payload
-        return event, anomalies, realtime_payload
+        return event.id

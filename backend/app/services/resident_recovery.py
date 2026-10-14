@@ -44,7 +44,6 @@ from app.models.enums import (
     GateCommandState,
     GateMalfunctionStatus,
     MovementSagaState,
-    PresenceState,
     TimingClassification,
 )
 from app.modules.notifications.base import NotificationContext
@@ -181,11 +180,14 @@ async def observe_tracker(entity_id: str, new_state: dict, old_state: dict) -> N
 
 
 async def has_conflict(session: AsyncSession, person: Person, vehicle: Vehicle, captured_at: datetime) -> bool:
+    from app.models.core import LIVE_ACCESS_EVENT_PREDICATE
+    from app.services.movement_fsm import MovementDirectionFSM
+
     presence = await session.scalar(select(Presence.state).where(Presence.person_id == person.id))
-    latest = await session.scalar(select(AccessEvent).where(AccessEvent.vehicle_id == vehicle.id,
+    latest = await session.scalar(select(AccessEvent.direction).where(AccessEvent.vehicle_id == vehicle.id,
         AccessEvent.decision == AccessDecision.GRANTED, AccessEvent.occurred_at < captured_at,
-        ~AccessEvent.source.ilike("%backfill%")).order_by(AccessEvent.occurred_at.desc(), AccessEvent.id.desc()).limit(1))
-    return presence == PresenceState.PRESENT or bool(latest and latest.direction == AccessDirection.ENTRY)
+        LIVE_ACCESS_EVENT_PREDICATE).order_by(AccessEvent.occurred_at.desc(), AccessEvent.id.desc()).limit(1))
+    return MovementDirectionFSM.has_arrival_conflict(presence, latest)
 
 
 async def blockers(session: AsyncSession, *, now: datetime, exclude_saga_id: uuid.UUID | None = None, exclude_command_key: str | None = None) -> str | None:

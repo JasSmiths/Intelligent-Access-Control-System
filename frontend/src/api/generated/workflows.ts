@@ -7,7 +7,6 @@ export type ActionConfigByType = {
   "garage_door.close": { "target_entity_ids": Array<string> };
   "maintenance_mode.enable": Record<string, never>;
   "maintenance_mode.disable": Record<string, never>;
-  "integration.icloud_calendar.sync": { "provider": "icloud_calendar"; "action": "sync_calendars" };
 };
 export type AutomationActionType = keyof ActionConfigByType;
 export type KnownAutomationAction = {
@@ -57,12 +56,6 @@ export const ACTION_METADATA = {
     "default_reason": "Automation changed Maintenance Mode: @Subject.",
     "execution": "durable_effect",
     "effect": "configuration"
-  },
-  "integration.icloud_calendar.sync": {
-    "editor": "none",
-    "default_reason": "Automation ran integration action from @EventType.",
-    "execution": "durable_effect",
-    "effect": "integration"
   }
 } as const;
 const ACTION_DEFAULTS = {
@@ -82,11 +75,7 @@ const ACTION_DEFAULTS = {
     "target_entity_ids": []
   },
   "maintenance_mode.enable": {},
-  "maintenance_mode.disable": {},
-  "integration.icloud_calendar.sync": {
-    "provider": "icloud_calendar",
-    "action": "sync_calendars"
-  }
+  "maintenance_mode.disable": {}
 } satisfies ActionConfigByType;
 export function isAutomationActionType(value: string): value is AutomationActionType {
   return Object.hasOwn(ACTION_METADATA, value);

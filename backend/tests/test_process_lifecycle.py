@@ -49,7 +49,6 @@ def owned_resources(monkeypatch):
     monkeypatch.setattr(main, "AccessCompletionOwner", lambda *args: service("access_completion"))
     monkeypatch.setattr(main, "HaPresenceWorker", lambda *args: service("ha_presence"))
     monkeypatch.setattr(main, "vehicle_information_resources", service("vehicle_information_clients"))
-    monkeypatch.setattr(main, "get_icloud_calendar_service", lambda: service("calendar"))
     for name in SERVICE_NAMES:
         instance = service(name)
         monkeypatch.setattr(main, f"get_{name}_worker" if name == "vehicle_information" else f"get_{name}_service", lambda instance=instance: instance)
@@ -68,7 +67,7 @@ def owned_resources(monkeypatch):
     return events, controls
 
 
-@pytest.mark.parametrize("failure", ("realtime", "vehicle_information_clients", "telemetry", "reports", "calendar", "access_completion", "ha_presence", *SERVICE_NAMES))
+@pytest.mark.parametrize("failure", ("realtime", "vehicle_information_clients", "telemetry", "reports", "access_completion", "ha_presence", *SERVICE_NAMES))
 async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_resources, failure):
     events, controls = owned_resources
     controls["fail_start"] = failure
@@ -78,7 +77,7 @@ async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_re
             pytest.fail("Failed startup must not accept requests")
     started = [name for action, name in events if action == "start"]
     stopped = [name for action, name in events if action == "stop"]
-    producers = {*SERVICE_NAMES, "calendar", "reports", "access_completion", "ha_presence"} - {"notification"}
+    producers = {*SERVICE_NAMES, "reports", "access_completion", "ha_presence"} - {"notification"}
     assert stopped == [
         *[name for name in reversed(started) if name in producers],
         *[name for name in reversed(started) if name not in producers],
@@ -112,10 +111,10 @@ async def test_normal_shutdown_drains_owned_tasks_before_services_and_database(o
     first_stop = next(i for i, event in enumerate(events) if event[0] == "stop")
     assert all(i < first_stop for i, event in enumerate(events) if event == ("task", "stopped"))
     assert events[-1] == ("stop", "database")
-    for caller, dependency in (("automation", "calendar"), ("access_event", "access_device"),
+    for caller, dependency in (("access_event", "access_device"),
                                ("access_completion", "unifi_protect"), ("ha_presence", "home_assistant")):
         assert events.index(("stop", caller)) < events.index(("stop", dependency))
-    for producer in ({*SERVICE_NAMES, "calendar", "reports", "access_completion", "ha_presence"} - {"notification"}):
+    for producer in ({*SERVICE_NAMES, "reports", "access_completion", "ha_presence"} - {"notification"}):
         for sink in ("notification", "telemetry", "realtime", "vehicle_information_clients", "home_assistant_client", "database"):
             assert events.index(("stop", producer)) < events.index(("stop", sink))
     for before, after in (("notification", "telemetry"), ("telemetry", "realtime"),
@@ -176,43 +175,6 @@ async def test_timed_out_cooperative_cleanup_is_cancelled_before_later_resources
         ('stop', 'home_assistant_client'), ('stop', 'database')]
 
 
-async def test_full_lifespan_retains_calendar_observation_cleanup_before_database_disposal(owned_resources, monkeypatch):
-    from app.services.icloud_calendar import ICloudCalendarService
-    events, _ = owned_resources
-    client = SimpleNamespace(cleanup_auth_session=lambda _: None, detach=lambda _: None)
-    service = ICloudCalendarService(client)
-    monkeypatch.setattr(main, "get_icloud_calendar_service", lambda: service)
-    entered, cleanup, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    cancelled = []
-    async def actual_observer():
-        entered.set()
-        try:
-            await asyncio.Future()
-        finally:
-            cancelled.append(asyncio.current_task().cancelling())
-            cleanup.set()
-            await release.wait()
-    async def accepted(native):
-        return {"status": "connected", "id": "inert-known-receipt"}
-    async def after(receipt, native):
-        return await service._observe_accepted(receipt, actual_observer, work=native.work)
-    monkeypatch.setattr("app.services.icloud_calendar.CALENDAR_OBSERVATION_SECONDS", .02)
-    original_wait_for = asyncio.wait_for
-    async def short_stop(awaitable, *, timeout):
-        return await original_wait_for(awaitable, timeout=.01)
-    monkeypatch.setattr(main.asyncio, "wait_for", short_stop)
-    lifetime = main.lifespan(FastAPI())
-    await lifetime.__aenter__()
-    request = asyncio.create_task(service.sdk.run(accepted, after_result=after))
-    await entered.wait()
-    shutdown = asyncio.create_task(lifetime.__aexit__(None, None, None))
-    await cleanup.wait(); await asyncio.sleep(.03)
-    assert not shutdown.done() and not request.done() and service.sdk._active is not None
-    assert ("stop", "database") not in events and cancelled == [1]
-    release.set()
-    assert (await request)["id"] == "inert-known-receipt"
-    await shutdown
-    assert events[-1] == ("stop", "database") and service.sdk._active is None
 
 
 async def test_repeated_lifespan_cancellation_retains_actual_completion_cleanup_before_sinks(owned_resources, monkeypatch):

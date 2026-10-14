@@ -39,12 +39,8 @@ def target(key):
 
 @pytest_asyncio.fixture(autouse=True)
 async def inert_configuration(monkeypatch, isolated_resources):
-    from app.services import automation_integration_actions
-
     monkeypatch.setattr(authorization, "get_runtime_config_for_session", AsyncMock(return_value=SimpleNamespace(
         site_timezone="Europe/London", schedule_default_policy="allow")))
-    monkeypatch.setattr(automation_integration_actions, "integration_action_status",
-        AsyncMock(return_value=SimpleNamespace(enabled=True, disabled_reason=None)))
     async with AsyncSessionLocal() as session:
         await session.execute(text("TRUNCATE notification_rules CASCADE"))
         await session.commit()

@@ -127,10 +127,11 @@ async def test_lpr_webhook_secret_lists_as_boolean_public_value(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_lpr_webhook_secret_empty_update_keeps_existing_value(monkeypatch) -> None:
+    ciphertext = settings_service.setting_payload("lpr_webhook_token", "synthetic-existing-token")["encrypted"]
     setting = SystemSetting(
         key="lpr_webhook_token",
         category="lpr",
-        value={"encrypted": "existing-token"},
+        value={"encrypted": ciphertext},
         is_secret=True,
         description=settings_service.DEFAULT_DYNAMIC_SETTINGS["lpr_webhook_token"][2],
     )
@@ -141,8 +142,8 @@ async def test_lpr_webhook_secret_empty_update_keeps_existing_value(monkeypatch)
 
     rows = await settings_service.update_settings({"lpr_webhook_token": ""})
 
-    assert setting.value == {"encrypted": "existing-token"}
-    assert rows[0]["value"] is True
+    assert setting.value == {"encrypted": ciphertext}
+    assert rows.rows[0]["value"] is True
 
 
 def test_jwts_and_actionable_hashes_are_bound_to_current_auth_secret(tmp_path, monkeypatch) -> None:
@@ -168,4 +169,4 @@ def test_jwts_and_actionable_hashes_are_bound_to_current_auth_secret(tmp_path, m
 
 
 # Rotation ciphertext/action-context parity and required atomic audit are covered
-# against PostgreSQL in scripts/validation/test_calendar_auth_root_persistence.py.
+# against PostgreSQL in scripts/validation/test_auth_root_persistence.py.

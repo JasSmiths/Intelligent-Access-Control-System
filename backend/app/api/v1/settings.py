@@ -1,6 +1,5 @@
 from typing import Annotated, Any
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,31 +8,30 @@ from app.api.confirmations import require_confirmed_action
 from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
 from app.models import User
-from app.modules.access_devices.registry import get_access_device_provider
-from app.modules.notifications.apprise_client import validate_apprise_urls
-from app.services.access_devices import get_access_device_service
 from app.services.action_confirmations import ActionConfirmationError, consume_action_confirmation
 from app.services.auth_secret_management import (
     AuthSecretRotationError,
     auth_secret_security_status,
     rotate_auth_secret,
 )
-from app.services.dvla import test_vehicle_enquiry_connection
-from app.services.home_assistant import get_home_assistant_service
+from app.services.integration_testing import test_integration_connection
 from app.services.settings import (
     UnknownDynamicSettingsError,
     get_runtime_config,
+    get_runtime_config_for_session,
     list_settings,
-    update_settings,
     validate_dynamic_setting_keys,
+)
+from app.services.settings_activation import (
+    SettingsActivationUnavailable,
+    SettingsSaveReceipt,
+    settings_activation,
 )
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     actor_from_user,
     record_audit_log,
 )
-from app.services.unifi_protect import get_unifi_protect_service
-from app.services.vehicle_information import get_vehicle_information_service
 
 router = APIRouter()
 
@@ -72,6 +70,18 @@ async def runtime_settings(_: Annotated[User, Depends(current_user)]) -> dict[st
     }
 
 
+@router.get("/validation")
+async def settings_validation_status(
+    _: Annotated[User, Depends(admin_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict[str, str | bool]:
+    try:
+        await get_runtime_config_for_session(session)
+    except ValueError as exc:
+        return {"valid": False, "message": str(exc)}
+    return {"valid": True, "message": "Current settings are valid."}
+
+
 @router.get("/security/auth-secret")
 async def get_auth_secret_status(_: Annotated[User, Depends(admin_user)]) -> dict[str, object]:
     return await auth_secret_security_status()
@@ -105,7 +115,7 @@ async def patch_settings(
     request: SettingsUpdateRequest,
     user: Annotated[User, Depends(admin_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> list[dict[str, Any]]:
+) -> SettingsSaveReceipt:
     try:
         validate_dynamic_setting_keys(request.values)
     except UnknownDynamicSettingsError as exc:
@@ -125,7 +135,7 @@ async def patch_settings(
         confirmation_token=request.confirmation_token,
     )
     try:
-        rows = await update_settings(request.values, user=user, source="settings_endpoint")
+        receipt = await settings_activation.save(request.values, user=user, source="settings_endpoint")
     except UnknownDynamicSettingsError as exc:
         raise HTTPException(
             status_code=400,
@@ -135,17 +145,11 @@ async def patch_settings(
                 "allowed_keys": exc.allowed_keys,
             },
         ) from exc
+    except SettingsActivationUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if any(key.startswith("home_assistant_") for key in request.values):
-        service = get_home_assistant_service()
-        await service.stop()
-        await service.start()
-    if any(key.startswith(("esphome_", "gate_")) for key in request.values):
-        await get_access_device_service().restart()
-    if any(key.startswith("unifi_protect_") for key in request.values):
-        await get_unifi_protect_service().restart()
-    return rows
+    return receipt
 
 
 @router.post("/test")
@@ -168,30 +172,7 @@ async def test_connection(
     except ActionConfirmationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
-        if integration == "home_assistant":
-            await _test_home_assistant(values)
-        elif integration == "esphome":
-            await _test_esphome(values)
-        elif integration == "apprise":
-            await _test_apprise(values)
-        elif integration == "dvsa":
-            await get_vehicle_information_service().test_connection(values)
-        elif integration == "dvla":
-            await _test_dvla(values)
-        elif integration == "unifi_protect":
-            await _test_unifi_protect(values)
-        elif integration == "openai":
-            await _test_openai(values)
-        elif integration == "gemini":
-            await _test_gemini(values)
-        elif integration in {"anthropic", "claude"}:
-            await _test_anthropic(values)
-        elif integration == "ollama":
-            await _test_ollama(values)
-        else:
-            raise HTTPException(
-                status_code=400, detail=f"Unknown integration: {request.integration}"
-            )
+        await test_integration_connection(integration, values)
     except Exception as exc:
         await record_audit_log(
             category=TELEMETRY_CATEGORY_INTEGRATIONS,
@@ -203,11 +184,11 @@ async def test_connection(
             target_label=integration,
             outcome="failed",
             level="error",
-            metadata={"integration": integration, "error": str(exc)},
+            metadata={"integration": integration, "error_class": type(exc).__name__},
         )
         if isinstance(exc, HTTPException):
             raise
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail="Connection test failed. Review the selected provider configuration.") from exc
     await record_audit_log(
         category=TELEMETRY_CATEGORY_INTEGRATIONS,
         action="integration.test",
@@ -219,110 +200,3 @@ async def test_connection(
         metadata={"integration": integration},
     )
     return {"ok": True, "message": "Connection test succeeded."}
-
-
-async def _test_home_assistant(values: dict[str, Any]) -> None:
-    base_url = str(values.get("home_assistant_url") or "").rstrip("/")
-    token = str(values.get("home_assistant_token") or "")
-    if not base_url or not token:
-        raise ValueError("Home Assistant URL and token are required.")
-    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-        response = await client.get(
-            f"{base_url}/api/", headers={"Authorization": f"Bearer {token}"}
-        )
-    _raise_for_test(response, "Home Assistant")
-
-
-async def _test_esphome(values: dict[str, Any]) -> None:
-    runtime = await get_runtime_config()
-    provider = get_access_device_provider("esphome")
-    verify_live_device = getattr(provider, "verify_live_device", None)
-    if verify_live_device is None:
-        status = await provider.status(refresh=True)
-        if not status.connected:
-            raise ValueError(status.last_error or "No configured ESPHome devices connected.")
-        return
-    enabled_devices = [
-        device
-        for device in runtime.esphome_devices
-        if device.get("enabled", True) and str(device.get("host") or "").strip()
-    ]
-    if not enabled_devices:
-        raise ValueError("No enabled ESPHome devices are configured.")
-    requested_device = str(values.get("device_id") or "").strip()
-    target_devices = (
-        [device for device in enabled_devices if str(device.get("id") or "") == requested_device]
-        if requested_device
-        else enabled_devices
-    )
-    if not target_devices:
-        raise ValueError("Requested ESPHome device is not configured or enabled.")
-    for device in target_devices:
-        await verify_live_device(str(device["id"]))
-
-
-async def _test_apprise(values: dict[str, Any]) -> None:
-    urls = str(values.get("apprise_urls") or "").strip()
-    if not urls:
-        urls = (await get_runtime_config()).apprise_urls.strip()
-    validate_apprise_urls(urls)
-
-
-async def _test_dvla(values: dict[str, Any]) -> None:
-    await test_vehicle_enquiry_connection(values)
-
-
-async def _test_unifi_protect(values: dict[str, Any]) -> None:
-    await get_unifi_protect_service().test_connection(values)
-
-
-async def _test_openai(values: dict[str, Any]) -> None:
-    base_url = str(values.get("openai_base_url") or "https://api.openai.com/v1").rstrip("/")
-    api_key = str(values.get("openai_api_key") or "")
-    if not api_key:
-        raise ValueError("OpenAI API key is required.")
-    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-        response = await client.get(
-            f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
-        )
-    _raise_for_test(response, "OpenAI")
-
-
-async def _test_gemini(values: dict[str, Any]) -> None:
-    base_url = str(
-        values.get("gemini_base_url") or "https://generativelanguage.googleapis.com/v1beta"
-    ).rstrip("/")
-    api_key = str(values.get("gemini_api_key") or "")
-    if not api_key:
-        raise ValueError("Gemini API key is required.")
-    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-        response = await client.get(f"{base_url}/models?key={api_key}")
-    _raise_for_test(response, "Gemini")
-
-
-async def _test_anthropic(values: dict[str, Any]) -> None:
-    base_url = str(values.get("anthropic_base_url") or "https://api.anthropic.com/v1").rstrip("/")
-    api_key = str(values.get("anthropic_api_key") or "")
-    if not api_key:
-        raise ValueError("Anthropic API key is required.")
-    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-        response = await client.get(
-            f"{base_url}/models",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-        )
-    _raise_for_test(response, "Anthropic")
-
-
-async def _test_ollama(values: dict[str, Any]) -> None:
-    base_url = str(values.get("ollama_base_url") or "http://host.docker.internal:11434").rstrip("/")
-    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-        response = await client.get(f"{base_url}/api/tags")
-    _raise_for_test(response, "Ollama")
-
-
-def _raise_for_test(response: httpx.Response, label: str) -> None:
-    if response.status_code >= 400:
-        raise ValueError(f"{label} returned HTTP {response.status_code}: {response.text[:180]}")

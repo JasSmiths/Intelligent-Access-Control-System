@@ -1232,14 +1232,18 @@ async def test_voice_action_attempts_all_targets_before_reporting_failures(monke
     monkeypatch.setattr(service.recipients, "select_voice_targets", fake_select_voice_targets)
     monkeypatch.setattr(service, "_voice_announcements_preflight", fake_voice_preflight)
 
-    with pytest.raises(NotificationDeliveryError) as excinfo:
-        await service._send_voice({"message": "BMW arrived"}, SimpleNamespace(home_assistant_default_media_player=""))
+    outcome = await service._send_voice({"message": "BMW arrived"}, SimpleNamespace(home_assistant_default_media_player=""))
 
     assert calls == [
         ("media_player.offline", "bee em double you arrived"),
         ("media_player.kitchen", "bee em double you arrived"),
     ]
-    assert "media_player.offline: speaker offline" in str(excinfo.value)
+    assert outcome.metadata["accepted_any"] is True
+    assert outcome.metadata["review_required"] is True
+    assert outcome.metadata["destination_outcomes"] == [
+        {"target": "media_player.offline", "delivery": "unknown"},
+        {"target": "media_player.kitchen", "delivery": "accepted"},
+    ]
 
 
 async def test_voice_action_preflight_on_sends_to_targets(monkeypatch) -> None:

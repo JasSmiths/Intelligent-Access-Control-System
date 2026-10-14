@@ -22,7 +22,7 @@ async def init_database() -> None:
         logger.info("database_migrations_ready")
 
     migration = await migrate_encrypted_payloads_for_active_auth_secret()
-    if migration["settings"] or migration["icloud_accounts"]:
+    if migration["settings"]:
         logger.info("auth_secret_encrypted_payloads_migrated", extra=migration)
 
     await seed_dynamic_settings()

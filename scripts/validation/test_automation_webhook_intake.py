@@ -5,7 +5,6 @@ import asyncio
 from datetime import UTC, datetime
 import hashlib
 import hmac
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import uuid
 
@@ -14,7 +13,7 @@ from sqlalchemy import select, text
 
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRule, AutomationRun, AutomationWebhookNonce, AutomationWebhookSender, NotificationRule
-from app.services import automation_errors, automation_integration_actions, automations
+from app.services import automation_errors, automations
 
 pytestmark = pytest.mark.asyncio
 KEY = "whk_synthetic_webhook_key_with_sufficient_length_for_tests"
@@ -39,8 +38,6 @@ async def setup(monkeypatch, *, require_hmac=True, trigger="webhook.received", s
         identity = row.id
     service = automations.AutomationService()
     monkeypatch.setattr(service.dispatcher, "run_once", AsyncMock(return_value=False))
-    monkeypatch.setattr(automation_integration_actions, "integration_action_status",
-        AsyncMock(return_value=SimpleNamespace(enabled=True, disabled_reason=None)))
     return service, identity
 
 

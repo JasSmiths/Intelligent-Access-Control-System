@@ -23,6 +23,7 @@ MAX_PREPARATION_ATTEMPTS = 3
 ACTIVE_STATUSES = ("queued", "processing")
 DELIVERY_CERTAINTIES = {"accepted", "not_sent", "rejected", "unknown"}
 _MOBILE_RECEIPT_TARGET = re.compile(r"notify\.mobile_app_[A-Za-z0-9_]{1,192}\Z")
+_VOICE_RECEIPT_TARGET = re.compile(r"media_player\.[A-Za-z0-9_]{1,192}\Z")
 _NUMERIC_RECEIPT_TARGET = re.compile(r"[0-9]{1,32}\Z")
 
 
@@ -68,6 +69,7 @@ def safe_destination_outcomes(value: Any) -> list[dict[str, str]]:
         if not (
             target == "apprise"
             or _MOBILE_RECEIPT_TARGET.fullmatch(target)
+            or _VOICE_RECEIPT_TARGET.fullmatch(target)
             or _NUMERIC_RECEIPT_TARGET.fullmatch(target)
         ):
             continue
@@ -562,6 +564,7 @@ def run_summary(row: NotificationRun) -> dict[str, Any]:
                 "rule_id": item["rule"].get("id") if isinstance(item.get("rule"), dict) else None,
                 "action_id": item["action"].get("id") if isinstance(item.get("action"), dict) else None,
                 "partial_failure": item.get("partial_failure", False),
+                "accepted_any": item.get("accepted_any") is True or destination_outcome_truth(item.get("destination_outcomes"))[0],
                 "failure_count": _item_failure_count(item),
                 "review_required": bool(item.get("review_required")),
                 "delivery_uncertain": bool(item.get("delivery_uncertain")),

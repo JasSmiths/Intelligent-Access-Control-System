@@ -12,6 +12,11 @@ class AccessPlan:
     decision: AccessDecision
 
 
+def identity_is_active(*, vehicle_known: bool, owner_known: bool, owner_active: bool) -> bool:
+    """An ownerless registered vehicle retains the supported vehicle-only identity."""
+    return vehicle_known and (not owner_known or owner_active)
+
+
 def access_is_allowed(
     *,
     schedule_allowed: bool,

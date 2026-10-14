@@ -6,12 +6,12 @@ import { createReadSignals, ReadSignalsContext } from "../../lib/readSignals";
 import { PassesView } from "../../views/PassesView";
 import { useSelectedPassMetadata } from "./useSelectedPassMetadata";
 import type { VisitorPass } from "./types";
-const visitor = { id: "selected", visitor_name: "Selected Calendar Visitor", pass_type: "one-time", status: "active", creation_source: "icloud_calendar", expected_time: "2026-10-08T12:00:00Z", window_start: "2026-10-08T11:30:00Z", window_end: "2026-10-08T12:30:00Z", created_at: "2026-10-08T08:00:00Z", updated_at: "2026-10-08T08:00:00Z", window_minutes: 30 } as VisitorPass;
+const visitor = { id: "selected", visitor_name: "Selected Visitor", pass_type: "one-time", status: "active", creation_source: "ui", expected_time: "2026-10-08T12:00:00Z", window_start: "2026-10-08T11:30:00Z", window_end: "2026-10-08T12:30:00Z", created_at: "2026-10-08T08:00:00Z", updated_at: "2026-10-08T08:00:00Z", window_minutes: 30 } as VisitorPass;
 function setup() {
   const signals = createReadSignals("first");
   const wrapper = ({ children }: { children: React.ReactNode }) => <ReadSignalsContext.Provider value={signals}>{children}</ReadSignalsContext.Provider>;
   let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now);
-  const invalidate = async () => { now += 6000; await act(async () => { signals.publish({ type: "realtime", message: { type: "visitor_pass.cancelled", payload: { source: "icloud_calendar", cancelled_count: 1 } } }); }); };
+  const invalidate = async () => { now += 6000; await act(async () => { signals.publish({ type: "realtime", message: { type: "visitor_pass.cancelled", payload: { source: "ui", cancelled_count: 1 } } }); }); };
   return { signals, wrapper, invalidate };
 }
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -19,7 +19,7 @@ it("hydrates open details after an aggregate cancellation removes the pass from 
   const { wrapper, invalidate } = setup(); let cancelled = false;
   const get = vi.spyOn(api, "get").mockImplementation(async (path) => path.includes("/selected") ? { ...visitor, status: cancelled ? "cancelled" : "active" } : cancelled ? [] : [visitor]);
   render(<PassesView query="" />, { wrapper });
-  fireEvent.click(await screen.findByRole("button", { name: /Selected Calendar Visitor/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Selected Visitor/ }));
   await screen.findByRole("dialog", { name: visitor.visitor_name });
   await waitFor(() => expect(get.mock.calls.filter(([path]) => path.endsWith("/selected"))).toHaveLength(1));
   cancelled = true; await invalidate();
@@ -35,7 +35,7 @@ it("retains an editor draft while selected metadata cancels its pass and blocks 
   vi.spyOn(api, "get").mockImplementation(async (path) => path.includes("/selected") ? { ...visitor, status: cancelled ? "cancelled" : "active" } : cancelled ? [] : [visitor]);
   const post = vi.spyOn(api, "post"); const patch = vi.spyOn(api, "patch");
   render(<PassesView query="" />, { wrapper });
-  fireEvent.click(await screen.findByRole("button", { name: /Selected Calendar Visitor/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Selected Visitor/ }));
   fireEvent.click(within(await screen.findByRole("dialog", { name: visitor.visitor_name })).getByRole("button", { name: /Edit/ }));
   const field = await screen.findByLabelText("Visitor name"); fireEvent.change(field, { target: { value: "Retained local draft" } });
   cancelled = true; await invalidate();
@@ -67,7 +67,7 @@ it("keeps a selected failure local and blocks details actions while allowing clo
   const { wrapper, signals } = setup();
   vi.spyOn(api, "get").mockImplementation(async (path) => { if (path.endsWith("/selected")) throw new ApiError("Selected metadata offline", 503, {}); return [visitor]; });
   render(<PassesView query="" />, { wrapper });
-  fireEvent.click(await screen.findByRole("button", { name: /Selected Calendar Visitor/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Selected Visitor/ }));
   await screen.findAllByText("Selected metadata offline");
   const dialog = screen.getByRole("dialog", { name: visitor.visitor_name });
   expect(within(dialog).getByRole("button", { name: /Edit/ })).toBeDisabled();
@@ -85,7 +85,7 @@ it("does not replace a full cancelled realtime row with a late active selected G
     reads += 1; return reads === 1 ? visitor : blocked;
   });
   render(<PassesView query="" />, { wrapper });
-  fireEvent.click(await screen.findByRole("button", { name: /Selected Calendar Visitor/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Selected Visitor/ }));
   await waitFor(() => expect(reads).toBe(1));
   fireEvent.click(within(screen.getByRole("dialog", { name: visitor.visitor_name })).getByRole("button", { name: /Edit/ }));
   await waitFor(() => expect(reads).toBe(2));

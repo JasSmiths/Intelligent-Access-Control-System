@@ -17,6 +17,23 @@ CheckpointState = Literal["succeeded", "failed", "skipped", "unknown"]
 NotificationState = Literal["pending", "attempting", "accepted", "failed", "skipped", "unknown"]
 
 
+@dataclass
+class NotificationDeliveryProgress:
+    """One action's receipt lifetime, retained by its dispatcher on interruption.
+
+    The existing delivery vocabulary applies: an admitted in-flight destination
+    is unknown until the adapter supplies a definite outcome. Unstarted targets
+    remain not_sent. No progress object authorizes replay.
+    """
+    destination_outcomes: list[dict[str, str]] = field(default_factory=list)
+
+    def prepare(self, targets: list[str]) -> None:
+        self.destination_outcomes = [{"target": target, "delivery": "not_sent"} for target in targets]
+
+    def record(self, index: int, delivery: str) -> None:
+        self.destination_outcomes[index]["delivery"] = delivery
+
+
 class WorkflowAction(TypedDict):
     id: str
     type: str

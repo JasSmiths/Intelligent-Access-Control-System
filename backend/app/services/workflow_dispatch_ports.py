@@ -17,6 +17,7 @@ from app.services.workflows.execution_contracts import (
     AutomationActionResult,
     AutomationExecution,
     NotificationActionOutcome,
+    NotificationDeliveryProgress,
     NotificationPlanItem,
     WorkflowAction,
 )
@@ -67,7 +68,8 @@ class NotificationDispatchOwner(Protocol):
         item: NotificationPlanItem | None = None,
     ) -> tuple[RuntimeConfig | None, NotificationPolicy]: ...
     async def deliver_planned_action(
-        self, item: NotificationPlanItem, row: NotificationRun, config: RuntimeConfig
+        self, item: NotificationPlanItem, row: NotificationRun, config: RuntimeConfig,
+        progress: NotificationDeliveryProgress | None = None,
     ) -> NotificationActionOutcome: ...
     async def publish_planned_failure(
         self,

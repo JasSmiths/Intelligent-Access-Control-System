@@ -6,7 +6,7 @@ import * as directory from "../../api/directory";
 import * as client from "../../api/client";
 import { integrationsApi, type RecoveryTrackerDiscovery } from "../../api/integrations";
 import { missedExitRecoveryApi } from "../../api/missedExitRecovery";
-import type { Person, SystemSetting } from "../../api/types";
+import type { Person, SettingsSaveReceipt, SystemSetting } from "../../api/types";
 import { RecoveryConfiguration } from "./RecoveryConfiguration";
 
 const owner = { id: "owner-a", display_name: "Synthetic A", home_assistant_mobile_app_notify_service: "notify.mobile_app_first", missed_exit_recovery_enabled: false, missed_exit_recovery_tracker_entity_id: null } as Person;
@@ -95,12 +95,12 @@ it("preserves drafts during save and fences a stale read after successful save",
   let view!: ReturnType<typeof render>;
   await act(async () => { view = render(configuration()); });
   editGlobal();
-  const saved = deferred<SystemSetting[]>(); vi.mocked(client.api.patch).mockReturnValueOnce(saved.promise);
+  const saved = deferred<SettingsSaveReceipt>(); vi.mocked(client.api.patch).mockReturnValueOnce(saved.promise);
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save global configuration" })));
   const stale = deferred<SystemSetting[]>(); vi.mocked(client.api.get).mockReturnValueOnce(stale.promise);
   await act(async () => invalidate());
   expect(globalToggle()).toHaveValue("true"); expect(latitude()).toHaveValue(51.5);
-  await act(async () => saved.resolve(rows(true, 51.5, -0.1)));
+  await act(async () => saved.resolve({ saved: true, settings: rows(true, 51.5, -0.1), changed_keys: [], activation: { state: "not_required", services: {} } }));
   await act(async () => stale.resolve(rows()));
   expect(globalToggle()).toHaveValue("true"); expect(latitude()).toHaveValue(51.5);
   expect(screen.getByRole("status")).toHaveTextContent("Global recovery settings saved");

@@ -34,6 +34,7 @@ from app.services.workflows.catalog import (
 
 def test_retired_models_are_absent_from_current_metadata_and_exports():
     retired_tables = {
+        "icloud_calendar_accounts", "icloud_calendar_sync_runs",
         "chat_sessions", "chat_messages", "alfred_approvals", "alfred_memories",
         "alfred_lessons", "alfred_feedback", "alfred_eval_examples",
         "processed_messaging_messages", "messaging_identities",
@@ -51,7 +52,7 @@ async def test_retired_api_groups_and_visitor_outreach_are_not_registered():
     app = FastAPI()
     app.include_router(api_router, prefix="/api/v1")
     paths = {path.removeprefix("/api/v1") for path in app.openapi()["paths"]}
-    retired_segments = {"alfred", "discord", "whatsapp", "incoming-messages", "chat", "chat-sessions"}
+    retired_segments = {"alfred", "discord", "whatsapp", "incoming-messages", "chat", "chat-sessions", "icloud-calendar"}
     for path in paths:
         assert retired_segments.isdisjoint(path.split("/")), path
     assert {
@@ -133,3 +134,12 @@ def test_retained_notification_and_camera_provider_interfaces_remain_available()
         provider = get_image_provider(name)
         assert provider.name == name
         assert callable(provider.analyze_image)
+
+
+def test_retired_calendar_action_is_rejected_and_not_executable_but_history_is_readable():
+    from app.services.workflows.action_definitions import ACTION_BY_TYPE, WorkflowConfigurationError, validate_actions, historical_action_config
+    action = {"type": "integration.icloud_calendar.sync", "config": {"provider": "icloud_calendar", "action": "sync_calendars"}}
+    assert action["type"] not in ACTION_BY_TYPE
+    with pytest.raises(WorkflowConfigurationError):
+        validate_actions([action])
+    assert historical_action_config(action["type"], action["config"]) == action["config"]

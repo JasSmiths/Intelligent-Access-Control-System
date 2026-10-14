@@ -5,7 +5,6 @@ import type { ProviderEditorProps } from "./editorTypes";
 import { AppriseEditor } from "./providers/ApprisePanel";
 import { ESPHomeEditor } from "./providers/ESPHomePanel";
 import { HomeAssistantEditor } from "./providers/HomeAssistantPanel";
-import { ICloudCalendarEditor } from "./providers/ICloudCalendarPanel";
 import { ScalarSettingsEditor } from "./providers/ScalarSettingsEditor";
 import { UnifiProtectEditor } from "./providers/UnifiProtectEditor";
 
@@ -13,7 +12,6 @@ const providerEditors: Readonly<Record<string, React.ComponentType<ProviderEdito
   home_assistant: HomeAssistantEditor,
   apprise: AppriseEditor,
   esphome: ESPHomeEditor,
-  icloud_calendar: ICloudCalendarEditor,
   unifi_protect: UnifiProtectEditor
 };
 
@@ -25,7 +23,7 @@ export function assertManagedEditorCoverage(definitions: readonly IntegrationDef
   if (missing.length || extra.length) throw new Error(`Integration editor coverage: missing [${missing.join(", ")}], extra [${extra.join(", ")}]`);
 }
 export const managedEditorKeys = Object.keys(providerEditors);
-assertManagedEditorCoverage(integrationDefinitions(null, {}, null, [], ""), managedEditorKeys);
+assertManagedEditorCoverage(integrationDefinitions(null, {}, null), managedEditorKeys);
 
 // Account/provider identity owns the whole editor. Tabs and refreshed settings do
 // not replace its draft; the caller guards an operator's provider switch first.

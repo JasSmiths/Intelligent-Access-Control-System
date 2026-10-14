@@ -248,13 +248,19 @@ async def test_third_typed_setting_reaches_real_admission_revalidation(monkeypat
         assert config.fixture_region == "synthetic-region"
 
 
-async def test_corrupt_unrelated_setting_can_be_repaired_together_or_admission_unset():
+async def test_corrupt_unrelated_setting_requires_repair_even_when_admission_unset():
     row = await new_device()
     await AccessDeviceService().upsert_binding(str(row.id), "home_assistant", {"external_id": "cover.synthetic"})
     await settings.update_settings({"home_assistant_url": "https://before.invalid", "home_assistant_token": "synthetic-token", "gate_admission_device_key": row.key})
-    await settings.update_settings({"auth_access_token_minutes": "invalid-retained-value"})
+    async with AsyncSessionLocal() as session:
+        record = await session.scalar(select(SystemSetting).where(SystemSetting.key == "auth_access_token_minutes"))
+        if record is None:
+            session.add(SystemSetting(key="auth_access_token_minutes", category="auth", value={"plain": "invalid-retained-value"}, is_secret=False))
+        else:
+            record.value = {"plain": "invalid-retained-value"}
+        await session.commit()
     # A configured admission candidate now uses execution's full conversion.
-    with pytest.raises(ValueError, match="invalid literal"):
+    with pytest.raises(ValueError, match="auth_access_token_minutes"):
         await settings.update_settings({"home_assistant_url": "https://after.invalid"})
     async with AsyncSessionLocal() as session:
         original = await session.scalar(select(SystemSetting).where(SystemSetting.key == "home_assistant_url"))
@@ -263,10 +269,18 @@ async def test_corrupt_unrelated_setting_can_be_repaired_together_or_admission_u
     async with AsyncSessionLocal() as session:
         config = await settings.get_runtime_config_for_session(session)
         assert config.home_assistant_url == "https://after.invalid" and config.auth_access_token_minutes == 12
-    await settings.update_settings({"auth_access_token_minutes": "invalid-retained-value"})
-    # Explicit unset still returns before conversion, providing a safe escape.
-    await settings.update_settings({"gate_admission_device_key": None})
+    async with AsyncSessionLocal() as session:
+        record = await session.scalar(select(SystemSetting).where(SystemSetting.key == "auth_access_token_minutes"))
+        if record is None:
+            session.add(SystemSetting(key="auth_access_token_minutes", category="auth", value={"plain": "invalid-retained-value"}, is_secret=False))
+        else:
+            record.value = {"plain": "invalid-retained-value"}
+        await session.commit()
+    # Unsetting admission must not bypass complete validation.
+    with pytest.raises(ValueError, match="auth_access_token_minutes"):
+        await settings.update_settings({"gate_admission_device_key": None})
+    await settings.update_settings({"gate_admission_device_key": None, "auth_access_token_minutes": 12})
     async with AsyncSessionLocal() as session:
         records = {row.key: row for row in (await session.scalars(select(SystemSetting))).all()}
         assert settings.decrypted_value(records["gate_admission_device_key"]) is None
-        assert settings.decrypted_value(records["auth_access_token_minutes"]) == "invalid-retained-value"
+        assert settings.decrypted_value(records["auth_access_token_minutes"]) == 12

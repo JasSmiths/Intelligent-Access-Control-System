@@ -51,7 +51,7 @@ export function AppriseEditor(props: ProviderEditorProps) {
     try {
       const result = await removeAppriseUrl(url, lifetime.isCurrent);
       if (isMutationNotStarted(result) || !lifetime.isCurrent()) return;
-      setUrls((current) => current.filter((item) => item.index !== url.index).map((item, index) => ({ ...item, index })));
+      setUrls(result.urls);
       setFeedback({ tone: "success", title: "Apprise URL removed", detail: "The notification URL was removed." });
       refreshAccepted();
     } catch (error) { if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "Apprise URL update failed", detail: error instanceof Error ? error.message : "Unable to remove Apprise URL." }); }

@@ -1,0 +1,380 @@
+{
+  "schema_version": 2,
+  "scope": "V01/V02 focused local follow-up; previous remediation retained as explicitly historical context",
+  "root": "/Users/jas/Documents/Intelligent Access System",
+  "git": {
+    "starting_head": "abec96d37b2d60a2d5f403f441cef21619432b1a",
+    "final_head": "abec96d37b2d60a2d5f403f441cef21619432b1a",
+    "starting_branch": "main",
+    "final_branch": "main",
+    "original_review_sha": "abec96d37b2d60a2d5f403f441cef21619432b1a",
+    "preexisting_edits": "evidence/preexisting-context.json",
+    "staged_changes": false,
+    "task_committed": false
+  },
+  "fingerprints": {
+    "starting": "a773364a0933db096464143bb8941f87e3dc5a3874f73e03ea68a18b47ed3d1f",
+    "final_tested": "1bc3838659160f422bad2e5800473da993188f4746f0c1e338c11beaa396a557",
+    "algorithm": "sha256(sorted(relative_path + NUL + file_sha256 + newline))",
+    "starting_manifest": "evidence/iacs-validation-ieb32j6y/manifest.json",
+    "final_manifest": "evidence/iacs-validation-c1ylh8yt/manifest.json",
+    "delivery_documents": "Written after final code validation; excluded from code fingerprint; included in task-only patch and bundle manifest hashes"
+  },
+  "artifact_base": "/private/tmp/iacs-integration-mutations-20261014",
+  "portable_artifact_base": ".",
+  "task_change_manifest": "followup-change-manifest.json",
+  "task_only_patch": "task-only.patch",
+  "statistics": {
+    "source": {
+      "production_code": {
+        "files": 10,
+        "added_lines": 302,
+        "deleted_lines": 283,
+        "new_files": 2,
+        "deleted_files": 0
+      },
+      "documentation": {
+        "files": 2,
+        "added_lines": 20,
+        "deleted_lines": 0,
+        "new_files": 0,
+        "deleted_files": 0
+      },
+      "tests": {
+        "files": 6,
+        "added_lines": 436,
+        "deleted_lines": 15,
+        "new_files": 1,
+        "deleted_files": 0
+      },
+      "validation_configuration": {
+        "files": 2,
+        "added_lines": 3,
+        "deleted_lines": 0,
+        "new_files": 0,
+        "deleted_files": 0
+      }
+    },
+    "delivery_documents": {
+      "modified": 2,
+      "generated_archive": 1
+    }
+  },
+  "requirements": {
+    "R01": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "R02": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "R03": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "R04": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "R05": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "R06": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "R07": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "R08": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "R09": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "R10": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "R11": {
+      "status": "fixed",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "C01": {
+      "status": "deferred",
+      "verification_scope": "Earlier remediation; carried forward, broad prior delta not part of follow-up patch",
+      "prior_evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json"
+    },
+    "V01": {
+      "status": "fixed",
+      "verified": true,
+      "root_cause": "Routes built replacement lists before coordinator admission; successful compound edits could overwrite accepted concurrent changes.",
+      "correction": "Explicit ESPHome, Apprise and HA discovery operations apply to freshly locked authoritative values in settings persistence, then canonical validation/audit/commit and existing owned activation; safe accepted representations prepared before commit.",
+      "owners": [
+        {
+          "path": "backend/app/services/settings.py",
+          "symbol": "update_settings",
+          "line": 673
+        },
+        {
+          "path": "backend/app/services/settings_activation.py",
+          "symbol": "SettingsActivationCoordinator",
+          "line": 39
+        },
+        {
+          "path": "backend/app/services/integration_settings.py",
+          "symbol": "apply_integration_edit",
+          "line": 80
+        },
+        {
+          "path": "backend/app/api/v1/integrations.py",
+          "symbol": "update_integration_settings",
+          "line": 89
+        }
+      ],
+      "regression_tests": [
+        "test_two_real_add_routes_preserve_both_additions[False]",
+        "test_two_real_add_routes_preserve_both_additions[True]",
+        "test_add_after_concurrent_remove_cannot_resurrect_endpoint",
+        "test_independent_device_patches_preserve_both_accepted_fields",
+        "test_concurrent_apprise_additions_preserve_both",
+        "test_discovery_merges_fresh_configuration_after_external_work[gates]",
+        "test_discovery_merges_fresh_configuration_after_external_work[garage-doors]",
+        "test_required_settings_audit_failure_rolls_back_compound_edit",
+        "test_public_apprise_metadata_and_audit_do_not_include_credentials",
+        "test_discovery_merge_uses_current_settings_at_save_boundary[gates]",
+        "test_discovery_merge_uses_current_settings_at_save_boundary[garage-doors]",
+        "test_concurrent_apprise_addition_conflicts_with_approved_delete",
+        "test_apprise_add_after_delete_does_not_restore_removed_destination",
+        "test_current_actor_is_revalidated_after_route_confirmation",
+        "test_compound_edit_cancellation_drains_activation_before_shutdown",
+        "test_duplicate_add_is_authoritative_noop_with_confirmation_and_no_restart",
+        "test_explicit_null_host_remains_invalid_and_secret_omission_and_clear_are_distinct"
+      ],
+      "before": "Lost updates reproduced with real concurrent route entry, including separate coordinators; 16/23 baseline failures include V02 and guarded status/privacy contracts.",
+      "after": "All 23 API/PostgreSQL cases pass; full harness repeats suite-004.",
+      "evidence": [
+        "evidence/paired-regression-results.json",
+        "evidence/iacs-validation-c1ylh8yt/suite-004.log"
+      ]
+    },
+    "V02": {
+      "status": "fixed",
+      "verified": true,
+      "root_cause": "Index-only deletion confirmation could substitute the next destination after list shifts.",
+      "correction": "Required opaque HMAC destination identity plus ordered-list revision bind confirmation and mutation under the same settings locks; stale binding returns 409, index-only clients 422; fresh duplicate selection removes exactly one occurrence; UI uses accepted authoritative URLs.",
+      "owners": [
+        {
+          "path": "backend/app/services/integration_settings.py",
+          "symbol": "apprise_destinations",
+          "line": 72
+        },
+        {
+          "path": "backend/app/api/v1/integrations.py",
+          "symbol": "remove_apprise_url",
+          "line": 460
+        },
+        {
+          "path": "frontend/src/api/integrations.ts",
+          "symbol": "removeAppriseUrl",
+          "line": 198
+        }
+      ],
+      "regression_tests": [
+        "test_preceding_item_deletion_never_substitutes_another_target",
+        "test_reordering_or_duplicate_change_conflicts_with_stale_approval[replacement0]",
+        "test_reordering_or_duplicate_change_conflicts_with_stale_approval[replacement1]",
+        "test_fresh_duplicate_selection_removes_one_and_old_approval_conflicts",
+        "test_index_only_delete_is_not_an_approval_bypass",
+        "test_public_apprise_metadata_and_audit_do_not_include_credentials",
+        "test_concurrent_apprise_addition_conflicts_with_approved_delete",
+        "test_confirmation_is_bound_to_exact_opaque_target_and_cannot_be_replayed",
+        "test_current_actor_is_revalidated_after_route_confirmation",
+        "test_duplicate_add_is_authoritative_noop_with_confirmation_and_no_restart"
+      ],
+      "before": "Preceding deletion, reorder/duplicate and concurrency regressions fail on captured starting application.",
+      "after": "All 23 API/PostgreSQL and affected58 browser checks pass.",
+      "evidence": [
+        "evidence/paired-regression-results.json",
+        "evidence/browser/console.log"
+      ]
+    }
+  },
+  "tests": [
+    {
+      "name": "Paired starting-code API/PostgreSQL regression",
+      "command": "focused.py --source /private/tmp/iacs-integration-mutations-20261014/iacs-validation-ieb32j6y/source --test-overlay scripts/validation/test_integration_mutations.py --suite scripts/validation/test_integration_mutations.py",
+      "exit_code": 1,
+      "result": "16 failed / 7 passed; expected behavioral baseline, zero setup errors",
+      "run": "iacs-validation-focus-_16peat7",
+      "artifact": "evidence/iacs-validation-focus-_16peat7/suite-001.log"
+    },
+    {
+      "name": "Focused after-fix real API/storage and activation",
+      "command": "focused.py --suite scripts/validation/test_integration_mutations.py --suite scripts/validation/test_settings_configuration.py --unit tests/test_settings_activation.py",
+      "exit_code": 0,
+      "result": "23 API/PostgreSQL + 20 settings PostgreSQL + 14 activation tests passed",
+      "run": "iacs-validation-focus-igwiz0e1",
+      "artifact": "evidence/focused-compatibility-console.log"
+    },
+    {
+      "name": "Full final isolated harness",
+      "command": "IACS_VALIDATION_BACKEND_IMAGE=iacs-backend:uiprotect-23-backfill-verified-20261013 PYTHONDONTWRITEBYTECODE=1 <bundled-python3.12> scripts/validation/validate.py --allow-downloads --reuse-dependencies /private/tmp/iacs-integration-mutations-20261014/iacs-validation-focus-rstp6hsg --evidence-root /private/tmp/iacs-integration-mutations-20261014",
+      "exit_code": 0,
+      "result": "1565 backend passed / 35 persistence-only skips; frontend 61 files / 367 tests; 60 suites / 1134 cases; all checks passed",
+      "run": "iacs-validation-c1ylh8yt",
+      "artifact": "evidence/iacs-validation-c1ylh8yt/results.json"
+    },
+    {
+      "name": "Affected Chromium and WebKit browser checks",
+      "command": "node /opt/node_modules/playwright/cli.js test e2e/provider-editors.spec.ts e2e/integration-receipts.spec.ts --workers=1",
+      "command_recording": "Test entrypoint and options known; original Docker wrapper argv was not saved. Image, frontend hashes, one worker, network-none isolation and strict inert fixtures are recorded; wrapper flags are not invented.",
+      "exit_code": 0,
+      "result": "58 passed; no backend proxy, strict inert API mocks, unchanged 30-second test timeout",
+      "artifact": "evidence/browser/console.log",
+      "source_parity": "Every frontend input hash equals final harness manifest",
+      "image": {
+        "reference": "iacs-followup-browser:20261014",
+        "id": "sha256:869763af86eddab1993de1041448eccb1821e5ffa9328d54202aedc607394a87"
+      },
+      "isolation": {
+        "network": "none",
+        "workers": 1,
+        "test_timeout_seconds": 30,
+        "CI": "1",
+        "port": 5174,
+        "backend_proxy": false
+      },
+      "tooling": "evidence/browser-tooling/Dockerfile"
+    },
+    {
+      "name": "Final runtime build and PDF",
+      "command": "scripts/validation/runtime_pdf_smoke.py --build --image iacs-backend:integration-mutations-accepted-runtime-20261014 --evidence-root /private/tmp/iacs-integration-mutations-20261014/runtime-accepted",
+      "exit_code": 0,
+      "result": "Passed; non-root, network none, no installed-source or dependency overlays",
+      "artifact": "evidence/runtime-accepted/iacs-runtime-pdf-1r5mfym4/result.json"
+    },
+    {
+      "name": "Final installed runtime imports/hash parity",
+      "command": "python3 /private/tmp/iacs-integration-mutations-20261014/check_runtime.py",
+      "exit_code": 0,
+      "result": "Changed owners import; installed hashes match final source; no lifespan/provider startup",
+      "artifact": "evidence/runtime-imports.json"
+    },
+    {
+      "name": "Host snapshot tests",
+      "command": "python3 scripts/validation/test_source_snapshot.py",
+      "exit_code": 0,
+      "result": "22 passed",
+      "artifact": "evidence/host-source-snapshot.log"
+    },
+    {
+      "name": "Host harness configuration tests",
+      "command": "python3 scripts/validation/test_harness_configuration.py",
+      "exit_code": 0,
+      "result": "30 passed",
+      "artifact": "evidence/host-harness-configuration.log"
+    }
+  ],
+  "paired_results": "evidence/paired-regression-results.json",
+  "skip_accounting": "evidence/skip-counterparts.json",
+  "test_inventory": "evidence/test-inventory-delta.json",
+  "model": {
+    "primary_requested": "gpt-6.1-sol/xhigh",
+    "primary_effective": "unverified; not exposed",
+    "review": {
+      "requested_model": "gpt-6-astra",
+      "requested_effort": "medium",
+      "delegation": "Existing /root/astra_review reused with explicit original model/effort request; no new reviewer or CLI/cloud session.",
+      "effective_model_and_effort": "unverified; tool session does not expose effective model/effort or custom overrides",
+      "status": "Scoped independent review completed; no material finding; effective model identity unverified",
+      "initial_target": {
+        "fingerprint": "8ab88de886ba15d56de4cb44b17862f774c703b19e1a701637fc4a90e225f7db",
+        "diff": "review.patch",
+        "manifest": "review-manifest.json",
+        "report": "review-checkpoints.json"
+      },
+      "final_delta": {
+        "fingerprint": "1bc3838659160f422bad2e5800473da993188f4746f0c1e338c11beaa396a557",
+        "scope": "Two null name/host normalization lines, compatibility API test, AST-identical EOF cleanup",
+        "finding": "No material finding; null host rejects, omitted encryption key is preserved, explicit empty key clears."
+      },
+      "limitations": [
+        "Not a repository-wide certification",
+        "Initial review preceded final full harness completion; final validation evidence sent separately",
+        "Effective reviewer model identity not independently exposed"
+      ]
+    },
+    "token_usage": "unavailable",
+    "last_account_window_remaining_percent": 86,
+    "pause_threshold_remaining_percent": 20
+  },
+  "ownership": {
+    "before": "Routes read cached config, build replacement lists and return caller-built arrays; coordinator serialized only later persistence/activation.",
+    "after": "Routes collect intent/discovery facts; explicit integration edit owner applies operations under settings transaction locks; settings owns validation/current actor/audit/commit and accepted representation; coordinator retains cancellation-aware serialized activation; clients display accepted representations."
+  },
+  "retained_failures": {
+    "summary": "evidence/retained-runs.json",
+    "baseline": "Expected failures distinguish actual lost-work/mis-target behavior from missing new public binding fields and actor error-code normalization. Revoked actor was already denied400; final403 makes denial precise, not a claim that old code authorized it.",
+    "interrupted_full_runs": [
+      "iacs-validation-m0oijkr4",
+      "iacs-validation-y51k98t2",
+      "iacs-validation-ukmq3qtr"
+    ]
+  },
+  "contracts": {
+    "apprise_delete": "index path plus required destination_id and revision in confirmation payload and DELETE body; obsolete index-only422; stale list409; refresh and deliberate new approval; no automatic resend",
+    "duplicates": "One approved occurrence removed only when ordered list/multiplicity matches; add remains deduplicated no-op",
+    "auth_root_rotation": "Changes invalidate opaque bindings safely; refresh destinations and confirm again",
+    "privacy": "Opaque keyed fingerprints and service/ordinal previews; no credential prefix in public metadata",
+    "schema": "No follow-up migration/dependency change",
+    "calendar": "Earlier retirement preserved, not reopened"
+  },
+  "blockers": [],
+  "remaining_limits": [
+    "Effective primary/reviewer model metadata unavailable",
+    "Real provider/hardware/browser-to-live-backend tests intentionally not executed",
+    "Historical C01 snapshot attachment product choice remains deferred as previously documented",
+    "Synthetic tests do not establish production latency or exactly-once network delivery"
+  ],
+  "prior_context": {
+    "evidence": "prior-remediation/IACS_REMEDIATION_EVIDENCE.json",
+    "handover": "prior-remediation/IACS_REMEDIATION_HANDOVER.md",
+    "patch": "prior-remediation/task-only.patch",
+    "historical_log_link_repaired": "prior-remediation/evidence/full-final-8-console.log",
+    "original_prior_delivery": "evidence/prior-context/"
+  },
+  "production": {
+    "migrated": false,
+    "deployed": false,
+    "live_provider_calls": false,
+    "live_container_restarts": false
+  },
+  "bundle_validation": {
+    "report": "evidence/bundle-content-verification.json",
+    "local_archive_inventory_report": "/private/tmp/iacs-integration-mutations-20261014/bundle-inspection.json",
+    "checks": [
+      "relative safe paths",
+      "CRC and every member hash",
+      "secret-marker scan",
+      "apply follow-up-only patch to included starting bytes and compare all final bytes",
+      "prior context separated"
+    ]
+  }
+}

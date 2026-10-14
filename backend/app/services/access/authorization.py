@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 
 from app.models import (
     AccessEvent,
@@ -210,6 +210,7 @@ async def _current_facts(
     if event.vehicle_id:
         vehicle = await session.scalar(
             select(Vehicle)
+            .options(defer(Vehicle.vehicle_photo_data_url, raiseload=True))
             .where(Vehicle.id == event.vehicle_id)
             .with_for_update(read=True, nowait=True)
             .execution_options(populate_existing=True)
@@ -218,6 +219,7 @@ async def _current_facts(
         if vehicle is not None and vehicle.person_id:
             owner = await session.scalar(
                 select(Person)
+                .options(defer(Person.profile_photo_data_url, raiseload=True))
                 .where(Person.id == vehicle.person_id)
                 .with_for_update(read=True, nowait=True)
                 .execution_options(populate_existing=True)
@@ -265,6 +267,8 @@ async def _current_facts(
             select(Vehicle)
             .where(Vehicle.id == vehicle.id)
             .options(
+                defer(Vehicle.vehicle_photo_data_url, raiseload=True),
+                selectinload(Vehicle.owner).defer(Person.profile_photo_data_url, raiseload=True),
                 selectinload(Vehicle.schedule),
                 selectinload(Vehicle.owner).selectinload(Person.schedule),
             )

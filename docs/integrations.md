@@ -17,7 +17,6 @@ checks.
 | UniFi Protect | Camera discovery, events, snapshots, thumbnails, clips and current camera evidence. The client requires host, local username, password **and** Integration API key, with configurable port and TLS verification. It uses the locked `uiprotect` dependency and its private/public channels. [Service](../backend/app/services/unifi_protect.py), [wrapper](../backend/app/modules/unifi_protect/client.py). |
 | Camera image analysis | OpenAI, Gemini, Claude/Anthropic and vision-capable Ollama models analyze images through their native APIs. The `local` selection does not support image analysis. Configure the provider, model, endpoint and applicable credentials. [Providers](../backend/app/ai/providers.py). |
 | Notifications | Home Assistant mobile services and Apprise URLs deliver messages through the durable notification service. Rules and automations select recipients and actions; configured URLs can contain credentials. [Delivery owner](../backend/app/services/notifications.py), [adapters](../backend/app/modules/notifications/). |
-| iCloud Calendar | Authenticated calendar accounts synchronize calendar events into visitor-pass workflows, including account authentication and 2FA when required. Account state belongs to the calendar service. [Service](../backend/app/services/icloud_calendar.py). |
 | DVLA | Tax and basic vehicle details through the [shared vehicle information owner](../backend/app/services/vehicle_information.py). API key, endpoint and timeout retain their separate configuration and connection test. |
 | DVSA | Optional MOT history and model enrichment through the same owner. Disabled by default; uses OAuth and an API key. [Adapter](../backend/app/modules/dvsa/client.py), [configuration and behavior](#vehicle-information-and-mot-history). |
 
@@ -42,6 +41,18 @@ returning it. The ESPHome device list is encrypted because it includes device
 keys. Never include credentials, cookies, capability tokens or raw provider
 payloads in documentation, logs or diagnostic output.
 
+Managed ESPHome and Apprise additions/edits, and Home Assistant discovery merges,
+apply to fresh configuration within the settings transaction. Discovery I/O runs
+before SQL locks. Their responses describe the configuration accepted at commit.
+Apprise deletion requires both the selected destination's opaque `destination_id`
+and the displayed list's opaque `revision`, bound into confirmation together with
+its index. Index-only clients must refresh/update; there is no index-only fallback.
+Any change to normalized list order, entries or duplicate count returns 409 for an
+old approval. A fresh selection of a duplicate removes one occurrence. The client
+must refresh and obtain a new confirmation after a conflict, without automatic
+retry. Public previews contain service labels, never credential prefixes; the
+bindings are keyed fingerprints and do not reveal URL credentials.
+
 [AccessDeviceConfiguration](../backend/app/services/access_device_configuration.py)
 owns device identity, provider bindings and frozen target plans. A confirmed plan
 must not be rebuilt from changed settings during dispatch. Provider discovery is
@@ -55,68 +66,94 @@ and setting changes still acquire the existing target journal locks before setti
 locks and rows; unresolved commands block mutation. Secret null/empty updates
 retain stored values except clearable `apprise_urls`.
 
-Admission-setting validation uses the same complete typed candidate conversion as
-execution planning. If unrelated retained data is malformed, a configured
-admission update can now fail during that conversion; repair it in the same update
-or explicitly unset the admission key. The unset-key path returns before conversion
-and leaves automatic admission disabled.
+Every settings save validates the complete prospective configuration before any
+setting write, even when the admission gate is unset. Numeric strings and the
+supported boolean spellings remain accepted; malformed enums, timezones,
+non-finite numbers, contradictory debounce windows and invalid structured
+provider settings are rejected without echoing submitted values. Blank protected
+secrets retain their ciphertext; Apprise URLs can be explicitly cleared.
 
-## Calendar synchronization and recovery
+The canonical constraints are in
+[settings validation](../backend/app/services/settings_validation.py). Auth session
+minutes are 5–43,200, remember days 1–365; LPR quiet/max windows are 0.5–60 / 1–300
+seconds with quiet ≤ max, vehicle idle time 1–86,400 seconds and similarity 0–1.
+DVLA/DVSA timeouts are 1–120 / 1–20 seconds and image-analysis timeout 1–300 seconds.
+Protect ports are 1–65,535 and snapshot width/height 160–4,096 / 90–2,160 pixels.
+Coordinates must be finite, paired and within latitude/longitude bounds.
 
-The [calendar facade](../backend/app/services/icloud_calendar.py) composes account
-transactions, sync attempts and the SDK owner. Authentication/start, verification
-and synchronization share one nonwaiting process slot; busy requests return 503
-with `Retry-After: 5`. At most eight pending 2FA clients are retained for the
-existing ten-minute logical TTL. Expired or retiring handshakes cannot be used;
-actual thread, socket, receiver and cookie cleanup finishes before capacity is
-released. DNS/TLS acquisition may run until its finite opening timeout before a
-socket can be registered for abort. Connect/read limits are not a hard total
-native-thread deadline. Stop/disconnect forbids a new stage, while owned cleanup
-may outlive the original 120-second attempt.
+Invalid legacy settings are never rewritten or interpreted as permission. An
+Admin can inspect `/api/v1/settings/validation` and repair the named fields in one
+confirmed update. Authentication reads only its canonical settings projection,
+so unrelated broken integration/policy values do not block repair login. Invalid
+authentication settings still fail closed; a still-valid bearer session can reach
+the diagnostic and repair endpoint without cookie configuration. If no such
+session exists, keep execution stopped and arrange an explicitly authorized,
+backup-first offline repair; this development task does not authorize that write.
 
-Each new sync has a client-known UUID, fixed account-ID manifest, and fixed
-coverage. Site-local today and today+15-day midnights are converted to requested
-UTC instants; the locked SDK serializes those UTC dates with a captured vendor
-`usertz`. The run retains both requested instants and actual inclusive vendor
-coverage, including site/host timezone and DST differences. Explicit resume uses
-that same coverage even on a different host. A repeated ordinary start reads its
-existing receipt; it never resumes unfinished work implicitly.
+A PATCH returns `saved`, public `settings`, actual `changed_keys` and an
+`activation` receipt. Persistence/audit acceptance is separate from process-local
+provider activation (`not_required`, `activated`, `failed`, `partial_failure` or
+`pending`). Identical saves and blank secret placeholders do not restart services.
+The [activation owner](../backend/app/services/settings_activation.py) serializes
+application saves and restarts, and drains before provider/database disposal.
+Activation failure leaves the saved values accepted: inspect service status and
+resolve the activation problem before using the integration. Do not blindly
+resubmit the same settings. Connection tests retain Admin confirmation/audit;
+the [test dispatcher](../backend/app/services/integration_testing.py) delegates
+vendor I/O to the appropriate adapters.
 
-Use the provider editor's bounded recent-run list or saved exact UUID to inspect
-origin, coverage and completed/remaining accounts. The browser retains only the
-original UI request UUID and selected inspection UUID, scoped to the signed-in
-account/role. Inspecting a workflow run does not replace the original lost-response
-request. Explicit confirmed Admin recovery may adopt an interrupted workflow run,
-recording the recovery actor while preserving its original operation and workflow
-outcome. Completed/terminal accounts never repeat. Live run/account leases are
-not stolen. Reconnect/secret rotation allows a pending account to fetch its fresh
-session on explicit resume; changed site-timezone semantics or removed accounts
-produce terminal checkpoints requiring a deliberate new run where appropriate.
+## Calendar retirement and upgrade
 
-Only the supported full-refresh envelope (`Event` list, optional validated
-`Collection`/`Invitee` lists) authorizes absence reconciliation. Unknown control
-fields, malformed rows and unsupported/truncated shapes cause an incomplete
-checkpoint without account effects. This conservative protocol may reject new
-legitimate vendor metadata; fixtures use the installed SDK and inert HTTP, and
-no live Apple envelope validation is claimed. Intentional all-day/nonmatching
-exclusions remain distinct from malformed input. Sync absence cancellation is
-limited to calendar ACTIVE/SCHEDULED passes with aware stored `event_start`
-inside proven coverage. Explicit account removal instead cancels all eligible
-source-prefixed passes, including out-of-horizon/malformed historical metadata.
-USED, CANCELLED and EXPIRED passes are preserved. Existing 255-character source
-references and their collision limitation are unchanged.
+iCloud Calendar is retired. Account login/2FA, calendar discovery and sync,
+workers, routes, workflow actions, settings editors and the SDK dependency are
+removed. Manually created visitor passes, schedules, automations and notifications
+remain supported. Historical pass source labels explicitly say retired.
 
-Account effects, required audit and durable per-pass intents commit together.
-Known accepted receipts survive later metadata/listener failure or cancellation;
-unresolved commits remain unknown and require exact-state inspection before a
-fresh explicit attempt. Rejected remove/resume confirmations are audited by the
-admitted outer owner only after positive rollback and actual cleanup; missing
-confirmation remains 428 without rejection audit. Unproved settlement does not
-open a potentially self-blocking audit transaction. Migration 0014 requires
-coordinated stop/drain and version cutover because old workers ignore fences.
-Downgrade refuses before DDL when new generations, leases or run contexts exist;
-use a verified matching backup/compatible-image fix-forward plan. These changes
-do not authorize deployment, operational migration or live provider requests.
+Forward migration [0016](../backend/alembic/versions/20261014_0016_retire_icloud_calendar.py)
+drops dedicated account/session ciphertext and sync tables. It archives sanitized
+sync statuses and per-account checkpoint counts in `system.feature_retirement`
+audit records; account names, Apple IDs and raw provider errors are excluded.
+It cancels unused/eligible ACTIVE or SCHEDULED source passes without deleting
+visits, events, reservations or historical linkage. Departed duration passes lose
+future arrival authority. USED one-time passes with an open visit remain available
+for departure matching. Provenance disagreement, unresolved reserved/held work,
+active open visits and inconsistent active consumption block the entire upgrade
+with the affected pass UUID. Reconcile those exact records deliberately; never
+infer whether an uncertain gate command happened from this error.
+
+Saved affected workflows are disabled with schedules cleared. Captured affected
+work, including mixed hardware/calendar plans and orphan runs, enters terminal
+`review_required` with `icloud_calendar_retired`; claims/leases are cleared, whole
+plans and accepted/unknown receipts remain. Completed histories remain readable,
+with embedded calendar checkpoint details sanitized. Pending calendar confirmations
+are cancelled. Existing unsupported-action guards also hold pending plans before
+any action runs. No calendar operation can be submitted to the new catalog.
+
+Production upgrade is a separate operator action; development validation never
+runs it. Stop and drain every old backend/worker before cutover: mixed old/new
+workers are unsupported. Take and verify a matching database, configured data
+files/auth-root and image backup. Inspect open/uncertain visitor work first. Run
+the normal Alembic upgrade with the new image while workers remain stopped; a
+blocker rolls back all retirement SQL, including credential deletion. Correct only
+the identified provenance/reservation/visit condition through its established owner
+and retry after deliberate review. Start the new version only after migration and
+schema checks succeed. Review disabled workflows and create a supported replacement
+explicitly; never remove one retired step and replay the remaining hardware plan.
+
+After a successful upgrade and verified backup, an operator may inspect only the
+`icloud-calendar-sessions` child of the deployment's configured `IACS_DATA_DIR`.
+Confirm it is the retired session directory, is not a symlink, and no old process
+uses it. Remove that exact directory offline if desired; never delete the parent,
+auth-root files, other provider state or backups. The migration does not touch
+files, and this task does not perform that cleanup. Old browser UUID-only calendar
+request references may be cleared from local/session storage by exact
+`iacs-calendar-run:` keys; they contain no executable capability in the new UI.
+
+Downgrade cannot recreate deleted credentials or data. Rollback requires stopping
+the new workers and restoring the matching pre-upgrade database/files and old image
+pair; otherwise fix forward. Preserve the backup until the operator accepts the
+new deployment. No production migration, deployment or live Apple test is part of
+local remediation.
 
 ## LPR ingress
 
@@ -337,3 +374,10 @@ recovery does not renew authority or replay a physical command. A restored
 database can lack receipts for later physical effects, so a matching source/image
 and backup still require uncertainty review before normal workers resume. The
 isolated fixture and restore checks do not authorize deployment or live sends.
+
+Requested mobile snapshots currently have a boolean attachment request and no
+explicit optionality contract. A capture failure continues to fail that delivery;
+choosing text-only fallback remains a product decision. Existing optional public
+snapshot URL omission retains its warning. Voice receipts report provider acceptance,
+never proof of audible playback; partial acceptance and uncertainty are visible in
+Recent notification delivery history and the run API, with no automatic replay.

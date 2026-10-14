@@ -20,6 +20,16 @@ from app.services.settings import RuntimeConfig, get_runtime_config
 logger = get_logger(__name__)
 
 
+async def test_connection(config: RuntimeConfig) -> None:
+    if not config.home_assistant_url or not config.home_assistant_token:
+        raise ValueError("Home Assistant URL and token are required.")
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        response = await client.get(f"{config.home_assistant_url.rstrip('/')}/api/",
+            headers={"Authorization": f"Bearer {config.home_assistant_token}"})
+    if response.status_code >= 400:
+        raise ValueError(f"Home Assistant returned HTTP {response.status_code}.")
+
+
 class HomeAssistantError(RuntimeError):
     """Raised when Home Assistant rejects or cannot complete a request."""
 

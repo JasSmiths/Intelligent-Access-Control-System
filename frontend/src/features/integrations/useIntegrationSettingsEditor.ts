@@ -1,7 +1,7 @@
 import React from "react";
 import { confirmedPatch, isMutationNotStarted, testIntegrationSettings } from "../../api/integrations";
-import type { SystemSetting } from "../../api/types";
-import { coerceSettingsPayload } from "../../lib/settings";
+import type { SettingsSaveReceipt } from "../../api/types";
+import { coerceSettingsPayload, settingsActivationWarning } from "../../lib/settings";
 import { useEditorLifetime } from "../../ui/useEditorLifetime";
 import { integrationInitialValues, type IntegrationFeedback } from "./catalog";
 import type { ProviderEditorProps } from "./editorTypes";
@@ -23,15 +23,16 @@ export function useIntegrationSettingsEditor({ definition, values, currentUser, 
     pending.current = true; setOperation("save"); setFeedback(null);
     try {
       const payload = { values: coerceSettingsPayload(form) };
-      const result = await confirmedPatch<SystemSetting[]>("/api/v1/settings", "settings.update", payload, {
+      const result = await confirmedPatch<SettingsSaveReceipt>("/api/v1/settings", "settings.update", payload, {
         target_entity: "Integration", target_id: definition.key, target_label: definition.title, reason: "Save integration settings"
       }, payload, lifetime.isCurrent);
       if (isMutationNotStarted(result) || !lifetime.isCurrent()) return false;
       baseline.current = JSON.stringify(form);
-      setFeedback({ tone: "success", title: "Settings saved", detail: `${definition.title} settings were accepted.` });
+      const warning = settingsActivationWarning(result);
+      setFeedback({ tone: warning ? "info" : "success", title: "Settings saved", detail: warning || `${definition.title} settings were accepted.` });
       // Page metadata has its own read errors; it cannot reverse the accepted PATCH.
       void onChanged().catch(() => undefined);
-      return true;
+      return !warning;
     } catch (error) {
       if (lifetime.isCurrent()) setFeedback({ tone: "error", title: "Unable to save settings", detail: error instanceof Error ? error.message : "Unable to save settings." });
       return false;

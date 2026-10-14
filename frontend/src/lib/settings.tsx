@@ -3,7 +3,13 @@ import type { RealtimeMessage } from "../api/types";
 import { Key, SlidersHorizontal } from "lucide-react";
 import React from "react";
 import { api, isAbortError } from "../api/client";
-import type { SettingsMap, SystemSetting } from "../api/types";
+import type { SettingsMap, SettingsSaveReceipt, SystemSetting } from "../api/types";
+export function settingsActivationWarning(receipt: Pick<SettingsSaveReceipt, "activation">): string {
+  const state = receipt.activation.state;
+  return ["failed", "partial_failure", "pending"].includes(state)
+    ? `Settings saved. Provider activation is ${state.replace(/_/g, " ")}. Review service status before using the integration; the saved values do not need to be submitted again.`
+    : "";
+}
 export type SettingFieldDefinition = {
   key: string;
   label: string;
@@ -135,15 +141,16 @@ export function useSettings(category?: string, eventMatches: (event: RealtimeMes
   }, [category]);
   const reload = useCoordinatedRead(load, eventMatches);
   const save = React.useCallback(async (updates: Record<string, unknown>, options: { confirmationToken?: string } = {}) => {
-    const savedRows = await api.patch<SystemSetting[]>("/api/v1/settings", {
+    const receipt = await api.patch<SettingsSaveReceipt>("/api/v1/settings", {
       values: updates,
       ...(options.confirmationToken ? { confirmation_token: options.confirmationToken } : {})
     });
     loadAbortRef.current?.abort();
     loadSequenceRef.current += 1;
-    setSettingsRows(savedRows);
-    setError("");
+    setSettingsRows(receipt.settings);
+    setError(settingsActivationWarning(receipt));
     setLoading(false);
+    return receipt;
   }, []);
   return {
     rows: settingsRows,

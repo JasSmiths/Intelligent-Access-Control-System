@@ -31,7 +31,6 @@ from app.core.task_lifecycle import drain_owned
 from app.db.session import engine
 from app.models import (
     AuditLog,
-    ICloudCalendarAccount,
     NotificationActionContext,
     SystemSetting,
     User,
@@ -103,18 +102,12 @@ async def _rotate_owned(user: User, requested_secret: str | None) -> dict[str, o
             try:
                 actor = await load_active_admin(session, user.id, auth_version=user.auth_session_version, lock=True)
                 settings_rows = list((await session.scalars(select(SystemSetting).order_by(SystemSetting.key).with_for_update())).all())
-                accounts = list((await session.scalars(select(ICloudCalendarAccount).where(ICloudCalendarAccount.encrypted_session_bundle.is_not(None)).order_by(ICloudCalendarAccount.id).with_for_update())).all())
-                settings_count = account_count = 0
+                settings_count = 0
                 for row in settings_rows:
                     encrypted = _encrypted_setting_value(row)
                     if encrypted:
                         row.value = {"encrypted": encrypt_secret(decrypt_secret(encrypted, secret=old_secret), secret=next_secret)}
                         settings_count += 1
-                for account in accounts:
-                    if account.encrypted_session_bundle:
-                        account.encrypted_session_bundle = encrypt_secret(decrypt_secret(account.encrypted_session_bundle, secret=old_secret), secret=next_secret)
-                        _invalidate_account_session(account)
-                        account_count += 1
                 contexts = list((await session.scalars(select(NotificationActionContext).where(NotificationActionContext.consumed_at.is_(None)).order_by(NotificationActionContext.id).with_for_update())).all())
                 now = datetime.now(UTC)
                 for context in contexts:
@@ -125,7 +118,7 @@ async def _rotate_owned(user: User, requested_secret: str | None) -> dict[str, o
                     target_entity="AuthSecret", target_label="Auth root secret",
                     metadata={"source": status["source"], "file_path": status["file_path"],
                               "custom_secret_supplied": bool(requested_secret),
-                              "settings_reencrypted": settings_count, "icloud_accounts_reencrypted": account_count,
+                              "settings_reencrypted": settings_count,
                               "action_contexts_invalidated": len(contexts)})
                 audit.id = audit_id
                 await session.flush()
@@ -133,7 +126,7 @@ async def _rotate_owned(user: User, requested_secret: str | None) -> dict[str, o
                 await asyncio.to_thread(_replace_root_files, path, old_secret, next_secret)
                 reset_auth_secret_cache()
                 prepared = {**get_auth_secret_status(), "rotated": True,
-                            "settings_reencrypted": settings_count, "icloud_accounts_reencrypted": account_count,
+                            "settings_reencrypted": settings_count,
                             "action_contexts_invalidated": len(contexts)}
                 commit_started = True
                 await session.commit()
@@ -202,11 +195,10 @@ async def _migrate_owned() -> dict[str, int]:
             session = AsyncSession(bind=connection, expire_on_commit=False)
             commit_started = False
             audit_id = uuid.uuid4()
-            counts = {"settings": 0, "icloud_accounts": 0}
+            counts = {"settings": 0}
             failure: BaseException | None = None
             try:
                 rows = list((await session.scalars(select(SystemSetting).order_by(SystemSetting.key).with_for_update())).all())
-                accounts = list((await session.scalars(select(ICloudCalendarAccount).where(ICloudCalendarAccount.encrypted_session_bundle.is_not(None)).order_by(ICloudCalendarAccount.id).with_for_update())).all())
                 for row in rows:
                     encrypted = _encrypted_setting_value(row)
                     if encrypted:
@@ -214,13 +206,6 @@ async def _migrate_owned() -> dict[str, int]:
                         if decrypted.source != "active":
                             row.value = {"encrypted": encrypt_secret(decrypted.value, secret=active_secret)}
                             counts["settings"] += 1
-                for account in accounts:
-                    if account.encrypted_session_bundle:
-                        decrypted = _decrypt_with_candidates(account.encrypted_session_bundle, candidates, f"iCloud calendar account {account.apple_id}")
-                        if decrypted.source != "active":
-                            account.encrypted_session_bundle = encrypt_secret(decrypted.value, secret=active_secret)
-                            _invalidate_account_session(account)
-                            counts["icloud_accounts"] += 1
                 if any(counts.values()):
                     audit = await write_audit_log(session, category=TELEMETRY_CATEGORY_CRUD,
                         action="auth_secret.migrate_encrypted_payloads", actor="system",
@@ -311,11 +296,6 @@ async def _positive_recovery(audit_id: uuid.UUID) -> bool:
 
 async def _outcome_bounds(session: AsyncSession) -> None:
     await session.execute(text("SELECT set_config('statement_timeout', '5000', true), set_config('lock_timeout', '1000', true)"))
-
-
-def _invalidate_account_session(account: ICloudCalendarAccount) -> None:
-    account.sync_generation += 1
-    account.sync_lease_token = account.sync_lease_until = None
 
 
 def _replace_root_files(path: Path, old: str, new: str) -> None:

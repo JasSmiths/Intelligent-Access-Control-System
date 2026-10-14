@@ -114,11 +114,11 @@ export function visitorPassStatusPillTone(visitorPass: VisitorPass): VisitorPass
 
 export function visitorPassWindowLabel(visitorPass: VisitorPass) {
   if (visitorPass.pass_type === "duration") return "Duration";
-  return visitorPass.creation_source === "icloud_calendar" ? "Calendar Sync" : `+/- ${visitorPass.window_minutes}m`;
+  return visitorPass.creation_source === "icloud_calendar" ? "Retired Calendar" : `+/- ${visitorPass.window_minutes}m`;
 }
 
 export function visitorPassSourceLabel(source: string) {
-  if (source === "icloud_calendar") return "iCloud Calendar";
+  if (source === "icloud_calendar") return "iCloud Calendar (retired)";
   return titleCase(source);
 }
 
@@ -273,7 +273,7 @@ export function visitorPassLogIcon(action: string): React.ElementType {
 function visitorPassLogActor(log: VisitorPassLogEntry) {
   const actor = log.actor_user_label || log.actor || "IACS";
   if (log.actor === "System") return "IACS";
-  if (log.actor.toLowerCase().includes("icloud")) return "iCloud Calendar Sync";
+  if (log.actor.toLowerCase().includes("icloud")) return "Retired iCloud Calendar Sync";
   return actor;
 }
 

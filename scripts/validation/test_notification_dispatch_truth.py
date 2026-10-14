@@ -2,6 +2,7 @@
 from test_recovery_boundaries import isolated_resources as isolated_resources
 
 import uuid
+import asyncio
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock
@@ -18,6 +19,7 @@ from app.modules.notifications.base import NotificationContext, NotificationDeli
 from app.modules.notifications.home_assistant_mobile import HomeAssistantMobileAppNotifier
 from app.services import action_confirmations
 from app.services import notifications as notification_owner
+from app.services import notification_dispatch
 from app.services.notification_runs import NotificationRunStore, run_summary, safe_destination_outcomes
 from app.services.notifications import NotificationActionOutcome, NotificationService
 
@@ -190,6 +192,51 @@ async def test_mixed_home_assistant_fanout_records_accepted_and_unknown_without_
     assert await value.run_store.claim(row.id) is None
     assert not await value.dispatcher.run_once(row.id)
     assert client.calls == ["notify.mobile_app_accepted", "notify.mobile_app_lost"]
+
+
+@pytest.mark.parametrize("failure", ["rejected", "unknown", "cancel", "timeout"])
+async def test_voice_partial_acceptance_survives_failure_and_interruption_without_replay(monkeypatch, failure):
+    targets = ["media_player.accepted", "media_player.failed", "media_player.remaining"]
+    await save_rule(uuid.uuid4(), {"id": "voice-truth", "type": "voice", "target_mode": "selected",
+        "target_ids": [f"home_assistant_tts:{target}" for target in targets], "message_template": "Synthetic voice"})
+    entered = asyncio.Event()
+    calls = []
+    class Announcer:
+        async def announce(self, target, _message, **_):
+            calls.append(target.entity_id)
+            if target.entity_id == targets[1]:
+                if failure in {"cancel", "timeout"}:
+                    entered.set()
+                    await asyncio.Event().wait()
+                raise NotificationDeliveryError("Synthetic failure", delivery=failure)
+    monkeypatch.setattr(notification_owner, "HomeAssistantTtsAnnouncer", Announcer)
+    value = service(monkeypatch)
+    monkeypatch.setattr(value, "_voice_announcements_preflight", AsyncMock(return_value=None))
+    identity, claimed, _ = await prepared_saved_run(value)
+    if failure == "timeout":
+        monkeypatch.setattr(notification_dispatch, "ACTION_TIMEOUT_SECONDS", .05)
+    task = asyncio.create_task(value.dispatcher.run_once(identity, claimed=claimed))
+    if failure == "cancel":
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        await asyncio.wait_for(task, 5)
+    row = await value.run_store.get(identity)
+    checkpoint = row.delivery_plan[0]
+    assert checkpoint["accepted_any"] is True
+    assert checkpoint["state"] == "accepted"
+    assert checkpoint["review_required"] == (failure != "rejected")
+    assert checkpoint["destination_outcomes"] == [
+        {"target": targets[0], "delivery": "accepted"},
+        {"target": targets[1], "delivery": "rejected" if failure == "rejected" else "unknown"},
+        {"target": targets[2], "delivery": "not_sent" if failure in {"cancel", "timeout"} else "accepted"},
+    ]
+    prior = list(calls)
+    assert await value.run_store.claim(identity) is None
+    assert not await value.dispatcher.run_once(identity)
+    assert calls == prior
 
 
 async def test_definite_mobile_rejection_is_failed_without_reclaim_or_resend(monkeypatch):
@@ -377,6 +424,7 @@ async def test_filtered_unknown_receipt_still_requires_review_before_any_reclaim
         {"target": "notify.mobile_app_accepted", "delivery": "accepted"},
     ]
     summary_action = run_summary(row)["actions"][0]
+    assert summary_action["accepted_any"] is True
     assert summary_action["review_required"] is True
     assert summary_action["reason"] == "provider_outcome_unknown"
     assert "private.example" not in str(action)

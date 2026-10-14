@@ -46,7 +46,9 @@ owner explicitly; vendor modules never construct business services.
    fallback; recognition authority is still checked at dispatch.
 2. [Evidence resolution](../backend/app/services/access/evidence.py) loads
    identity, schedules, movement history, and applicable camera/recovery evidence.
-   The movement FSM resolves direction; the
+   The pure movement FSM resolves direction, recovery eligibility, conflict and
+   phone/camera precedence from typed facts. [Circular timing](../backend/app/services/access/timing.py)
+   classifies site-local routines; SQL supplies only bounded timestamp samples. The
    [pure access policy](../backend/app/services/access/decision.py) builds the plan.
 3. [Execution](../backend/app/services/access/execution.py) persists the event,
    movement saga, session/pass state, anomalies, required delivery intents,
@@ -61,10 +63,25 @@ owner explicitly; vendor modules never construct business services.
    transaction. A grant awaiting gate verification does not establish admission.
    Applicable garage fanout follows verified admission through the device owner.
 
+Evidence gathers facts; it does not confer dispatch authority. A narrow preliminary
+projection decides whether a full camera probe is useful. After external work, final
+resolution and dispatch freshly load current identity, settings and permission.
+Latest live history seeks each person/vehicle identity independently through its
+partial time/UUID index, considers at most two candidates, and hydrates the winner
+in the same SQL statement. This avoids a population-sized OR filter while preserving
+strict predecessor time and deterministic tie semantics.
+A future recovery condition using existing facts belongs in `MovementDirectionFSM`
+and its typed intent/table tests; a genuinely new fact may extend the evidence
+contract. Providers, delivery and unrelated SQL need not change.
+
 The pure plan carries decision and direction evidence. Execution computes whether
 a command is required; persisted journals, movement sagas and receipts retain
 command authority and outcome. Resident recovery retains its command requirement in the persisted movement
 saga.
+
+Execution handoffs return only the created event UUID. Enrichment stays on the
+persisted event; durable publication reservations own logical idempotency. Network
+delivery is reconcilable, not a claim of exactly-once delivery.
 
 The ledger supplies durable idempotency; duplicate reads and retries cannot renew
 recognition authority. Suppressed movements remain in history. Reconciliation
@@ -142,7 +159,7 @@ P6 integrated validation and approval remain separate gates in the closure recor
 People, groups, vehicles, schedules, and visitor passes provide identity and access
 configuration. Schedule evaluation and assignments have separate owners under
 `services/`; API adapters must reuse those operations. Manual duration passes
-require a plate when created. Calendar synchronization feeds the same pass owner.
+require a plate when created. Supported visitor workflows use the same pass owner.
 
 Notifications and automations use shared trigger, action, and template contracts.
 Notification planning, recipient selection and authorization have separate owners;
@@ -200,44 +217,37 @@ Top Charts query recorded activity; Investigations uses structured filters and
 retained evidence. Missed Exit Recovery is an optional bounded admission-recovery
 flow; its policy and safety limits are in [integrations](integrations.md).
 
-### Calendar operation ownership
+### Settings persistence, activation and retired history
 
-[Account/auth transactions](../backend/app/services/calendar_accounts.py),
-[authentication orchestration](../backend/app/services/calendar_authentication.py),
-[run storage](../backend/app/services/calendar_sync_store.py),
-[account acceptance](../backend/app/services/calendar_sync_commit.py) and
-[reconciliation](../backend/app/services/calendar_reconciliation.py) have distinct
-transaction responsibilities. The [engine](../backend/app/services/calendar_sync_engine.py)
-keeps one original attempt deadline and one renewal child across detached vendor
-work. Account/domain/intents precede final current requester/workflow authority
-and the run checkpoint lock. All writes flush before a final fresh clock and
-exact lease/generation/authority-expiry check; no pending writes follow it.
+[Settings](../backend/app/services/settings.py) owns the complete prospective
+configuration, protected storage, fresh actor/configuration fences and required
+atomic audit. [Pure validation](../backend/app/services/settings_validation.py)
+normalizes the canonical contract before any write. The public receipt is prepared
+before commit and precise changed keys feed the process-local
+[activation coordinator](../backend/app/services/settings_activation.py). All save
+entry points serialize persistence with the whole affected activation sequence;
+cancellation drains that sequence before another save or shutdown. Provider failures
+cannot revoke accepted persistence. Connection-test I/O belongs to vendor adapters
+behind the small [test dispatcher](../backend/app/services/integration_testing.py).
 
-The [SDK admission owner](../backend/app/services/icloud_calendar_sdk.py) owns
-actual native work and pending clients. Bounded postaccept metadata/publication
-runs inside that same admitted child, so process stop drains it before database
-or provider disposal. [API adapters](../backend/app/api/v1/icloud_calendar.py)
-authenticate in a short owned read and carry detached canonical authority; no
-request-yield auth transaction spans SDK work. The existing checked workflow
-execution reaches a narrow [current-authority participant](../backend/app/services/calendar_workflow_authority.py),
-with final NOWAIT locks rather than a second permission policy.
+Compound integration edits use explicit operations in
+[integration settings](../backend/app/services/integration_settings.py). Persistence
+applies those operations to current values after the existing auth-root, actor,
+configuration and setting locks, then prepares their public representation before
+commit. Routes collect discovery facts before admission; they do not construct
+replacement configuration from cached reads. Activation retains the same owned,
+serialized lifetime as ordinary settings saves.
 
-[Auth-root coordination](../backend/app/services/auth_root.py) fences participating
-settings seed/update, calendar ciphertext writers and secret rotation/migration.
-Rotation retains its dedicated session-level lock across file/DB outcome and
-cleanup; short writers reload under the same transaction-level fence before
-actor/domain locks. Required audit UUIDs provide positive outcome evidence.
-An unresolved outcome preserves recovery keys; it never blindly restores an old
-key based on an absent receipt. This finite writer boundary does not globally
-repair unrelated cached JWT/configuration readers.
+[Auth-root coordination](../backend/app/services/auth_root.py) fences settings
+ciphertext and secret rotation/migration. Dedicated locks span file/DB outcomes;
+required audit UUIDs establish positive acceptance. Unresolved outcomes retain
+recovery keys rather than restoring based on absence. Calendar credentials and
+writers are gone; retirement migration/history fixtures are self-contained and do
+not import removed runtime modules. See [upgrade/rollback](integrations.md#calendar-retirement-and-upgrade).
 
-The calendar editor owns exact-run read/acceptance generations and two UUID-only
-recovery references. Passes owns at most the open detail/editor IDs; aggregate
-calendar cancellation invalidates their metadata, while full row replacement
-fences older selected GETs. Fresh status/errors can disable dependent actions
-without resetting dirty fields. Calendar behavior extensions change the
-reconciliation owner and its fixtures; protocol-envelope changes belong to the
-vendor module, not the shared facade or editor frame.
+Selected pass metadata remains bounded to open editor/detail identities. Aggregate
+cancellation invalidates it and authoritative full-row events fence older reads,
+without replacing dirty drafts. Those lifetimes remain shared visitor behavior.
 
 ### Diagnostics and realtime observers
 
@@ -784,7 +794,7 @@ at schedules. It covers legacy/default round-trip, actual persistence/audit,
 vehicle then unambiguous owner then default selection, London's repeated DST hour
 and a separately committed edit denying actual final recognition authority despite
 stale preloaded state. A real dated rule would extend these owners and corresponding
-request/read contracts; this fixture ships no new rule format or calendar behavior.
+request/read contracts; this fixture ships no new rule format or retired-provider behavior.
 
 The [mileage extension exercise](../scripts/validation/test_vehicle_information.py)
 projects value, unit, source and recorded date from the existing typed, bounded

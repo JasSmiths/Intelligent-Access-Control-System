@@ -72,6 +72,30 @@ class MovementDecision:
 
 
 @dataclass(frozen=True)
+class RecoveryDirectionIntent:
+    allowed: bool
+    exact_plate: bool
+    explicit_direction: AccessDirection | None
+    phone_ready: bool
+    phone_reason: str
+    safety_block: str | None
+    camera_direction: AccessDirection | None
+    camera_clear: bool
+    probe_camera: bool = False
+
+
+@dataclass(frozen=True)
+class RecoveryDirectionDecision:
+    direction: AccessDirection
+    allowed: bool
+    phone_ready: bool
+    reason: str
+    method: str = "none"
+    approval_eligible: bool = False
+    requires_camera: bool = False
+
+
+@dataclass(frozen=True)
 class ResolvedMovementWindow:
     source: str
     registration_number: str
@@ -107,6 +131,35 @@ class MovementDirectionFSM:
     precedence rules in one transition table so entry, exit, convoy, visitor,
     and malfunction cases are not scattered through procedural branches.
     """
+
+    @staticmethod
+    def recovery_conflict_is_relevant(gate_state: GateState | None, presence: PresenceState | None,
+                                     explicit: AccessDirection | None) -> bool:
+        return not (gate_state in DEPARTURE_GATE_STATES and presence == PresenceState.PRESENT
+                    and explicit != AccessDirection.ENTRY)
+
+    @staticmethod
+    def has_arrival_conflict(presence: PresenceState | None, previous_live_direction: AccessDirection | None) -> bool:
+        return presence == PresenceState.PRESENT or previous_live_direction == AccessDirection.ENTRY
+
+    @staticmethod
+    def resolve_recovery(intent: RecoveryDirectionIntent) -> RecoveryDirectionDecision:
+        ready = intent.phone_ready and not intent.safety_block
+        reason = intent.safety_block or intent.phone_reason
+        if intent.explicit_direction == AccessDirection.EXIT:
+            return RecoveryDirectionDecision(AccessDirection.EXIT, intent.allowed, ready, "departure_evidence")
+        if ready and intent.allowed:
+            return RecoveryDirectionDecision(AccessDirection.ENTRY, True, ready, reason, method="phone_automatic")
+        eligible = intent.allowed and intent.exact_plate and not intent.safety_block
+        if intent.probe_camera and eligible:
+            return RecoveryDirectionDecision(AccessDirection.ENTRY, intent.allowed, ready, reason, requires_camera=True)
+        if intent.camera_clear and intent.camera_direction == AccessDirection.EXIT:
+            return RecoveryDirectionDecision(AccessDirection.EXIT, intent.allowed, ready, "camera_confirmed_departure")
+        if intent.camera_clear and intent.camera_direction == AccessDirection.ENTRY and eligible:
+            return RecoveryDirectionDecision(AccessDirection.ENTRY, True, ready, "camera_confirmed_entry", method="camera_automatic")
+        approval = bool(intent.allowed and intent.exact_plate and reason not in {
+            "maintenance_mode", "gate_malfunction", "unresolved_gate_command", "unresolved_entry", "departure_evidence"})
+        return RecoveryDirectionDecision(AccessDirection.ENTRY, False, ready, reason, approval_eligible=approval)
 
     def resolve(self, intent: MovementIntent) -> MovementDecision:
         resolution: dict[str, Any] = {

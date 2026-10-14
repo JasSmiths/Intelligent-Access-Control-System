@@ -176,6 +176,15 @@ class ESPHomeAccessDeviceProvider:
             wait_timeout=LIVE_DISCOVERY_WAIT_SECONDS,
         )
 
+    async def test_connection(self, device_id: str = "") -> None:
+        devices = await self._configured_devices()
+        if device_id:
+            devices = [device for device in devices if str(device["id"]) == device_id]
+        if not devices:
+            raise ValueError("No requested enabled ESPHome device is configured.")
+        for device in devices:
+            await self.verify_live_device(str(device["id"]))
+
     async def current_state(self, binding: AccessDeviceBinding) -> GateState:
         device = await self._device_for_binding(binding)
         session = await self._session_for_device(device)

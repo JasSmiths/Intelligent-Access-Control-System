@@ -20,6 +20,8 @@ from app.modules.home_assistant.client import HomeAssistantClient as DefaultHome
 from app.modules.home_assistant.client import get_home_assistant_client
 from app.modules.notifications.apprise_client import (
     AppriseNotificationSender,
+)
+from app.modules.notifications.apprise_urls import (
     normalize_apprise_url,
     split_apprise_urls,
     summarize_apprise_url,
@@ -82,6 +84,7 @@ from app.services.workflows.catalog import (
 from app.services.workflows.channel_definitions import CHANNEL_BY_TYPE
 from app.services.workflows.execution_contracts import (
     NotificationActionOutcome,
+    NotificationDeliveryProgress,
     NotificationPlanItem,
     checked_notification_plan,
 )
@@ -220,7 +223,7 @@ class NotificationService:
             sessions=lambda: AsyncSessionLocal(), clients=lambda: _home_assistant_client()
         )
         self.delivery_handlers: dict[
-            str, Callable[[dict[str, Any], NotificationContext, RuntimeConfig, dict[str, Any]],
+            str, Callable[[dict[str, Any], NotificationContext, RuntimeConfig, dict[str, Any], NotificationDeliveryProgress | None],
                           Awaitable[NotificationActionOutcome]]
         ] = {
             "mobile": self._deliver_mobile,
@@ -678,26 +681,38 @@ class NotificationService:
         return await get_runtime_config()
 
     async def deliver_planned_action(
-        self, item: NotificationPlanItem, row: NotificationRun, config: RuntimeConfig
+        self, item: NotificationPlanItem, row: NotificationRun, config: RuntimeConfig,
+        progress: NotificationDeliveryProgress | None = None,
     ) -> NotificationActionOutcome:
         context = self._context_with_notification_run_id(
             notification_context_from_payload(row.context), row.id
         )
         action = item["action"]
         if action.get("delivery_mode") == "literal":
-            return await self._deliver_literal(action, context, config)
-        return await self._deliver_action(item["action"], context, config, item["rule"])
+            return await self._deliver_literal(action, context, config, progress)
+        return await self._deliver_action(item["action"], context, config, item["rule"], progress)
 
     async def _deliver_literal(
-        self, action: dict[str, Any], context: NotificationContext, config: RuntimeConfig
+        self, action: dict[str, Any], context: NotificationContext, config: RuntimeConfig,
+        progress: NotificationDeliveryProgress | None = None,
     ) -> NotificationActionOutcome:
         """Preserve manual native bodies; workflow formatting does not apply here."""
         target, body = action["target"], action["message"]
         metadata: dict[str, Any] = {}
         if action["type"] == "voice":
-            await HomeAssistantTtsAnnouncer().announce(
-                AnnouncementTarget(target), body, runtime_config=config
-            )
+            progress = progress if progress is not None else NotificationDeliveryProgress()
+            progress.prepare([target])
+            progress.record(0, "unknown")
+            try:
+                await HomeAssistantTtsAnnouncer().announce(
+                    AnnouncementTarget(target), body, runtime_config=config
+                )
+            except NotificationDeliveryError as exc:
+                progress.record(0, exc.delivery)
+                raise NotificationDeliveryError("Announcement request failed.", delivery=exc.delivery,
+                    destination_outcomes=progress.destination_outcomes) from exc
+            progress.record(0, "accepted")
+            metadata.update(accepted_any=True, destination_outcomes=progress.destination_outcomes)
         elif action["type"] == "mobile":
             if action.get("resident_recovery_output") is not None:
                 from app.services.resident_recovery import resolve_mobile_actions
@@ -880,25 +895,29 @@ class NotificationService:
         context: NotificationContext,
         config: RuntimeConfig,
         rendered_rule: dict[str, Any],
+        progress: NotificationDeliveryProgress | None = None,
     ) -> NotificationActionOutcome:
         action_type = str(action.get("type") or "")
         handler = self.delivery_handlers.get(action_type)
         if handler is None:
             raise NotificationDeliveryError(f"Unsupported notification action: {action_type}")
-        return await handler(action, context, config, rendered_rule)
+        return await handler(action, context, config, rendered_rule, progress)
 
     async def _deliver_mobile(
         self, action: dict[str, Any], context: NotificationContext, config: RuntimeConfig, _rendered_rule: dict[str, Any],
+        progress: NotificationDeliveryProgress | None = None,
     ) -> NotificationActionOutcome:
         return await self._send_mobile(action, context, config)
 
     async def _deliver_voice(
         self, action: dict[str, Any], _context: NotificationContext, config: RuntimeConfig, _rendered_rule: dict[str, Any],
+        progress: NotificationDeliveryProgress | None = None,
     ) -> NotificationActionOutcome:
-        return await self._send_voice(action, config)
+        return await self._send_voice(action, config, progress)
 
     async def _deliver_in_app(
         self, action: dict[str, Any], context: NotificationContext, _config: RuntimeConfig, rendered_rule: dict[str, Any],
+        progress: NotificationDeliveryProgress | None = None,
     ) -> NotificationActionOutcome:
         await event_bus.publish(
             "notification.in_app",
@@ -1164,46 +1183,50 @@ class NotificationService:
             get_snapshot_manager().delete_snapshot_path(snapshot.path)
 
     async def _send_voice(
-        self, action: dict[str, Any], config: RuntimeConfig
+        self, action: dict[str, Any], config: RuntimeConfig,
+        progress: NotificationDeliveryProgress | None = None,
     ) -> NotificationActionOutcome:
         frozen = "frozen_voice_targets" in action
-        targets = (
-            action["frozen_voice_targets"]
-            if frozen
-            else await self.recipients.select_voice_targets(config, action)
-        )
+        targets = (action["frozen_voice_targets"] if frozen
+            else await self.recipients.select_voice_targets(config, action))
         if not targets:
-            raise NotificationDeliveryError(
-                "No Home Assistant media player is configured or selected."
-            )
-        suppression = (
-            await self._voice_announcements_preflight(runtime_config=config)
-            if frozen
-            else await self._voice_announcements_preflight()
-        )
+            raise NotificationDeliveryError("No Home Assistant media player is configured or selected.", delivery="not_sent")
+        suppression = (await self._voice_announcements_preflight(runtime_config=config)
+            if frozen else await self._voice_announcements_preflight())
         if suppression:
             return suppression
-
+        progress = progress if progress is not None else NotificationDeliveryProgress()
+        progress.prepare(targets)
         announcer = HomeAssistantTtsAnnouncer()
         failures: list[str] = []
-        delivered_any = False
-        for target in targets:
+        for index, target in enumerate(targets):
+            spoken_message = apply_vehicle_tts_phonetics(
+                content_for_recipient(action, f"home_assistant_tts:{target}")["message"])
+            # Freeze the unknown outcome before entering the adapter. Cancellation
+            # preserves this target as unknown and later targets as not_sent.
+            progress.record(index, "unknown")
             try:
-                spoken_message = apply_vehicle_tts_phonetics(
-                    content_for_recipient(action, f"home_assistant_tts:{target}")["message"]
-                )
                 options = {"runtime_config": config} if frozen else {}
                 await announcer.announce(AnnouncementTarget(target), spoken_message, **options)
-                delivered_any = True
-            except Exception as exc:  # noqa: BLE001 - retain each provider failure before proceeding.
-                failures.append(f"{target}: {exc}")
-        if failures:
-            raise NotificationDeliveryError("; ".join(failures))
+                progress.record(index, "accepted")
+            except NotificationDeliveryError as exc:
+                progress.record(index, exc.delivery)
+                if exc.delivery != "accepted":
+                    failures.append(f"{target}: provider {exc.delivery}")
+            except Exception:  # noqa: BLE001 - unclassified provider outcomes remain uncertain.
+                failures.append(f"{target}: delivery outcome unknown")
+        receipts = progress.destination_outcomes
+        delivered_any = any(receipt["delivery"] == "accepted" for receipt in receipts)
+        uncertain = _receipt_delivery_uncertain(receipts)
         if not delivered_any:
-            raise NotificationDeliveryError(
-                "No Home Assistant media player endpoints were delivered."
-            )
-        return NotificationActionOutcome(delivered=True)
+            raise NotificationDeliveryError("Voice destinations did not accept the announcement.",
+                delivery=_receipt_failure_delivery(receipts), destination_outcomes=receipts)
+        return NotificationActionOutcome(delivered=True,
+            reason="delivered_with_failures" if failures else "delivered",
+            message="At least one destination accepted the announcement request; audible playback is not verified.",
+            metadata={"accepted_any": True, "destination_outcomes": receipts,
+                "partial_failure": bool(failures), "failure_count": _receipt_failure_count(receipts),
+                "delivery_uncertain": uncertain, "review_required": uncertain})
 
     async def _voice_announcements_preflight(
         self, *, runtime_config: RuntimeConfig | None = None
@@ -1297,10 +1320,6 @@ class NotificationService:
             content_type=stored.content_type,
             public_url=manager.notification_snapshot_public_url(stored),
         )
-
-    async def _snapshot_attachments(self, media: dict[str, Any]) -> list[str]:
-        snapshot = await self._snapshot_attachment(media)
-        return [snapshot.path] if snapshot else []
 
     def _record_notification_span(
         self,

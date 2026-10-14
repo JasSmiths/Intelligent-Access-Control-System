@@ -100,32 +100,26 @@ async def test_access_execution_re_resolves_current_facts_after_camera_transacti
         result = await asyncio.wait_for(task, 8)
         assert result is not None
         assert camera_calls == [(read, original_id)]
-        if mutation in {"deactivated", "runtime_policy"}:
-            assert result.event.decision == AccessDecision.DENIED
-            assert result.event.direction == AccessDirection.DENIED
-            hardware.assert_not_awaited()
-            assert not result.presence_updated
-        elif mutation == "unchanged":
-            assert result.event.decision == AccessDecision.GRANTED
-            assert result.event.direction == AccessDirection.EXIT
-            assert result.presence_updated
-            hardware.assert_not_awaited()
-        else:
-            assert result.event.decision == AccessDecision.GRANTED
-            assert result.event.direction == AccessDirection.ENTRY
-            assert result.event.person_id == (other_id if mutation == "owner" else original_id)
-            assert result.direction_resolution["source"] == "gate_state"
-            hardware.assert_awaited_once()
-            assert not result.presence_updated  # Inert sink has no admission evidence.
         async with AsyncSessionLocal() as session:
-            durable = await session.get(AccessEvent, result.event.id)
-            assert durable.person_id == result.event.person_id and durable.direction == result.event.direction
-            if mutation == "unchanged":
-                presence = await session.get(Presence, original_id)
+            durable = await session.get(AccessEvent, result)
+            presence = await session.get(Presence, durable.person_id)
+            if mutation in {"deactivated", "runtime_policy"}:
+                assert durable.decision == AccessDecision.DENIED and durable.direction == AccessDirection.DENIED
+                hardware.assert_not_awaited()
+                assert presence.last_event_id != durable.id
+            elif mutation == "unchanged":
+                assert durable.decision == AccessDecision.GRANTED and durable.direction == AccessDirection.EXIT
                 assert presence.state == PresenceState.EXITED and presence.last_event_id == durable.id
+                hardware.assert_not_awaited()
+            else:
+                assert durable.decision == AccessDecision.GRANTED and durable.direction == AccessDirection.ENTRY
+                assert durable.person_id == (other_id if mutation == "owner" else original_id)
+                assert durable.raw_payload["direction_resolution"]["source"] == "gate_state"
+                hardware.assert_awaited_once()
+                assert presence.last_event_id != durable.id  # Inert sink has no admission evidence.
             if mutation == "runtime_policy":
                 assert durable.raw_payload["schedule"]["allowed"] is False
-                assert result.runtime.schedule_default_policy == "deny"
+                assert (await get_runtime_config_for_session(session)).schedule_default_policy == "deny"
             assert len(list((await session.scalars(select(AccessEvent))).all())) == 1
     finally:
         release_camera.set()

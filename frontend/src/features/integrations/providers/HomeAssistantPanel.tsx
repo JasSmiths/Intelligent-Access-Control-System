@@ -11,7 +11,7 @@ import { SettingField } from "../../../lib/settings";
 import { Badge } from "../../../ui/primitives";
 import type { HomeAssistantDiscovery, HomeAssistantEntity, IntegrationStatus } from "../../../api/types";
 import type { BadgeTone } from "../../../ui/primitives";
-import { formatOptionalDate } from "./ICloudCalendarPanel";
+import { formatDate } from "../../../lib/format";
 
 export function HomeAssistantSettingsFields({
   disabled = false,
@@ -38,7 +38,7 @@ export function HomeAssistantSettingsFields({
   const connectionLabel = connected ? "Connected" : degraded ? "Degraded" : configured ? "Configured" : "Not Configured";
   const connectionTone: BadgeTone = connected ? "green" : degraded ? "red" : configured ? "blue" : "gray";
   const connectionDetail = status?.last_error
-    || (status?.state_refreshed_at ? `State refreshed ${formatOptionalDate(status.state_refreshed_at)}` : configured ? "Credentials are saved, but live state has not been verified yet." : "Save credentials to enable Home Assistant state sync.");
+    || (status?.state_refreshed_at ? `State refreshed ${formatDate(status.state_refreshed_at)}` : configured ? "Credentials are saved, but live state has not been verified yet." : "Save credentials to enable Home Assistant state sync.");
   return (
     <div className="ha-config-shell">
       {discoveryError ? <div className="auth-error inline-error">{discoveryError}</div> : null}

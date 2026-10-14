@@ -10,8 +10,7 @@ function fixture() {
   let changed = false;
   const get = vi.spyOn(api, "get").mockImplementation(async (path) => {
     if (path.endsWith("/unifi-protect/status")) { if (changed) throw new Error("Protect read offline"); return { configured: false, connected: false }; }
-    if (path.endsWith("/icloud-calendar/accounts")) { if (changed) throw new Error("Calendar read offline"); return { accounts: [{ id: "cloud", apple_id: "synthetic@example.invalid", display_name: "Synthetic calendar", status: "connected", is_active: true }], recent_sync_runs: [] }; }
-    if (path.endsWith("/apprise/urls")) { if (changed) throw new Error("Apprise read offline"); return { urls: [{ index: 0, type: "Pushover", scheme: "pover", preview: "Synthetic preview" }] }; }
+    if (path.endsWith("/apprise/urls")) { if (changed) throw new Error("Apprise read offline"); return { urls: [{ index: 0, destination_id: "d".repeat(64), revision: "e".repeat(64), type: "Pushover", scheme: "pover", preview: "Synthetic preview" }] }; }
     if (path.includes("/settings")) { if (changed) throw new Error("Settings read offline"); return []; }
     return {};
   });
@@ -20,7 +19,7 @@ function fixture() {
     changed = true;
     return { status: "ok", account_count: 1, events_scanned: 0, passes_created: 0, passes_updated: 0, passes_cancelled: 0, passes_skipped: 0 };
   });
-  const patch = vi.spyOn(api, "patch").mockImplementation(async () => { changed = true; return []; });
+  const patch = vi.spyOn(api, "patch").mockImplementation(async () => { changed = true; return { saved: true, settings: [], changed_keys: [], activation: { state: "not_required", services: {} } }; });
   const remove = vi.spyOn(api, "delete").mockImplementation(async () => { changed = true; return { urls: [] }; });
   const signals = createReadSignals("synthetic");
   render(<ReadSignalsContext.Provider value={signals}><IntegrationsView currentUser={admin} /></ReadSignalsContext.Provider>);
@@ -51,15 +50,7 @@ it("retains an accepted Apprise removal when its own metadata read fails and res
   await expect(signals.publish({ type: "refresh", reason: "manual", resetHistory: false })).rejects.toThrow("Settings read offline");
   expect(get.mock.calls.filter(([path]) => path.endsWith("/unifi-protect/status"))).toHaveLength(2);
 });
-it("shows accepted calendar sync independently of its failed metadata reload", async () => {
-  const { post } = fixture();
-  fireEvent.click(await screen.findByRole("button", { name: /iCloud Calendar/ }));
-  fireEvent.click(await screen.findByRole("button", { name: "Sync Calendars Now" }));
-  await screen.findByText("Calendar sync complete");
-  expect(screen.getByText("Calendar read offline")).toBeInTheDocument();
-  expect(screen.queryByText("Calendar sync failed")).not.toBeInTheDocument();
-  expect(post.mock.calls.filter(([path]) => path.endsWith("/icloud-calendar/sync"))).toHaveLength(1);
-});
+
 it("keeps a real settings mutation rejection visible and leaves the editor open", async () => {
   const { patch, get } = fixture(); patch.mockRejectedValueOnce(new Error("Settings rejected"));
   fireEvent.click(await screen.findByRole("button", { name: /DVLA Lookup/ }));

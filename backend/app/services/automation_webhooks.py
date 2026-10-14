@@ -21,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AutomationRule, AutomationWebhookNonce, AutomationWebhookSender
 from app.services.automation_errors import AutomationError
-from app.services.automation_integration_actions import integration_action_for_type
 from app.services.automation_policy import action_paused_by_maintenance_mode
 from app.services.telemetry import current_trace_id, payload_shape
 from app.services.type_helpers import as_dict
@@ -247,9 +246,7 @@ def harden_webhook_triggers_for_actions(
 
 def action_requires_webhook_hardening(action: dict[str, Any]) -> bool:
     action_type = str(action.get("type") or "")
-    return action_paused_by_maintenance_mode(action_type) or bool(
-        integration_action_for_type(action_type)
-    )
+    return action_paused_by_maintenance_mode(action_type)
 
 
 async def webhook_policies_for_key(session: AsyncSession, webhook_key: str) -> list[dict[str, Any]]:

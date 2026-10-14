@@ -1,6 +1,11 @@
 from dataclasses import dataclass
 
-from app.modules.home_assistant.client import HomeAssistantClient, get_home_assistant_client
+from app.modules.home_assistant.client import (
+    HomeAssistantClient,
+    HomeAssistantError,
+    get_home_assistant_client,
+)
+from app.modules.notifications.base import NotificationDeliveryError
 from app.services.settings import get_runtime_config
 
 
@@ -18,14 +23,14 @@ class HomeAssistantTtsAnnouncer:
     async def announce(self, target: AnnouncementTarget, message: str, *, runtime_config=None) -> None:
         config = runtime_config if runtime_config is not None else await get_runtime_config()
         options = {"runtime_config": config} if runtime_config is not None else {}
-        await self._client.call_service(
-            config.home_assistant_tts_service,
-            {
-                "entity_id": target.entity_id,
-                "message": message,
-            },
-            **options,
-        )
+        try:
+            await self._client.call_service(
+                config.home_assistant_tts_service,
+                {"entity_id": target.entity_id, "message": message},
+                **options,
+            )
+        except HomeAssistantError as exc:
+            raise NotificationDeliveryError("Home Assistant announcement request failed.", delivery=exc.delivery) from exc
 
     async def announce_default(self, message: str) -> None:
         config = await get_runtime_config()

@@ -187,11 +187,9 @@ package's matching browsers. The UniFi wrapper uses raw-event conversion, camera
 video exports and the current SDK camera projection contract; see the
 [SDK integration contract](integrations.md#unifi-protect-sdk-contract).
 
-SQLAlchemy stays on the patched 2.0 line (`>=2.0.54,<2.1`). Version 2.1 makes
-`Session.execute()` autoflush unconditional, including SQL budget statements;
-calendar final-flush expiry fixtures no longer reach their intended write barrier.
-Review transaction and fixture ownership separately before removing this bound;
-retain the existing expiry/rollback assertions.
+SQLAlchemy stays on the patched 2.0 line (`>=2.0.54,<2.1`). Review transaction
+and fixture ownership separately before changing this dependency bound; retain
+the supported recovery expiry and rollback assertions.
 
 Use the [isolated validation harness](validation.md) for backend regression.
 If backend source is mounted into a running installation, perform code changes

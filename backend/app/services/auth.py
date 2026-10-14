@@ -13,15 +13,16 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError, VerifyMismatchError
 from fastapi import HTTPException, Request, Response, WebSocket, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer, with_expression
 
 from app.core.auth_secret import get_auth_secret
 from app.models import RevokedAuthToken, User
 from app.models.enums import UserRole
-from app.services.profile_photos import stored_image_url
-from app.services.settings import get_runtime_config
+from app.services.profile_photos import photo_reference_expression, stored_image_url
+from app.services.settings import get_authentication_config
 
 password_hasher = PasswordHasher()
 
@@ -87,6 +88,8 @@ def serialize_user(
     first_name = user.first_name or split_full_name(user.full_name)[0]
     last_name = user.last_name or split_full_name(user.full_name)[1]
     photo_path = photo_url_path or f"/api/v1/users/{user.id}/photo"
+    photo_reference = (user.profile_photo_reference
+        if "profile_photo_data_url" in inspect(user).unloaded else user.profile_photo_data_url)
     return {
         "id": str(user.id),
         "username": user.username,
@@ -95,7 +98,7 @@ def serialize_user(
         "full_name": compose_full_name(first_name, last_name) or user.full_name,
         "profile_photo_data_url": user.profile_photo_data_url if include_photo else None,
         "profile_photo_url": stored_image_url(
-            user.profile_photo_data_url, photo_path, getattr(user, "updated_at", None)
+            photo_reference, photo_path, getattr(user, "updated_at", None)
         ),
         "email": user.email,
         "mobile_phone_number": user.mobile_phone_number,
@@ -171,8 +174,37 @@ async def create_user(
     return user
 
 
+async def create_initial_admin(
+    session: AsyncSession, *, username: str, first_name: str, last_name: str,
+    password: str, profile_photo_data_url: str | None = None,
+    mobile_phone_number: str | None = None, email: str | None = None,
+) -> User:
+    """Own first-run admission, user creation and required audit atomically."""
+    from app.services.telemetry import TELEMETRY_CATEGORY_CRUD, write_audit_log
+
+    await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:scope))"), {"scope": "iacs:initial-admin"})
+    if await count_users(session) > 0:
+        raise HTTPException(status_code=409, detail="Initial setup is locked because a user already exists.")
+    try:
+        user = await create_user(session, username=username, first_name=first_name, last_name=last_name,
+            full_name=compose_full_name(first_name, last_name), password=password,
+            profile_photo_data_url=profile_photo_data_url, mobile_phone_number=mobile_phone_number,
+            email=email, role=UserRole.ADMIN, is_active=True)
+        user.last_login_at = datetime.now(UTC)
+        await session.flush()
+        await session.refresh(user)
+        await write_audit_log(session, category=TELEMETRY_CATEGORY_CRUD, action="auth.initial_setup",
+            actor="Initial setup", actor_user_id=user.id, target_entity="User", target_id=user.id,
+            target_label=user.username, metadata={"role": UserRole.ADMIN.value})
+        await session.commit()
+        return user
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="User already exists") from exc
+
+
 async def create_access_token(user: User, *, remember_me: bool = False) -> tuple[str, datetime]:
-    runtime = await get_runtime_config()
+    runtime = await get_authentication_config()
     now = datetime.now(tz=UTC)
     expires_at = now + (
         timedelta(days=runtime.auth_remember_days)
@@ -191,7 +223,7 @@ async def create_access_token(user: User, *, remember_me: bool = False) -> tuple
 
 
 async def set_session_cookie(response: Response, token: str, expires_at: datetime) -> None:
-    runtime = await get_runtime_config()
+    runtime = await get_authentication_config()
     response.set_cookie(
         key=runtime.auth_cookie_name,
         value=token,
@@ -204,7 +236,7 @@ async def set_session_cookie(response: Response, token: str, expires_at: datetim
 
 
 async def clear_session_cookie(response: Response) -> None:
-    runtime = await get_runtime_config()
+    runtime = await get_authentication_config()
     response.delete_cookie(key=runtime.auth_cookie_name, path="/", samesite="lax")
 
 
@@ -235,7 +267,9 @@ async def authenticated_token(session: AsyncSession, token: str | None) -> Verif
     except ValueError:
         return None
 
-    user = await session.get(User, user_id, populate_existing=True)
+    user = await session.get(User, user_id, populate_existing=True, options=(
+        defer(User.profile_photo_data_url, raiseload=True), defer(User.password_hash, raiseload=True),
+        with_expression(User.profile_photo_reference, photo_reference_expression(User.profile_photo_data_url))))
     if not user or not user.is_active:
         return None
     if int(payload.get("ver") or 0) != int(user.auth_session_version or 0):
@@ -300,7 +334,7 @@ async def authenticate_request(session: AsyncSession, request: Request) -> User 
 
 
 async def authenticate_websocket(session: AsyncSession, websocket: WebSocket) -> User | None:
-    runtime = await get_runtime_config()
+    runtime = await get_authentication_config()
     token = websocket.cookies.get(runtime.auth_cookie_name) or websocket.query_params.get("token")
     authorization = websocket.headers.get("authorization")
     if not token and authorization and authorization.lower().startswith("bearer "):
@@ -317,7 +351,7 @@ async def _extract_http_token_async(request: Request) -> str | None:
     authorization = request.headers.get("authorization")
     if authorization and authorization.lower().startswith("bearer "):
         return authorization.split(" ", 1)[1].strip()
-    runtime = await get_runtime_config()
+    runtime = await get_authentication_config()
     return request.cookies.get(runtime.auth_cookie_name)
 
 

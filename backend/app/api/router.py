@@ -12,7 +12,6 @@ from app.api.v1 import (
     events,
     gate_malfunctions,
     health,
-    icloud_calendar,
     integrations,
     leaderboard,
     maintenance,
@@ -49,9 +48,6 @@ api_router.include_router(
     gate_malfunctions.router, prefix="/gate-malfunctions", tags=["Gate Telemetry"]
 )
 api_router.include_router(integrations.router, prefix="/integrations", tags=["Integrations"])
-api_router.include_router(
-    icloud_calendar.router, prefix="/integrations/icloud-calendar", tags=["Integrations"]
-)
 api_router.include_router(leaderboard.router, tags=["Top Charts"])
 api_router.include_router(
     missed_exit_recovery.router, prefix="/missed-exit-recovery", tags=["Missed Exit Recovery"]

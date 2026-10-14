@@ -92,10 +92,6 @@
 .modal-card.schedule-modal > .modal-header, .modal-card.schedule-modal > .modal-actions { flex: none; }
 .modal-card:not(.workflow-editor-modal):not(.schedule-modal) > .modal-header { position: sticky; top: -20px; z-index: 2; padding-block: 6px; background: var(--surface); }
 .modal-card:not(.workflow-editor-modal):not(.schedule-modal) > .modal-actions { position: sticky; bottom: -20px; z-index: 2; padding-block: 10px; background: var(--surface); border-top: 1px solid var(--line); }
-.modal-card.icloud-calendar-modal { display: flex; flex-direction: column; overflow: hidden; }
-.modal-card.icloud-calendar-modal > .icloud-calendar-panel { min-height: 0; overflow: auto; overscroll-behavior: contain; }
-.modal-card.icloud-calendar-modal > .modal-header,
-.modal-card.icloud-calendar-modal > .modal-actions { flex: none; position: static; }
 @media (max-width: 720px) { .route-filter-bar { padding-inline: 14px; } }
 @media (max-width: 1000px) {
   .settings-home .settings-home-header { align-items: stretch; flex-direction: column; gap: 18px; }

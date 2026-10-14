@@ -63,4 +63,3 @@ def test_other_rule_configurations_keep_their_current_contract(trigger):
     # Phrase hardware remains expressible but requires a real confirmation at
     # execution; saving a rule cannot supply a requester-bound approval.
     assert hardware_configuration_error([trigger], ["gate.open"]) is None
-    assert hardware_configuration_error(["vehicle.unknown_plate"], ["integration.icloud_calendar.sync"]) is None

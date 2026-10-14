@@ -279,12 +279,14 @@ async def test_normal_committed_owner_entry_consumes_old_trip_across_all_vehicle
         await session.commit()
     observation = await plate_read(h, item, gate="open", explicit="entry")
     result = await h.execute(observation)
-    assert result.event.decision == AccessDecision.GRANTED and result.event.direction == AccessDirection.ENTRY
-    assert "missed_exit_recovery" not in result.direction_resolution
+    async with AsyncSessionLocal() as session:
+        event = await session.get(AccessEvent, result)
+    assert event.decision == AccessDecision.GRANTED and event.direction == AccessDirection.ENTRY
+    assert "missed_exit_recovery" not in event.raw_payload["direction_resolution"]
     trip = await trip_for(item)
     assert trip.samples == [] and trip.consumed_at is not None
-    assert trip.claimed_event_id == result.event.id
-    assert len(h.intents) == 1 and h.authorized == [result.event.id], h.refusals
+    assert trip.claimed_event_id == result
+    assert len(h.intents) == 1 and h.authorized == [result], h.refusals
     assert h.intents[0].target_plan is None  # Ordinary coordinator authority.
 
 
@@ -292,8 +294,10 @@ async def test_normal_committed_owner_entry_consumes_old_trip_across_all_vehicle
 async def test_final_automatic_dispatch_uses_current_one_shot_trip_authority(h, mutation):
     item = await seed(h)
     result = await h.execute(await plate_read(h, item))
-    assert result.direction_resolution["missed_exit_recovery"]["method"] == "phone_automatic"
-    assert h.authorized == [result.event.id], h.refusals
+    async with AsyncSessionLocal() as session:
+        event = await session.get(AccessEvent, result)
+    assert event.raw_payload["direction_resolution"]["missed_exit_recovery"]["method"] == "phone_automatic"
+    assert h.authorized == [result], h.refusals
     intent = h.intents[0]
     claimed = await trip_for(item)
     if mutation in {"near_gate", "new_away"}:

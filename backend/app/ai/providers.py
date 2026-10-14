@@ -7,7 +7,25 @@ from typing import Any, Protocol
 
 import httpx
 
-from app.services.settings import get_runtime_config
+from app.services.settings import RuntimeConfig, get_runtime_config
+
+
+async def test_provider_connection(provider: str, config: RuntimeConfig) -> None:
+    """Provider-owned inert/read connection checks; never analyze an image."""
+    definitions = {
+        "openai": (config.openai_base_url, config.openai_api_key, {"Authorization": f"Bearer {config.openai_api_key}"}, "/models"),
+        "gemini": (config.gemini_base_url, config.gemini_api_key, {"x-goog-api-key": config.gemini_api_key}, "/models"),
+        "anthropic": (config.anthropic_base_url, config.anthropic_api_key, {"x-api-key": config.anthropic_api_key, "anthropic-version": "2023-06-01"}, "/models"),
+        "claude": (config.anthropic_base_url, config.anthropic_api_key, {"x-api-key": config.anthropic_api_key, "anthropic-version": "2023-06-01"}, "/models"),
+        "ollama": (config.ollama_base_url, "unused", {}, "/api/tags"),
+    }
+    base_url, credential, headers, path = definitions[provider]
+    if not credential:
+        raise ValueError("The selected provider API key is required.")
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        response = await client.get(f"{base_url.rstrip('/')}{path}", headers=headers)
+    if response.status_code >= 400:
+        raise ValueError(f"The selected provider returned HTTP {response.status_code}.")
 
 
 @dataclass(frozen=True)

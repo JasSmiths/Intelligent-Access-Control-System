@@ -34,8 +34,10 @@ it("retains a real provider rejection instead of a stopped-before-write outcome"
   expect(fetcher).toHaveBeenCalledTimes(2);
 });
 it("returns accepted Apprise deletion independently of a subsequent metadata read", async () => {
-  const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ confirmation_token: "inert-token" }))).mockResolvedValueOnce(new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetcher);
-  expect(await removeAppriseUrl({ index: 2, type: "Inert", scheme: "inert", preview: "safe preview" })).toBeUndefined();
+  const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ confirmation_token: "inert-token" }))).mockResolvedValueOnce(new Response(JSON.stringify({ urls: [] }))); vi.stubGlobal("fetch", fetcher);
+  const selected = { destination_id: "d".repeat(64), revision: "e".repeat(64) };
+  expect(await removeAppriseUrl({ index: 2, type: "Inert", scheme: "inert", preview: "safe preview", ...selected })).toEqual({ urls: [] });
   expect(fetcher.mock.calls.map(([, request]) => request.method)).toEqual(["POST", "DELETE"]);
-  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ confirmation_token: "inert-token" });
+  expect(JSON.parse(fetcher.mock.calls[0][1].body)).toMatchObject({ payload: { index: 2, ...selected } });
+  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ ...selected, confirmation_token: "inert-token" });
 });

@@ -5,15 +5,11 @@ import "../styles/integrations.css";
 import { Bell, PlugZap } from "lucide-react";
 import React from "react";
 
-import { isRecord } from "../lib/format";
 import { notificationChannelMeta } from "../lib/notifications";
 import { useSettings } from "../lib/settings";
 import { Badge, Toolbar } from "../ui/primitives";
 import type { IntegrationStatus, UnifiProtectCamera, UserAccount } from "../api/types";
 import {
-  ICloudCalendarAccount,
-  ICloudCalendarPayload,
-  ICloudCalendarSyncRun,
   integrationsApi,
   UnifiProtectStatus
 } from "../api/integrations";
@@ -26,14 +22,13 @@ import { CameraAiProviderSettings } from "../features/integrations/providers/Cam
 import { IntegrationModal } from "../features/integrations/IntegrationModal";
 import { UnifiProtectCameraSection } from "../features/integrations/unifiProtect";
 
-const ICLOUD_REALTIME_PROCESSED_LIMIT = 60;
 
 export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) {
   const { values, loading, error: settingsError, reload } = useSettings(undefined, integrationEventMatches);
   const [homeAssistantStatus, setHomeAssistantStatus] = React.useState<IntegrationStatus | null>(null);
   const [homeAssistantError, setHomeAssistantError] = React.useState("");
   const [loadedStatuses, setLoadedStatuses] = React.useState<Set<string>>(() => new Set());
-  const initialStatusesLoaded = loadedStatuses.size === 3;
+  const initialStatusesLoaded = loadedStatuses.size === 2;
   const markLoaded = React.useCallback((key: string) => setLoadedStatuses((current) => new Set(current).add(key)), []);
   const signals = React.useContext(ReadSignalsContext);
   const [active, setActive] = React.useState<IntegrationDefinition | null>(null);
@@ -42,11 +37,8 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
   const [protectSnapshotRefreshToken, setProtectSnapshotRefreshToken] = React.useState(0);
   const [protectLoading, setProtectLoading] = React.useState(false);
   const [protectError, setProtectError] = React.useState("");
-  const [icloudPayload, setIcloudPayload] = React.useState<ICloudCalendarPayload>({ accounts: [], recent_sync_runs: [] });
-  const [icloudError, setIcloudError] = React.useState("");
   const [protectCamerasLoaded, setProtectCamerasLoaded] = React.useState(false);
   const protectCamerasLoadedRef = React.useRef(false);
-  const processedIcloudRealtimeRef = React.useRef(new Set<string>());
   const protectOptions = React.useRef({ force: false, includeCameras: false });
   const readProtect = React.useCallback(async (signal: AbortSignal) => {
     const { force, includeCameras } = protectOptions.current;
@@ -74,13 +66,6 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
   const loadProtect = React.useCallback((force = false, includeCameras = protectCamerasLoadedRef.current) => {
     protectOptions.current = { force, includeCameras }; return refreshProtect();
   }, [refreshProtect]);
-  const readICloudCalendar = React.useCallback(async (signal: AbortSignal) => {
-    setIcloudError("");
-    try { const payload = await integrationsApi.getICloudCalendar({ signal }); if (!signal.aborted) setIcloudPayload(payload); }
-    catch (error) { if (!signal.aborted) setIcloudError(error instanceof Error ? error.message : "Unable to load iCloud Calendar accounts."); throw error; }
-    finally { if (!signal.aborted) { markLoaded("icloud"); } }
-  }, [markLoaded]);
-  const loadICloudCalendar = useCoordinatedRead(readICloudCalendar, integrationEventMatches);
   const readHomeAssistantStatus = React.useCallback(async (signal: AbortSignal) => {
     setHomeAssistantError("");
     try { const result = await integrationsApi.getHomeAssistantStatus({ signal }); if (!signal.aborted) setHomeAssistantStatus(result); }
@@ -92,18 +77,6 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
     if (signal.type !== "realtime") return;
     const message = signal.message;
     if (message.type === "home_assistant.status") setHomeAssistantStatus((current) => current ? { ...current, ...message.payload } : current);
-    if (message.type !== "icloud_calendar.accounts_changed" && message.type !== "icloud_calendar.sync_completed") return;
-    const key = `${message.type}-${message.created_at ?? ""}`;
-    if (processedIcloudRealtimeRef.current.has(key)) return;
-    processedIcloudRealtimeRef.current.add(key);
-    if (processedIcloudRealtimeRef.current.size > ICLOUD_REALTIME_PROCESSED_LIMIT) {
-      Array.from(processedIcloudRealtimeRef.current).slice(0, processedIcloudRealtimeRef.current.size - ICLOUD_REALTIME_PROCESSED_LIMIT).forEach((key) => processedIcloudRealtimeRef.current.delete(key));
-    }
-    if (message.type === "icloud_calendar.accounts_changed" && Array.isArray(message.payload.accounts)) setIcloudPayload((current) => ({ ...current, accounts: message.payload.accounts as ICloudCalendarAccount[] }));
-    if (message.type === "icloud_calendar.sync_completed" && isRecord(message.payload.sync)) {
-      const run = message.payload.sync as ICloudCalendarSyncRun;
-      setIcloudPayload((current) => ({ ...current, recent_sync_runs: [run, ...current.recent_sync_runs.filter((item) => item.id !== run.id)].slice(0, 5) }));
-    }
   }), [signals]);
   const editorLeaveGuard = React.useRef<(() => boolean) | null>(null);
   const setEditorLeaveGuard = React.useCallback((guard: (() => boolean) | null) => { editorLeaveGuard.current = guard; }, []);
@@ -113,11 +86,10 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
     const reads = [reload()];
     if (provider === "home_assistant") reads.push(loadHomeAssistantStatus());
     if (provider === "unifi_protect") reads.push(loadProtect(true));
-    if (provider === "icloud_calendar") reads.push(loadICloudCalendar());
     await Promise.allSettled(reads);
-  }, [reload, loadHomeAssistantStatus, loadProtect, loadICloudCalendar]);
+  }, [reload, loadHomeAssistantStatus, loadProtect]);
 
-  const tiles = integrationDefinitions(homeAssistantStatus, values, protectStatus, icloudPayload.accounts, icloudError);
+  const tiles = integrationDefinitions(homeAssistantStatus, values, protectStatus);
   const groupedTiles = integrationCategories
     .map((category) => ({
       ...category,
@@ -148,7 +120,7 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
               {category.tiles.map((tile) => {
                 const Icon = tile.icon;
                 const checking = loading || !initialStatusesLoaded;
-                const unavailable = Boolean(settingsError || (tile.key === "home_assistant" && homeAssistantError) || (tile.key === "unifi_protect" && protectError) || (tile.key === "icloud_calendar" && icloudError));
+                const unavailable = Boolean(settingsError || (tile.key === "home_assistant" && homeAssistantError) || (tile.key === "unifi_protect" && protectError));
                 return (
                   <article className="card integration-tile" key={tile.key}>
                     <button

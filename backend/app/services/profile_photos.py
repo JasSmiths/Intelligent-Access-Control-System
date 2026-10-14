@@ -6,6 +6,8 @@ from io import BytesIO
 from urllib.parse import unquote_to_bytes
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from sqlalchemy import case, func, literal
+from sqlalchemy.sql.elements import ColumnElement
 
 DATA_URL_RE = re.compile(r"^data:(?P<content_type>[^;,]+)(?P<base64>;base64)?,(?P<data>.*)$", re.DOTALL)
 HEIF_IMAGE_CONTENT_TYPES = {
@@ -21,6 +23,14 @@ JPEG_QUALITY = 82
 
 class ProfilePhotoError(ValueError):
     """Raised when a profile photo data URL cannot be normalized."""
+
+
+def photo_reference_expression(column: ColumnElement[str | None]) -> ColumnElement[str | None]:
+    """Project stored image presence without materializing its data URL.
+
+    External/path references retain the existing stored_image_url semantics.
+    """
+    return case((func.left(column, 5) == "data:", literal("data:")), else_=column)
 
 
 def normalize_profile_photo_data_url(value: str | None) -> str | None:

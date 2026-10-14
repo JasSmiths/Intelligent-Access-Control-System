@@ -11,7 +11,7 @@ import uuid
 import pytest
 
 from app.models import AutomationRule, AutomationRun
-from app.services import automation_integration_actions, automation_intake
+from app.services import automation_intake
 from app.services.automation_actions import AutomationActionExecutor
 from app.services.automation_execution import AutomationRunStore, frozen_action_plan
 from app.services.automation_policy import HARDWARE_ACTION_TYPES
@@ -36,7 +36,6 @@ def executor():
         maintenance_active=AsyncMock(return_value=False),
         maintenance_change=AsyncMock(side_effect=AssertionError("unexpected independent commit")),
         notification_activation=AsyncMock(return_value={"is_active": True}),
-        integrations=automation_integration_actions.execute_integration_action,
         authorize_hardware=AsyncMock(side_effect=AssertionError("unexpected authorization")),
     )
 
@@ -107,9 +106,6 @@ def test_defaults_and_canonical_references_preserve_existing_meaning_without_sha
         "target_entity_ids": targets,
     }}])[0]["config"] == {"target_entity_ids": ["cover.main", "cover.main"]}
     assert targets == [" cover.main ", "", "  ", "cover.main"]
-    assert validate_actions([{"type": "integration.icloud_calendar.sync"}])[0]["config"] == {
-        "provider": "icloud_calendar", "action": "sync_calendars",
-    }
     first = ACTION_BY_TYPE["garage_door.open"].defaults()
     first["target_entity_ids"].append("mutated")
     assert ACTION_BY_TYPE["garage_door.open"].defaults() == {"target_entity_ids": []}
@@ -229,19 +225,17 @@ def test_export_is_deterministic_fresh_and_rejects_unsupported_schema_constructs
 
 
 async def test_temporary_new_action_extends_definitions_handler_editor_and_reservation_without_dispatch_branches(monkeypatch):
-    action_type = "integration.fixture.record"
+    action_type = "fixture.record"
     definition = ActionDefinition(
-        type=action_type, group="integrations", group_label="Integrations", label="Fixture",
+        type=action_type, group="fixture", group_label="Fixture", label="Fixture",
         description="Inert fixture", configuration=EmptyConfiguration,
-        execution="durable_effect", effect="integration", editor="none",
-        provider="fixture", integration_action="record",
+        execution="durable_effect", effect="configuration", editor="none",
     )
     monkeypatch.setitem(ACTION_BY_TYPE, action_type, definition)
     sink = AsyncMock(return_value={"id": "new", "type": action_type, "status": "success"})
-    runtime = automation_integration_actions.IntegrationActionDefinition(
-        type=action_type, is_enabled=AsyncMock(return_value=True), execute=sink,
-    )
-    monkeypatch.setitem(automation_integration_actions.INTEGRATION_ACTION_BY_TYPE, action_type, runtime)
+    original_bindings = AutomationActionExecutor._bind_handlers
+    monkeypatch.setattr(AutomationActionExecutor, "_bind_handlers",
+        lambda self: {**original_bindings(self), action_type: sink})
     monkeypatch.setattr(export_contracts, "ACTION_DEFINITIONS", (*ACTION_DEFINITIONS, definition))
     rendered_types = export_contracts.render_contracts()
     assert f'"{action_type}": Record<string, never>' in rendered_types

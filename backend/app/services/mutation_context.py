@@ -4,6 +4,7 @@ import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.models import User
 from app.models.enums import UserRole
@@ -37,7 +38,7 @@ async def load_active_admin(
         identity = uuid.UUID(str(user_id))
     except (ValueError, TypeError, AttributeError) as exc:
         raise MutationError("forbidden", "Active Admin access is required.") from exc
-    query = select(User).where(User.id == identity).execution_options(populate_existing=True)
+    query = select(User).options(defer(User.profile_photo_data_url, raiseload=True), defer(User.password_hash, raiseload=True)).where(User.id == identity).execution_options(populate_existing=True)
     if lock:
         query = query.with_for_update()
     user = require_active_admin(await session.scalar(query))

@@ -266,7 +266,7 @@ async def test_full_lifespan_drains_real_blocked_source_sql_before_database_disp
     monkeypatch.setattr(report_exports, "REPORT_PIPELINE_SECONDS", 1.0)
     monkeypatch.setattr(report_exports, "build_movement_report_snapshot", blocked_source)
     inert = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
-    for name in ("notification", "automation", "visitor_pass", "access_device", "access_event", "movement_reconciliation", "home_assistant", "gate_malfunction", "unifi_protect", "icloud_calendar", "leaderboard"):
+    for name in ("notification", "automation", "visitor_pass", "access_device", "access_event", "movement_reconciliation", "home_assistant", "gate_malfunction", "unifi_protect", "leaderboard"):
         monkeypatch.setattr(main, f"get_{name}_service", lambda: inert)
     monkeypatch.setattr(main, "get_vehicle_information_worker", lambda: inert)
     monkeypatch.setattr(main, "event_bus", inert)

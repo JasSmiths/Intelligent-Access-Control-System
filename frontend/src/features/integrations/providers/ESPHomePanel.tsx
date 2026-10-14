@@ -1,3 +1,4 @@
+import { settingsActivationWarning } from "../../../lib/settings";
 import { Activity, Clock3, Key, Loader2, PlugZap, Plus, RefreshCw, SlidersHorizontal, Trash2, Zap } from "lucide-react";
 import React from "react";
 import { formatDate } from "../../../lib/format";
@@ -83,7 +84,7 @@ export function ESPHomeEditor(props: ProviderEditorProps) {
     try {
       const result = await addESPHomeDevice({ name: form.name.trim(), host: form.host.trim(), port: Number(form.port || 6053), encryption_key: form.encryption_key, timeout_seconds: Number(form.timeout_seconds || 30), enabled: true }, lifetime.isCurrent);
       if (isMutationNotStarted(result) || !lifetime.isCurrent()) return;
-      setDevices(result); resetForm(); setAdding(false); setStatusMessage("ESPHome device added. Waiting for native stream..."); refreshAccepted();
+      setDevices(result.devices); resetForm(); setAdding(false); setStatusMessage(settingsActivationWarning(result) || "ESPHome device added. Waiting for native stream..."); refreshAccepted();
     } catch (error) { fail(error, "Unable to add ESPHome device."); } finally { finish(); }
   };
   const removeDevice = async (device: ESPHomeDeviceSummary) => {
@@ -91,7 +92,7 @@ export function ESPHomeEditor(props: ProviderEditorProps) {
     try {
       const result = await removeESPHomeDevice(device, lifetime.isCurrent);
       if (isMutationNotStarted(result) || !lifetime.isCurrent()) return;
-      setDevices(result); setStatusMessage("ESPHome device removed."); refreshAccepted();
+      setDevices(result.devices); setStatusMessage(settingsActivationWarning(result) || "ESPHome device removed."); refreshAccepted();
     } catch (error) { fail(error, "Unable to remove ESPHome device."); } finally { finish(); }
   };
   const testDevice = async (device: ESPHomeDeviceSummary) => {

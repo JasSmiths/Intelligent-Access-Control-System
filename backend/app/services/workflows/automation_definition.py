@@ -15,7 +15,7 @@ from typing import Any
 
 from app.services.automation_policy import TriggerProvenance
 from app.services.type_helpers import as_dict
-from app.services.workflows.action_definitions import ACTION_BY_TYPE, historical_action_config
+from app.services.workflows.action_definitions import historical_action_config
 from app.services.workflows.catalog import (
     automation_action_catalog,
     automation_condition_catalog,
@@ -43,10 +43,6 @@ TRIGGER_SCOPES = {
     for trigger in group["triggers"]
 }
 TIME_TRIGGER_KEYS = {"time.specific_datetime", "time.every_x", "time.cron"}
-INTEGRATION_ACTION_KEYS = {
-    key: (definition.provider, definition.integration_action)
-    for key, definition in ACTION_BY_TYPE.items() if definition.provider is not None
-}
 
 
 @dataclass
@@ -518,10 +514,6 @@ def restored_automation_context(snapshot: dict[str, Any]) -> AutomationContext:
     )
     context.provenance = TriggerProvenance(**captured["provenance"])
     return context
-
-
-def integration_action_config(action_type: str, config: dict[str, Any]) -> dict[str, Any]:
-    return historical_action_config(action_type, config)
 
 
 AUTOMATION_BRIDGE_IGNORED_EVENT_TYPES = {

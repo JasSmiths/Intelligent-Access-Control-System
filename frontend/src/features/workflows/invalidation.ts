@@ -9,3 +9,7 @@ export function automationRunEventMatches(event: RealtimeMessage) {
 export function notificationCameraEventMatches(event: RealtimeMessage) {
   return ["settings", "unifi_protect"].includes(auditResource(event));
 }
+
+export function notificationRunEventMatches(event: RealtimeMessage) {
+  return event.type.startsWith("notification.");
+}

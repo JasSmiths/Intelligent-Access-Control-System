@@ -1,5 +1,5 @@
 import { ACTION_METADATA, defaultActionConfig, isAutomationActionType } from "../../api/generated/workflows";
-import { Bell, CalendarDays, Car, Clock3, Construction, DoorOpen, GitBranch, MessageCircle, PlugZap, UserPlus, UserRound, Warehouse } from "lucide-react";
+import { Bell, Car, Clock3, Construction, DoorOpen, GitBranch, MessageCircle, PlugZap, UserPlus, UserRound, Warehouse } from "lucide-react";
 import React from "react";
 import type { AutomationAction, AutomationCatalogGroup, AutomationCatalogItem, AutomationNode, AutomationRule, AutomationVariableGroup } from "../../api/workflows";
 import type { WorkflowTriggerCategory } from "./model";
@@ -99,7 +99,6 @@ export function automationCategoryIcon(groupId: string) {
   if (groupId.includes("maintenance")) return Construction;
   if (groupId.includes("visitor")) return UserPlus;
   if (groupId.includes("webhook")) return PlugZap;
-  if (groupId.includes("icloud") || groupId.includes("calendar")) return CalendarDays;
   if (groupId.includes("integration")) return PlugZap;
   if (groupId.includes("notification")) return Bell;
   if (groupId.includes("garage")) return Warehouse;
@@ -113,7 +112,6 @@ export function automationNodeIcon(type: string) {
   if (type.startsWith("maintenance_mode.")) return Construction;
   if (type.startsWith("visitor_pass.")) return UserPlus;
   if (type.startsWith("webhook.")) return PlugZap;
-  if (type.startsWith("integration.icloud_calendar")) return CalendarDays;
   if (type.startsWith("integration.")) return PlugZap;
   if (type.startsWith("notification.")) return Bell;
   if (type.startsWith("garage_door.")) return Warehouse;

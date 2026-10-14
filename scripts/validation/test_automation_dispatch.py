@@ -16,7 +16,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import AuditLog, AutomationRule, AutomationRun
 from app.modules.access_devices.base import CommandDelivery
 from app.modules.gate.base import GateCommandResult, GateState
-from app.services import automation_integration_actions, automation_intake, automations
+from app.services import automation_intake, automations
 from app.services.workflows.automation_definition import captured_automation_context
 from app.services.gate_commands import GateCommandCoordinator
 
@@ -28,7 +28,6 @@ async def inert_boundaries(monkeypatch, isolated_resources):
     async with AsyncSessionLocal() as session:
         await session.execute(text("TRUNCATE notification_runs CASCADE"))
         await session.commit()
-    monkeypatch.setattr(automation_integration_actions, "integration_action_status", AsyncMock(return_value=SimpleNamespace(enabled=True, disabled_reason=None)))
     monkeypatch.setattr(automations, "set_automation_activation", AsyncMock(return_value={"enabled": False, "rule_ids": []}))
     preview = {"version": 1, "action": "open", "targets": [{"device_key": "synthetic_gate"}]}
     monkeypatch.setattr(automation_intake, "AccessDeviceConfiguration", lambda: SimpleNamespace(preview_gate_open=AsyncMock(return_value=preview)))

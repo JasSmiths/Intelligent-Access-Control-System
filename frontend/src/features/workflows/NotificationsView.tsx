@@ -4,6 +4,7 @@ import { useModalFocus } from "../../ui/useModalFocus";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
 import { Bell, Plus, Split, X } from "lucide-react";
 import React from "react";
+import { NotificationRunHistory } from "./NotificationRunHistory";
 import type { Person, Schedule, UserAccount } from "../../api/types";
 import type { NotificationRule, NotificationTriggerGroup } from "../../api/workflows";
 import { workflowApi } from "../../api/workflows";
@@ -322,6 +323,8 @@ export function NotificationsView({ currentUser }: { currentUser: UserAccount })
           </div>
         </div>
       ) : null}
+
+      {currentUser.role === "admin" ? <NotificationRunHistory accountKey={`${currentUser.id}:${currentUser.role}`} /> : null}
 
       {activeDraft && modal === "condition" ? (
         <NotificationConditionModal

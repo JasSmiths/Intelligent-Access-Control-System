@@ -42,10 +42,6 @@ from app.services.automation_intake import (
     reserve_occurrence,
     reserve_trigger,
 )
-from app.services.automation_integration_actions import (
-    execute_integration_action,
-    integration_action_catalog,
-)
 from app.services.automation_policy import (
     HARDWARE_ACTION_TYPES,
     HARDWARE_DENIAL_DETAILS,
@@ -124,9 +120,6 @@ class AutomationService:
             notification_activation=lambda session, **kwargs: set_automation_activation(
                 session, **kwargs
             ),
-            integrations=lambda session, action, context, **kwargs: execute_integration_action(
-                session, action, context, **kwargs
-            ),
             authorize_hardware=self.authorize_hardware_dispatch,
         )
         self.webhooks = AutomationWebhookIntake(
@@ -174,7 +167,7 @@ class AutomationService:
         return {
             "triggers": TRIGGER_CATALOG,
             "conditions": CONDITION_CATALOG,
-            "actions": ACTION_CATALOG + await integration_action_catalog(),
+            "actions": ACTION_CATALOG,
             "variables": variable_groups(),
             "notification_rules": await self._notification_rule_catalog(),
             "garage_doors": [

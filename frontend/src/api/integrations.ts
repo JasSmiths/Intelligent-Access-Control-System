@@ -1,5 +1,5 @@
 import { api, createActionConfirmation, type ApiRequestOptions } from "./client";
-import type { AccessDevice, ActionConfirmationOptions, HomeAssistantDiscovery, IntegrationStatus, UnifiProtectCamera, UserAccount } from "./types";
+import type { AccessDevice, SettingsActivationReceipt, ActionConfirmationOptions, HomeAssistantDiscovery, IntegrationStatus, UnifiProtectCamera, UserAccount } from "./types";
 export type AccessDeviceEligibility = AccessDevice & { commandable: boolean; admission_eligible: boolean };
 export type RecoveryTrackerDiscovery = {
   trackers: Array<{ entity_id: string; name: string; available: boolean; eligible: boolean; reason: string | null }>;
@@ -81,31 +81,7 @@ export function isGateCommandReceipt(value: unknown): value is GateCommandReceip
 export function coverTargetReceipt(value: unknown): DeviceCommandReceipt | null {
   return record(value) && isDeviceCommandReceipt(value.target_receipt) ? value.target_receipt : null;
 }
-export type ICloudCalendarAccount = {
-  id: string; apple_id: string; display_name: string; status: string; is_active: boolean;
-  last_auth_at: string | null; last_sync_at: string | null; last_sync_status: string | null;
-  last_sync_summary: Record<string, unknown> | null; last_error: string | null;
-  created_by_user_id: string | null; created_at: string | null; updated_at: string | null;
-};
-export type ICloudCalendarSyncRun = {
-  id: string; started_at: string | null; finished_at: string | null; status: string;
-  trigger_source: string; triggered_by_user_id: string | null; account_count: number;
-  events_scanned: number; events_matched: number; passes_created: number; passes_updated: number;
-  passes_cancelled: number; passes_skipped: number; account_results: Record<string, unknown>[]; error: string | null;
-  interrupted?: boolean; cleanup_pending?: boolean;
-  recovery?: { original_origin: "ui" | "workflow"; original_actor_user_id: string | null;
-    workflow_operation_id: string | null; account_ids: string[]; completed_account_ids: string[];
-    remaining_account_ids: string[]; busy: boolean; can_resume: boolean; recovery_actor_user_id: string | null;
-    coverage: { requested_start: string; requested_end: string; start_date: string; end_date: string;
-      vendor_timezone: string; effective_start: string; effective_end: string } } | null;
-};
-export type ICloudCalendarPayload = { accounts: ICloudCalendarAccount[]; recent_sync_runs: ICloudCalendarSyncRun[] };
-export type ICloudAuthStartResponse = {
-  status: "connected" | "requires_2fa"; requires_2fa?: boolean; handshake_id?: string;
-  apple_id?: string; detail?: string; account?: ICloudCalendarAccount;
-};
-export type ICloudAuthVerifyResponse = { status: "connected"; account: ICloudCalendarAccount };
-export type AppriseUrlSummary = { id?: string; index: number; type: string; scheme: string; preview: string };
+export type AppriseUrlSummary = { id?: string; index: number; type: string; scheme: string; preview: string; destination_id: string; revision: string };
 export type ESPHomeDeviceSummary = {
   id: string; name: string; host: string; port: number; timeout_seconds: number;
   enabled: boolean; encryption_key_configured: boolean;
@@ -167,13 +143,6 @@ export const integrationsApi = {
     return result.events;
   },
   analyzeProtectSnapshot: (cameraId: string, prompt: string) => api.post<UnifiProtectAnalysis>(`/api/v1/integrations/unifi-protect/cameras/${encodeURIComponent(cameraId)}/analyze`, { prompt }),
-  getICloudCalendar: (options: ApiRequestOptions = {}) => api.get<ICloudCalendarPayload>("/api/v1/integrations/icloud-calendar/accounts", options),
-  startICloudAuth: (appleId: string, password: string) => api.post<ICloudAuthStartResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/start", { apple_id: appleId, password }),
-  verifyICloudAuth: (handshakeId: string, code: string) => api.post<ICloudAuthVerifyResponse>("/api/v1/integrations/icloud-calendar/accounts/auth/verify", { handshake_id: handshakeId, code }),
-  syncICloudCalendar: (runId: string) => api.post<ICloudCalendarSyncRun>("/api/v1/integrations/icloud-calendar/sync", { run_id: runId }),
-  getICloudCalendarRun: (runId: string, options: ApiRequestOptions = {}) => api.get<ICloudCalendarSyncRun>(`/api/v1/integrations/icloud-calendar/sync/${encodeURIComponent(runId)}`, options),
-  resumeICloudCalendar: (runId: string, beforeWrite: MutationStartGuard) => confirmedPost<ICloudCalendarSyncRun>(`/api/v1/integrations/icloud-calendar/sync/${encodeURIComponent(runId)}/resume`, "icloud_calendar.sync.resume", { run_id: runId }, { target_entity: "ICloudCalendarSyncRun", target_id: runId, reason: "Explicit same-run calendar recovery" }, {}, beforeWrite),
-  removeICloudAccount: (accountId: string, beforeWrite: MutationStartGuard) => confirmedDelete<ICloudCalendarAccount>(`/api/v1/integrations/icloud-calendar/accounts/${encodeURIComponent(accountId)}`, "icloud_calendar.account.remove", { account_id: accountId }, { target_entity: "ICloudCalendarAccount", target_id: accountId, reason: "Remove calendar account and cancel eligible source passes" }, {}, beforeWrite),
   getAppriseUrls: async (options: ApiRequestOptions = {}) => {
     const result = await api.get<{ urls: AppriseUrlSummary[] }>("/api/v1/integrations/apprise/urls", options);
     return result.urls;
@@ -227,10 +196,10 @@ export async function addAppriseUrl(url: string, beforeWrite: MutationStartGuard
   return isMutationNotStarted(result) ? result : result.urls;
 }
 export function removeAppriseUrl(url: AppriseUrlSummary, beforeWrite: MutationStartGuard = () => true) {
-  const payload = { index: url.index };
-  return confirmedDelete(`/api/v1/integrations/apprise/urls/${url.index}`, "apprise.url.delete", payload, {
-    target_entity: "AppriseURL", target_id: String(url.index), target_label: url.preview || "Notification URL", reason: "Remove notification URL"
-  }, {}, beforeWrite);
+  const selected = { destination_id: url.destination_id, revision: url.revision };
+  return confirmedDelete<{ urls: AppriseUrlSummary[] }>(`/api/v1/integrations/apprise/urls/${url.index}`, "apprise.url.delete", { index: url.index, ...selected }, {
+    target_entity: "AppriseURL", target_id: url.destination_id, target_label: url.preview || "Notification URL", reason: "Remove notification URL"
+  }, selected, beforeWrite);
 }
 export function sendAppriseTestNotification(beforeWrite: MutationStartGuard = () => true) {
   const payload = {
@@ -252,22 +221,22 @@ export async function addESPHomeDevice(payload: {
   timeout_seconds: number;
   enabled: boolean;
 }, beforeWrite: MutationStartGuard = () => true) {
-  const result = await confirmedPost<{ devices: ESPHomeDeviceSummary[] }>("/api/v1/integrations/esphome/devices", "esphome.device.create", payload, {
+  const result = await confirmedPost<{ devices: ESPHomeDeviceSummary[]; activation: SettingsActivationReceipt }>("/api/v1/integrations/esphome/devices", "esphome.device.create", payload, {
     target_entity: "ESPHomeDevice",
     target_label: payload.name,
     reason: "Add ESPHome access device"
   }, payload, beforeWrite);
-  return isMutationNotStarted(result) ? result : result.devices;
+  return result;
 }
 export async function removeESPHomeDevice(device: ESPHomeDeviceSummary, beforeWrite: MutationStartGuard = () => true) {
   const payload = { device_id: device.id };
-  const result = await confirmedDelete<{ devices: ESPHomeDeviceSummary[] }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}`, "esphome.device.delete", payload, {
+  const result = await confirmedDelete<{ devices: ESPHomeDeviceSummary[]; activation: SettingsActivationReceipt }>(`/api/v1/integrations/esphome/devices/${encodeURIComponent(device.id)}`, "esphome.device.delete", payload, {
     target_entity: "ESPHomeDevice",
     target_id: device.id,
     target_label: device.name,
     reason: "Remove ESPHome access device"
   }, {}, beforeWrite);
-  return isMutationNotStarted(result) ? result : result.devices;
+  return result;
 }
 export function testESPHomeDevice(device: ESPHomeDeviceSummary, beforeWrite: MutationStartGuard = () => true) {
   const payload = { device_id: device.id };

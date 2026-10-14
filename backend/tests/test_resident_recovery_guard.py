@@ -52,6 +52,10 @@ class FakeSession:
     async def scalars(self, statement):
         return SimpleNamespace(all=lambda: [])
 
+    async def execute(self, statement):
+        return SimpleNamespace(first=lambda: SimpleNamespace(id=uuid.UUID(int=1),
+            missed_exit_recovery_enabled=True, state=PresenceState.PRESENT))
+
 
 @pytest.fixture
 def trace():
