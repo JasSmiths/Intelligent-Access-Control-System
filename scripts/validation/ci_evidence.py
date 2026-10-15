@@ -17,6 +17,7 @@ REPORTS = frozenset((
     "disposable-owned.json", "disposable-cleanup.json", "storage.json", "result.json",
 ))
 LOGS = frozenset((
+    "python-dependencies", "frontend-dependencies", "pull-node", "pull-pgvector-pgvector", "pull-redis",
     "python-lock-check", "frontend-lock-check", "frontend-tree-check", "python-identity", "uv-identity",
     "npm-identity", "isolation-db-free", "isolation-persistence", "isolation-inspect", "snapshot-tests",
     "harness-configuration-tests", "storage-tests", "ci-evidence-tests", "architecture-boundaries", "compile",

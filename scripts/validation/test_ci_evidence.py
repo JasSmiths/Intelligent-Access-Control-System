@@ -149,6 +149,33 @@ class CIEvidenceTests(unittest.TestCase):
         self.assertIn("backend-tests.log", report["runs"][0]["missing"])
         self.assertTrue(report["errors"])
 
+    def test_fresh_dependency_preparation_retains_each_attempted_log(self):
+        self.complete()
+        commands = ["python-dependencies", "frontend-dependencies", "pull-node", "pull-pgvector-pgvector", "pull-redis"]
+        self.put(self.run / "checks.json", {name: {"status": "passed", "command": ["inert"]} for name in commands})
+        for name in commands:
+            self.put(self.run / (name + ".log"), "synthetic locked dependency preparation")
+        for name in ["pull-unrelated.log", "python-dependencies-secret.log", "artifacts/python-dependencies.log"]:
+            self.put(self.run / name, "not a named producer")
+        report = self.collect()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["runs"][0]["missing"], [])
+        kept = {item["path"].removeprefix("validation/iacs-validation-fixture/") for item in report["files"]}
+        self.assertTrue({name + ".log" for name in commands} <= kept)
+        self.assertNotIn("pull-unrelated.log", kept)
+        self.assertNotIn("python-dependencies-secret.log", kept)
+        self.assertNotIn("artifacts/python-dependencies.log", kept)
+
+    def test_reused_dependencies_require_verification_logs_without_fresh_preparation(self):
+        self.complete()
+        commands = ["python-lock-check", "frontend-lock-check"]
+        self.put(self.run / "checks.json", {name: {"status": "passed", "command": ["inert"]} for name in commands})
+        for name in commands:
+            self.put(self.run / (name + ".log"), "synthetic reused lock verification")
+        report = self.collect()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["runs"][0]["missing"], [])
+
     def test_workflow_invokes_this_collector_and_uploads_only_its_staged_directory(self):
         workflow = Path(__file__).resolve().parents[2] / ".github/workflows/project-checks.yml"
         content = workflow.read_text()

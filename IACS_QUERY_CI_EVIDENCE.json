@@ -2561,5 +2561,62 @@
     "live_provider_calls": false
   },
   "git_mutations": false,
-  "blockers": []
+  "blockers": [],
+  "record_scope": "Frozen implementation verification; subsequent authorized publication is recorded separately below.",
+  "publication_follow_up": {
+    "published_commit": "726fa44318deae19cdacaace93eb6c385017372b",
+    "first_run_id": 38744800237,
+    "first_run_result": "Harness/runtime/build/audit passed; collection failed for five missing fresh-preparation logs",
+    "first_run_verified_pytest_passes": 2830,
+    "first_run_accounted_skips": 35,
+    "correction_fingerprint": "b9ba04c581fd4d1eb9b998a12b9891f5287956478d2543505116cdfaef27e025",
+    "correction_status_at_commit": "local targeted checks/review passed; hosted rerun pending",
+    "collector_before": {
+      "expected_failures": 1,
+      "host_yaml_skips": 1
+    },
+    "collector_after": {
+      "passed": 12,
+      "host_yaml_skips": 1
+    },
+    "other_host_tests": {
+      "source_snapshot": 22,
+      "harness_configuration": 31,
+      "storage": 17,
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    },
+    "locked_local_attempt": {
+      "status": "blocked_before_container_creation",
+      "image": "sha256:eb8b224b53e821557b911f680a92e2340b34209099472bb6a7b600d062f5dba2",
+      "reason": "Previously prepared backend image is no longer cached; disk VM probe refused. No dependency download or environment duplication attempted.",
+      "counterpart": "Hosted full harness will run these tests against freshly prepared exact locks."
+    },
+    "review": {
+      "status": "closed_no_material_findings",
+      "requested_model": "gpt-6-astra",
+      "requested_effort": "medium",
+      "effective_metadata": "unavailable",
+      "agent": "/root/query_ci_review",
+      "source_fingerprint": "b9ba04c581fd4d1eb9b998a12b9891f5287956478d2543505116cdfaef27e025",
+      "scope": [
+        "scripts/validation/ci_evidence.py",
+        "scripts/validation/test_ci_evidence.py"
+      ],
+      "finding": "Five exact names match Harness.image/dependencies and the recorded hosted failure; named top-level selection remains narrow; unrelated/nested names excluded; failed/partial completeness unchanged.",
+      "validation_pending": "Corrected hosted run; locked local attempt blocked by missing cached image."
+    },
+    "evidence_root": "/private/tmp/iacs-query-ci-20261015/publication",
+    "receipts": [
+      "first-ci-verification.json",
+      "host-regressions.json",
+      "review-ci-correction.json",
+      "publication.json",
+      "artifact-verification.json"
+    ],
+    "production": "unchanged"
+  }
 }
