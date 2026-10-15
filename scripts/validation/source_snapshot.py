@@ -17,7 +17,7 @@ EXCLUDED_SUFFIXES = {'.key', '.pem', '.p12', '.pfx', '.pyc', '.pyo',
 SOURCE_ROOTS = ('backend/', 'frontend/', 'scripts/', 'docs/', '.github/')
 DELIVERY_ARTIFACTS = {
     f'IACS_{task}_{kind}.{suffix}'
-    for task in ('REMEDIATION', 'SECURITY_RELIABILITY')
+    for task in ('REMEDIATION', 'SECURITY_RELIABILITY', 'QUERY_CI')
     for kind, suffix in (('HANDOVER', 'md'), ('EVIDENCE', 'json'), ('REVIEW_BUNDLE', 'zip'))
 }
 

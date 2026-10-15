@@ -9,6 +9,7 @@ import re
 
 
 PERSISTENCE_TESTS = [
+    "scripts/validation/test_query_efficiency.py",
     "scripts/validation/test_historical_discovery_upgrade.py",
     "scripts/validation/test_historical_discovery_persistence.py",
     "scripts/validation/test_notification_binding_upgrade.py",
@@ -78,7 +79,7 @@ PERSISTENCE_TESTS = [
 DIAGNOSTIC_TESTS = ['scripts/validation/test_recovery_boundaries.py']
 SCHEMA_CHECKS = ['scripts/validation/test_schema_contract.py']
 HOST_TESTS = ['scripts/validation/test_source_snapshot.py', 'scripts/validation/test_harness_configuration.py',
-              'scripts/validation/test_storage.py']
+              'scripts/validation/test_storage.py', 'scripts/validation/test_ci_evidence.py']
 REQUIRED_HELPERS = ['scripts/validation/recovery_checks.py', 'scripts/validation/database_restore.py',
                     'scripts/validation/storage.py',
                      'backend/app/services/workflows/action_definitions.py',

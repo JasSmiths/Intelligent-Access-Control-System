@@ -476,6 +476,16 @@ stream projected timeline inputs and account separately for output/PDF cost.
 Performance changes must preserve authorization freshness, transaction ordering
 and recovery behavior. Do not trade those guarantees for a cache or a shorter path.
 
+The Admin user list scopes deferred password/photo columns to that query. Compact
+lists use the existing photo-reference expression; explicit `include_photo=true`
+loads photos in the same query, while the shared serializer and photo endpoint
+retain their contracts. Notification presence conditions use planner-owned
+`EXISTS` reads of PRESENT state, optionally constrained by person primary key.
+They preserve canonical ID matching and do not filter inactive people or cache
+observations between calls. The isolated
+[query suite](../scripts/validation/test_query_efficiency.py) checks public/media
+parity, loaded columns, condition truth and synthetic allocation/query evidence.
+
 ### Access-device binding policies
 
 [Binding policies](../backend/app/modules/access_devices/binding_policies.py)

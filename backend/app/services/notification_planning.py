@@ -232,9 +232,23 @@ class NotificationPlanner:
             return schedule_allows_at(schedule, occurred_at, config.site_timezone)
 
         if condition_type == "presence":
-            rows = (await session.scalars(select(Presence))).all()
-            present_ids = {str(row.person_id) for row in rows if row.state == PresenceState.PRESENT}
-            return presence_condition_matches(condition, present_ids)
+            mode = str(condition.get("mode") or "")
+            if mode not in {"no_one_home", "someone_home", "person_home"}:
+                return False
+            query = select(Presence.person_id).where(Presence.state == PresenceState.PRESENT)
+            if mode == "person_home":
+                person_id = str(condition.get("person_id") or "")
+                try:
+                    parsed_id = uuid.UUID(person_id)
+                except ValueError:
+                    return False
+                # The existing policy compares canonical UUID strings exactly.
+                # Do not broaden it to uppercase, braces or hyphenless inputs.
+                if str(parsed_id) != person_id:
+                    return False
+                query = query.where(Presence.person_id == parsed_id)
+            present = bool(await session.scalar(select(query.exists())))
+            return not present if mode == "no_one_home" else present
 
         logger.warning(
             "notification_condition_unknown",

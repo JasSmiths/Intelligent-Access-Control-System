@@ -57,7 +57,8 @@ class SourceSnapshotTests(unittest.TestCase):
                     'IACS_REMEDIATION_REVIEW_BUNDLE.zip',
                     'IACS_REMEDIATION_HANDOVER.md', 'IACS_REMEDIATION_EVIDENCE.json',
                     'IACS_SECURITY_RELIABILITY_REVIEW_BUNDLE.zip',
-                    'IACS_SECURITY_RELIABILITY_HANDOVER.md', 'IACS_SECURITY_RELIABILITY_EVIDENCE.json']
+                    'IACS_SECURITY_RELIABILITY_HANDOVER.md', 'IACS_SECURITY_RELIABILITY_EVIDENCE.json',
+                    'IACS_QUERY_CI_REVIEW_BUNDLE.zip', 'IACS_QUERY_CI_HANDOVER.md', 'IACS_QUERY_CI_EVIDENCE.json']
         for relative in excluded:
             self.make_file(relative)
             with self.subTest(relative=relative), self.assertRaises(ValueError):

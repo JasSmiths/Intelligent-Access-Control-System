@@ -1,0 +1,2565 @@
+{
+  "task": "IACS focused query efficiency and CI artifact cleanup",
+  "completion_percent": 100,
+  "workspace": "/Users/jas/Documents/Intelligent Access System",
+  "branch": "main",
+  "starting_head": "2a3a572fe10755c959feaed74790b13f65015a6f",
+  "final_head": "2a3a572fe10755c959feaed74790b13f65015a6f",
+  "starting_fingerprint": "f7d66850e18e8e05f600be877a21e2b4bcb4b6e83e3502f1daae6d0a8066ac04",
+  "final_tested_fingerprint": "5ccb992e0228041283a46d6aae7c77fedf5549c71be5d83e8a9d9e388ae37890",
+  "pre_existing_edits": [
+    "Untracked IACS_SECURITY_RELIABILITY_REVIEW_BUNDLE.zip, preserved unchanged"
+  ],
+  "source_file_count": 835,
+  "task_source_changes": [
+    {
+      "path": ".github/workflows/project-checks.yml",
+      "status": "modified",
+      "before_sha256": "5ae170b934684f08f33d3d41157c27210b0b1742720cc13375d3c3b313ad2ce5",
+      "after_sha256": "9a0371faea6992dc301a5535a9a340f577a5e34d86489e41bd62e572829cff84"
+    },
+    {
+      "path": "backend/app/api/v1/users.py",
+      "status": "modified",
+      "before_sha256": "523537f49a0fe34e06553fca2b13ad98cb36346133b6803b66e6145ead1bda6b",
+      "after_sha256": "601f4ca2add9527b05148cac161e15bbe730414ab156a7bd331f9ba0826e4a65"
+    },
+    {
+      "path": "backend/app/services/notification_planning.py",
+      "status": "modified",
+      "before_sha256": "0d95bfdafaeacb4b6bd40f00646abff2780333ca8535b91feeaef8af3bc2bbe9",
+      "after_sha256": "4d4efdad8cb013c7d1e71b7dfc8a9e1270fc1cc1c491c1e6474ae7116aaaec3d"
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "before_sha256": "aef7990cce1b6e9e570568f0154322974b96a45e66b2115b8cf4cf3a322ae8c4",
+      "after_sha256": "444042db39ef685e2c6d9defb18cd422a5afd5fff35c6b4fc37ec46fe0f223af"
+    },
+    {
+      "path": "docs/validation.md",
+      "status": "modified",
+      "before_sha256": "496ebe33a78f9183e19cdd4c96ccad0fcb211c45cd28fd8edee3745222e2e128",
+      "after_sha256": "abc44e9cc08710198bf96e319a815f2ccd940200180bd998b5c4a12b4b258b68"
+    },
+    {
+      "path": "scripts/validation/ci_evidence.py",
+      "status": "new",
+      "before_sha256": null,
+      "after_sha256": "1b8b3389a56768ab21dad54ef20571b279f0d0db7b174823ee7a603616e8bd4a"
+    },
+    {
+      "path": "scripts/validation/recovery_checks.py",
+      "status": "modified",
+      "before_sha256": "6bba61a7deb887d7fc9ad96d156fcc2fae8768f6e0eea826d7cec253c3ccd8b6",
+      "after_sha256": "d763042217c6d5d7df19623a8f27eecb4cd5d54352cb5774b19182cab5e14a1f"
+    },
+    {
+      "path": "scripts/validation/source_snapshot.py",
+      "status": "modified",
+      "before_sha256": "fddb8cf4e774a39de90d5d162e1bcaf77d5e7f69bbe92724a7fd977032f00d00",
+      "after_sha256": "6039c5179eda88fdf8bbf70694d15914cbc160b4087a61c8c8609511d39d1987"
+    },
+    {
+      "path": "scripts/validation/test_ci_evidence.py",
+      "status": "new",
+      "before_sha256": null,
+      "after_sha256": "16ac04e44e1ec21b4d834645e9b906aac1c118f40bcbf2b27bff2ad74ffad799"
+    },
+    {
+      "path": "scripts/validation/test_harness_configuration.py",
+      "status": "modified",
+      "before_sha256": "52c10da83ed338e4bb48f60f5171b93786065689307b4661a008d41ed21ab4c8",
+      "after_sha256": "f3868f4e5a139504eab1ac95f87f8979f426b05c6ead745079c6351e6145259d"
+    },
+    {
+      "path": "scripts/validation/test_query_efficiency.py",
+      "status": "new",
+      "before_sha256": null,
+      "after_sha256": "bbcd3860f30fbe6f63a16b90a8cf5abec9774aa6e9d0a2986b060b50f8f16781"
+    },
+    {
+      "path": "scripts/validation/test_source_snapshot.py",
+      "status": "modified",
+      "before_sha256": "16903e7cefc66327bf5a80edf70cef8f200a1966843f6eb0a6ec714d075c877b",
+      "after_sha256": "19e6425cdb9d9b4db19aed45b1915079de0039f37fce646f83412ace6dc90ffc"
+    },
+    {
+      "path": "scripts/validation/validate.py",
+      "status": "modified",
+      "before_sha256": "ba855027d034c41804c44fbf9ca7be158642db65d9cea8eed4d108cd791a3072",
+      "after_sha256": "8403cba13d5f5601651fd2e26c223c3d6c5c8ddd669baafc334ae540e631a395"
+    }
+  ],
+  "task_source_statistics": {
+    "workflow": {
+      "files": 1,
+      "insertions": 8,
+      "deletions": 7
+    },
+    "production": {
+      "files": 2,
+      "insertions": 30,
+      "deletions": 5
+    },
+    "docs": {
+      "files": 2,
+      "insertions": 27,
+      "deletions": 0
+    },
+    "harness": {
+      "files": 4,
+      "insertions": 204,
+      "deletions": 3
+    },
+    "tests": {
+      "files": 4,
+      "insertions": 474,
+      "deletions": 3
+    }
+  },
+  "generated_changes": [],
+  "delivery_docs_written_after_code_validation": [
+    "IACS_QUERY_CI_HANDOVER.md",
+    "IACS_QUERY_CI_EVIDENCE.json"
+  ],
+  "requirements": {
+    "A": {
+      "status": "fixed_and_verified",
+      "owner": "backend/app/api/v1/users.py::list_users",
+      "before_expected_failures": 2,
+      "final_cases": 7,
+      "evidence": "measurements.json"
+    },
+    "B": {
+      "status": "fixed_and_verified",
+      "owner": "backend/app/services/notification_planning.py::NotificationPlanner._condition_matches",
+      "before_expected_failures": 6,
+      "final_cases": 9,
+      "evidence": "measurements.json"
+    },
+    "C": {
+      "status": "fixed_and_verified",
+      "owner": "scripts/validation/ci_evidence.py::collect/main and .github/workflows/project-checks.yml",
+      "final_collector_tests": 11,
+      "evidence": "curation-comparison.json"
+    }
+  },
+  "measurements": {
+    "users-8-photo-False": {
+      "before": {
+        "rows": 8,
+        "photo_text_bytes_each": 131094,
+        "photo_rows": 4,
+        "warmup": 1,
+        "samples": 5,
+        "query_counts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "loaded_fields": [
+          "_sa_instance_state",
+          "auth_session_version",
+          "created_at",
+          "email",
+          "first_name",
+          "full_name",
+          "id",
+          "is_active",
+          "last_login_at",
+          "last_name",
+          "mobile_phone_number",
+          "password_changed_at",
+          "password_hash",
+          "person_id",
+          "preferences",
+          "profile_photo_data_url",
+          "role",
+          "updated_at",
+          "username"
+        ],
+        "response_bytes": 4012,
+        "response_sha256": "9dedb6934d7e1e0201f25ac892003168bfb72bc9495f16db739429ae5ba82169",
+        "python_tracemalloc_peaks_bytes": [
+          1204023,
+          1204839,
+          1204239,
+          1204367,
+          1204167
+        ],
+        "p50_ms": 1.7705130012473091,
+        "p95_ms_nearest_rank": 1.8518049982958473,
+        "qualification": "Python traced allocations, not RSS or database wire bytes; timings include JSON encoding."
+      },
+      "after": {
+        "rows": 8,
+        "photo_text_bytes_each": 131094,
+        "photo_rows": 4,
+        "warmup": 1,
+        "samples": 5,
+        "query_counts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "loaded_fields": [
+          "_sa_instance_state",
+          "auth_session_version",
+          "created_at",
+          "email",
+          "first_name",
+          "full_name",
+          "id",
+          "is_active",
+          "last_login_at",
+          "last_name",
+          "mobile_phone_number",
+          "password_changed_at",
+          "person_id",
+          "preferences",
+          "profile_photo_reference",
+          "role",
+          "updated_at",
+          "username"
+        ],
+        "response_bytes": 4012,
+        "response_sha256": "9dedb6934d7e1e0201f25ac892003168bfb72bc9495f16db739429ae5ba82169",
+        "python_tracemalloc_peaks_bytes": [
+          320519,
+          319289,
+          319083,
+          319343,
+          318913
+        ],
+        "p50_ms": 2.329241997358622,
+        "p95_ms_nearest_rank": 2.3892419994808733,
+        "qualification": "Python traced allocations, not RSS or database wire bytes; timings include JSON encoding."
+      },
+      "python_peak_median_before_bytes": 1204239,
+      "python_peak_median_after_bytes": 319289,
+      "equivalent_public_response": true
+    },
+    "users-300-photo-False": {
+      "before": {
+        "rows": 300,
+        "photo_text_bytes_each": 131094,
+        "photo_rows": 150,
+        "warmup": 1,
+        "samples": 5,
+        "query_counts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "loaded_fields": [
+          "_sa_instance_state",
+          "auth_session_version",
+          "created_at",
+          "email",
+          "first_name",
+          "full_name",
+          "id",
+          "is_active",
+          "last_login_at",
+          "last_name",
+          "mobile_phone_number",
+          "password_changed_at",
+          "password_hash",
+          "person_id",
+          "preferences",
+          "profile_photo_data_url",
+          "role",
+          "updated_at",
+          "username"
+        ],
+        "response_bytes": 150942,
+        "response_sha256": "f514a574390ec2c732924005150cfb7fde80d241890b76bc6874e7b0dc84adf5",
+        "python_tracemalloc_peaks_bytes": [
+          21516288,
+          21513192,
+          21511576,
+          21512168,
+          21512162
+        ],
+        "p50_ms": 33.6149850008951,
+        "p95_ms_nearest_rank": 35.99241800111486,
+        "qualification": "Python traced allocations, not RSS or database wire bytes; timings include JSON encoding."
+      },
+      "after": {
+        "rows": 300,
+        "photo_text_bytes_each": 131094,
+        "photo_rows": 150,
+        "warmup": 1,
+        "samples": 5,
+        "query_counts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "loaded_fields": [
+          "_sa_instance_state",
+          "auth_session_version",
+          "created_at",
+          "email",
+          "first_name",
+          "full_name",
+          "id",
+          "is_active",
+          "last_login_at",
+          "last_name",
+          "mobile_phone_number",
+          "password_changed_at",
+          "person_id",
+          "preferences",
+          "profile_photo_reference",
+          "role",
+          "updated_at",
+          "username"
+        ],
+        "response_bytes": 150942,
+        "response_sha256": "f514a574390ec2c732924005150cfb7fde80d241890b76bc6874e7b0dc84adf5",
+        "python_tracemalloc_peaks_bytes": [
+          1599605,
+          1597707,
+          1699839,
+          1595493,
+          1595575
+        ],
+        "p50_ms": 29.63560900025186,
+        "p95_ms_nearest_rank": 60.45034100316116,
+        "qualification": "Python traced allocations, not RSS or database wire bytes; timings include JSON encoding."
+      },
+      "python_peak_median_before_bytes": 21512168,
+      "python_peak_median_after_bytes": 1597707,
+      "equivalent_public_response": true
+    },
+    "users-8-photo-True": {
+      "before": {
+        "rows": 8,
+        "photo_text_bytes_each": 131094,
+        "photo_rows": 4,
+        "warmup": 1,
+        "samples": 5,
+        "query_counts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "loaded_fields": [
+          "_sa_instance_state",
+          "auth_session_version",
+          "created_at",
+          "email",
+          "first_name",
+          "full_name",
+          "id",
+          "is_active",
+          "last_login_at",
+          "last_name",
+          "mobile_phone_number",
+          "password_changed_at",
+          "password_hash",
+          "person_id",
+          "preferences",
+          "profile_photo_data_url",
+          "role",
+          "updated_at",
+          "username"
+        ],
+        "response_bytes": 528380,
+        "response_sha256": "41b44793d5e090b7ba01ada3d8673b3d19260cf700bbb0e0de431286aac079d6",
+        "python_tracemalloc_peaks_bytes": [
+          1882714,
+          1882414,
+          1882624,
+          1882414,
+          1882414
+        ],
+        "p50_ms": 2.3223500029416755,
+        "p95_ms_nearest_rank": 2.640226000949042,
+        "qualification": "Python traced allocations, not RSS or database wire bytes; timings include JSON encoding."
+      },
+      "after": {
+        "rows": 8,
+        "photo_text_bytes_each": 131094,
+        "photo_rows": 4,
+        "warmup": 1,
+        "samples": 5,
+        "query_counts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "loaded_fields": [
+          "_sa_instance_state",
+          "auth_session_version",
+          "created_at",
+          "email",
+          "first_name",
+          "full_name",
+          "id",
+          "is_active",
+          "last_login_at",
+          "last_name",
+          "mobile_phone_number",
+          "password_changed_at",
+          "person_id",
+          "preferences",
+          "profile_photo_data_url",
+          "role",
+          "updated_at",
+          "username"
+        ],
+        "response_bytes": 528380,
+        "response_sha256": "41b44793d5e090b7ba01ada3d8673b3d19260cf700bbb0e0de431286aac079d6",
+        "python_tracemalloc_peaks_bytes": [
+          1964868,
+          1882892,
+          1883102,
+          1882532,
+          1882504
+        ],
+        "p50_ms": 2.551115998358,
+        "p95_ms_nearest_rank": 2.644449999934295,
+        "qualification": "Python traced allocations, not RSS or database wire bytes; timings include JSON encoding."
+      },
+      "python_peak_median_before_bytes": 1882414,
+      "python_peak_median_after_bytes": 1882892,
+      "equivalent_public_response": true
+    },
+    "users-300-photo-True": {
+      "before": {
+        "rows": 300,
+        "photo_text_bytes_each": 131094,
+        "photo_rows": 150,
+        "warmup": 1,
+        "samples": 5,
+        "query_counts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "loaded_fields": [
+          "_sa_instance_state",
+          "auth_session_version",
+          "created_at",
+          "email",
+          "first_name",
+          "full_name",
+          "id",
+          "is_active",
+          "last_login_at",
+          "last_name",
+          "mobile_phone_number",
+          "password_changed_at",
+          "password_hash",
+          "person_id",
+          "preferences",
+          "profile_photo_data_url",
+          "role",
+          "updated_at",
+          "username"
+        ],
+        "response_bytes": 19814742,
+        "response_sha256": "0b5193493cca0c06b0118de52a19c03ed2154ada84d3dc0e889b9411ea845d1a",
+        "python_tracemalloc_peaks_bytes": [
+          60806194,
+          60928935,
+          60809600,
+          60905257,
+          60769864
+        ],
+        "p50_ms": 57.888446001015836,
+        "p95_ms_nearest_rank": 61.04188400058774,
+        "qualification": "Python traced allocations, not RSS or database wire bytes; timings include JSON encoding."
+      },
+      "after": {
+        "rows": 300,
+        "photo_text_bytes_each": 131094,
+        "photo_rows": 150,
+        "warmup": 1,
+        "samples": 5,
+        "query_counts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "loaded_fields": [
+          "_sa_instance_state",
+          "auth_session_version",
+          "created_at",
+          "email",
+          "first_name",
+          "full_name",
+          "id",
+          "is_active",
+          "last_login_at",
+          "last_name",
+          "mobile_phone_number",
+          "password_changed_at",
+          "person_id",
+          "preferences",
+          "profile_photo_data_url",
+          "role",
+          "updated_at",
+          "username"
+        ],
+        "response_bytes": 19814742,
+        "response_sha256": "0b5193493cca0c06b0118de52a19c03ed2154ada84d3dc0e889b9411ea845d1a",
+        "python_tracemalloc_peaks_bytes": [
+          60784228,
+          60782728,
+          60781152,
+          60782702,
+          60783462
+        ],
+        "p50_ms": 60.33867400037707,
+        "p95_ms_nearest_rank": 62.33166699894355,
+        "qualification": "Python traced allocations, not RSS or database wire bytes; timings include JSON encoding."
+      },
+      "python_peak_median_before_bytes": 60809600,
+      "python_peak_median_after_bytes": 60782728,
+      "equivalent_public_response": true
+    },
+    "presence-8": {
+      "before": {
+        "rows": 8,
+        "warmup": 1,
+        "samples": 5,
+        "queries_per_sample": [
+          9,
+          9,
+          9,
+          9,
+          9
+        ],
+        "orm_rows_per_sample": [
+          72,
+          72,
+          72,
+          72,
+          72
+        ],
+        "answers": [
+          true,
+          false,
+          true,
+          true,
+          false,
+          true,
+          true,
+          false,
+          true
+        ],
+        "python_tracemalloc_peaks_bytes": [
+          285616,
+          285904,
+          285566,
+          285776,
+          285766
+        ],
+        "p50_ms": 4.8377829989476595,
+        "p95_ms_nearest_rank": 4.862200003117323,
+        "sql": [
+          "SELECT presence.person_id, presence.state, presence.last_event_id, presence.last_changed_at, presence.created_at, presence.updated_at \nFROM presence",
+          "SELECT presence.person_id, presence.state, presence.last_event_id, presence.last_changed_at, presence.created_at, presence.updated_at \nFROM presence",
+          "SELECT presence.person_id, presence.state, presence.last_event_id, presence.last_changed_at, presence.created_at, presence.updated_at \nFROM presence"
+        ],
+        "indexes": [
+          "CREATE INDEX ix_presence_last_event_id ON public.presence USING btree (last_event_id)",
+          "CREATE UNIQUE INDEX presence_pkey ON public.presence USING btree (person_id)"
+        ],
+        "plans": {
+          "all_rows": [
+            {
+              "Plan": {
+                "Node Type": "Seq Scan",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Relation Name": "presence",
+                "Alias": "presence",
+                "Startup Cost": 0.0,
+                "Total Cost": 19.2,
+                "Plan Rows": 920,
+                "Plan Width": 60,
+                "Actual Startup Time": 0.001,
+                "Actual Total Time": 0.001,
+                "Actual Rows": 8,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 1,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning": {
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.008,
+              "Triggers": [],
+              "Execution Time": 0.002
+            }
+          ],
+          "present_exists": [
+            {
+              "Plan": {
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Startup Cost": 4.3,
+                "Total Cost": 4.31,
+                "Plan Rows": 1,
+                "Plan Width": 1,
+                "Actual Startup Time": 0.002,
+                "Actual Total Time": 0.002,
+                "Actual Rows": 1,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 1,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Plans": [
+                  {
+                    "Node Type": "Seq Scan",
+                    "Parent Relationship": "InitPlan",
+                    "Subplan Name": "InitPlan 1 (returns $0)",
+                    "Parallel Aware": false,
+                    "Async Capable": false,
+                    "Relation Name": "presence",
+                    "Alias": "presence",
+                    "Startup Cost": 0.0,
+                    "Total Cost": 21.5,
+                    "Plan Rows": 5,
+                    "Plan Width": 0,
+                    "Actual Startup Time": 0.001,
+                    "Actual Total Time": 0.001,
+                    "Actual Rows": 1,
+                    "Actual Loops": 1,
+                    "Filter": "(state = 'PRESENT'::presencestate)",
+                    "Rows Removed by Filter": 7,
+                    "Shared Hit Blocks": 1,
+                    "Shared Read Blocks": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Dirtied Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0
+                  }
+                ]
+              },
+              "Planning": {
+                "Shared Hit Blocks": 3,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.014,
+              "Triggers": [],
+              "Execution Time": 0.004
+            }
+          ],
+          "person_exists": [
+            {
+              "Plan": {
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Startup Cost": 8.17,
+                "Total Cost": 8.18,
+                "Plan Rows": 1,
+                "Plan Width": 1,
+                "Actual Startup Time": 0.002,
+                "Actual Total Time": 0.002,
+                "Actual Rows": 1,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 2,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Plans": [
+                  {
+                    "Node Type": "Index Scan",
+                    "Parent Relationship": "InitPlan",
+                    "Subplan Name": "InitPlan 1 (returns $0)",
+                    "Parallel Aware": false,
+                    "Async Capable": false,
+                    "Scan Direction": "Forward",
+                    "Index Name": "presence_pkey",
+                    "Relation Name": "presence",
+                    "Alias": "presence",
+                    "Startup Cost": 0.15,
+                    "Total Cost": 8.17,
+                    "Plan Rows": 1,
+                    "Plan Width": 0,
+                    "Actual Startup Time": 0.002,
+                    "Actual Total Time": 0.002,
+                    "Actual Rows": 1,
+                    "Actual Loops": 1,
+                    "Index Cond": "(person_id = '00000000-0000-0000-0000-00000000006b'::uuid)",
+                    "Rows Removed by Index Recheck": 0,
+                    "Filter": "(state = 'PRESENT'::presencestate)",
+                    "Rows Removed by Filter": 0,
+                    "Shared Hit Blocks": 2,
+                    "Shared Read Blocks": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Dirtied Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0
+                  }
+                ]
+              },
+              "Planning": {
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.01,
+              "Triggers": [],
+              "Execution Time": 0.004
+            }
+          ]
+        },
+        "qualification": "Nine repeated conditions, no caching. EXISTS returns a scalar but may scan database rows. Python traced allocations are not RSS or wire bytes."
+      },
+      "after": {
+        "rows": 8,
+        "warmup": 1,
+        "samples": 5,
+        "queries_per_sample": [
+          9,
+          9,
+          9,
+          9,
+          9
+        ],
+        "orm_rows_per_sample": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "answers": [
+          true,
+          false,
+          true,
+          true,
+          false,
+          true,
+          true,
+          false,
+          true
+        ],
+        "python_tracemalloc_peaks_bytes": [
+          287734,
+          287808,
+          287758,
+          287918,
+          287558
+        ],
+        "p50_ms": 4.114777999348007,
+        "p95_ms_nearest_rank": 4.328902999986894,
+        "sql": [
+          "SELECT EXISTS (SELECT presence.person_id \nFROM presence \nWHERE presence.state = $1::presencestate) AS anon_1",
+          "SELECT EXISTS (SELECT presence.person_id \nFROM presence \nWHERE presence.state = $1::presencestate) AS anon_1",
+          "SELECT EXISTS (SELECT presence.person_id \nFROM presence \nWHERE presence.state = $1::presencestate AND presence.person_id = $2::UUID) AS anon_1"
+        ],
+        "indexes": [
+          "CREATE INDEX ix_presence_last_event_id ON public.presence USING btree (last_event_id)",
+          "CREATE UNIQUE INDEX presence_pkey ON public.presence USING btree (person_id)"
+        ],
+        "plans": {
+          "all_rows": [
+            {
+              "Plan": {
+                "Node Type": "Seq Scan",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Relation Name": "presence",
+                "Alias": "presence",
+                "Startup Cost": 0.0,
+                "Total Cost": 19.2,
+                "Plan Rows": 920,
+                "Plan Width": 60,
+                "Actual Startup Time": 0.001,
+                "Actual Total Time": 0.001,
+                "Actual Rows": 8,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 1,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning": {
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.011,
+              "Triggers": [],
+              "Execution Time": 0.003
+            }
+          ],
+          "present_exists": [
+            {
+              "Plan": {
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Startup Cost": 4.3,
+                "Total Cost": 4.31,
+                "Plan Rows": 1,
+                "Plan Width": 1,
+                "Actual Startup Time": 0.001,
+                "Actual Total Time": 0.002,
+                "Actual Rows": 1,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 1,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Plans": [
+                  {
+                    "Node Type": "Seq Scan",
+                    "Parent Relationship": "InitPlan",
+                    "Subplan Name": "InitPlan 1 (returns $0)",
+                    "Parallel Aware": false,
+                    "Async Capable": false,
+                    "Relation Name": "presence",
+                    "Alias": "presence",
+                    "Startup Cost": 0.0,
+                    "Total Cost": 21.5,
+                    "Plan Rows": 5,
+                    "Plan Width": 0,
+                    "Actual Startup Time": 0.001,
+                    "Actual Total Time": 0.001,
+                    "Actual Rows": 1,
+                    "Actual Loops": 1,
+                    "Filter": "(state = 'PRESENT'::presencestate)",
+                    "Rows Removed by Filter": 7,
+                    "Shared Hit Blocks": 1,
+                    "Shared Read Blocks": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Dirtied Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0
+                  }
+                ]
+              },
+              "Planning": {
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.012,
+              "Triggers": [],
+              "Execution Time": 0.004
+            }
+          ],
+          "person_exists": [
+            {
+              "Plan": {
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Startup Cost": 8.17,
+                "Total Cost": 8.18,
+                "Plan Rows": 1,
+                "Plan Width": 1,
+                "Actual Startup Time": 0.002,
+                "Actual Total Time": 0.002,
+                "Actual Rows": 1,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 2,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Plans": [
+                  {
+                    "Node Type": "Index Scan",
+                    "Parent Relationship": "InitPlan",
+                    "Subplan Name": "InitPlan 1 (returns $0)",
+                    "Parallel Aware": false,
+                    "Async Capable": false,
+                    "Scan Direction": "Forward",
+                    "Index Name": "presence_pkey",
+                    "Relation Name": "presence",
+                    "Alias": "presence",
+                    "Startup Cost": 0.15,
+                    "Total Cost": 8.17,
+                    "Plan Rows": 1,
+                    "Plan Width": 0,
+                    "Actual Startup Time": 0.001,
+                    "Actual Total Time": 0.002,
+                    "Actual Rows": 1,
+                    "Actual Loops": 1,
+                    "Index Cond": "(person_id = '00000000-0000-0000-0000-00000000006b'::uuid)",
+                    "Rows Removed by Index Recheck": 0,
+                    "Filter": "(state = 'PRESENT'::presencestate)",
+                    "Rows Removed by Filter": 0,
+                    "Shared Hit Blocks": 2,
+                    "Shared Read Blocks": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Dirtied Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0
+                  }
+                ]
+              },
+              "Planning": {
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.013,
+              "Triggers": [],
+              "Execution Time": 0.004
+            }
+          ]
+        },
+        "qualification": "Nine repeated conditions, no caching. EXISTS returns a scalar but may scan database rows. Python traced allocations are not RSS or wire bytes."
+      },
+      "python_peak_median_before_bytes": 285766,
+      "python_peak_median_after_bytes": 287758
+    },
+    "presence-4000": {
+      "before": {
+        "rows": 4000,
+        "warmup": 1,
+        "samples": 5,
+        "queries_per_sample": [
+          9,
+          9,
+          9,
+          9,
+          9
+        ],
+        "orm_rows_per_sample": [
+          36000,
+          36000,
+          36000,
+          36000,
+          36000
+        ],
+        "answers": [
+          true,
+          false,
+          true,
+          true,
+          false,
+          true,
+          true,
+          false,
+          true
+        ],
+        "python_tracemalloc_peaks_bytes": [
+          6841762,
+          6841454,
+          6840638,
+          6838422,
+          6838212
+        ],
+        "p50_ms": 1074.9346600023273,
+        "p95_ms_nearest_rank": 1143.5174719990755,
+        "sql": [
+          "SELECT presence.person_id, presence.state, presence.last_event_id, presence.last_changed_at, presence.created_at, presence.updated_at \nFROM presence",
+          "SELECT presence.person_id, presence.state, presence.last_event_id, presence.last_changed_at, presence.created_at, presence.updated_at \nFROM presence",
+          "SELECT presence.person_id, presence.state, presence.last_event_id, presence.last_changed_at, presence.created_at, presence.updated_at \nFROM presence"
+        ],
+        "indexes": [
+          "CREATE INDEX ix_presence_last_event_id ON public.presence USING btree (last_event_id)",
+          "CREATE UNIQUE INDEX presence_pkey ON public.presence USING btree (person_id)"
+        ],
+        "plans": {
+          "all_rows": [
+            {
+              "Plan": {
+                "Node Type": "Seq Scan",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Relation Name": "presence",
+                "Alias": "presence",
+                "Startup Cost": 0.0,
+                "Total Cost": 65.28,
+                "Plan Rows": 3128,
+                "Plan Width": 60,
+                "Actual Startup Time": 0.002,
+                "Actual Total Time": 0.118,
+                "Actual Rows": 4000,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 34,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning": {
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.009,
+              "Triggers": [],
+              "Execution Time": 0.173
+            }
+          ],
+          "present_exists": [
+            {
+              "Plan": {
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Startup Cost": 4.57,
+                "Total Cost": 4.58,
+                "Plan Rows": 1,
+                "Plan Width": 1,
+                "Actual Startup Time": 0.085,
+                "Actual Total Time": 0.085,
+                "Actual Rows": 1,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 34,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Plans": [
+                  {
+                    "Node Type": "Seq Scan",
+                    "Parent Relationship": "InitPlan",
+                    "Subplan Name": "InitPlan 1 (returns $0)",
+                    "Parallel Aware": false,
+                    "Async Capable": false,
+                    "Relation Name": "presence",
+                    "Alias": "presence",
+                    "Startup Cost": 0.0,
+                    "Total Cost": 73.1,
+                    "Plan Rows": 16,
+                    "Plan Width": 0,
+                    "Actual Startup Time": 0.084,
+                    "Actual Total Time": 0.084,
+                    "Actual Rows": 1,
+                    "Actual Loops": 1,
+                    "Filter": "(state = 'PRESENT'::presencestate)",
+                    "Rows Removed by Filter": 3999,
+                    "Shared Hit Blocks": 34,
+                    "Shared Read Blocks": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Dirtied Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0
+                  }
+                ]
+              },
+              "Planning": {
+                "Shared Hit Blocks": 3,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.015,
+              "Triggers": [],
+              "Execution Time": 0.087
+            }
+          ],
+          "person_exists": [
+            {
+              "Plan": {
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Startup Cost": 8.3,
+                "Total Cost": 8.31,
+                "Plan Rows": 1,
+                "Plan Width": 1,
+                "Actual Startup Time": 0.002,
+                "Actual Total Time": 0.003,
+                "Actual Rows": 1,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 3,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Plans": [
+                  {
+                    "Node Type": "Index Scan",
+                    "Parent Relationship": "InitPlan",
+                    "Subplan Name": "InitPlan 1 (returns $0)",
+                    "Parallel Aware": false,
+                    "Async Capable": false,
+                    "Scan Direction": "Forward",
+                    "Index Name": "presence_pkey",
+                    "Relation Name": "presence",
+                    "Alias": "presence",
+                    "Startup Cost": 0.28,
+                    "Total Cost": 8.3,
+                    "Plan Rows": 1,
+                    "Plan Width": 0,
+                    "Actual Startup Time": 0.002,
+                    "Actual Total Time": 0.002,
+                    "Actual Rows": 1,
+                    "Actual Loops": 1,
+                    "Index Cond": "(person_id = '00000000-0000-0000-0000-000000001003'::uuid)",
+                    "Rows Removed by Index Recheck": 0,
+                    "Filter": "(state = 'PRESENT'::presencestate)",
+                    "Rows Removed by Filter": 0,
+                    "Shared Hit Blocks": 3,
+                    "Shared Read Blocks": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Dirtied Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0
+                  }
+                ]
+              },
+              "Planning": {
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.01,
+              "Triggers": [],
+              "Execution Time": 0.004
+            }
+          ]
+        },
+        "qualification": "Nine repeated conditions, no caching. EXISTS returns a scalar but may scan database rows. Python traced allocations are not RSS or wire bytes."
+      },
+      "after": {
+        "rows": 4000,
+        "warmup": 1,
+        "samples": 5,
+        "queries_per_sample": [
+          9,
+          9,
+          9,
+          9,
+          9
+        ],
+        "orm_rows_per_sample": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "answers": [
+          true,
+          false,
+          true,
+          true,
+          false,
+          true,
+          true,
+          false,
+          true
+        ],
+        "python_tracemalloc_peaks_bytes": [
+          287916,
+          287840,
+          288228,
+          288100,
+          288004
+        ],
+        "p50_ms": 4.788191999978153,
+        "p95_ms_nearest_rank": 4.861984001763631,
+        "sql": [
+          "SELECT EXISTS (SELECT presence.person_id \nFROM presence \nWHERE presence.state = $1::presencestate) AS anon_1",
+          "SELECT EXISTS (SELECT presence.person_id \nFROM presence \nWHERE presence.state = $1::presencestate) AS anon_1",
+          "SELECT EXISTS (SELECT presence.person_id \nFROM presence \nWHERE presence.state = $1::presencestate AND presence.person_id = $2::UUID) AS anon_1"
+        ],
+        "indexes": [
+          "CREATE INDEX ix_presence_last_event_id ON public.presence USING btree (last_event_id)",
+          "CREATE UNIQUE INDEX presence_pkey ON public.presence USING btree (person_id)"
+        ],
+        "plans": {
+          "all_rows": [
+            {
+              "Plan": {
+                "Node Type": "Seq Scan",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Relation Name": "presence",
+                "Alias": "presence",
+                "Startup Cost": 0.0,
+                "Total Cost": 65.28,
+                "Plan Rows": 3128,
+                "Plan Width": 60,
+                "Actual Startup Time": 0.001,
+                "Actual Total Time": 0.101,
+                "Actual Rows": 4000,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 34,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning": {
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.011,
+              "Triggers": [],
+              "Execution Time": 0.162
+            }
+          ],
+          "present_exists": [
+            {
+              "Plan": {
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Startup Cost": 4.57,
+                "Total Cost": 4.58,
+                "Plan Rows": 1,
+                "Plan Width": 1,
+                "Actual Startup Time": 0.117,
+                "Actual Total Time": 0.117,
+                "Actual Rows": 1,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 34,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Plans": [
+                  {
+                    "Node Type": "Seq Scan",
+                    "Parent Relationship": "InitPlan",
+                    "Subplan Name": "InitPlan 1 (returns $0)",
+                    "Parallel Aware": false,
+                    "Async Capable": false,
+                    "Relation Name": "presence",
+                    "Alias": "presence",
+                    "Startup Cost": 0.0,
+                    "Total Cost": 73.1,
+                    "Plan Rows": 16,
+                    "Plan Width": 0,
+                    "Actual Startup Time": 0.116,
+                    "Actual Total Time": 0.116,
+                    "Actual Rows": 1,
+                    "Actual Loops": 1,
+                    "Filter": "(state = 'PRESENT'::presencestate)",
+                    "Rows Removed by Filter": 3999,
+                    "Shared Hit Blocks": 34,
+                    "Shared Read Blocks": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Dirtied Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0
+                  }
+                ]
+              },
+              "Planning": {
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.013,
+              "Triggers": [],
+              "Execution Time": 0.119
+            }
+          ],
+          "person_exists": [
+            {
+              "Plan": {
+                "Node Type": "Result",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Startup Cost": 8.3,
+                "Total Cost": 8.31,
+                "Plan Rows": 1,
+                "Plan Width": 1,
+                "Actual Startup Time": 0.002,
+                "Actual Total Time": 0.002,
+                "Actual Rows": 1,
+                "Actual Loops": 1,
+                "Shared Hit Blocks": 3,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Plans": [
+                  {
+                    "Node Type": "Index Scan",
+                    "Parent Relationship": "InitPlan",
+                    "Subplan Name": "InitPlan 1 (returns $0)",
+                    "Parallel Aware": false,
+                    "Async Capable": false,
+                    "Scan Direction": "Forward",
+                    "Index Name": "presence_pkey",
+                    "Relation Name": "presence",
+                    "Alias": "presence",
+                    "Startup Cost": 0.28,
+                    "Total Cost": 8.3,
+                    "Plan Rows": 1,
+                    "Plan Width": 0,
+                    "Actual Startup Time": 0.002,
+                    "Actual Total Time": 0.002,
+                    "Actual Rows": 1,
+                    "Actual Loops": 1,
+                    "Index Cond": "(person_id = '00000000-0000-0000-0000-000000001003'::uuid)",
+                    "Rows Removed by Index Recheck": 0,
+                    "Filter": "(state = 'PRESENT'::presencestate)",
+                    "Rows Removed by Filter": 0,
+                    "Shared Hit Blocks": 3,
+                    "Shared Read Blocks": 0,
+                    "Shared Dirtied Blocks": 0,
+                    "Shared Written Blocks": 0,
+                    "Local Hit Blocks": 0,
+                    "Local Read Blocks": 0,
+                    "Local Dirtied Blocks": 0,
+                    "Local Written Blocks": 0,
+                    "Temp Read Blocks": 0,
+                    "Temp Written Blocks": 0
+                  }
+                ]
+              },
+              "Planning": {
+                "Shared Hit Blocks": 0,
+                "Shared Read Blocks": 0,
+                "Shared Dirtied Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Dirtied Blocks": 0,
+                "Local Written Blocks": 0,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0
+              },
+              "Planning Time": 0.014,
+              "Triggers": [],
+              "Execution Time": 0.004
+            }
+          ]
+        },
+        "qualification": "Nine repeated conditions, no caching. EXISTS returns a scalar but may scan database rows. Python traced allocations are not RSS or wire bytes."
+      },
+      "python_peak_median_before_bytes": 6840638,
+      "python_peak_median_after_bytes": 288004
+    }
+  },
+  "ci_retention": {
+    "command": [
+      "/Users/jas/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3",
+      "/Users/jas/Documents/Intelligent Access System/scripts/validation/ci_evidence.py",
+      "--validation-root",
+      "/private/tmp/iacs-query-ci-20261015/verified",
+      "--runtime-root",
+      "/private/tmp/iacs-security-reliability-20261014",
+      "--output",
+      "/private/tmp/iacs-query-ci-20261015/curated"
+    ],
+    "exit_code": 0,
+    "source_fingerprint": "5ccb992e0228041283a46d6aae7c77fedf5549c71be5d83e8a9d9e388ae37890",
+    "before_files": 4525,
+    "before_bytes": 45500167,
+    "after_files": 448,
+    "after_bytes": 17706042,
+    "collection_errors": [],
+    "per_run": [
+      {
+        "category": "validation",
+        "run": "iacs-validation-efvudopm",
+        "before_files": 4500,
+        "before_bytes": 44830847,
+        "after_files": 422,
+        "after_bytes": 16945954
+      },
+      {
+        "category": "runtime",
+        "run": "iacs-runtime-pdf-0qrk40om",
+        "before_files": 13,
+        "before_bytes": 371961,
+        "after_files": 13,
+        "after_bytes": 371961
+      },
+      {
+        "category": "runtime",
+        "run": "iacs-runtime-pdf-z3zspz7c",
+        "before_files": 12,
+        "before_bytes": 297359,
+        "after_files": 12,
+        "after_bytes": 297359
+      }
+    ],
+    "excluded_categories": {
+      "raw_restore_dump": 1,
+      "unnamed_or_scratch_reports": 2,
+      "other_pytest_scratch": 1448,
+      "generated_keys": 14,
+      "test_media": 2613
+    },
+    "excluded_files": 4078,
+    "excluded_bytes": 27884893,
+    "runtime_context": "Two prior completed runtime-proof trees exercise build/image outcome retention only; no new runtime smoke/image build performed.",
+    "qualification": "Local reproduction of prior broad rules over regular nonhidden files; new selection is the exact workflow CLI. This is not a hosted archive measurement.",
+    "restore_proof": {
+      "original_unchanged": true,
+      "revision_equivalent": true,
+      "rows_equivalent": true,
+      "schema_equivalent": true,
+      "sequences_equivalent": true
+    },
+    "required_final_proof_present": true,
+    "retained_manifest": "curated/collection.json"
+  },
+  "tests": {
+    "full": {
+      "command": [
+        "scripts/validation/validate.py",
+        "--reuse-dependencies",
+        "/private/tmp/iacs-integration-mutations-20261014/iacs-validation-focus-rstp6hsg",
+        "--evidence-root",
+        "/private/tmp/iacs-query-ci-20261015/verified"
+      ],
+      "environment": {
+        "IACS_VALIDATION_BACKEND_IMAGE": "iacs-backend:uiprotect-23-backfill-verified-20261013"
+      },
+      "exit_code": 0,
+      "run": "verified/iacs-validation-efvudopm",
+      "results": {
+        "python-lock-check": 0,
+        "python-identity": 0,
+        "uv-identity": 0,
+        "frontend-lock-check": 0,
+        "frontend-tree-check": 0,
+        "npm-identity": 0,
+        "isolation-db-free": 0,
+        "snapshot-tests": 0,
+        "harness-configuration-tests": 0,
+        "storage-tests": 0,
+        "ci-evidence-tests": 0,
+        "architecture-boundaries": 0,
+        "compile": 0,
+        "workflow-contracts": 0,
+        "backend-tests": 0,
+        "ruff": 0,
+        "test-names": 0,
+        "mypy": 0,
+        "typed-contracts": 0,
+        "frontend-tests": 0,
+        "frontend-build": 0,
+        "compose-config": 0,
+        "postgres-start": 0,
+        "redis-start": 0,
+        "isolation-persistence": 0,
+        "isolation-inspect": 0,
+        "migration-up": 0,
+        "migration-current": 0,
+        "migration-check": 0,
+        "database-restore-client-version": 0,
+        "database-restore-source-create": 0,
+        "database-restore-prepare": 0,
+        "database-restore-dump": 0,
+        "database-restore-target-create": 0,
+        "database-restore-load": 0,
+        "database-restore-verify": 0,
+        "database-restore-drop-0": 0,
+        "database-restore-drop-1": 0,
+        "schema-check-1": 0,
+        "suite-001-create": 0,
+        "suite-001": 0,
+        "suite-001-drop": 0,
+        "suite-002-create": 0,
+        "suite-002": 0,
+        "suite-002-drop": 0,
+        "suite-003-create": 0,
+        "suite-003": 0,
+        "suite-003-drop": 0,
+        "suite-004-create": 0,
+        "suite-004": 0,
+        "suite-004-drop": 0,
+        "suite-005-create": 0,
+        "suite-005": 0,
+        "suite-005-drop": 0,
+        "suite-006-create": 0,
+        "suite-006": 0,
+        "suite-006-drop": 0,
+        "suite-007-create": 0,
+        "suite-007": 0,
+        "suite-007-drop": 0,
+        "suite-008-create": 0,
+        "suite-008": 0,
+        "suite-008-drop": 0,
+        "suite-009-create": 0,
+        "suite-009": 0,
+        "suite-009-drop": 0,
+        "suite-010-create": 0,
+        "suite-010": 0,
+        "suite-010-drop": 0,
+        "suite-011-create": 0,
+        "suite-011": 0,
+        "suite-011-drop": 0,
+        "suite-012-create": 0,
+        "suite-012": 0,
+        "suite-012-drop": 0,
+        "suite-013-create": 0,
+        "suite-013": 0,
+        "suite-013-drop": 0,
+        "suite-014-create": 0,
+        "suite-014": 0,
+        "suite-014-drop": 0,
+        "suite-015-create": 0,
+        "suite-015": 0,
+        "suite-015-drop": 0,
+        "suite-016-create": 0,
+        "suite-016": 0,
+        "suite-016-drop": 0,
+        "suite-017-create": 0,
+        "suite-017": 0,
+        "suite-017-drop": 0,
+        "suite-018-create": 0,
+        "suite-018": 0,
+        "suite-018-drop": 0,
+        "suite-019-create": 0,
+        "suite-019": 0,
+        "suite-019-drop": 0,
+        "suite-020-create": 0,
+        "suite-020": 0,
+        "suite-020-drop": 0,
+        "suite-021-create": 0,
+        "suite-021": 0,
+        "suite-021-drop": 0,
+        "suite-022-create": 0,
+        "suite-022": 0,
+        "suite-022-drop": 0,
+        "suite-023-create": 0,
+        "suite-023": 0,
+        "suite-023-drop": 0,
+        "suite-024-create": 0,
+        "suite-024": 0,
+        "suite-024-drop": 0,
+        "suite-025-create": 0,
+        "suite-025": 0,
+        "suite-025-drop": 0,
+        "suite-026-create": 0,
+        "suite-026": 0,
+        "suite-026-drop": 0,
+        "suite-027-create": 0,
+        "suite-027": 0,
+        "suite-027-drop": 0,
+        "suite-028-create": 0,
+        "suite-028": 0,
+        "suite-028-drop": 0,
+        "suite-029-create": 0,
+        "suite-029": 0,
+        "suite-029-drop": 0,
+        "suite-030-create": 0,
+        "suite-030": 0,
+        "suite-030-drop": 0,
+        "suite-031-create": 0,
+        "suite-031": 0,
+        "suite-031-drop": 0,
+        "suite-032-create": 0,
+        "suite-032": 0,
+        "suite-032-drop": 0,
+        "suite-033-create": 0,
+        "suite-033": 0,
+        "suite-033-drop": 0,
+        "suite-034-create": 0,
+        "suite-034": 0,
+        "suite-034-drop": 0,
+        "suite-035-create": 0,
+        "suite-035": 0,
+        "suite-035-drop": 0,
+        "suite-036-create": 0,
+        "suite-036": 0,
+        "suite-036-drop": 0,
+        "suite-037-create": 0,
+        "suite-037": 0,
+        "suite-037-drop": 0,
+        "suite-038-create": 0,
+        "suite-038": 0,
+        "suite-038-drop": 0,
+        "suite-039-create": 0,
+        "suite-039": 0,
+        "suite-039-drop": 0,
+        "suite-040-create": 0,
+        "suite-040": 0,
+        "suite-040-drop": 0,
+        "suite-041-create": 0,
+        "suite-041": 0,
+        "suite-041-drop": 0,
+        "suite-042-create": 0,
+        "suite-042": 0,
+        "suite-042-drop": 0,
+        "suite-043-create": 0,
+        "suite-043": 0,
+        "suite-043-drop": 0,
+        "suite-044-create": 0,
+        "suite-044": 0,
+        "suite-044-drop": 0,
+        "suite-045-create": 0,
+        "suite-045": 0,
+        "suite-045-drop": 0,
+        "suite-046-create": 0,
+        "suite-046": 0,
+        "suite-046-drop": 0,
+        "suite-047-create": 0,
+        "suite-047": 0,
+        "suite-047-drop": 0,
+        "suite-048-create": 0,
+        "suite-048": 0,
+        "suite-048-drop": 0,
+        "suite-049-create": 0,
+        "suite-049": 0,
+        "suite-049-drop": 0,
+        "suite-050-create": 0,
+        "suite-050": 0,
+        "suite-050-drop": 0,
+        "suite-051-create": 0,
+        "suite-051": 0,
+        "suite-051-drop": 0,
+        "suite-052-create": 0,
+        "suite-052": 0,
+        "suite-052-drop": 0,
+        "suite-053-create": 0,
+        "suite-053": 0,
+        "suite-053-drop": 0,
+        "suite-054-create": 0,
+        "suite-054": 0,
+        "suite-054-drop": 0,
+        "suite-055-create": 0,
+        "suite-055": 0,
+        "suite-055-drop": 0,
+        "suite-056-create": 0,
+        "suite-056": 0,
+        "suite-056-drop": 0,
+        "suite-057-create": 0,
+        "suite-057": 0,
+        "suite-057-drop": 0,
+        "suite-058-create": 0,
+        "suite-058": 0,
+        "suite-058-drop": 0,
+        "suite-059-create": 0,
+        "suite-059": 0,
+        "suite-059-drop": 0,
+        "suite-060-create": 0,
+        "suite-060": 0,
+        "suite-060-drop": 0,
+        "suite-061-create": 0,
+        "suite-061": 0,
+        "suite-061-drop": 0,
+        "suite-062-create": 0,
+        "suite-062": 0,
+        "suite-062-drop": 0,
+        "suite-063-create": 0,
+        "suite-063": 0,
+        "suite-063-drop": 0,
+        "suite-064-create": 0,
+        "suite-064": 0,
+        "suite-064-drop": 0,
+        "suite-065-create": 0,
+        "suite-065": 0,
+        "suite-065-drop": 0,
+        "suite-066-create": 0,
+        "suite-066": 0,
+        "suite-066-drop": 0,
+        "suite-067-create": 0,
+        "suite-067": 0,
+        "suite-067-drop": 0,
+        "cleanup": 0,
+        "source_integrity": 0,
+        "production_unchanged": true
+      },
+      "unique_pytest_passes": 2830,
+      "skips": 35,
+      "skip_counterparts": [
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_unknown_blocks_both_actions_on_same_target_but_not_other_target",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_concurrent_claims_have_one_physical_dispatch_owner",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_expired_attempt_late_acceptance_cannot_overwrite_unknown",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_stale_physical_evidence_cannot_erase_a_known_provider_acceptance",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_only_proven_unsent_can_advance_to_unused_fallback",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_already_open_ends_reservation_with_evidence_and_zero_attempts",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_stored_observation_requires_exact_target_and_attempt_window_and_survives_purge",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_maintenance_committed_while_target_waits_prevents_every_hardware_path[gate-open]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_maintenance_committed_while_target_waits_prevents_every_hardware_path[garage_door-open]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_maintenance_committed_while_target_waits_prevents_every_hardware_path[garage_door-close]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_maintenance_waits_for_winning_attempt_checkpoint_commit[gate-open]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_maintenance_waits_for_winning_attempt_checkpoint_commit[garage_door-open]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_maintenance_waits_for_winning_attempt_checkpoint_commit[garage_door-close]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_assigned_schedule_writer_contention_and_committed_denial_both_prevent_send[gate]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_assigned_schedule_writer_contention_and_committed_denial_both_prevent_send[garage_door]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_service_replay_after_terminal_device_deletion_returns_original_receipt",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_controller_value_error_after_child_acceptance_retains_truth_and_never_repeats",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_authorization_checkpoint_reads_after_waiting_for_target_lock",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_many_old_unknowns_do_not_starve_fresh_reconcilable_target",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_committed_settings_change_cannot_be_hidden_by_another_workers_cached_plan",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_automatic_entry_precondition_is_global_and_never_opens_on_unknown[closed-2-True]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_automatic_entry_precondition_is_global_and_never_opens_on_unknown[open-0-True]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_automatic_entry_precondition_is_global_and_never_opens_on_unknown[opening-0-True]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_automatic_entry_precondition_is_global_and_never_opens_on_unknown[unknown-0-False]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_automatic_entry_precondition_is_global_and_never_opens_on_unknown[fault-0-False]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_automatic_entry_precondition_is_global_and_never_opens_on_unknown[closing-0-False]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_receipt_lists_page_equal_timestamps_without_mutation_or_child_duplicates",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_parent_projection_refreshes_preloaded_child_after_another_worker_verifies",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_child_reservation_locks_parent_before_target_during_expiry_projection",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_post_send_audit_database_failure_holds_unknown_and_never_resends[accepted]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_post_send_audit_database_failure_holds_unknown_and_never_resends[unknown]",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_expired_unsent_audit_database_failure_rolls_back_before_any_provider",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_accepted_then_verified_audits_share_state_commits_and_replay_deduplicates",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_successful_claim_hints_prior_expired_outcome_after_close",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        },
+        {
+          "classname": "tests.test_access_device_command_journal",
+          "name": "test_dispatch_refusal_hints_actual_committed_no_send_outcome",
+          "skipped_in": "artifacts/backend-tests/junit.xml",
+          "passed_in": "artifacts/suite-038/junit.xml"
+        }
+      ],
+      "suites": [
+        {
+          "path": "artifacts/backend-tests/junit.xml",
+          "passed": 1574,
+          "skipped": 35,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-001/junit.xml",
+          "passed": 16,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-002/junit.xml",
+          "passed": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-003/junit.xml",
+          "passed": 29,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-004/junit.xml",
+          "passed": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-005/junit.xml",
+          "passed": 20,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-006/junit.xml",
+          "passed": 30,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-007/junit.xml",
+          "passed": 25,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-008/junit.xml",
+          "passed": 12,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-009/junit.xml",
+          "passed": 17,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-010/junit.xml",
+          "passed": 20,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-011/junit.xml",
+          "passed": 23,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-012/junit.xml",
+          "passed": 23,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-013/junit.xml",
+          "passed": 2,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-014/junit.xml",
+          "passed": 8,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-015/junit.xml",
+          "passed": 2,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-016/junit.xml",
+          "passed": 49,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-017/junit.xml",
+          "passed": 19,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-018/junit.xml",
+          "passed": 19,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-019/junit.xml",
+          "passed": 30,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-020/junit.xml",
+          "passed": 23,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-021/junit.xml",
+          "passed": 11,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-022/junit.xml",
+          "passed": 13,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-023/junit.xml",
+          "passed": 12,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-024/junit.xml",
+          "passed": 3,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-025/junit.xml",
+          "passed": 45,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-026/junit.xml",
+          "passed": 17,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-027/junit.xml",
+          "passed": 38,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-028/junit.xml",
+          "passed": 28,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-029/junit.xml",
+          "passed": 39,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-030/junit.xml",
+          "passed": 16,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-031/junit.xml",
+          "passed": 15,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-032/junit.xml",
+          "passed": 7,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-033/junit.xml",
+          "passed": 14,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-034/junit.xml",
+          "passed": 1,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-035/junit.xml",
+          "passed": 3,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-036/junit.xml",
+          "passed": 17,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-037/junit.xml",
+          "passed": 9,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-038/junit.xml",
+          "passed": 35,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-039/junit.xml",
+          "passed": 7,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-040/junit.xml",
+          "passed": 36,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-041/junit.xml",
+          "passed": 10,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-042/junit.xml",
+          "passed": 25,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-043/junit.xml",
+          "passed": 38,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-044/junit.xml",
+          "passed": 30,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-045/junit.xml",
+          "passed": 21,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-046/junit.xml",
+          "passed": 6,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-047/junit.xml",
+          "passed": 9,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-048/junit.xml",
+          "passed": 30,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-049/junit.xml",
+          "passed": 12,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-050/junit.xml",
+          "passed": 26,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-051/junit.xml",
+          "passed": 7,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-052/junit.xml",
+          "passed": 25,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-053/junit.xml",
+          "passed": 5,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-054/junit.xml",
+          "passed": 33,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-055/junit.xml",
+          "passed": 5,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-056/junit.xml",
+          "passed": 22,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-057/junit.xml",
+          "passed": 30,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-058/junit.xml",
+          "passed": 27,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-059/junit.xml",
+          "passed": 7,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-060/junit.xml",
+          "passed": 33,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-061/junit.xml",
+          "passed": 17,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-062/junit.xml",
+          "passed": 31,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-063/junit.xml",
+          "passed": 6,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-064/junit.xml",
+          "passed": 7,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-065/junit.xml",
+          "passed": 17,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-066/junit.xml",
+          "passed": 2,
+          "skipped": 0,
+          "failed": 0
+        },
+        {
+          "path": "artifacts/suite-067/junit.xml",
+          "passed": 40,
+          "skipped": 0,
+          "failed": 0
+        }
+      ]
+    },
+    "baseline_equivalent": {
+      "command": "focused.py --source iacs-validation-xodt_3th/source --suite scripts/validation/test_query_efficiency.py --test-overlay scripts/validation/test_query_efficiency.py",
+      "exit_code": 1,
+      "expected_efficiency_failures": 8,
+      "passed": 8,
+      "run": "iacs-validation-focus-tc_y76hi"
+    },
+    "focused_after": {
+      "exit_code": 0,
+      "passed": 16,
+      "run": "iacs-validation-focus-8vhnj_6r"
+    },
+    "collector": {
+      "locked_full_tests_passed": 11,
+      "exit_code": 0,
+      "host_yaml_skip_closed_by_locked_full_run": true
+    },
+    "workflow_validation": {
+      "tool": "PyYAML BaseLoader plus workflow gate invariants",
+      "exit_code": 0,
+      "actionlint": "unavailable"
+    },
+    "browser": {
+      "status": "not_required",
+      "reason": "No frontend/interaction changes; API/media equivalence verified with real PostgreSQL"
+    },
+    "remote_ci": {
+      "status": "not_run_or_triggered",
+      "later_check": "Owner must inspect actual hosted upload after separately pushing"
+    }
+  },
+  "review": {
+    "status": "closed_no_material_findings",
+    "source_fingerprint": "5ccb992e0228041283a46d6aae7c77fedf5549c71be5d83e8a9d9e388ae37890",
+    "reviewer": "/root/query_ci_review",
+    "requested_model": "gpt-6-astra",
+    "requested_reasoning_effort": "medium",
+    "effective_model_metadata": "unavailable",
+    "source_review": "A/B and C correction accepted; final small build-log retention delta and real evidence inspected",
+    "verified_retained_file_hashes": 447,
+    "material_findings": [
+      {
+        "id": "C-R1",
+        "severity": "P2",
+        "status": "resolved"
+      }
+    ],
+    "raw_report": "Review closed with no remaining material findings for snapshot 5ccb992e0228041283a46d6aae7c77fedf5549c71be5d83e8a9d9e388ae37890. Verified final collector correction, all 447 retained-file hashes, zero collection errors/missing proof, successful harness results, 67 suites, 2,830 unique pytest passes, all 35 skipped-case passing counterparts, and 11 passing collector tests. Cleanup and source integrity pass; production unchanged. A/B assessment unchanged. Coverage limits: curation exercised locally; runtime inputs are historical receipts, not fresh runtime validation or hosted upload."
+  },
+  "models": {
+    "requested_implementer": "gpt-6.1-sol",
+    "requested_implementer_effort": "xhigh",
+    "requested_reviewer": "gpt-6-astra",
+    "requested_reviewer_effort": "medium",
+    "effective_metadata": "unavailable"
+  },
+  "token_usage": "not exposed",
+  "artifacts": {
+    "evidence_root": "/private/tmp/iacs-query-ci-20261015",
+    "full": "verified/iacs-validation-efvudopm",
+    "retained": "curated",
+    "measurements": "measurements.json",
+    "curation": "curation-comparison.json",
+    "review": "review-final.json",
+    "bundle_evidence_root": "evidence/",
+    "full_reports_bundle": "evidence/curated/validation/iacs-validation-efvudopm",
+    "console_bundle": "evidence/console/verified-console.log",
+    "owned_archive_cleanup": "synthetic-archive-cleanup.json",
+    "patch": "task.patch",
+    "changed_files": "task-source-changes-final.json",
+    "tests": "test-inventory.json"
+  },
+  "limits": [
+    "Synthetic allocation/timing measurements include tracing and observation overhead; not RSS or database wire bytes. User response bytes are normalized model JSON, not complete HTTP wire bytes.",
+    "EXISTS may scan all presence rows. No index or schema change was made.",
+    "No new hosted upload, actionlint, browser or runtime-image rebuild was performed.",
+    "Effective model/effort metadata unavailable; requested Astra delegation was explicit."
+  ],
+  "production": {
+    "deployed": false,
+    "migrated": false,
+    "restarted": false,
+    "live_provider_calls": false
+  },
+  "git_mutations": false,
+  "blockers": []
+}

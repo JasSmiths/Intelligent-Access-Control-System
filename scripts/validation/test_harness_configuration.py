@@ -261,7 +261,7 @@ class RecoveryProfileTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 recovery_checks.pytest_arguments(invalid)
 
-    def test_ci_uses_default_full_inventory_and_uploads_nested_recovery_artifacts(self):
+    def test_ci_uses_default_full_inventory_and_uploads_curated_recovery_evidence(self):
         workflow = (ROOT / '.github/workflows/project-checks.yml').read_text()
         step = workflow.split('name: Run the same isolated locked checks as local development', 1)[1]
         step = step.split('      - name:', 1)[0]
@@ -271,7 +271,9 @@ class RecoveryProfileTests(unittest.TestCase):
         self.assertNotIn('--diagnostic', step)
         self.assertNotIn('--persistence-test', step)
         self.assertNotIn('--schema-check', step)
-        self.assertIn('iacs-evidence/*/artifacts/**', workflow)
+        self.assertIn('python3 scripts/validation/ci_evidence.py', workflow)
+        self.assertIn('path: ${{ runner.temp }}/iacs-upload-evidence', workflow)
+        self.assertNotIn('/artifacts/**', workflow)
 
 
 class FullRunLockTests(unittest.TestCase):

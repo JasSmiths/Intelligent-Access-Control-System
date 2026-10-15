@@ -52,6 +52,13 @@ jobs:
         run: >-
           python3 scripts/validation/validate.py --mode full --allow-downloads
           --evidence-root "${{ runner.temp }}/iacs-evidence"
+      - name: Select named validation evidence without test scratch
+        if: always()
+        run: >-
+          python3 scripts/validation/ci_evidence.py
+          --validation-root "${{ runner.temp }}/iacs-evidence"
+          --runtime-root "${{ runner.temp }}/iacs-runtime-pdf-evidence"
+          --output "${{ runner.temp }}/iacs-upload-evidence"
       - name: Retain commands, fingerprints and test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -59,13 +66,7 @@ jobs:
           name: isolated-contract-evidence
           if-no-files-found: warn
           retention-days: 14
-          path: |
-            ${{ runner.temp }}/iacs-evidence/*/*.json
-            ${{ runner.temp }}/iacs-evidence/*/*.log
-            ${{ runner.temp }}/iacs-evidence/*/artifacts/**
-            ${{ runner.temp }}/iacs-runtime-pdf-evidence/*/*.json
-            ${{ runner.temp }}/iacs-runtime-pdf-evidence/*/*.log
-            ${{ runner.temp }}/iacs-runtime-pdf-evidence/*/artifacts/**
+          path: ${{ runner.temp }}/iacs-upload-evidence
 
   dependency-audits:
     runs-on: ubuntu-latest

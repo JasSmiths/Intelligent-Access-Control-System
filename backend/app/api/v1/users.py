@@ -7,6 +7,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Res
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer, with_expression
 
 from app.api.dependencies import admin_user
 from app.api.v1.media import PhotoVariant, data_url_media_response
@@ -20,7 +21,11 @@ from app.services.auth import (
     hash_password_async,
     serialize_user,
 )
-from app.services.profile_photos import ProfilePhotoError, normalize_profile_photo_data_url
+from app.services.profile_photos import (
+    ProfilePhotoError,
+    normalize_profile_photo_data_url,
+    photo_reference_expression,
+)
 
 router = APIRouter()
 
@@ -110,7 +115,13 @@ async def list_users(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     include_photo: Annotated[bool, Query()] = False,
 ) -> list[UserResponse]:
-    users = (await session.scalars(select(User).order_by(User.first_name, User.last_name))).all()
+    query = select(User).options(defer(User.password_hash, raiseload=True))
+    if not include_photo:
+        query = query.options(
+            defer(User.profile_photo_data_url, raiseload=True),
+            with_expression(User.profile_photo_reference, photo_reference_expression(User.profile_photo_data_url)),
+        )
+    users = (await session.scalars(query.order_by(User.first_name, User.last_name))).all()
     return [UserResponse(**serialize_user(user, include_photo=include_photo)) for user in users]
 
 

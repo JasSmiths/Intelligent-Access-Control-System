@@ -391,6 +391,23 @@ checks. `artifacts/` holds pytest, schema, diagnostic and restore evidence.
 `source-integrity.json`, production before/after records, `owned-containers.json`
 and `cleanup.json` record preservation and resource cleanup.
 
+CI runs [ci_evidence.py](../scripts/validation/ci_evidence.py) with `if: always()`
+before uploading its new curated directory. Its explicit producer allowlist keeps
+named source/result/check, dependency, storage and cleanup reports; known command
+logs; each suite's JUnit and query measurements; named schema/restore summaries;
+and the runtime smoke report/PDF when produced. It does not recursively upload
+`artifacts/`: pytest temporary trees, generated keys, input images, raw database
+state/dumps, environments, caches and unrelated JSON/log files remain excluded.
+The restore rehearsal still creates, restores and verifies its disposable dump.
+The collector never deletes owning-test output. `collection.json` records retained
+hashes, bytes, missing reports and partial/failed runs. A claimed successful run
+missing required proof fails collection; partial failure evidence is still staged.
+Symlinks/escapes are refused, storage admission and the shared bulk lock apply,
+and an existing destination cannot be reused. Add intentional producer locations
+and collector tests together when new evidence is required. The current CI job
+does not produce browser artifacts; browser checks retain their separately scoped
+failure evidence locally. Local collector tests do not establish a hosted upload.
+
 Prerequisite, diagnostic, cleanup or production-comparison failures return
 nonzero. A failed migration prevents dependent persistence checks; schema checks
 can still assess their own scratch databases. Normal interrupts clean up only
