@@ -14,7 +14,7 @@ export function useModalClose<Args extends unknown[]>(
     const modal = ref.current;
     if (cleanupRef.current || modal?.closest('[data-closing="true"]')) return;
     const backdrop = modal?.closest<HTMLElement>(".modal-backdrop, .search-palette-backdrop, dialog");
-    if (!modal || !modal.matches('[role="dialog"], dialog') || !backdrop || !modal.getAnimations ||
+    if (!modal || !modal.matches('[role="dialog"], [role="alertdialog"], dialog') || !backdrop || !modal.getAnimations ||
         window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ||
         getComputedStyle(modal).animationName === "none" || !getComputedStyle(modal).animationName) {
       return closeRef.current(...args);

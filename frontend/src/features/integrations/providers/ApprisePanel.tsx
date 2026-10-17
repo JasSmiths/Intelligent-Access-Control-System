@@ -3,6 +3,7 @@ import React from "react";
 import { Badge } from "../../../ui/primitives";
 import { EditorDialog } from "../../../ui/EditorDialog";
 import { useEditorLifetime } from "../../../ui/useEditorLifetime";
+import { type LeaveDecision, useDiscardConfirmation, whenLeaveAllowed } from "../../../ui/useEditorDismiss";
 import { useCoordinatedRead } from "../../../lib/useCoordinatedRead";
 import { type AppriseUrlSummary, addAppriseUrl, removeAppriseUrl, integrationsApi, isMutationNotStarted, sendAppriseTestNotification, testIntegrationSettings } from "../../../api/integrations";
 import type { ProviderEditorProps } from "../editorTypes";
@@ -23,7 +24,8 @@ export function AppriseEditor(props: ProviderEditorProps) {
   const pending = React.useRef(false);
   const busy = operation !== null;
   const submitting = operation === "add";
-  const discardDraft = () => !pending.current && (!newUrl || window.confirm("Discard unsaved Apprise URL?"));
+  const confirmDiscard = useDiscardConfirmation();
+  const discardDraft = (): LeaveDecision => pending.current ? false : !newUrl || confirmDiscard("Apprise URL");
   const read = React.useCallback(async (signal: AbortSignal) => {
     setLoading(true); setReadError("");
     try { const next = await integrationsApi.getAppriseUrls({ signal }); if (!signal.aborted) setUrls(next); }
@@ -84,7 +86,7 @@ export function AppriseEditor(props: ProviderEditorProps) {
           <strong>Notification URLs</strong>
           <span>Add one destination per service. Secrets stay encrypted; only safe previews are shown here.</span>
         </div>
-        <button className="primary-button" disabled={!canManage || busy || loading || Boolean(readError)} onClick={() => { if (!adding || discardDraft()) { if (adding) setNewUrl(""); setAdding((current) => !current); } }} type="button">
+        <button className="primary-button" disabled={!canManage || busy || loading || Boolean(readError)} onClick={() => { const toggle = () => { if (pending.current) return; if (adding) setNewUrl(""); setAdding((current) => !current); }; if (!adding) toggle(); else whenLeaveAllowed(discardDraft(), toggle); }} type="button">
           <Plus size={15} /> Add New Apprise URL
         </button>
       </div>
@@ -105,7 +107,7 @@ export function AppriseEditor(props: ProviderEditorProps) {
             <small className="field-hint">For Pushover use `pover://USER_KEY@APP_TOKEN`. `pushover://USER_KEY/APP_TOKEN` is accepted too.</small>
           </label>
           <div className="apprise-add-actions">
-            <button className="secondary-button" disabled={busy} onClick={() => { if (discardDraft()) { setNewUrl(""); setAdding(false); } }} type="button">Cancel</button>
+            <button className="secondary-button" disabled={busy} onClick={() => whenLeaveAllowed(discardDraft(), () => { if (pending.current) return; setNewUrl(""); setAdding(false); })} type="button">Cancel</button>
             <button className="primary-button" disabled={!canManage || busy || loading || Boolean(readError) || !newUrl.trim()} type="submit">
               {submitting ? "Adding..." : "Add URL"}
             </button>

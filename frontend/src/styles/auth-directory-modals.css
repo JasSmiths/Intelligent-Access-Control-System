@@ -1331,6 +1331,16 @@
   font-weight: 400;
 }
 
+/* Shared in-app confirmation (ui/ConfirmDialog); long names must not overflow. */
+.confirm-dialog .gate-confirm-title > div {
+  min-width: 0;
+}
+
+.confirm-dialog .gate-confirm-title h2,
+.confirm-dialog .gate-confirm-title p {
+  overflow-wrap: anywhere;
+}
+
 .integration-modal {
   width: min(1080px, 100%);
   gap: 14px;

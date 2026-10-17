@@ -1,10 +1,10 @@
 import React from "react";
 import { X } from "lucide-react";
-import { useEditorDismissGuard } from "./useEditorDismiss";
+import { type LeaveDecision, useEditorDismissGuard, whenLeaveAllowed } from "./useEditorDismiss";
 import { useModalClose } from "./useModalClose";
 import { useModalFocus } from "./useModalFocus";
 
-export type EditorCloseGuard = () => boolean;
+export type EditorCloseGuard = () => LeaveDecision;
 type ClosePorts = { requestClose: () => void; closeAccepted: () => void | Promise<void> };
 
 export function EditorDialog({ title, description, dirty, busy, onClose, onGuardChange, tabs, className, children }: {
@@ -21,7 +21,7 @@ export function EditorDialog({ title, description, dirty, busy, onClose, onGuard
   const ref = React.useRef<HTMLDivElement>(null);
   const closeAccepted = useModalClose(ref, onClose);
   const canLeave = useEditorDismissGuard(dirty, busy, "integration changes");
-  const requestClose = React.useCallback(() => { if (canLeave()) void closeAccepted(); }, [canLeave, closeAccepted]);
+  const requestClose = React.useCallback(() => { whenLeaveAllowed(canLeave(), () => { void closeAccepted(); }); }, [canLeave, closeAccepted]);
   useModalFocus(ref, true, requestClose);
   React.useLayoutEffect(() => { onGuardChange?.(canLeave); return () => onGuardChange?.(null); }, [onGuardChange, canLeave]);
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>

@@ -407,7 +407,15 @@ changes and stale pre-mutation reads through their own lifetime and urgent refre
 
 Shared editor lifecycle helpers in [ui/](../frontend/src/ui/) protect dirty drafts,
 prevent duplicate submission or dismissal while busy, cancel owned reads and restore
-focus. OAuth placeholders and artificial integration-test progress waits have been
+focus. Client-side confirmations use the promise-based
+[`useConfirm`](../frontend/src/ui/useConfirm.tsx) and its themed
+[`ConfirmDialog`](../frontend/src/ui/ConfirmDialog.tsx) (alert dialog, focus trap,
+Escape cancels, danger and busy states); a prompt still open when its owner unmounts
+resolves as cancelled. Dirty-draft guards may therefore answer asynchronously, so
+callers act through `whenLeaveAllowed`. Native `window.confirm`, `alert` and
+`prompt` are rejected by [a source check](../frontend/src/nativeDialogs.test.ts);
+errors use inline feedback or the toast stack. These prompts are UX only and never
+replace server-side action confirmations. OAuth placeholders and artificial integration-test progress waits have been
 retired; feedback follows actual pending work. The existing ESPHome 750 ms stream
 refresh retains its timing and now fences the in-flight read result on disposal.
 Global styles are composed by [styles.css](../frontend/src/styles.css); feature

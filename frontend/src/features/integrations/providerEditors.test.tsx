@@ -8,6 +8,8 @@ import { IntegrationModal, assertManagedEditorCoverage, managedEditorKeys } from
 import { integrationDefinitions } from "./catalog";
 import { IntegrationsView } from "../../views/IntegrationsView";
 import { CameraAiProviderSettings } from "./providers/CameraAiProviderSettings";
+import type { EditorCloseGuard } from "../../ui/EditorDialog";
+import { answerConfirm, expectNoConfirm } from "../../test/confirm";
 
 const admin = { id: "synthetic-admin", role: "admin" } as UserAccount;
 const values = { home_assistant_url: "http://inert.local", unifi_protect_host: "inert-protect", openai_api_key: true, llm_provider: "openai", ollama_base_url: "http://inert-model" };
@@ -28,7 +30,7 @@ function fixture() {
   const remove = vi.spyOn(api, "delete").mockResolvedValue(undefined);
   return { get, post, patch, remove };
 }
-function mount(key: string, callbacks: { onClose?: () => void; onChanged?: () => Promise<void>; onGuardChange?: (guard: (() => boolean) | null) => void } = {}) {
+function mount(key: string, callbacks: { onClose?: () => void; onChanged?: () => Promise<void>; onGuardChange?: (guard: EditorCloseGuard | null) => void } = {}) {
   const signals = createReadSignals("first");
   const props = { definition: definition(key), currentUser: admin, initialTab: "general" as const, values, loading: false, onClose: callbacks.onClose ?? vi.fn(), onChanged: callbacks.onChanged ?? vi.fn().mockResolvedValue(undefined), onGuardChange: callbacks.onGuardChange };
   const rendered = render(<ReadSignalsContext.Provider value={signals}><IntegrationModal {...props} /></ReadSignalsContext.Provider>);
@@ -56,17 +58,19 @@ it("retains the accepted settings receipt and draft when provider activation fai
   expect(screen.queryByText("Unable to save settings")).not.toBeInTheDocument();
 });
 it.each(["home_assistant", "unifi_protect", "openai", "apprise", "esphome"])("keeps the complete %s draft through settings refresh and guards every close route", async (key) => {
-  fixture(); const close = vi.fn(); const canLeave = { current: null as (() => boolean) | null };
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  fixture(); const close = vi.fn(); const canLeave = { current: null as EditorCloseGuard | null };
   const mounted = mount(key, { onClose: close, onGuardChange: (guard) => { canLeave.current = guard; } });
   const field = await draft(key); const retained = (field as HTMLInputElement).value;
   mounted.rerender(<ReadSignalsContext.Provider value={mounted.signals}><IntegrationModal {...mounted.props} values={{ ...values, home_assistant_url: "http://refreshed.local", unifi_protect_host: "refreshed" }} /></ReadSignalsContext.Provider>);
   expect(field).toHaveValue(retained);
-  const dialog = screen.getByRole("dialog"); fireEvent.click(within(dialog).getByRole("button", { name: "Close" })); fireEvent.keyDown(document, { key: "Escape" }); fireEvent.mouseDown(dialog.parentElement!);
-  const done = within(dialog).queryByRole("button", { name: "Done" }); if (done) fireEvent.click(done);
-  expect(canLeave.current?.()).toBe(false); expect(close).not.toHaveBeenCalled(); expect(field).toHaveValue(retained);
-  expect(confirm.mock.calls.length).toBeGreaterThanOrEqual(4);
-  confirm.mockReturnValue(true); fireEvent.click(within(dialog).getByRole("button", { name: "Close" })); expect(close).toHaveBeenCalledOnce();
+  const dialog = screen.getByRole("dialog");
+  const done = within(dialog).queryByRole("button", { name: "Done" });
+  const routes = [() => fireEvent.click(within(dialog).getByRole("button", { name: "Close" })), () => fireEvent.keyDown(document, { key: "Escape" }), () => fireEvent.mouseDown(dialog.parentElement!), ...(done ? [() => fireEvent.click(done)] : [])];
+  for (const route of routes) { route(); await answerConfirm("cancel", /^Discard unsaved/); }
+  let decision: ReturnType<EditorCloseGuard> | undefined; act(() => { decision = canLeave.current?.(); });
+  expect(decision).toBeInstanceOf(Promise); await answerConfirm("cancel"); await expect(decision).resolves.toBe(false);
+  expect(close).not.toHaveBeenCalled(); expect(field).toHaveValue(retained);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Close" })); await answerConfirm("confirm", /^Discard unsaved/); await waitFor(() => expect(close).toHaveBeenCalledOnce());
 });
 it("retains a Protect draft across tab and initialTab changes, resetting only for a new account", async () => {
   fixture(); const mounted = mount("unifi_protect"); await draft("unifi_protect");
@@ -78,23 +82,23 @@ it("retains a Protect draft across tab and initialTab changes, resetting only fo
   expect(screen.getByLabelText("Console host")).toHaveValue("new-account");
 });
 it("intercepts provider switching before the dirty keyed editor is replaced", async () => {
-  fixture(); const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  fixture();
   render(<ReadSignalsContext.Provider value={createReadSignals("first")}><IntegrationsView currentUser={admin} /></ReadSignalsContext.Provider>);
   const apprise = screen.getByRole("button", { name: /^Apprise/ }); await waitFor(() => expect(apprise).toBeEnabled()); fireEvent.click(apprise); await draft("apprise");
-  fireEvent.click(screen.getByRole("button", { name: /^ESPHome/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^ESPHome/ })); await answerConfirm("cancel", "Discard unsaved integration changes?");
   expect(screen.getByRole("dialog", { name: "Apprise" })).toBeInTheDocument(); expect(screen.getByLabelText(/^Apprise URL/)).toHaveValue("inert://retained-draft");
-  confirm.mockReturnValue(true); fireEvent.click(screen.getByRole("button", { name: /^ESPHome/ })); await screen.findByRole("dialog", { name: "ESPHome" }); expect(screen.queryByLabelText(/^Apprise URL/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /^ESPHome/ })); await answerConfirm("confirm", "Discard unsaved integration changes?"); await screen.findByRole("dialog", { name: "ESPHome" }); expect(screen.queryByLabelText(/^Apprise URL/)).not.toBeInTheDocument();
 });
 it.each(["apprise", "esphome", "openai"])("blocks dismissal and duplicate writes for %s, then stops before writing after account replacement", async (key) => {
   const { post, patch } = fixture(); const confirmation = deferred<{ confirmation_token: string }>();
-  post.mockReturnValueOnce(confirmation.promise); const close = vi.fn(); const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  post.mockReturnValueOnce(confirmation.promise); const close = vi.fn();
   const mounted = mount(key, { onClose: close }); const field = await draft(key);
   const action = key === "apprise" ? "Add URL" : key === "esphome" ? "Add Device" : "Save";
   const button = screen.getByRole("button", { name: action }); fireEvent.click(button); fireEvent.click(button);
   await waitFor(() => expect(field).toBeDisabled()); const retained = (field as HTMLInputElement).value;
   fireEvent.change(field, { target: { value: "must-not-replace" } }); expect(field).toHaveValue(retained);
   fireEvent.click(screen.getByRole("button", { name: "Close" })); fireEvent.keyDown(document, { key: "Escape" }); fireEvent.mouseDown(screen.getByRole("dialog").parentElement!);
-  expect(close).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled(); expect(post).toHaveBeenCalledOnce(); expect(patch).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled(); expectNoConfirm(); expect(post).toHaveBeenCalledOnce(); expect(patch).not.toHaveBeenCalled();
   mounted.rerender(<ReadSignalsContext.Provider value={createReadSignals("second")}><IntegrationModal {...mounted.props} definition={definition("openai")} /></ReadSignalsContext.Provider>);
   await act(async () => confirmation.resolve({ confirmation_token: "old-account" }));
   expect(post).toHaveBeenCalledOnce(); expect(patch).not.toHaveBeenCalled(); expect(screen.getByLabelText(/^API key/)).toHaveValue(""); expect(screen.queryByText(/added|Settings saved/)).not.toBeInTheDocument();
@@ -158,4 +162,23 @@ it("observes an accepted provider write after disposal without publishing it int
   await act(async () => accepted.resolve({ urls: [{ index: 0, destination_id: "d".repeat(64), revision: "e".repeat(64), type: "Inert", scheme: "inert", preview: "Accepted old URL" }] }));
   expect(changed).not.toHaveBeenCalled(); expect(screen.getByLabelText(/^API key/)).toHaveValue(""); expect(screen.queryByText("Apprise URL added")).not.toBeInTheDocument();
   expect(post).toHaveBeenCalledTimes(2);
+});
+
+it("shows a read-only copy field instead of a native prompt when the clipboard rejects the LPR token", async () => {
+  fixture(); const logs = (["log", "info", "warn", "error", "debug"] as const).map((level) => vi.spyOn(console, level));
+  const writeText = vi.fn().mockRejectedValueOnce(new Error("Clipboard denied")).mockResolvedValueOnce(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  try {
+    mount("unifi_protect");
+    const generate = (await screen.findByText("Generate")).closest("button")!; // Field actions sit inside the field label. await waitFor(() => expect(generate).toBeEnabled());
+    fireEvent.click(generate);
+    fireEvent.click(screen.getByText("Copy").closest("button")!);
+    const field = await screen.findByRole("textbox", { name: "LPR webhook token (copy manually)" });
+    const token = writeText.mock.calls[0][0] as string;
+    expect(token).toMatch(/^[0-9a-f]{64}$/); expect(field).toHaveValue(token); expect(field).toHaveAttribute("readonly");
+    expect(screen.getByText("Copy unavailable")).toBeInTheDocument(); expectNoConfirm();
+    expect(logs.flatMap((spy) => spy.mock.calls).flat().some((value) => String(value).includes(token))).toBe(false);
+    fireEvent.click(screen.getByText("Copy").closest("button")!);
+    await screen.findByText("Token copied"); expect(screen.queryByRole("textbox", { name: "LPR webhook token (copy manually)" })).not.toBeInTheDocument();
+  } finally { Reflect.deleteProperty(navigator, "clipboard"); }
 });

@@ -246,7 +246,13 @@ export function App() {
       setMobileNavOpen(false);
       window.history.replaceState({}, "", "/login");
     } catch (logoutError) {
-      window.alert(logoutError instanceof Error ? logoutError.message : "Unable to log out. Please try again.");
+      setNotificationToasts((current) => [{
+        id: `logout-error-${Date.now()}`,
+        title: "Logout failed",
+        body: logoutError instanceof Error ? logoutError.message : "Unable to log out. Please try again.",
+        event_type: "logout_failed",
+        severity: "warning" as const
+      }, ...current].slice(0, 4));
     } finally {
       setLoggingOut(false);
     }

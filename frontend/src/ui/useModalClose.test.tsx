@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useModalClose } from "./useModalClose";
 import { useModalFocus } from "./useModalFocus";
 import { useEditorDismiss } from "./useEditorDismiss";
+import { answerConfirm, expectNoConfirm } from "../test/confirm";
 
 type Close = (value?: string) => void | Promise<void>;
 
@@ -127,7 +128,6 @@ it("retains the live draft and focus isolation until both exit animations finish
 });
 
 it("does not repeat a dirty-discard prompt for Escape or backdrop events during exit", async () => {
-  const confirmDiscard = vi.spyOn(window, "confirm").mockReturnValue(true);
   const onClose = vi.fn();
   function GuardedModal() {
     const ref = React.useRef<HTMLDivElement>(null);
@@ -144,12 +144,17 @@ it("does not repeat a dirty-discard prompt for Escape or backdrop events during 
   render(<GuardedModal />);
   const { modal, backdrop, card, background } = mockMotion();
   fireEvent.keyDown(modal, { key: "Escape" });
-  expect(confirmDiscard).toHaveBeenCalledExactlyOnceWith("Discard unsaved draft?");
+  expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
+  // Backdrop requests while the prompt is open do not stack a second prompt.
+  fireEvent.mouseDown(backdrop);
+  fireEvent.click(backdrop);
+  expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
+  await answerConfirm("confirm", "Discard unsaved draft?");
   fireEvent.keyDown(modal, { key: "Escape" });
   fireEvent.mouseDown(backdrop);
   fireEvent.click(backdrop);
   fireEvent.keyDown(modal, { key: "Escape" });
-  expect(confirmDiscard).toHaveBeenCalledOnce();
+  expectNoConfirm();
   expect(onClose).not.toHaveBeenCalled();
   await act(async () => { card.resolve(); background.resolve(); });
   expect(onClose).toHaveBeenCalledOnce();

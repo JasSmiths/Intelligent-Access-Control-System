@@ -17,6 +17,7 @@ import { useAccessDeviceBindings } from "../features/settings/useAccessDeviceBin
 import { ReadSignalsContext } from "../lib/readSignals";
 import type { AccessDeviceKind } from "../features/settings/accessDeviceModel";
 import { AccessDeviceEditor } from "../features/settings/AccessDeviceEditor";
+import { useConfirm } from "../ui/useConfirm";
 
 export function AccessDevicesSettingsView({
   kind,
@@ -198,13 +199,21 @@ export function AccessDevicesSettingsView({
     }
   };
 
+  const askConfirm = useConfirm();
+  const removePromptRef = React.useRef(false);
   const deleteDevice = async (device: AccessDevice) => {
     if (savingKeyRef.current || !lifetime.isCurrent()) return;
     if (!isAdmin) {
       setError("Administrator access is required to remove access devices.");
       return;
     }
-    if (!window.confirm(`Remove ${device.name}?`)) return;
+    if (removePromptRef.current) return;
+    removePromptRef.current = true;
+    let confirmed = false;
+    try { confirmed = await askConfirm({ title: `Remove ${device.name}?`, message: "This access device will be removed.", confirmLabel: "Remove", tone: "danger" }); }
+    finally { removePromptRef.current = false; }
+    // The prompt is asynchronous: re-check the single-operation fence and account lifetime.
+    if (!confirmed || savingKeyRef.current || !lifetime.isCurrent()) return;
     savingKeyRef.current = device.id; setSavingKey(device.id); setRemovingKey(device.id);
     setError(""); setMessage("");
     try {

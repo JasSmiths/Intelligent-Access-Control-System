@@ -15,6 +15,7 @@ import { RecoveryConfiguration } from "../features/missedExitRecovery/RecoveryCo
 import { PeopleView } from "./PeopleView";
 import { VehiclesView } from "./VehiclesView";
 import { SchedulesView } from "../features/schedules/SchedulesView";
+import { answerConfirm } from "../test/confirm";
 
 const admin = { id: "synthetic-admin", role: "admin" } as UserAccount;
 const person = { id: "person", first_name: "Ash", last_name: "Smith", display_name: "Ash Smith", vehicles: [], is_active: true, garage_door_entity_ids: [], home_assistant_presence_input_boolean_entity_ids: [] } as unknown as Person;
@@ -78,13 +79,15 @@ for (const kind of ["Vehicle", "Schedule"] as const) {
       if (path === "/api/v1/schedules") { if (deleted && kind === "Schedule") throw new Error("Schedule offline"); return kind === "Schedule" ? [schedule] : []; }
         return [];
     });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.spyOn(api, "post").mockResolvedValue({ confirmation_token: "inert" });
     const remove = vi.spyOn(api, "delete").mockImplementation(async () => { deleted = true; });
     compose(kind === "Vehicle" ? <VehiclesView canRefreshInformation={false} query="" /> : <SchedulesView query="" />);
     const label = kind === "Vehicle" ? "TEST123" : "Synthetic schedule";
     if (kind === "Vehicle") fireEvent.click(await screen.findByRole("button", { name: /Unassigned.*1 vehicle/ }));
-    fireEvent.click(await screen.findByRole("button", { name: `Delete ${label}` }));
+    const deleteButton = await screen.findByRole("button", { name: `Delete ${label}` });
+    fireEvent.click(deleteButton);
+    if (kind === "Vehicle") { fireEvent.click(deleteButton); expect(deleteButton).toBeDisabled(); } // A double tap opens one prompt and one deletion.
+    await answerConfirm("confirm", `Delete ${label}?`);
     await screen.findByText(`${kind} deleted, but the list could not be refreshed. Try again to reload the list.`);
     expect(screen.getByText(`${kind} deleted.`)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: `Delete ${label}` })).not.toBeInTheDocument();
@@ -186,12 +189,12 @@ for (const action of ["delete", "deactivate"] as const) {
       if (path === "/api/v1/users") { if (changed) throw new Error("Users offline"); return [user]; }
       return [];
     });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.spyOn(api, "post").mockResolvedValue({ confirmation_token: "inert" });
     const remove = vi.spyOn(api, "delete").mockImplementation(async () => { changed = true; });
     const save = vi.spyOn(api, "patch").mockImplementation(async () => { changed = true; return { ...user, is_active: false }; });
     compose(<UsersView currentUser={admin} onCurrentUserUpdated={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: action === "delete" ? "Delete Synthetic User" : "Deactivate" }));
+    if (action === "delete") await answerConfirm("confirm", "Delete Synthetic User?");
     await screen.findByText(`User ${action === "delete" ? "deleted" : "updated"}, but the list could not be refreshed. Refresh to retry the read.`);
     if (action === "delete") { expect(screen.queryByRole("button", { name: "Delete Synthetic User" })).not.toBeInTheDocument(); expect(remove).toHaveBeenCalledOnce(); }
     else { expect(screen.getByRole("button", { name: "Activate" })).toBeEnabled(); expect(save).toHaveBeenCalledOnce(); }

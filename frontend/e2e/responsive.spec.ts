@@ -582,15 +582,30 @@ test("keeps a group form draft through resize and contains/restores modal focus"
   await expect(dialog).toBeVisible();
   await expect(groupName).toHaveValue("A long access group name for responsive checks");
 
-  page.once("dialog", (confirmation) => confirmation.dismiss());
+  const discard = page.getByRole("alertdialog", { name: "Discard unsaved group changes?" });
   await page.keyboard.press("Escape");
+  await expect(discard).toBeVisible();
+  await expect(discard.getByRole("button", { name: "Keep editing" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(discard).toHaveCount(0);
   await expect(dialog).toBeVisible();
   await expect(groupName).toHaveValue("A long access group name for responsive checks");
   await expect(page.locator(".modal-backdrop")).not.toHaveAttribute("data-closing", "true");
   expect(await groupName.evaluate((element) => Boolean(element.closest("[inert]")))).toBe(false);
-  page.once("dialog", (confirmation) => confirmation.accept());
   await page.keyboard.press("Escape");
-  const exit = await sampleDialogMotion(dialog);
+  await discard.getByRole("button", { name: "Discard" }).click();
+  // Finish the prompt's own exit, then sample the editor exit that the accepted discard starts.
+  const exit = await dialog.evaluate(async (element) => {
+    const prompt = document.querySelector('[role="alertdialog"]')?.closest(".modal-backdrop");
+    for (const animation of prompt?.getAnimations({ subtree: true }) ?? []) animation.finish();
+    const container = element.closest<HTMLElement>(".modal-backdrop")!;
+    for (let attempt = 0; attempt < 100 && container.dataset.closing !== "true"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    for (const animation of container.getAnimations({ subtree: true })) {
+      animation.pause();
+      animation.currentTime = Number(animation.effect!.getTiming().duration) / 2;
+    }
+    return { opacity: Number(getComputedStyle(element).opacity) };
+  });
   expect(exit.opacity).toBeGreaterThan(0);
   expect(exit.opacity).toBeLessThan(1);
   await expectClosingDialog(page, dialog);

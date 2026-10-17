@@ -8,6 +8,7 @@ import { DirectoryPagination } from "../features/directory/DirectoryPagination";
 import { api, createActionConfirmation } from "../api/client";
 import { useScheduleDefaultPolicyOptionLabel } from "../lib/format";
 import { Badge, EmptyState, ErrorState, LoadingState } from "../ui/primitives";
+import { useConfirm } from "../ui/useConfirm";
 import type { Vehicle } from "../api/types";
 
 import { directoryGroupDefaultOpen, indexPeopleByVehicleId, ownerPeopleForVehicle, vehicleOwnerLabel, groupVehiclesByDirectoryGroup, vehicleTitle } from "../features/directory/model";
@@ -32,6 +33,9 @@ export function VehiclesView({ canRefreshInformation, query }: { canRefreshInfor
   const [selectedVehicle, setSelectedVehicle] = React.useState<Vehicle | null>(null);
   const [error, setError] = React.useState("");
   const [saved, setSaved] = React.useState("");
+  const [deletingId, setDeletingId] = React.useState("");
+  const deletingRef = React.useRef("");
+  const askConfirm = useConfirm();
   const defaultPolicyOptionLabel = useScheduleDefaultPolicyOptionLabel();
   const peopleById = React.useMemo(() => new Map(ownerOptions.items.map((person) => [person.id, person])), [ownerOptions.items]);
   const peopleByVehicleId = React.useMemo(() => indexPeopleByVehicleId(ownerOptions.items), [ownerOptions.items]);
@@ -58,27 +62,34 @@ export function VehiclesView({ canRefreshInformation, query }: { canRefreshInfor
   };
 
   const deleteVehicle = async (vehicle: Vehicle) => {
-    if (!window.confirm(`Delete ${vehicle.registration_number}?`)) return;
-    setError("");
+    // One deletion at a time, from the confirmation prompt through the refresh.
+    if (deletingRef.current) return;
+    deletingRef.current = vehicle.id; setDeletingId(vehicle.id);
     try {
-      const confirmationPayload = { vehicle_id: vehicle.id };
-      const confirmation = await createActionConfirmation("vehicle.delete", confirmationPayload, {
-        target_entity: "Vehicle",
-        target_id: vehicle.id,
-        target_label: vehicle.registration_number,
-        reason: "Delete directory vehicle"
-      });
-      await api.delete(`/api/v1/vehicles/${vehicle.id}`, {
-        confirmation_token: confirmation.confirmation_token
-      });
-    } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete vehicle");
-      return;
+      if (!(await askConfirm({ title: `Delete ${vehicle.registration_number}?`, message: "This vehicle will be permanently removed from the directory.", confirmLabel: "Delete", tone: "danger" }))) return;
+      setError("");
+      try {
+        const confirmationPayload = { vehicle_id: vehicle.id };
+        const confirmation = await createActionConfirmation("vehicle.delete", confirmationPayload, {
+          target_entity: "Vehicle",
+          target_id: vehicle.id,
+          target_label: vehicle.registration_number,
+          reason: "Delete directory vehicle"
+        });
+        await api.delete(`/api/v1/vehicles/${vehicle.id}`, {
+          confirmation_token: confirmation.confirmation_token
+        });
+      } catch (deleteError) {
+        setError(deleteError instanceof Error ? deleteError.message : "Unable to delete vehicle");
+        return;
+      }
+      directoryPage.removeAccepted(vehicle.id);
+      setSaved("Vehicle deleted.");
+      try { await refresh(); }
+      catch { setError("Vehicle deleted, but the list could not be refreshed. Try again to reload the list."); }
+    } finally {
+      deletingRef.current = ""; setDeletingId("");
     }
-    directoryPage.removeAccepted(vehicle.id);
-    setSaved("Vehicle deleted.");
-    try { await refresh(); }
-    catch { setError("Vehicle deleted, but the list could not be refreshed. Try again to reload the list."); }
   };
 
   return (
@@ -131,6 +142,7 @@ export function VehiclesView({ canRefreshInformation, query }: { canRefreshInfor
                       </button>
                       <button
                         className="icon-button danger vehicle-delete"
+                        disabled={deletingId === vehicle.id}
                         onClick={() => { deleteVehicle(vehicle).catch(() => undefined); }}
                         type="button"
                         aria-label={`Delete ${vehicle.registration_number}`}

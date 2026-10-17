@@ -1,6 +1,7 @@
 import { useModalClose } from "../../ui/useModalClose";
 import { useModalFocus } from "../../ui/useModalFocus";
 import { useEditorDismiss } from "../../ui/useEditorDismiss";
+import { useConfirm } from "../../ui/useConfirm";
 import { GitBranch, Play, Plus, Save, Split, Trash2, X } from "lucide-react";
 import React from "react";
 import type { Person, UserAccount, Vehicle } from "../../api/types";
@@ -28,6 +29,7 @@ export function AutomationsView({ currentUser }: { currentUser: UserAccount }) {
   const closeDraft = useModalClose(modalRef, () => { setDraft(null); setModal(null); });
   const dismissDraft = useEditorDismiss(closeDraft, Boolean(draft) && JSON.stringify(draft) !== baseline.current, saving, "automation changes");
   const requestClose = () => { if (saving) return; if (modal) setModal(null); else dismissDraft(); };
+  const askConfirm = useConfirm();
   useModalFocus(modalRef, Boolean(draft), requestClose);
   const { filterCounts, filteredRules, setStatusFilter, statusFilter } = useWorkflowRuleFilters(rules);
   const [togglingRuleIds, setRuleToggling] = usePendingWorkflowIds();
@@ -95,7 +97,7 @@ export function AutomationsView({ currentUser }: { currentUser: UserAccount }) {
       await closeDraft();
       return;
     }
-    if (!window.confirm(`Delete ${rule.name}?`)) return;
+    if (!(await askConfirm({ title: `Delete ${rule.name}?`, message: "This automation will be permanently deleted.", confirmLabel: "Delete", tone: "danger" }))) return;
     try {
       await workflowApi.deleteAutomationRule(rule);
       await closeDraft();

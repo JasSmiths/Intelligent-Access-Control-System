@@ -338,11 +338,21 @@ test("preserves a dirty group draft and keeps actions visible on a short phone",
   await expect(editor.getByRole("button", { name: "Cancel" })).toBeInViewport();
   await expect(editor.getByRole("button", { name: "Save Group" })).toBeInViewport();
   await page.screenshot({ path: testInfo.outputPath("group-editor-mobile-short-after.png"), fullPage: false });
-  page.once("dialog", (dialog) => dialog.dismiss());
   await editor.getByRole("button", { name: "Cancel" }).click();
+  const discard = page.getByRole("alertdialog", { name: "Discard unsaved group changes?" });
+  await expect(discard.getByRole("button", { name: "Keep editing" })).toBeFocused();
+  await expect(discard.getByRole("button", { name: "Discard" })).toBeInViewport();
+  await page.screenshot({ path: testInfo.outputPath("group-discard-confirm-mobile-short.png"), fullPage: false, animations: "disabled" });
+  await discard.getByRole("button", { name: "Keep editing" }).click();
+  await expect(discard).toHaveCount(0);
   await expect(editor.getByLabel("Group name")).toHaveValue("Draft group");
-  page.once("dialog", (dialog) => dialog.accept());
   await page.keyboard.press("Escape");
+  await expect(discard).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(discard).toHaveCount(0);
+  await expect(editor.getByLabel("Group name")).toHaveValue("Draft group");
+  await page.keyboard.press("Escape");
+  await discard.getByRole("button", { name: "Discard" }).click();
   await expect(editor).toHaveCount(0);
   expect(unexpected).toEqual([]);
 });
@@ -357,8 +367,9 @@ test("keeps Schedule actions reachable on a short phone", async ({ page }, testI
   await expect(editor.getByRole("button", { name: "Cancel" })).toBeInViewport();
   await expect(editor.getByRole("button", { name: "Create Schedule" })).toBeInViewport();
   await page.screenshot({ path: testInfo.outputPath("schedule-editor-mobile-short-after.png"), fullPage: false });
-  page.once("dialog", (dialog) => dialog.accept());
   await editor.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("alertdialog", { name: "Discard unsaved schedule changes?" }).getByRole("button", { name: "Discard" }).click();
+  await expect(editor).toHaveCount(0);
   expect(unexpected).toEqual([]);
 });
 

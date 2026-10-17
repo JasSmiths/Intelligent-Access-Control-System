@@ -5,6 +5,7 @@ const usersEventMatches = (event: RealtimeMessage) => ["user", "person"].include
 import { useModalFocus } from "../ui/useModalFocus";
 import { useModalClose } from "../ui/useModalClose";
 import { useEditorDismiss } from "../ui/useEditorDismiss";
+import { useConfirm } from "../ui/useConfirm";
 import { Camera, Key, MessageCircle, Smartphone, Trash2, UserPlus, UserRound, X } from "lucide-react";
 import React from "react";
 import { lookupPeople } from "../api/directory";
@@ -72,10 +73,11 @@ export function UsersView({
     setPendingUserIds(new Set(pendingUserIdsRef.current));
   };
 
+  const askConfirm = useConfirm();
   const deleteUser = async (user: UserAccount) => {
     if (!beginUserAction(user.id)) return;
     try {
-    if (!window.confirm(`Delete ${displayUserName(user)}?`)) return;
+    if (!(await askConfirm({ title: `Delete ${displayUserName(user)}?`, message: "This user account will be permanently deleted.", confirmLabel: "Delete", tone: "danger" }))) return;
     setError("");
     try {
       const confirmation = await createActionConfirmation("user.delete", { user_id: user.id }, {

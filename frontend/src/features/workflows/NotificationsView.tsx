@@ -1,7 +1,8 @@
 import { useSchedules } from "../schedules/reads";
 import { useModalClose } from "../../ui/useModalClose";
 import { useModalFocus } from "../../ui/useModalFocus";
-import { useEditorDismiss } from "../../ui/useEditorDismiss";
+import { useDiscardConfirmation, useEditorDismiss } from "../../ui/useEditorDismiss";
+import { useConfirm } from "../../ui/useConfirm";
 import { Bell, Plus, Split, X } from "lucide-react";
 import React from "react";
 import { NotificationRunHistory } from "./NotificationRunHistory";
@@ -32,7 +33,16 @@ export function NotificationsView({ currentUser }: { currentUser: UserAccount })
   const baseline = React.useRef("");
   const closeDraft = useModalClose(modalRef, () => { setDraft(null); setModal(null); });
   const dismissDraft = useEditorDismiss(closeDraft, Boolean(draft) && JSON.stringify(draft) !== baseline.current, saving, "notification changes");
-  const requestClose = () => { if (saving) return; if (modal) { if (modal === "action" && selectorDirty && !window.confirm("Discard notification action selection?")) return; setModal(null); setSelectorDirty(false); } else dismissDraft(); };
+  const askConfirm = useConfirm();
+  const confirmDiscard = useDiscardConfirmation();
+  const closeSelector = () => { setModal(null); setSelectorDirty(false); };
+  const requestClose = () => {
+    if (saving) return;
+    if (!modal) { dismissDraft(); return; }
+    if (modal !== "action" || !selectorDirty) { closeSelector(); return; }
+    const decision = confirmDiscard("notification action selection");
+    if (decision) void decision.then((allowed) => { if (allowed) closeSelector(); });
+  };
   useModalFocus(modalRef, Boolean(draft), requestClose);
   const [testing, setTesting] = React.useState(false);
   const { filterCounts, filteredRules, setStatusFilter, statusFilter } = useWorkflowRuleFilters(rules);
@@ -86,7 +96,7 @@ export function NotificationsView({ currentUser }: { currentUser: UserAccount })
       await closeDraft();
       return;
     }
-    if (!window.confirm(`Delete ${rule.name}?`)) return;
+    if (!(await askConfirm({ title: `Delete ${rule.name}?`, message: "This notification workflow will be permanently deleted.", confirmLabel: "Delete", tone: "danger" }))) return;
     setFeedback(null);
     try {
       await workflowApi.deleteNotificationRule(rule);

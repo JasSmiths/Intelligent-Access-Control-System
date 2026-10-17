@@ -6,6 +6,8 @@ import { useCoordinatedRead } from "../../../lib/useCoordinatedRead";
 import { Badge, type BadgeTone } from "../../../ui/primitives";
 import { EditorDialog } from "../../../ui/EditorDialog";
 import { useEditorLifetime } from "../../../ui/useEditorLifetime";
+import { type LeaveDecision, useDiscardConfirmation, whenLeaveAllowed } from "../../../ui/useEditorDismiss";
+import { useConfirm } from "../../../ui/useConfirm";
 import type { AccessDeviceStreamDeviceStatus, IntegrationStatus } from "../../../api/types";
 import { addESPHomeDevice, type ESPHomeDeviceSummary, integrationsApi, isMutationNotStarted, removeESPHomeDevice, testESPHomeDevice, testIntegrationSettings } from "../../../api/integrations";
 import type { ProviderEditorProps } from "../editorTypes";
@@ -45,7 +47,10 @@ export function ESPHomeEditor(props: ProviderEditorProps) {
   const busy = operation !== null;
   const submitting = operation === "add";
   const dirty = JSON.stringify(form) !== JSON.stringify(emptyForm);
-  const discardDraft = () => !pending.current && (!dirty || window.confirm("Discard unsaved ESPHome device?"));
+  const askConfirm = useConfirm();
+  const confirmDiscard = useDiscardConfirmation();
+  const removePrompt = React.useRef(false);
+  const discardDraft = (): LeaveDecision => pending.current ? false : !dirty || confirmDiscard("ESPHome device");
   const resetForm = () => setForm(emptyForm);
   const updateForm = (key: keyof typeof form, value: string) => { if (!pending.current) setForm((current) => ({ ...current, [key]: value })); };
   const read = React.useCallback(async (signal: AbortSignal) => {
@@ -88,7 +93,13 @@ export function ESPHomeEditor(props: ProviderEditorProps) {
     } catch (error) { fail(error, "Unable to add ESPHome device."); } finally { finish(); }
   };
   const removeDevice = async (device: ESPHomeDeviceSummary) => {
-    if (pending.current || !canManage || !lifetime.isCurrent() || !window.confirm(`Remove ESPHome device ${device.name}?`) || !begin("remove")) return;
+    if (pending.current || !canManage || !lifetime.isCurrent() || removePrompt.current) return;
+    removePrompt.current = true;
+    let confirmed = false;
+    try { confirmed = await askConfirm({ title: `Remove ESPHome device ${device.name}?`, message: "This ESPHome device will be removed from IACS.", confirmLabel: "Remove", tone: "danger" }); }
+    finally { removePrompt.current = false; }
+    // begin() re-checks the pending fence and editor lifetime after the asynchronous prompt.
+    if (!confirmed || !begin("remove")) return;
     try {
       const result = await removeESPHomeDevice(device, lifetime.isCurrent);
       if (isMutationNotStarted(result) || !lifetime.isCurrent()) return;
@@ -136,7 +147,7 @@ export function ESPHomeEditor(props: ProviderEditorProps) {
           <span>Add one native API controller per gate or garage-door device. Cover mappings live under Settings Gates and Garage Doors.</span>
         </div>
         <div className="esphome-header-actions">
-          <button className="primary-button" disabled={!canManage || busy || loading || Boolean(readError)} onClick={() => { if (!adding || discardDraft()) { resetForm(); setAdding((current) => !current); } }} type="button">
+          <button className="primary-button" disabled={!canManage || busy || loading || Boolean(readError)} onClick={() => { const toggle = () => { if (pending.current) return; resetForm(); setAdding((current) => !current); }; if (!adding) toggle(); else whenLeaveAllowed(discardDraft(), toggle); }} type="button">
             <Plus size={15} /> Add New ESPHome Device
           </button>
         </div>
@@ -184,7 +195,7 @@ export function ESPHomeEditor(props: ProviderEditorProps) {
             </label>
           </div>
           <div className="apprise-add-actions">
-            <button className="secondary-button" disabled={busy} onClick={() => { if (discardDraft()) { resetForm(); setAdding(false); } }} type="button">Cancel</button>
+            <button className="secondary-button" disabled={busy} onClick={() => whenLeaveAllowed(discardDraft(), () => { if (pending.current) return; resetForm(); setAdding(false); })} type="button">Cancel</button>
             <button className="primary-button" disabled={!canManage || busy || loading || Boolean(readError) || !form.name.trim() || !form.host.trim()} onClick={addDevice} type="button">
               {submitting ? "Adding..." : "Add Device"}
             </button>

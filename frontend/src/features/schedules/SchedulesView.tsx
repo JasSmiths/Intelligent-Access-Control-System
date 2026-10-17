@@ -8,6 +8,7 @@ import type { Schedule } from "../../api/types";
 import { matches, scheduleDays } from "../../lib/format";
 import { useSettings } from "../../lib/settings";
 import { Badge, EmptyState, ErrorState, LoadingState } from "../../ui/primitives";
+import { useConfirm } from "../../ui/useConfirm";
 import { scheduleDayHasBlocks, scheduleHasBlocks, scheduleIntervalLabels, scheduleSummary } from "./model";
 import { ScheduleEditor } from "./ScheduleEditor";
 
@@ -50,8 +51,9 @@ export function SchedulesView({ query }: { query: string }) {
     setSelectedSchedule(null);
   };
 
+  const askConfirm = useConfirm();
   const deleteSchedule = async (schedule: Schedule) => {
-    if (!window.confirm(`Delete ${schedule.name}?`)) return;
+    if (!(await askConfirm({ title: `Delete ${schedule.name}?`, message: "This schedule will be permanently deleted.", confirmLabel: "Delete", tone: "danger" }))) return;
     setError("");
     try {
       await schedulesApi.delete(schedule);

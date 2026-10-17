@@ -8,6 +8,8 @@ import React from "react";
 import { notificationChannelMeta } from "../lib/notifications";
 import { useSettings } from "../lib/settings";
 import { Badge, Toolbar } from "../ui/primitives";
+import type { EditorCloseGuard } from "../ui/EditorDialog";
+import { whenLeaveAllowed } from "../ui/useEditorDismiss";
 import type { IntegrationStatus, UnifiProtectCamera, UserAccount } from "../api/types";
 import {
   integrationsApi,
@@ -78,8 +80,8 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
     const message = signal.message;
     if (message.type === "home_assistant.status") setHomeAssistantStatus((current) => current ? { ...current, ...message.payload } : current);
   }), [signals]);
-  const editorLeaveGuard = React.useRef<(() => boolean) | null>(null);
-  const setEditorLeaveGuard = React.useCallback((guard: (() => boolean) | null) => { editorLeaveGuard.current = guard; }, []);
+  const editorLeaveGuard = React.useRef<EditorCloseGuard | null>(null);
+  const setEditorLeaveGuard = React.useCallback((guard: EditorCloseGuard | null) => { editorLeaveGuard.current = guard; }, []);
   const refreshProviderCard = React.useCallback(async (provider: string) => {
     // Accepted writes refresh only their own card and saved settings. Read errors
     // remain in those owners and cannot reverse a provider mutation receipt.
@@ -127,8 +129,8 @@ export function IntegrationsView({ currentUser }: { currentUser: UserAccount }) 
                       className="integration-tile-main"
                       disabled={loading || Boolean(settingsError)}
                       onClick={() => {
-                        if (active?.key !== tile.key && editorLeaveGuard.current && !editorLeaveGuard.current()) return;
-                        setActive(tile);
+                        if (active?.key === tile.key || !editorLeaveGuard.current) { setActive(tile); return; }
+                        whenLeaveAllowed(editorLeaveGuard.current(), () => setActive(tile));
                       }}
                       type="button"
                     >

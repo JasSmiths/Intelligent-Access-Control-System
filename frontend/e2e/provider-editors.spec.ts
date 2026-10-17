@@ -60,9 +60,15 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await fixture.refresh(); await expect.poll(() => fixture.settingsReads).toBeGreaterThan(before);
       await expect(modal.getByLabel(provider.field)).toHaveValue(provider.draft);
       if (provider.key === "unifi_protect") { await modal.getByRole("tab", { name: "Exposes" }).click(); await modal.getByRole("tab", { name: "General" }).click(); await expect(modal.getByLabel(provider.field)).toHaveValue(provider.draft); }
-      let prompts = 0; page.on("dialog", async (dialog) => { prompts += 1; await dialog.dismiss(); });
-      await page.keyboard.press("Escape"); await modal.getByRole("button", { name: "Close", exact: true }).click();
-      await expect(modal).toBeVisible(); await expect(modal.getByLabel(provider.field)).toHaveValue(provider.draft); expect(prompts).toBe(2);
+      let nativePrompts = 0; page.on("dialog", async (dialog) => { nativePrompts += 1; await dialog.dismiss(); });
+      const discard = page.getByRole("alertdialog", { name: "Discard unsaved integration changes?" });
+      await page.keyboard.press("Escape"); await expect(discard).toBeVisible(); await expect(discard.getByRole("button", { name: "Keep editing" })).toBeFocused();
+      await discard.getByRole("button", { name: "Keep editing" }).click(); await expect(discard).toHaveCount(0);
+      await modal.getByRole("button", { name: "Close", exact: true }).click(); await expect(discard).toBeVisible();
+      const promptBounds = await discard.boundingBox(); expect(promptBounds!.x).toBeGreaterThanOrEqual(0); expect(promptBounds!.x + promptBounds!.width).toBeLessThanOrEqual(viewport.width + 1);
+      if (viewport.width === 900 || viewport.width === 390) await page.screenshot({ path: testInfo.outputPath(`provider-${provider.key}-${viewport.width}-discard-confirm.png`), fullPage: false, animations: "disabled" });
+      await page.keyboard.press("Escape"); await expect(discard).toHaveCount(0);
+      await expect(modal).toBeVisible(); await expect(modal.getByLabel(provider.field)).toHaveValue(provider.draft); expect(nativePrompts).toBe(0);
       const bounds = await modal.boundingBox(); expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width + 1); expect(bounds!.height).toBeLessThanOrEqual(viewport.height + 1);
       const action = modal.getByRole("button", { name: /^(Save|Done)$/, exact: true }).last(); await action.scrollIntoViewIfNeeded(); await expect(action).toBeInViewport();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
@@ -79,7 +85,7 @@ for (const provider of providers) {
     await expect.poll(() => fixture.confirmations).toBe(1);
     await expect(modal.getByLabel(provider.field)).toBeDisabled();
     let prompts = 0; page.on("dialog", async (dialog) => { prompts += 1; await dialog.dismiss(); });
-    await page.keyboard.press("Escape"); await modal.getByRole("button", { name: "Close", exact: true }).click(); await expect(modal).toBeVisible(); expect(prompts).toBe(0);
+    await page.keyboard.press("Escape"); await modal.getByRole("button", { name: "Close", exact: true }).click(); await expect(modal).toBeVisible(); expect(prompts).toBe(0); await expect(page.getByRole("alertdialog")).toHaveCount(0);
     fixture.release();
     if (provider.key === "apprise") await expect(modal.getByText("Apprise URL added", { exact: true })).toBeVisible();
     else if (provider.key === "esphome") await expect(modal.getByText("ESPHome device added. Waiting for native stream...", { exact: true })).toBeVisible();

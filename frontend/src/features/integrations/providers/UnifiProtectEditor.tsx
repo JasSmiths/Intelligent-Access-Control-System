@@ -19,6 +19,7 @@ export function UnifiProtectEditor(props: ProviderEditorProps) {
   const [cameras, setCameras] = React.useState<UnifiProtectCamera[]>([]);
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
+  const [manualCopy, setManualCopy] = React.useState(false);
   const read = React.useCallback(async (signal: AbortSignal) => {
     setLoading(true); setError("");
     try {
@@ -38,13 +39,20 @@ export function UnifiProtectEditor(props: ProviderEditorProps) {
     if (!window.crypto?.getRandomValues) { editor.setFeedback({ tone: "error", title: "Token generation unavailable", detail: "This browser does not expose secure random generation." }); return; }
     const bytes = new Uint8Array(32); window.crypto.getRandomValues(bytes);
     editor.update("lpr_webhook_token", Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""));
+    setManualCopy(false);
     editor.setFeedback({ tone: "success", title: "Token generated", detail: "Copy this token into UniFi Protect before saving or closing this modal." });
   };
   const copy = async () => {
     const token = editor.form.lpr_webhook_token;
     if (!token || editor.busy || !editor.canManage) return;
-    try { await navigator.clipboard?.writeText(token); if (editor.lifetime.isCurrent()) editor.setFeedback({ tone: "success", title: "Token copied", detail: "Paste it into UniFi Protect as the X-IACS-LPR-Token header value." }); }
-    catch { if (editor.lifetime.isCurrent()) window.prompt("LPR webhook token", token); }
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(token);
+      if (editor.lifetime.isCurrent()) { setManualCopy(false); editor.setFeedback({ tone: "success", title: "Token copied", detail: "Paste it into UniFi Protect as the X-IACS-LPR-Token header value." }); }
+    } catch {
+      // Never log the token; show it in a read-only field the user can select and copy.
+      if (editor.lifetime.isCurrent()) { setManualCopy(true); editor.setFeedback({ tone: "error", title: "Copy unavailable", detail: "Select the token below and copy it manually." }); }
+    }
   };
   const tabs = <div className="integration-modal-tabs" role="tablist" aria-label={`${props.definition.title} settings sections`}>
     <button aria-selected={tab === "general"} className={tab === "general" ? "integration-modal-tab active" : "integration-modal-tab"} onClick={() => setTab("general")} role="tab" type="button"><Settings size={15} /> General</button>
@@ -57,6 +65,10 @@ export function UnifiProtectEditor(props: ProviderEditorProps) {
           {editor.form.lpr_webhook_token ? <button className="secondary-button compact" disabled={!editor.canManage || editor.busy} onClick={() => void copy()} type="button"><Copy size={14} /> Copy</button> : null}
           <button className="secondary-button compact" disabled={!editor.canManage || editor.busy} onClick={generate} type="button"><Key size={14} /> Generate</button>
         </> : undefined} />
+        {manualCopy && editor.form.lpr_webhook_token ? <label className="field">
+          <span>LPR webhook token</span>
+          <input aria-label="LPR webhook token (copy manually)" autoFocus onFocus={(event) => event.currentTarget.select()} readOnly spellCheck={false} type="text" value={editor.form.lpr_webhook_token} />
+        </label> : null}
         {error ? <div className="auth-error inline-error">{error}</div> : null}
         {editor.feedback ? <IntegrationFeedbackPanel feedback={editor.feedback} /> : null}
         <div className="modal-actions"><button className="secondary-button" disabled={!editor.canManage || editor.busy || props.loading} onClick={editor.test} type="button">{editor.operation === "test" ? "Testing..." : "Test Connection"}</button><button className="primary-button" disabled={!editor.canManage || editor.busy || props.loading} type="submit">{editor.operation === "save" ? "Saving..." : "Save"}</button></div>
