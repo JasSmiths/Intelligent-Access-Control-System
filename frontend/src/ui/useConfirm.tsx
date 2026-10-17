@@ -8,6 +8,9 @@ export type Confirm = (options: ConfirmOptions) => Promise<boolean>;
 type ConfirmRequest = { id: number; options: ConfirmOptions; settle: (confirmed: boolean) => void; fail: (error: unknown) => void };
 
 // One app-wide host owns the in-app confirmation surface; requests queue so only one is visible.
+// The host exists only while a request is queued. Modals isolate the body children present when
+// they open (useModalFocus marks them inert), so a host left mounted between prompts would be
+// inert under the next editor and its buttons would ignore clicks. A fresh host is appended last.
 let queue: readonly ConfirmRequest[] = [];
 let nextId = 1;
 let host: { root: Root; container: HTMLElement } | null = null;
@@ -23,8 +26,15 @@ function ConfirmHost() {
   return <ConfirmDialog key={current.id} {...current.options} onResult={current.settle} onActionError={current.fail} />;
 }
 
+function releaseHost() {
+  const current = host;
+  host = null;
+  if (current) { current.root.unmount(); current.container.remove(); }
+}
+
 function ensureHost() {
   if (host?.container.isConnected) return;
+  releaseHost();
   const container = document.createElement("div");
   container.dataset.confirmHost = "";
   document.body.appendChild(container);
@@ -45,6 +55,11 @@ function request(options: ConfirmOptions, owner?: Set<ConfirmRequest>) {
       if (!queue.includes(item)) return false;
       owner?.delete(item);
       publish(queue.filter((candidate) => candidate !== item));
+      if (!queue.length) {
+        // Unmount after the settling event or effect finishes, unless a new request arrived meanwhile.
+        const idle = host;
+        queueMicrotask(() => { if (!queue.length && host === idle) releaseHost(); });
+      }
       return true;
     };
     owner?.add(entry);
@@ -70,7 +85,5 @@ export function useConfirm(): Confirm {
 /** Cancels every pending confirmation and unmounts the host. Used by test cleanup. */
 export function disposeConfirmHost() {
   for (const entry of [...queue]) entry.settle(false);
-  const current = host;
-  host = null;
-  if (current) { current.root.unmount(); current.container.remove(); }
+  releaseHost();
 }
