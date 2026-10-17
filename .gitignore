@@ -23,3 +23,6 @@ logs/
 # Host-specific release pins and bind mounts; never portable deployment defaults.
 docker-compose.override.yml
 .codex/config.toml
+
+# Review bundles are handoff artifacts, kept outside the repository.
+/*.zip
