@@ -9,6 +9,9 @@ import re
 
 
 PERSISTENCE_TESTS = [
+    "scripts/validation/test_idle_background_work.py",
+    "scripts/validation/test_idle_background_upgrade.py",
+    "scripts/validation/test_idle_query_efficiency.py",
     "scripts/validation/test_query_efficiency.py",
     "scripts/validation/test_historical_discovery_upgrade.py",
     "scripts/validation/test_historical_discovery_persistence.py",

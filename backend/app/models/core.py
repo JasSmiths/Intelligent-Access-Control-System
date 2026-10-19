@@ -694,6 +694,17 @@ class AutomationRun(Base, TimestampMixin):
             "id",
             postgresql_where=text("recovery_version = 1 AND status IN ('queued', 'processing')"),
         ),
+        Index(
+            "ix_automation_run_pending_audit",
+            "finished_at",
+            "id",
+            postgresql_where=text("completion_audit_pending IS TRUE"),
+        ),
+        CheckConstraint(
+            "NOT completion_audit_pending OR (recovery_version IS NOT DISTINCT FROM 1 "
+            "AND status IN ('success', 'failed', 'skipped', 'review_required'))",
+            name="ck_automation_run_pending_audit_terminal",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -729,6 +740,10 @@ class AutomationRun(Base, TimestampMixin):
     claim_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     action_plan: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB(none_as_null=True))
     review_reason: Mapped[str | None] = mapped_column(String(120))
+
+    completion_audit_pending: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
 
     rule: Mapped[AutomationRule | None] = relationship(back_populates="runs")
 
@@ -1594,4 +1609,5 @@ class MissedExitRecoveryAttempt(Base, TimestampMixin):
 
 Index("ix_lpr_ingest_observing", LprIngestEvent.observation_state, LprIngestEvent.capture_until, LprIngestEvent.id)
 Index("ix_lpr_ingest_ready_order", LprIngestEvent.status, LprIngestEvent.ready_ordinal)
+Index("ix_lpr_ingest_observation_ready", LprIngestEvent.observation_state, LprIngestEvent.ready_ordinal)
 Index("ix_lpr_ingest_window", LprIngestEvent.window_id, LprIngestEvent.id)

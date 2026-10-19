@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import String, cast, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -790,10 +790,15 @@ class AutomationService:
     async def _account_completion(
         self, session: AsyncSession, run: AutomationRun, rule: AutomationRule | None
     ) -> bool:
-        if run.recovery_version != 1 or run.status in {"queued", "processing"}:
+        if (
+            run.recovery_version != 1
+            or run.status in {"queued", "processing"}
+            or not run.completion_audit_pending
+        ):
             return False
         audit_id = uuid.uuid5(run.id, "completion-audit")
         if await session.get(AuditLog, audit_id) is not None:
+            run.completion_audit_pending = False
             return False
         error = next(
             (
@@ -834,35 +839,16 @@ class AutomationService:
             level="error" if run.status in {"failed", "review_required"} else "info",
         )
         audit.id = audit_id
+        run.completion_audit_pending = False
         await session.flush()
         return True
 
     async def recover_completion_audits(self) -> None:
         async with AsyncSessionLocal() as session:
-            accounted = (
-                select(AuditLog.id)
-                .where(
-                    AuditLog.category == TELEMETRY_CATEGORY_AUTOMATION,
-                    AuditLog.action.in_(
-                        [
-                            "automation_rule.success",
-                            "automation_rule.skipped",
-                            "automation_rule.failed",
-                            "automation_rule.review_required",
-                        ]
-                    ),
-                    AuditLog.metadata_["run_id"].astext == cast(AutomationRun.id, String),
-                )
-                .exists()
-            )
             identities = (
                 await session.scalars(
                     select(AutomationRun.id)
-                    .where(
-                        AutomationRun.recovery_version == 1,
-                        AutomationRun.status.not_in(["queued", "processing"]),
-                        ~accounted,
-                    )
+                    .where(AutomationRun.completion_audit_pending.is_(True))
                     .order_by(AutomationRun.finished_at, AutomationRun.id)
                     .limit(20)
                 )

@@ -617,6 +617,7 @@ class AutomationRunStore:
         row: AutomationRun, status: str, now: datetime, reason: str | None = None
     ) -> None:
         row.status, row.finished_at = status, now
+        row.completion_audit_pending = row.recovery_version == 1
         row.claim_token = row.lease_expires_at = None
         if reason:
             row.review_reason, row.error = reason, reason

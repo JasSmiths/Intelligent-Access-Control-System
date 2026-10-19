@@ -491,6 +491,9 @@ class AccessEventService:
     async def _process_boundary(self, coordinator: CoordinatorClaim) -> bool:
         async with asyncio.timeout(90):
             self._last_heartbeat_at = datetime.now(tz=UTC)
+            if not await self._pipeline.has_pending_work(coordinator):
+                self._last_processed_at = datetime.now(tz=UTC)
+                return False
             self._runtime = await get_runtime_config()
             boundary = await self._pipeline.boundary(coordinator)
             ingest = None

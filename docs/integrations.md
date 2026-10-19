@@ -421,6 +421,21 @@ database can lack receipts for later physical effects, so a matching source/imag
 and backup still require uncertainty review before normal workers resume. The
 isolated fixture and restore checks do not authorize deployment or live sends.
 
+The idle-worker migration `20261019_0019` and backend must be deployed together
+under separate production authorization, with the old worker stopped before upgrade:
+old code cannot create the new terminal accounting checkpoint. Preserve a verified
+matching pre-upgrade database/image recovery pair. The downgrade deliberately refuses
+to discard accounting state; recovery requires that matching restore and uncertainty
+review. The migration only backfills missing completion receipts and adds indexes;
+it imports no application services and dispatches no work. Once accounting commits,
+an authorized audit purge cannot recreate the receipt or increment counters again.
+
+After an authorized deployment, check health and compare three quiet 60-second CPU
+and database samples. The operational target is PostgreSQL below 5% of one core and
+idle coordinator writes limited to acquisition, release and lease renewal. Investigate
+a missed target before declaring the CPU issue resolved; workload and host conditions
+can change the result. Access response deadlines and the 500 ms fallback remain intact.
+
 Requested mobile snapshots currently have a boolean attachment request and no
 explicit optionality contract. A capture failure continues to fail that delivery;
 choosing text-only fallback remains a product decision. Existing optional public

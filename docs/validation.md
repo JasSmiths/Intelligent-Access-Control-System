@@ -882,6 +882,32 @@ scanned work, a general speedup, process RSS or PostgreSQL memory bounds.
 
 ### Composed core checkpoints
 
+The mandatory [idle worker suite](../scripts/validation/test_idle_background_work.py)
+checks terminal accounting, rollback/retry, concurrent callers, deterministic receipts,
+deleted rules, legacy exclusion and audit purge; it also drives empty LPR boundaries,
+local and fallback wakeups, arrivals during the probe, retained flush/preparing state,
+debounce expiry, terminal-prefix advancement, lease takeover and cancellation/shutdown.
+The existing [automation dispatch suite](../scripts/validation/test_automation_dispatch.py)
+proves audit failure recovery cannot replay the provider action. The
+[upgrade suite](../scripts/validation/test_idle_background_upgrade.py) checks fresh and
+populated migration, null/duplicate/unrelated receipt metadata, preserved counters and
+execution checkpoints, transactional migration failure and the restore-required downgrade.
+
+The [idle cost suite](../scripts/validation/test_idle_query_efficiency.py) enforces
+one application SELECT per empty LPR pass, no UPDATE or SELECT FOR UPDATE, and no
+payload hydration. Empty audit discovery reads no audit history. Custom and generic
+prepared plans must use the pending-audit partial index and indexed LPR existence
+checks. Fixtures compare 1,000/4,000 and 100,000/400,000 runs/audits with empty and
+nonempty pending queues, plus 1,000/100,000 handled LPR ingests and completed windows. Actual worker queries,
+equivalent outputs, plan rows/buffers, repeated timings and Python allocation peaks
+are retained in each suite's `query-efficiency.json`. Old discovery has a 750 ms
+statement timeout; timeouts remain evidence. Correctness and bounded database work
+are gates; timings are not. Python allocations exclude PostgreSQL memory and process
+RSS. Synthetic measurements do not establish production CPU savings.
+The same fixture executes the migration's exact backfill SQL at both scales and
+requires one pass over completion receipts, avoiding a repeated materialized-history
+scan when the receipt set exceeds PostgreSQL's working memory.
+
 The [actual pipeline suite](../scripts/validation/test_access_pipeline.py) drives
 persisted intake, coordinator claims and window execution. Its blocked visual
 completion and blocked vehicle-information fixtures require a subsequent core

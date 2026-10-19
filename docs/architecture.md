@@ -70,6 +70,12 @@ owner explicitly; vendor modules never construct business services.
    fenced coordinator consumes ready identities in durable receipt order. Window
    summaries, complete member associations and explainable suppression commit
    together; no RAM queue or debounce window establishes authority.
+   Before configuration or locked processing, `AccessPipelineStore.has_pending_work`
+   checks the current coordinator token/epoch/lease, retained boundary checkpoints,
+   ready ordinals beyond the handled cursor and open debounce windows in one compact
+   SELECT. Empty passes perform no writes or row locks. The probe grants no mutation
+   authority: existing fenced owners recheck all work. Local wake hints, the 500 ms
+   fallback poll, 10-second renewal and debounce deadlines remain unchanged.
    [Pure candidate ranking](../backend/app/services/access/plate_matching.py)
    preserves exact/fuzzy priority. The worker queries normalized active exact
    candidates through a partial index before loading registrations for fuzzy
@@ -544,6 +550,18 @@ trigger producers and its scheduler; it has no realtime subscription. The
 notification listener treats `notification.trigger` only as a wake hint. Visitor
 realtime messages cannot reserve work; pure workflow mappers remain available to
 the durable producers.
+
+Automation terminal transitions atomically set the internal
+`completion_audit_pending` checkpoint. Under the existing rule-then-run lock order,
+completion accounting creates the deterministic audit, increments rule counters
+and clears the checkpoint in one transaction. A failed transaction leaves it pending;
+an existing deterministic receipt clears it without incrementing again. Accounted
+runs remain accounted after an authorized audit purge. Recovery reads at most 20
+pending identities ordered by `finished_at, id`, using the partial index and literal
+`IS TRUE` predicate, with no repeated audit-history join. The database constraint
+restricts pending accounting to terminal recovery-version-1 runs; legacy runs remain
+historical. The forward migration recognizes existing completion receipts once using
+their category, action and run-ID metadata without dispatching work.
 
 [The exporter](../backend/app/services/workflows/export_contracts.py) derives
 [static frontend types and defaults](../frontend/src/api/generated/workflows.ts).

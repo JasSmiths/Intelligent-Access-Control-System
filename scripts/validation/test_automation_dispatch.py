@@ -229,11 +229,13 @@ async def test_audit_failure_after_external_success_recovers_audit_without_repla
     with pytest.raises(RuntimeError, match="synthetic audit failure"):
         await service.dispatcher.run_once(identity)
     assert (await service.run_store.get(identity)).action_plan[0]["state"] == "succeeded" and len(calls) == 1
+    assert (await service.run_store.get(identity)).completion_audit_pending
     monkeypatch.setattr(automations, "write_audit_log", original)
     await service.recover_completion_audits()
     await service.recover_completion_audits()
     assert len(calls) == 1
     async with AsyncSessionLocal() as session:
+        assert not (await session.get(AutomationRun, identity)).completion_audit_pending
         assert len((await session.scalars(select(AuditLog))).all()) == 1
 
 

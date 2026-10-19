@@ -319,6 +319,53 @@ class AccessPipelineStore:
             row.lease_token, row.lease_until = None, None
             await session.commit()
 
+    async def has_pending_work(self, claim: CoordinatorClaim) -> bool:
+        """One read-only idle probe; any work still enters the locked boundary path.
+
+        This snapshot grants no mutation authority. Arrival after the snapshot is
+        observed by the wake hint or the unchanged fallback poll; all processing
+        and lease checks retain their existing locked owners.
+        """
+        ready = (
+            select(LprIngestEvent.ready_ordinal)
+            .where(
+                LprIngestEvent.observation_state == "ready",
+                LprIngestEvent.ready_ordinal > LprCoordinatorState.handled_ready_ordinal,
+            )
+            .order_by(LprIngestEvent.ready_ordinal)
+            .limit(1)
+            .correlate(LprCoordinatorState)
+            .scalar_subquery()
+            .is_not(None)
+        )
+        # Plain EXISTS can choose a sequential scan for a correlated cursor or
+        # generic state parameter, expecting an early match. Ordered one-row
+        # lookups retain indexed bounds even when all retained history is handled.
+        windows = (
+            select(LprDebounceWindow.open_ordinal)
+            .where(LprDebounceWindow.state == "open")
+            .order_by(LprDebounceWindow.source, LprDebounceWindow.open_ordinal)
+            .limit(1)
+            .scalar_subquery()
+            .is_not(None)
+        )
+        async with access_session(self.session_factory) as session:
+            result = (await session.execute(
+                select(LprCoordinatorState, func.clock_timestamp(), ready, windows)
+                .where(LprCoordinatorState.id == 1)
+            )).one_or_none()
+            if result is None:
+                raise PipelineLeaseLost("coordinator_missing")
+            row, now, has_ready, has_windows = result
+            if not isinstance(now, datetime):
+                raise PipelineLeaseLost("database_clock_unavailable")
+            _check_coordinator(row, claim, now)
+            retained_boundary = any(value is not None for value in (
+                row.boundary_phase, row.boundary_ingest_id, row.finalizing_window_id,
+                row.flush_clock, row.flush_upper_ordinal, row.flush_completed_ordinal,
+            ))
+            return retained_boundary or bool(has_ready) or bool(has_windows)
+
     async def boundary(self, claim: CoordinatorClaim) -> CoordinatorBoundary:
         async with access_session(self.session_factory) as session:
             row = await assert_coordinator_in_session(session, claim)

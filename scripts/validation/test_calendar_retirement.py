@@ -147,6 +147,9 @@ async def test_populated_upgrade_holds_entire_mixed_work_and_preserves_delivery_
         assert await db.fetchval('SELECT status FROM notification_runs WHERE id=$1',IDS["notification"])=="review_required"
     finally:
         await db.close()
+    # Historical assertions above belong to AFTER. Today's ORM must use today's
+    # schema when proving that retained holds still prevent execution after upgrade.
+    assert schema.migrate(scratch.name, "upgrade", "head", scratch.output, "runtime-head")
     from sqlalchemy.ext.asyncio import create_async_engine,async_sessionmaker
     from app.services.automation_execution import AutomationRunStore
     from app.services.visitor_passes import VisitorPassService

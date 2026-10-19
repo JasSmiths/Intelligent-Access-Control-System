@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import uuid
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -14,7 +15,10 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import CheckConstraint, Column, MetaData, Table, Text, func, inspect, select, text
 from sqlalchemy.schema import CreateTable
+from sqlalchemy.ext.asyncio import create_async_engine
 from test_recovery_boundaries import isolated_resources as isolated_resources
+from test_feature_retirement import scratch as scratch, connection as scratch_connection
+import test_schema_contract as schema
 
 from app.db.base import Base
 from app.db.migration_policy import include_schema_object
@@ -67,16 +71,25 @@ def migrate(connection, direction):
         getattr(module, direction)()
 
 
-async def test_empty_upgrade_downgrade_and_complete_metadata_parity():
-    # PostgreSQL transactional DDL keeps the harness template at head after rollback.
-    async with engine.connect() as connection:
+async def test_empty_upgrade_downgrade_and_complete_metadata_parity(scratch):
+    # Round-trip the historical revision before applying its successors. Calling
+    # its DDL directly on today's head loses indexes supplied by later migrations.
+    assert schema.migrate(scratch.name, 'upgrade', '20261007_0013', scratch.output, 'pipeline-up')
+    assert schema.migrate(scratch.name, 'downgrade', '20261007_0012', scratch.output, 'pipeline-down')
+    client = await scratch_connection(scratch.name)
+    try:
+        tables = {row['tablename'] for row in await client.fetch("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+        assert not tables.intersection(NEW_TABLES)
+        assert await client.fetchval("SELECT to_regclass('lpr_ready_ordinal_seq')") is None
+    finally:
+        await client.close()
+    assert schema.migrate(scratch.name, 'upgrade', 'head', scratch.output, 'current-head')
+    async with AsyncExitStack() as resources:
+        scratch_engine = create_async_engine(schema.scratch_url(scratch.name))
+        resources.push_async_callback(scratch_engine.dispose)
+        connection = await resources.enter_async_context(scratch_engine.connect())
         transaction = await connection.begin()
         try:
-            await connection.run_sync(lambda sync: migrate(sync, 'downgrade'))
-            tables = await connection.run_sync(lambda sync: set(inspect(sync).get_table_names()))
-            assert not tables.intersection(NEW_TABLES)
-            assert await connection.scalar(text("SELECT to_regclass('lpr_ready_ordinal_seq')")) is None
-            await connection.run_sync(lambda sync: migrate(sync, 'upgrade'))
             assert await connection.scalar(text("SELECT to_regclass('lpr_ready_ordinal_seq')")) == 'lpr_ready_ordinal_seq'
             differences = await connection.run_sync(lambda sync: compare_metadata(
                 MigrationContext.configure(sync, opts={'include_object': include_schema_object}), Base.metadata))
