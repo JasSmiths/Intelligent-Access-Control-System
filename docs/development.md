@@ -201,6 +201,10 @@ Preserve these fixes when refreshing the dependency locks.
 Certifi is constrained to 2026.10.19 or later to remove the compromised emSign
 trust root ([GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2)).
 Rebuild backend images after updating this lock so the installed CA bundle changes.
+Pillow is constrained to 13.0.0 or later for its image-decoder and encoder security
+fixes ([13.0.0 release notes](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html)).
+Profile photos, report images and snapshots retain their existing conversion and
+size limits; the dependency upgrade does not change those policies.
 
 The October 2026 refresh updates application and development dependencies,
 including `uiprotect==23.1.2` and Mako 1.4.3 (the Windows
