@@ -8,6 +8,7 @@ import shutil
 
 from storage import StorageGuard
 from validate import validation_run_lock
+from recovery_checks import HOST_CHECKS
 
 
 REPORTS = frozenset((
@@ -19,8 +20,8 @@ REPORTS = frozenset((
 LOGS = frozenset((
     "python-dependencies", "frontend-dependencies", "pull-node", "pull-pgvector-pgvector", "pull-redis",
     "python-lock-check", "frontend-lock-check", "frontend-tree-check", "python-identity", "uv-identity",
-    "npm-identity", "isolation-db-free", "isolation-persistence", "isolation-inspect", "snapshot-tests",
-    "harness-configuration-tests", "storage-tests", "ci-evidence-tests", "architecture-boundaries", "compile",
+    "npm-identity", "isolation-db-free", "isolation-persistence", "isolation-inspect",
+    *HOST_CHECKS, "architecture-boundaries", "compile",
     "workflow-contracts", "backend-tests", "frontend-tests", "frontend-build", "compose-config", "ruff", "mypy",
     "typed-contracts", "postgres-start", "redis-start", "migration-up", "migration-current", "migration-check",
     "test-names", "database-restore-client-version", "database-restore-source-create", "database-restore-prepare",

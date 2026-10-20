@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from ci_evidence import collect, selected
+from recovery_checks import HOST_CHECKS
 
 
 class CIEvidenceTests(unittest.TestCase):
@@ -165,6 +166,22 @@ class CIEvidenceTests(unittest.TestCase):
         self.assertNotIn("pull-unrelated.log", kept)
         self.assertNotIn("python-dependencies-secret.log", kept)
         self.assertNotIn("artifacts/python-dependencies.log", kept)
+
+    def test_every_named_host_check_retains_its_log_without_nearby_scratch(self):
+        self.complete()
+        self.put(self.run / "checks.json", {
+            name: {"status": "passed", "command": ["python", path]}
+            for name, path in HOST_CHECKS.items()
+        })
+        for name in HOST_CHECKS:
+            self.put(self.run / (name + ".log"), "synthetic host check")
+            self.put(self.run / (name + "-secret.log"), "not a named producer")
+        report = self.collect()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["runs"][0]["missing"], [])
+        kept = {item["path"].removeprefix("validation/iacs-validation-fixture/") for item in report["files"]}
+        self.assertTrue({name + ".log" for name in HOST_CHECKS} <= kept)
+        self.assertFalse(any(path.endswith("-secret.log") for path in kept))
 
     def test_reused_dependencies_require_verification_logs_without_fresh_preparation(self):
         self.complete()

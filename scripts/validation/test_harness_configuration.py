@@ -164,7 +164,7 @@ class RecoveryProfileTests(unittest.TestCase):
     def test_event_driven_regressions_and_timer_inventory_are_mandatory(self):
         for name in ('workers', 'upgrade', 'efficiency'):
             self.assertIn(f'scripts/validation/test_event_driven_{name}.py', recovery_checks.PERSISTENCE_TESTS)
-        self.assertIn('scripts/validation/test_background_polling_inventory.py', recovery_checks.HOST_TESTS)
+        self.assertIn('scripts/validation/test_background_polling_inventory.py', recovery_checks.HOST_CHECKS.values())
         self.assertIn('scripts/validation/background_polling_inventory.json', recovery_checks.REQUIRED_HELPERS)
         self.assertIn('scripts/validation/event_driven_measurement.py', recovery_checks.REQUIRED_HELPERS)
 
@@ -230,7 +230,7 @@ class RecoveryProfileTests(unittest.TestCase):
     def test_full_snapshot_requires_new_helpers_host_checks_and_all_executed_files(self):
         args = arguments(['--allow-downloads', '--include', 'backend/app/synthetic_new.py'])
         selected = set(recovery_checks.required_sources(args))
-        expected = set(recovery_checks.HOST_TESTS + recovery_checks.REQUIRED_HELPERS + recovery_checks.SCHEMA_CHECKS)
+        expected = set(list(recovery_checks.HOST_CHECKS.values()) + recovery_checks.REQUIRED_HELPERS + recovery_checks.SCHEMA_CHECKS)
         expected.update(path for path, _ in recovery_checks.persistence_checks(args))
         self.assertTrue(expected <= selected)
         self.assertIn('backend/app/synthetic_new.py', selected)

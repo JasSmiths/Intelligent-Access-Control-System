@@ -84,9 +84,13 @@ PERSISTENCE_TESTS = [
 ]
 DIAGNOSTIC_TESTS = ['scripts/validation/test_recovery_boundaries.py']
 SCHEMA_CHECKS = ['scripts/validation/test_schema_contract.py']
-HOST_TESTS = ['scripts/validation/test_source_snapshot.py', 'scripts/validation/test_harness_configuration.py',
-              'scripts/validation/test_storage.py', 'scripts/validation/test_ci_evidence.py',
-              'scripts/validation/test_background_polling_inventory.py']
+HOST_CHECKS: dict[str, str] = {
+    'snapshot-tests': 'scripts/validation/test_source_snapshot.py',
+    'harness-configuration-tests': 'scripts/validation/test_harness_configuration.py',
+    'storage-tests': 'scripts/validation/test_storage.py',
+    'ci-evidence-tests': 'scripts/validation/test_ci_evidence.py',
+    'background-polling-inventory': 'scripts/validation/test_background_polling_inventory.py',
+}
 REQUIRED_HELPERS = ['scripts/validation/recovery_checks.py', 'scripts/validation/database_restore.py',
                     'scripts/validation/event_driven_measurement.py',
                     'scripts/validation/background_polling_inventory.json',
@@ -116,7 +120,7 @@ def schema_checks(args):
 def required_sources(args):
     required = list(args.include) + args.diagnostic + args.persistence_test + args.schema_check
     if args.mode == 'full':
-        required += HOST_TESTS + REQUIRED_HELPERS + schema_checks(args)
+        required += list(HOST_CHECKS.values()) + REQUIRED_HELPERS + schema_checks(args)
         required += [path for path, _ in persistence_checks(args)]
     return list(dict.fromkeys(required))
 
@@ -137,7 +141,7 @@ def pytest_arguments(name, paths=()):
 
 def inventory_errors(root):
     """Fail the host check when new tests have no explicit execution class."""
-    classified = PERSISTENCE_TESTS + DIAGNOSTIC_TESTS + SCHEMA_CHECKS + HOST_TESTS
+    classified = PERSISTENCE_TESTS + DIAGNOSTIC_TESTS + SCHEMA_CHECKS + list(HOST_CHECKS.values())
     present = {str(path.relative_to(root)) for path in (root / 'scripts/validation').glob('test_*.py')}
     errors = []
     if len(classified) != len(set(classified)):

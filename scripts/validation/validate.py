@@ -21,7 +21,7 @@ from storage import StorageGuard, StorageViolation, all_container_mounts, docker
 from source_snapshot import changed_snapshot_sources, copy_sources, discover_sources, source_file, source_fingerprint
 from type_targets import classified_modules, type_commands
 from recovery_checks import (
-    HOST_TESTS, PERSISTENCE_TESTS, inventory_errors, persistence_checks, pytest_arguments,
+    HOST_CHECKS, PERSISTENCE_TESTS, inventory_errors, persistence_checks, pytest_arguments,
     required_sources, schema_checks, suite_identity,
 )
 
@@ -418,9 +418,7 @@ class Harness:
                 network=namespace if persistent else 'none', work='/workspace/backend'),
                 required, classification=classification)
         backend_check('isolation-db-free', ['/workspace/scripts/validation/preflight.py'], True)
-        for index, relative in enumerate(HOST_TESTS):
-            name = ('snapshot-tests', 'harness-configuration-tests', 'storage-tests', 'ci-evidence-tests',
-                    'background-polling-inventory')[index]
+        for name, relative in HOST_CHECKS.items():
             backend_check(name, ['/workspace/' + relative], True)
         backend_check('architecture-boundaries', ['/workspace/scripts/architecture/check_boundaries.py'],
                       classification='static')

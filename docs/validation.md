@@ -404,8 +404,10 @@ hashes, bytes, missing reports and partial/failed runs. A claimed successful run
 missing required proof fails collection; partial failure evidence is still staged.
 Symlinks/escapes are refused, storage admission and the shared bulk lock apply,
 and an existing destination cannot be reused. Add intentional producer locations
-and collector tests together when new evidence is required. The current CI job
-does not produce browser artifacts; browser checks retain their separately scoped
+and collector tests together when new evidence is required. The collector
+derives host-check log names from the same named inventory used by the runner;
+keep names and source paths together in `recovery_checks.HOST_CHECKS`.
+The current CI job does not produce browser artifacts; browser checks retain their separately scoped
 failure evidence locally. Local collector tests do not establish a hosted upload.
 
 Prerequisite, diagnostic, cleanup or production-comparison failures return
