@@ -9,6 +9,9 @@ import re
 
 
 PERSISTENCE_TESTS = [
+    "scripts/validation/test_event_driven_workers.py",
+    "scripts/validation/test_event_driven_upgrade.py",
+    "scripts/validation/test_event_driven_efficiency.py",
     "scripts/validation/test_idle_background_work.py",
     "scripts/validation/test_idle_background_upgrade.py",
     "scripts/validation/test_idle_query_efficiency.py",
@@ -82,8 +85,11 @@ PERSISTENCE_TESTS = [
 DIAGNOSTIC_TESTS = ['scripts/validation/test_recovery_boundaries.py']
 SCHEMA_CHECKS = ['scripts/validation/test_schema_contract.py']
 HOST_TESTS = ['scripts/validation/test_source_snapshot.py', 'scripts/validation/test_harness_configuration.py',
-              'scripts/validation/test_storage.py', 'scripts/validation/test_ci_evidence.py']
+              'scripts/validation/test_storage.py', 'scripts/validation/test_ci_evidence.py',
+              'scripts/validation/test_background_polling_inventory.py']
 REQUIRED_HELPERS = ['scripts/validation/recovery_checks.py', 'scripts/validation/database_restore.py',
+                    'scripts/validation/event_driven_measurement.py',
+                    'scripts/validation/background_polling_inventory.json',
                     'scripts/validation/storage.py',
                      'backend/app/services/workflows/action_definitions.py',
                     'backend/app/services/workflows/channel_definitions.py',

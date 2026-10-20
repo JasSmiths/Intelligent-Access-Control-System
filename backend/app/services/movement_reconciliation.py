@@ -16,6 +16,7 @@ from app.services.access.completion_database import access_session
 from app.services.access.delivery import recover_garage_outcome_outputs
 from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.actionable_notifications import get_actionable_notification_service
+from app.services.durable_work import WorkReadiness, WorkTopic, work_wake
 from app.services.event_bus import event_bus
 from app.services.ha_presence_contracts import HaPresenceReservation
 from app.services.ha_presence_reservations import reserve_all_in_session
@@ -24,6 +25,7 @@ from app.services.movement.admission import (
     recover_unattempted_visitor_reservations,
 )
 from app.services.movement_ledger import get_movement_ledger_repository, movement_saga_summary
+from app.services.movement_work import movement_readiness
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     audit_log_event_payload,
@@ -42,6 +44,7 @@ class MovementReconciliationService:
         self._stop_event = asyncio.Event()
         self._ledger = get_movement_ledger_repository()
         self._pending_events: list[tuple[str, dict]] = []
+        self._wake = work_wake(WorkTopic.MOVEMENT)
         self._saga_cursor: uuid.UUID | None = None
         self._standalone_cursor: uuid.UUID | None = None
         self._reservation_cursor: uuid.UUID | None = None
@@ -67,18 +70,27 @@ class MovementReconciliationService:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
+            generation = self._wake.generation
             try:
-                await self.reconcile_once()
+                pending = await movement_readiness(lambda: AsyncSessionLocal())
+                if not pending.ready:
+                    await self._wake.wait(generation, pending, fallback_seconds=RECONCILIATION_INTERVAL_SECONDS)
+                    continue
+                while not self._stop_event.is_set():
+                    count = await self.reconcile_once()
+                    cursors = (self._saga_cursor, self._standalone_cursor,
+                               self._reservation_cursor, self._actionable_cursor)
+                    if not any(cursor is not None for cursor in cursors) and count == 0:
+                        break
+                    await asyncio.sleep(0)
+                future = await movement_readiness(lambda: AsyncSessionLocal(), include_ready=False)
+                await self._wake.wait(generation, future, fallback_seconds=RECONCILIATION_INTERVAL_SECONDS)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                logger.exception("movement_reconciliation_failed", extra={"error": str(exc)})
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=RECONCILIATION_INTERVAL_SECONDS
-                )
-            except TimeoutError:
-                continue
+            except Exception as exc:  # noqa: BLE001 - Recovery remains bounded during failures.
+                logger.warning("movement_reconciliation_failed", extra={"exception_class": type(exc).__name__})
+                await self._wake.wait(generation, WorkReadiness(False, RECONCILIATION_INTERVAL_SECONDS),
+                                      fallback_seconds=RECONCILIATION_INTERVAL_SECONDS)
 
     async def reconcile_once(self) -> int:
         self._pending_events = []

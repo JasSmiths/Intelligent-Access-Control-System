@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from test_process_lifecycle import owned_resources as owned_resources
 
 from app import main
+from app.services.durable_work import WorkReadiness
 from app.services.access import completion_worker
 from app.services.access.completion_database import access_session
 from app.services.access.completion_store import AccessCompletionStore
@@ -31,6 +32,9 @@ def claim(stage="visual"):
 
 
 class CompletionStore(AccessCompletionStore):
+    async def readiness(self):
+        return WorkReadiness(bool(self.claims), 0 if self.claims else None)
+
     def __init__(self, claims=()):
         self.claims = list(claims)
         self.capacities = []
@@ -56,6 +60,9 @@ class CompletionStore(AccessCompletionStore):
 
 
 class PublicationStore(AccessPublicationStore):
+    async def readiness(self):
+        return WorkReadiness(self.pending is not None, 0 if self.pending is not None else None)
+
     def __init__(self):
         self.pending = PublicationClaim(uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
         self.acked = asyncio.Event()

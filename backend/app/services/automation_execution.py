@@ -21,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.session import AsyncSessionLocal
 from app.models import AutomationRun
+from app.services.durable_readiness import readiness
+from app.services.durable_work import WorkReadiness, WorkTopic, notify_work
 from app.services.workflows.action_definitions import ACTION_BY_TYPE, pending_action_error
 from app.services.workflows.execution_contracts import AutomationExecution, checked_execution
 
@@ -93,6 +95,22 @@ def frozen_action_plan(run_id: uuid.UUID, planned: list[dict[str, Any]]) -> list
 
 
 class AutomationRunStore:
+    async def readiness(self) -> WorkReadiness:
+        return await readiness(
+            self.sessions,
+            (
+                (
+                    "SELECT t.now FROM t WHERE EXISTS (SELECT 1 FROM automation_runs WHERE recovery_version=1 AND status IN "
+                    "('queued','processing') AND (lease_expires_at IS NULL OR (status='processing' AND claim_token IS NULL)))"
+                ),
+                (
+                    "SELECT lease_expires_at FROM automation_runs WHERE recovery_version=1 AND status IN "
+                    "('queued','processing') AND lease_expires_at IS NOT NULL ORDER BY lease_expires_at,id LIMIT 1"
+                ),
+                "SELECT t.now FROM t WHERE EXISTS (SELECT 1 FROM automation_runs WHERE completion_audit_pending IS TRUE)",
+            ),
+        )
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal) -> None:
         self.sessions = session_factory
 
@@ -150,6 +168,7 @@ class AutomationRunStore:
             .returning(AutomationRun.id)
         )
         if inserted is not None:
+            await notify_work(session, WorkTopic.AUTOMATION)
             return inserted
         retained = await session.scalar(
             select(AutomationRun).where(AutomationRun.occurrence_key == occurrence)
@@ -158,6 +177,7 @@ class AutomationRunStore:
             raise ValueError(
                 "An occurrence identity cannot be rebound to a different automation rule or trigger."
             )
+
         return retained.id
 
     async def get(self, run_id: uuid.UUID) -> AutomationRun:
@@ -243,6 +263,7 @@ class AutomationRunStore:
                     or row.context.get("version") != 1
                 ):
                     self._terminal(row, "review_required", now, "execution_snapshot_unavailable")
+                    await notify_work(session, WorkTopic.AUTOMATION)
                     await session.commit()
                     if run_id is not None:
                         return None
@@ -250,12 +271,14 @@ class AutomationRunStore:
                 self._recover_attempts(row, now)
                 if error := pending_action_error(row.action_plan):
                     self._terminal(row, "review_required", now, error)
+                    await notify_work(session, WorkTopic.AUTOMATION)
                     await session.commit()
                     if run_id is not None:
                         return None
                     continue
                 if not any(item["state"] == "pending" for item in row.action_plan):
                     self._finish(row, now)
+                    await notify_work(session, WorkTopic.AUTOMATION)
                     await session.commit()
                     if run_id is not None:
                         return None
@@ -264,6 +287,7 @@ class AutomationRunStore:
                 row.claim_token = uuid.uuid4()
                 row.lease_expires_at = now + timedelta(seconds=LEASE_SECONDS)
                 row.claim_count += 1
+                await notify_work(session, WorkTopic.AUTOMATION)
                 await session.commit()
                 return row
         return None
@@ -357,6 +381,8 @@ class AutomationRunStore:
         row.action_plan = plan
         row.status, row.claim_token, row.lease_expires_at = "queued", None, check_after
         await session.flush()
+
+        await notify_work(session, WorkTopic.AUTOMATION)
         return True
 
     async def finish_action(
@@ -366,6 +392,7 @@ class AutomationRunStore:
         async with self.sessions() as session:
             row, now = await self.owned(session, run_id, token)
             self._checkpoint(row, index, result, state=state, expected="attempting", now=now)
+            await notify_work(session, WorkTopic.AUTOMATION)
             await session.commit()
             return row
 
@@ -411,6 +438,7 @@ class AutomationRunStore:
         row, now = await self.owned(session, run_id, token)
         self._terminal(row, "review_required", now, reason)
         await session.flush()
+        await notify_work(session, WorkTopic.AUTOMATION)
 
     async def finish_in_session(
         self, session: AsyncSession, run_id: uuid.UUID, token: uuid.UUID
@@ -421,6 +449,8 @@ class AutomationRunStore:
             raise AutomationClaimLost("Automation has unfinished actions.")
         self._finish(row, now)
         await session.flush()
+
+        await notify_work(session, WorkTopic.AUTOMATION)
         return row
 
     async def interrupt(self, run_id: uuid.UUID, token: uuid.UUID) -> None:
@@ -434,6 +464,8 @@ class AutomationRunStore:
                 row.status, row.claim_token, row.lease_expires_at = "queued", None, None
             else:
                 self._finish(row, now)
+
+            await notify_work(session, WorkTopic.AUTOMATION)
             await session.commit()
 
     @staticmethod

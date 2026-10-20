@@ -1,0 +1,283 @@
+{
+  "version": 1,
+  "healthy_repair_seconds": 60,
+  "scope": "All direct asyncio sleep/wait_for/wait sites under backend/app and browser timer call sites under frontend/src; includes necessary deadlines and non-polling timers explicitly. Indirect durable waits remain owned by their lane contracts. Compose PostgreSQL/Redis ten-second healthchecks remain unchanged.",
+  "owners": [
+    {
+      "path": "backend/app/api/v1/health.py",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "Request-driven database readiness deadline; no periodic application health poll."
+    },
+    {
+      "path": "backend/app/main.py",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "Bounded application shutdown waits drain owned services before reporting completion."
+    },
+    {
+      "path": "backend/app/modules/access_devices/esphome.py",
+      "timer_sites": 10,
+      "classification": "transport_authority",
+      "purpose": "Native stream subscription, bounded connection/discovery/state deadlines and 0.5-to-5-second reconnect backoff."
+    },
+    {
+      "path": "backend/app/modules/home_assistant/client.py",
+      "timer_sites": 1,
+      "classification": "transport_authority",
+      "purpose": "Subscribed Home Assistant socket reconnects after five seconds; not periodic state discovery."
+    },
+    {
+      "path": "backend/app/services/access/completion_media.py",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "Optional unknown-vehicle evidence matching retries at most five times with 0.25-second spacing and original deadline."
+    },
+    {
+      "path": "backend/app/services/access/completion_worker.py",
+      "timer_sites": 2,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "backend/app/services/access/evidence.py",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "Required external evidence has an original bounded request lifetime with actual cleanup ownership."
+    },
+    {
+      "path": "backend/app/services/access/publication_worker.py",
+      "timer_sites": 2,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "backend/app/services/access_devices.py",
+      "timer_sites": 4,
+      "classification": "physical_state",
+      "purpose": "Retain ten-second state/receipt reconciliation and 0.5-second command verification. Existing stream health lacks per-binding continuity and generation guarantees."
+    },
+    {
+      "path": "backend/app/services/access_events.py",
+      "timer_sites": 3,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "backend/app/services/automation_dispatch.py",
+      "timer_sites": 2,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "backend/app/services/automations.py",
+      "timer_sites": 1,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "backend/app/services/durable_work.py",
+      "timer_sites": 5,
+      "classification": "durable_work",
+      "purpose": "Closed committed PostgreSQL hints, generation latch and earliest durable deadline; sixty-second healthy repair, existing fast fallback, thirty-second listener health and bounded reconnect."
+    },
+    {
+      "path": "backend/app/services/event_bus.py",
+      "timer_sites": 3,
+      "classification": "transport_authority",
+      "purpose": "Blocking Redis stream reads and one-second reconnection retain committed stream cursor and bounded shutdown."
+    },
+    {
+      "path": "backend/app/services/gate_malfunctions.py",
+      "timer_sites": 1,
+      "classification": "physical_state",
+      "purpose": "Retain event wake plus fifteen-second forced safety read, unsafe-open deadlines, maintenance/keep-open suppression and audited recovery attempts."
+    },
+    {
+      "path": "backend/app/services/ha_presence_worker.py",
+      "timer_sites": 2,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "backend/app/services/home_assistant.py",
+      "timer_sites": 2,
+      "classification": "transport_authority",
+      "purpose": "Subscribed state listener reconnects after five seconds; thirty-second state refresh minimum is an on-demand throttle."
+    },
+    {
+      "path": "backend/app/services/leaderboard_worker.py",
+      "timer_sites": 2,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "backend/app/services/movement_ledger.py",
+      "timer_sites": 1,
+      "classification": "physical_state",
+      "purpose": "Concurrent duplicate command callers recheck the same durable parent lease every 0.1 seconds for at most ten seconds; never replay uncertain hardware."
+    },
+    {
+      "path": "backend/app/services/movement_reconciliation.py",
+      "timer_sites": 1,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "backend/app/services/notification_dispatch.py",
+      "timer_sites": 2,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "backend/app/services/realtime_connections.py",
+      "timer_sites": 4,
+      "classification": "transport_authority",
+      "purpose": "Retain two-second authority checks, per-send checks, exact token expiry timer and bounded actual transport cleanup."
+    },
+    {
+      "path": "backend/app/services/restart_backfill.py",
+      "timer_sites": 2,
+      "classification": "mixed",
+      "purpose": "Retain fifteen-second crash heartbeat, startup history repair and 120-second Protect anti-entropy; historical repair never replays hardware."
+    },
+    {
+      "path": "backend/app/services/telemetry.py",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "Idle diagnostic writer waits on an event; timer only bounds actual shutdown draining."
+    },
+    {
+      "path": "backend/app/services/unifi_protect_runtime.py",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "Optional subscribed callback probes have fixed bounded retry spacing, generation/deadline fencing and capacity limits."
+    },
+    {
+      "path": "backend/app/services/vehicle_information.py",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "Refresh-lock followers wait at most eighty 0.25-second cache checks for the normalized winner result."
+    },
+    {
+      "path": "backend/app/services/vehicle_information_jobs.py",
+      "timer_sites": 2,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "backend/app/services/visitor_passes.py",
+      "timer_sites": 1,
+      "classification": "durable_work",
+      "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
+    },
+    {
+      "path": "frontend/src/VariableRichTextEditor.tsx",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/api/client.ts",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Zero-delay cooperative yielding avoids blocking rendering; not recurring API traffic."
+    },
+    {
+      "path": "frontend/src/app/profile.ts",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/app/searchPalette.tsx",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/app/toasts.tsx",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/app/useRealtimeConnection.ts",
+      "timer_sites": 4,
+      "classification": "transport_authority",
+      "purpose": "Visible-tab socket liveness ping every twenty-five seconds, five-second probe timeout, bounded reconnect and deferred parse; recovery refresh is event-driven."
+    },
+    {
+      "path": "frontend/src/features/dashboard/useDashboardCommands.ts",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "One follow-up refresh 2.5 seconds after a saved command; no repeated hardware submission."
+    },
+    {
+      "path": "frontend/src/features/directory/PersonEditor.tsx",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/features/directory/PersonIntegrationFields.tsx",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/features/directory/useVehicleInformation.ts",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "Plate editing debounces normalized vehicle information requests and cancels prior request/account lifetimes."
+    },
+    {
+      "path": "frontend/src/features/integrations/providers/ESPHomePanel.tsx",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "One stream-status check 750 milliseconds after enabled device identities change; native stream status updates use hints."
+    },
+    {
+      "path": "frontend/src/features/investigations/ActivityTimeline.tsx",
+      "timer_sites": 3,
+      "classification": "display_interaction",
+      "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/features/investigations/hooks.ts",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/features/schedules/SchedulesView.tsx",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/features/settings/useZoneShadowRefresh.ts",
+      "timer_sites": 1,
+      "classification": "durable_work",
+      "purpose": "Committed zone-shadow observation hints drive coordinated bounded reads; sixty-second visible-page repair and immediate visibility resume recover lost hints."
+    },
+    {
+      "path": "frontend/src/features/workflows/hooks.ts",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/lib/refreshCoordinator.ts",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "Coalesced invalidation scheduling retains work received during active reads; timer is demand-driven."
+    },
+    {
+      "path": "frontend/src/views/DashboardView.tsx",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "One-second local display clock performs no network or database reads."
+    }
+  ]
+}

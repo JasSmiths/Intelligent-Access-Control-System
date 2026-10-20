@@ -16,6 +16,7 @@ from app.services import notifications
 from app.services import vehicle_information as information
 from app.services import vehicle_information_jobs as jobs
 from app.services.access.completion_results import InformationClaim
+from app.services.durable_work import WorkReadiness
 from app.services.vehicle_information_contracts import ProviderResult
 
 pytestmark = pytest.mark.asyncio
@@ -42,7 +43,7 @@ async def test_unexpected_provider_failure_drains_actual_sibling_before_slot_and
 
     async def provider(kind, *_args, **_kwargs):
         if kind == "dvla":
-            await entered.wait()
+            await asyncio.wait_for(entered.wait(), 2)
             raise original
         entered.set()
         try:
@@ -53,7 +54,7 @@ async def test_unexpected_provider_failure_drains_actual_sibling_before_slot_and
 
     monkeypatch.setattr(owner, "_provider", provider)
     call = asyncio.create_task(owner.lookup("AB12CDE", config=config()))
-    await cleaning.wait()
+    await asyncio.wait_for(cleaning.wait(), 2)
     close = asyncio.create_task(owner.close())
     await pause()
     assert not call.done() and not close.done() and len(owner._calls) == 1
@@ -89,9 +90,9 @@ async def test_repeated_lookup_cancellation_retains_provider_cleanup_and_call_re
 
     monkeypatch.setattr(owner, "_provider", provider)
     call = asyncio.create_task(owner.lookup("AB12CDE", config=config()))
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), 2)
     call.cancel()
-    await cleaning.wait()
+    await asyncio.wait_for(cleaning.wait(), 2)
     call.cancel()
     close = asyncio.create_task(owner.close())
     await pause()
@@ -118,7 +119,7 @@ async def test_successful_parallel_provider_results_keep_order_and_normal_status
 
     monkeypatch.setattr(owner, "_provider", provider)
     call = asyncio.create_task(owner.lookup("AB12CDE", config=config()))
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), 2)
     assert calls == ["dvla", "dvsa"] and not call.done()
     release.set()
     result = await call
@@ -143,7 +144,7 @@ async def test_close_waits_call_receipt_but_not_parent_unrelated_lifetime(monkey
 
     monkeypatch.setattr(owner, "_provider", provider)
     task = asyncio.create_task(parent())
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), 2)
     close = asyncio.create_task(owner.close())
     await pause()
     assert not close.done()
@@ -165,7 +166,7 @@ async def test_concurrent_close_and_repeated_cancellation_drain_whole_sequence()
 
     owner.dvsa.close.side_effect = close_dvsa
     first = asyncio.create_task(owner.close())
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), 2)
     cleanup = owner._cleanup
     first.cancel()
     await pause()
@@ -247,6 +248,7 @@ def worker_fixture(monkeypatch, owner, count=4):
         await owner.lookup(claim.registration_number, config=config())
 
     monkeypatch.setattr(worker, "_claim", claim)
+    monkeypatch.setattr(worker, "readiness", AsyncMock(return_value=WorkReadiness(True, 0)))
     monkeypatch.setattr(worker, "_prepare", prepare)
     monkeypatch.setattr(worker, "_execute", execute)
     monkeypatch.setattr(worker, "_fail", AsyncMock())
@@ -278,8 +280,8 @@ async def test_two_actual_worker_slots_remain_occupied_through_timed_out_cleanup
     monkeypatch.setattr(jobs, "INFORMATION_TIMEOUT_SECONDS", .02)
     worker, pending, capacities = worker_fixture(monkeypatch, owner)
     await worker.start()
-    await entered.wait()
-    await cleaning.wait()
+    await asyncio.wait_for(entered.wait(), 2)
+    await asyncio.wait_for(cleaning.wait(), 2)
     await asyncio.sleep(.55)
     assert active == 4 and len(worker._operations) == 2 and len(pending) == 2
     assert max(capacities) == 2 and all(0 <= value <= 2 for value in capacities)
@@ -316,15 +318,17 @@ async def test_main_lifespan_waits_actual_worker_cleanup_past_outer_timeout(owne
     monkeypatch.setattr(main, "vehicle_information_resources", SimpleNamespace(start=AsyncMock(), stop=owner.close))
     real_wait_for = asyncio.wait_for
 
-    async def short_stop(awaitable, *, timeout):
-        return await real_wait_for(awaitable, timeout=.02)
+    async def short_stop(awaitable, timeout):
+        # Keep asyncio.wait_for's actual signature for concurrent worker waits;
+        # only the application's 20-second shutdown allowance is shortened.
+        return await real_wait_for(awaitable, timeout=.02 if timeout == 20 else timeout)
 
     monkeypatch.setattr(main.asyncio, "wait_for", short_stop)
     lifespan = main.lifespan(FastAPI())
     await lifespan.__aenter__()
-    await entered.wait()
+    await real_wait_for(entered.wait(), timeout=2)
     shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
-    await cleaning.wait()
+    await real_wait_for(cleaning.wait(), timeout=2)
     await asyncio.sleep(.05)
     assert not shutdown.done() and ("stop", "database") not in events
     owner.dvsa.close.assert_not_awaited()
@@ -360,7 +364,7 @@ async def test_notification_shutdown_lookup_keeps_shared_client_after_worker_sto
     lifespan = main.lifespan(FastAPI())
     await lifespan.__aenter__()
     shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), 2)
     assert not owner._closing and not shutdown.done() and ("stop", "database") not in events
     release.set()
     await shutdown
@@ -396,7 +400,7 @@ async def test_main_shared_resource_waits_asgi_call_not_unrelated_request_parent
     await lifespan.__aenter__()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://synthetic.invalid") as client:
         parent = asyncio.create_task(request(client))
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), 2)
         shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
         await pause()
         assert not shutdown.done() and not owner._closed
@@ -426,9 +430,9 @@ async def test_connection_cancellation_keeps_actual_dvsa_cleanup_and_close_recei
     monkeypatch.setattr(information, "get_runtime_config", AsyncMock(return_value=full_config(dvsa_test_registration_number="AB12CDE")))
     owner.dvsa.lookup = lookup
     call = asyncio.create_task(owner.test_connection({}))
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), 2)
     call.cancel()
-    await cleaning.wait()
+    await asyncio.wait_for(cleaning.wait(), 2)
     call.cancel()
     close = asyncio.create_task(owner.close())
     await pause()
@@ -468,8 +472,8 @@ async def test_result_cleanup_has_one_cancel_and_retains_original_failure_class(
     monkeypatch.setattr(jobs, "INFORMATION_TIMEOUT_SECONDS", .03)
     monkeypatch.setattr(jobs, "INFORMATION_RENEWAL_SECONDS", .005)
     call = asyncio.create_task(worker._process(*pending.pop()))
-    await entered.wait()
-    await cleaning.wait()
+    await asyncio.wait_for(entered.wait(), 2)
+    await asyncio.wait_for(cleaning.wait(), 2)
     await asyncio.sleep(.06)  # Also cross the outer timeout during lost-lease cleanup.
     assert not call.done()
     worker._fail.assert_not_awaited()
@@ -498,9 +502,9 @@ async def test_repeated_worker_stop_keeps_result_transaction_cleanup_in_slot(mon
 
     monkeypatch.setattr(worker, "_execute", execute)
     await worker.start()
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), 2)
     first = asyncio.create_task(worker.stop())
-    await cleaning.wait()
+    await asyncio.wait_for(cleaning.wait(), 2)
     first.cancel()
     await pause()
     first.cancel()

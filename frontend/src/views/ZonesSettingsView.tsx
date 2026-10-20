@@ -1,4 +1,4 @@
-import { useCoordinatedRead } from "../lib/useCoordinatedRead";
+import { useZoneShadowRefresh } from "../features/settings/useZoneShadowRefresh";
 import { settingsEventMatches } from "../features/settings/invalidation";
 import { Loader2, RefreshCw } from "lucide-react";
 import React from "react";
@@ -67,11 +67,7 @@ export function ZonesSettingsView({
     }
   }, []);
 
-  const loadObservations = useCoordinatedRead(readObservations, settingsEventMatches);
-  React.useEffect(() => {
-    const interval = window.setInterval(() => { void loadObservations().catch(() => undefined); }, 15000);
-    return () => window.clearInterval(interval);
-  }, [loadObservations]);
+  const loadObservations = useZoneShadowRefresh(readObservations);
 
   const saveMode = async (mode: "shadow" | "live") => {
     if (!isAdmin || mode === zoneFilterMode || savingMode) return;

@@ -21,6 +21,13 @@ from app.services.access.completion_store import (
 )
 from app.services.access.pipeline_contracts import CompletionClaim, PipelineLeaseLost
 from app.services.access.publication_worker import AccessPublicationLane
+from app.services.durable_work import (
+    WorkReadiness,
+    WorkTopic,
+    WorkWake,
+    wait_with_capacity,
+    work_wake,
+)
 
 logger = get_logger(__name__)
 
@@ -41,12 +48,13 @@ class AccessCompletionOwner:
         store: AccessCompletionStore,
         stages: CompletionStageOwners,
         publication: AccessPublicationLane,
+        wake: WorkWake | None = None,
     ) -> None:
         self.store, self.stages, self.publication = store, stages, publication
         self._task: asyncio.Task[None] | None = None
         self._cleanup: asyncio.Task[None] | None = None
         self._operations: set[asyncio.Task[None]] = set()
-        self._wake = asyncio.Event()
+        self._wake = wake if wake is not None else work_wake(WorkTopic.COMPLETION)
         self._stopping = False
 
     async def start(self) -> None:
@@ -87,20 +95,24 @@ class AccessCompletionOwner:
                         if task.done():
                             self._operations.remove(task)
                             task.result()
-                    self._wake.clear()
+                    generation = self._wake.generation
+                    if len(self._operations) == COMPLETION_ACTIVE_SLOTS:
+                        await wait_with_capacity(self._wake, generation, WorkReadiness(), self._operations,
+                                                 full=True, fallback_seconds=0.5)
+                        continue
+                    pending = await self.store.readiness()
+                    if not pending.ready:
+                        await wait_with_capacity(self._wake, generation, pending, self._operations,
+                                                 full=False, fallback_seconds=0.5)
+                        continue
                     claims = await self.store.claim(COMPLETION_ACTIVE_SLOTS - len(self._operations))
                     for claim in claims:
                         self._operations.add(asyncio.create_task(
                             self._process(claim), name="access-completion-operation"
                         ))
-                    if self._operations:
-                        await asyncio.wait(tuple(self._operations), timeout=0.5,
-                                           return_when=asyncio.FIRST_COMPLETED)
-                    else:
-                        try:
-                            await asyncio.wait_for(self._wake.wait(), timeout=0.5)
-                        except TimeoutError:
-                            pass
+                    if not claims:
+                        await wait_with_capacity(self._wake, generation, WorkReadiness(False, 0.5),
+                                                 self._operations, full=False, fallback_seconds=0.5)
                 except Exception as exc:  # noqa: BLE001 - durable optional claims remain recoverable
                     logger.warning("access_completion_worker_failed",
                                    extra={"exception_class": type(exc).__name__})

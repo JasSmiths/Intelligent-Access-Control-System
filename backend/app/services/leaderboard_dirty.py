@@ -16,6 +16,8 @@ from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import AccessChartDirtyState, AccessEvent
 from app.models.enums import AccessDecision, AccessDirection
+from app.services.durable_readiness import readiness
+from app.services.durable_work import WorkReadiness, WorkTopic, notify_work
 from app.services.leaderboard_notifications import CHART_OPTIONAL_SECONDS
 
 CHART_QUIET_SECONDS = 2
@@ -38,6 +40,18 @@ class ChartClaim:
 
 
 class LeaderboardDirtyStore:
+    async def readiness(self) -> WorkReadiness:
+        return await readiness(
+            self.sessions,
+            (
+                (
+                    "SELECT GREATEST(COALESCE(lease_until,t.now),LEAST(last_dirty_at + INTERVAL '2 seconds',first_dirty_at + "
+                    "INTERVAL '10 seconds')) FROM access_chart_dirty_state,t WHERE id=1 AND "
+                    "requested_generation>acknowledged_generation"
+                ),
+            ),
+        )
+
     def __init__(self, sessions: Callable[[], AsyncSession] = AsyncSessionLocal) -> None:
         self.sessions = sessions
 
@@ -100,6 +114,8 @@ class LeaderboardDirtyStore:
         # Silent marks create no new authority. An active claim already captured
         # A's original authority independently; its frozen A is not renewed or
         # revoked here. These fields describe the latest pending/trailing batch.
+        await notify_work(session, WorkTopic.CHART)
+
 
     async def claim(self) -> ChartClaim | None:
         async with self.session() as session:

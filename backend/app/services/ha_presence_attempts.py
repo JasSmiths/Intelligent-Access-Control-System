@@ -23,6 +23,8 @@ from app.modules.home_assistant.input_boolean_contracts import (
     home_assistant_connection_fingerprint,
 )
 from app.services.auth_root import reload_auth_root_for_transaction
+from app.services.durable_readiness import readiness
+from app.services.durable_work import WorkReadiness, WorkTopic, notify_work
 from app.services.ha_presence_contracts import (
     HaAttemptClaim,
     HaConfigurationUnavailable,
@@ -46,6 +48,18 @@ from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, write_audit_
 
 
 class HaPresenceAttemptStore:
+    async def readiness(self) -> WorkReadiness:
+        return await readiness(
+            self._session_factory,
+            (
+                (
+                    "SELECT GREATEST(t.now,COALESCE((SELECT lease_until FROM ha_presence_coordinator WHERE id=1),t.now)) FROM "
+                    "t WHERE EXISTS (SELECT 1 FROM ha_presence_targets WHERE state='ready' AND barrier_attempt_id IS NULL)"
+                ),
+                "SELECT lease_until FROM ha_presence_effects WHERE state='attempting' ORDER BY lease_until,id LIMIT 1",
+            ),
+        )
+
     def __init__(self, session_factory: Callable[[], AsyncSession] = AsyncSessionLocal) -> None:
         self._session_factory = session_factory
 
@@ -301,6 +315,8 @@ class HaPresenceAttemptStore:
                 return False  # Unsettled certainty stays recoverable/UNKNOWN-fenced.
             coordinator.lease_token, coordinator.lease_until = None, None
             await session.flush()
+
+            await notify_work(session, WorkTopic.HA)
             await session.commit()
             return True
 
@@ -321,9 +337,13 @@ class HaPresenceAttemptStore:
                 effect.state, effect.outcome = "unknown", "worker_lost"
                 effect.detail, effect.completed_at = "worker_lost", now
                 await _audit_attempt(session, effect, "unknown", reason="worker_lost")
-            if coordinator.lease_until is not None and coordinator.lease_until <= now:
+            release = coordinator.lease_until is not None and coordinator.lease_until <= now
+            if release:
                 coordinator.lease_token, coordinator.lease_until = None, None
             await session.flush()
+
+            if rows or release:
+                await notify_work(session, WorkTopic.HA)
             await session.commit()
             return len(rows)
 

@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import IntegrityError
 
+from app.services.durable_work import WorkReadiness
 from app.db.session import AsyncSessionLocal, engine
 from app.models import AuditLog, AutomationRule, AutomationRun, LprCoordinatorState, LprIngestEvent
 from app.services import access_events, automations
@@ -138,12 +139,21 @@ async def test_empty_workers_have_one_select_and_no_locks_writes_or_configuratio
     service = access_events.AccessEventService()
     claim = await service._pipeline.acquire_coordinator()
     monkeypatch.setattr(access_events, "get_runtime_config", AsyncMock(side_effect=AssertionError("idle config read")))
+    service._last_probe_generation = service._wake.generation
+    passes = 0
+    async def safety_check(generation, pending, *, fallback_seconds):
+        nonlocal passes
+        assert not pending.ready
+        passes += 1
+        if passes == 8:
+            service._stop_event.set()
+    monkeypatch.setattr(service._wake, "wait", safety_check)
     with statements() as queries:
-        for _ in range(8):
-            assert await service._process_boundary(claim) is False
-    assert len(queries) == 8
+        await service._wait_until_ready(owned=True)
+    assert passes == len(queries) == 8
     for sql, _ in queries:
-        assert sql.lstrip().upper().startswith("SELECT")
+        assert sql.lstrip().upper().startswith(("SELECT", "WITH"))
+        assert not any(word in sql.upper() for word in ("INSERT ", "UPDATE ", "DELETE ", "PG_NOTIFY"))
         assert "FOR UPDATE" not in sql.upper()
         assert "normalized_payload" not in sql
     with statements() as queries:
@@ -198,7 +208,9 @@ async def test_actual_worker_observes_committed_arrivals_and_drains_shutdown(mon
     monkeypatch.setattr(service, "_handle_queued_read", handle)
     if arrival == "wake":
         # Disable the timer only for this proof: the local wake alone must suffice.
-        monkeypatch.setattr(service, "_wait_for_wake", service._wake.wait)
+        async def wait_for_local_hint():
+            await service._wake.wait(service._wait_generation, WorkReadiness(), fallback_seconds=float("inf"))
+        monkeypatch.setattr(service, "_wait_for_wake", wait_for_local_hint)
     task = asyncio.create_task(service._process_queue())
     try:
         await asyncio.wait_for(idle.wait(), 5)

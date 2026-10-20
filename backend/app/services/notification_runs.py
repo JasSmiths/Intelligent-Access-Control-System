@@ -14,6 +14,8 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.db.session import AsyncSessionLocal
 from app.models import NotificationRun
+from app.services.durable_readiness import readiness
+from app.services.durable_work import WorkReadiness, WorkTopic, notify_work
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, write_audit_log
 from app.services.workflows.channel_definitions import pending_notification_error
 
@@ -110,6 +112,21 @@ def destination_outcome_truth(value: Any) -> tuple[bool, int, bool]:
 
 
 class NotificationRunStore:
+    async def readiness(self) -> WorkReadiness:
+        return await readiness(
+            self.sessions,
+            (
+                (
+                    "SELECT t.now FROM t WHERE EXISTS (SELECT 1 FROM notification_runs WHERE recovery_version=1 AND status IN "
+                    "('queued','processing') AND claim_token IS NULL)"
+                ),
+                (
+                    "SELECT lease_expires_at FROM notification_runs WHERE recovery_version=1 AND status IN "
+                    "('queued','processing') AND claim_token IS NOT NULL ORDER BY lease_expires_at,id LIMIT 1"
+                ),
+            ),
+        )
+
     def __init__(self, session_factory=AsyncSessionLocal):
         self.sessions = session_factory
 
@@ -131,10 +148,10 @@ class NotificationRunStore:
         run_id: uuid.UUID,
         rules_override=None,
     ) -> uuid.UUID:
-        """Join the origin transaction; the caller owns commit and any wakeup.
+        """Join origin mutation and commit-only wake hint in the caller's transaction.
 
-        A stable origin ID makes repeated reservations inert. Polling discovers
-        committed work even when the producer stops before waking the dispatcher.
+        A stable origin ID makes repeated reservations inert. Deadline and safety
+        probes recover committed work if the listener misses its hint.
         """
         identity = uuid.UUID(str(run_id))
         await self._insert(session, context, rules_override, identity, immediate=False)
@@ -191,7 +208,7 @@ class NotificationRunStore:
 
     async def _insert(self, session, context, rules_override, identity, *, immediate, plan=None):
         now = await session.scalar(select(func.clock_timestamp()))
-        return await session.scalar(
+        row = await session.scalar(
             insert(NotificationRun)
             .values(
                 id=identity,
@@ -212,6 +229,10 @@ class NotificationRunStore:
             .on_conflict_do_nothing(index_elements=[NotificationRun.id])
             .returning(NotificationRun)
         )
+        if row is not None:
+
+            await notify_work(session, WorkTopic.NOTIFICATION)
+        return row
 
     async def get(self, run_id: uuid.UUID) -> NotificationRun:
         async with self.sessions() as session:
@@ -473,6 +494,8 @@ class NotificationRunStore:
             self._counts(row)
             if row.status == "review_required":
                 await self._audit_checkpoint(session, row, "review", reason=row.review_reason)
+
+            await notify_work(session, WorkTopic.NOTIFICATION)
             await session.commit()
 
     @staticmethod

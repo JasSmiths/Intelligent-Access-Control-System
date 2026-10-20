@@ -65,7 +65,7 @@ async def prepared_plans(sql, parameters):
         client = raw.driver_connection
         # Values are captured from the real worker statement, and restricted to
         # this fixture's known scalar arguments; never interpolate arbitrary input.
-        assert all(value in ("ready", "open", 1, 20) for value in parameters)
+        assert all(value in ("ready", "open", .5, 1, 20) for value in parameters)
         arguments = ",".join("'" + value + "'" if isinstance(value, str) else str(value) for value in parameters)
         await client.execute("PREPARE idle_budget AS " + sql)
         plans = {}
@@ -202,8 +202,16 @@ async def test_empty_lpr_worker_cost_is_independent_of_handled_history(size, mon
         await session.execute(text("ANALYZE lpr_ingest_events"))
         await session.execute(text("ANALYZE lpr_debounce_windows"))
         await session.commit()
+    async def finish_empty_probe(generation, pending, *, fallback_seconds):
+        assert not pending.ready
+        service._stop_event.set()
+    monkeypatch.setattr(service._wake, "wait", finish_empty_probe)
     async def boundary():
-        return await service._process_boundary(coordinator)
+        service._stop_event.clear()
+        service._last_probe_generation = service._wake.generation
+        await service._wait_until_ready(owned=True)
+        assert service._stop_event.is_set()
+        return False
     assert await boundary() is False
     candidate, results, queries = await measured(boundary)
     assert results == [False]*3 and candidate["queries"] == 3 and candidate["updates"] == 0
@@ -214,17 +222,20 @@ async def test_empty_lpr_worker_cost_is_independent_of_handled_history(size, mon
     for plan in plans.values():
         tree = list(nodes(plan["Plan"]))
         ingests = [row for row in tree if row.get("Relation Name") == "lpr_ingest_events"]
-        assert len(ingests) == 1
-        assert ingests[0]["Node Type"] in {"Index Scan", "Index Only Scan"}
-        assert "ready_ordinal >" in ingests[0]["Index Cond"]
-        assert any(row.get("Index Name") == "ix_lpr_window_open_order" for row in tree)
-        assert all(row.get("Actual Rows",0) <= 1 for row in tree)
+        assert len(ingests) == 2  # Ready receipt seek and abandoned-capture deadline seek.
+        assert all(row["Node Type"] in {"Index Scan", "Index Only Scan"} for row in ingests)
+        assert any("ready_ordinal >" in row.get("Index Cond", "") for row in ingests)
+        assert any(row.get("Index Name") == "ix_lpr_window_quiet_due" for row in tree)
+        assert any(row.get("Index Name") == "ix_lpr_window_max_due" for row in tree)
+        assert all(row.get("Actual Rows",0) <= 1 for row in tree if row.get("Relation Name"))
+        assert all(row.get("Actual Rows",0) <= 5 for row in tree if row["Node Type"] == "Values Scan")
         assert sum(row.get("Rows Removed by Filter",0) for row in tree) <= 1
-    # Reproduce the former no-probe path through the same worker and fenced store.
-    # Configuration is inert in both samples, so these are conservative DB costs.
+    # Compare the current fenced processing path with its readiness gate bypassed.
+    # The separate actual-8259 benchmark owns historical before/after attribution.
     with monkeypatch.context() as patch:
         patch.setattr(service._pipeline, "has_pending_work", AsyncMock(return_value=True))
-        baseline, before, _ = await measured(boundary)
+        service._stop_event.clear()
+        baseline, before, _ = await measured(lambda: service._process_boundary(coordinator))
     assert before == results and baseline["updates"] >= 6
     retain(tmp_path, f"lpr-{size}", {"handled_ingests":size,"completed_windows":size,"candidate":candidate,
         "baseline":baseline,"sql":queries[0][0],"plans":plans,"equivalent_results":results})

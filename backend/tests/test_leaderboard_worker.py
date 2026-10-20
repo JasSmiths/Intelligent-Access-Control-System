@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services import leaderboard_worker as owner
+from app.services.durable_work import WorkReadiness
 from app.services.leaderboard_dirty import ChartClaim, ChartLeaseLost, LeaderboardDirtyStore
 from app.services.leaderboard_worker import LeaderboardWorker
 
@@ -13,6 +14,7 @@ from app.services.leaderboard_worker import LeaderboardWorker
 async def test_construction_is_inert_and_idle_start_stop_owns_one_task(monkeypatch):
     store = LeaderboardDirtyStore()
     claim = AsyncMock(return_value=None); monkeypatch.setattr(store, 'claim', claim)
+    monkeypatch.setattr(store, 'readiness', AsyncMock(return_value=WorkReadiness()))
     worker = LeaderboardWorker(store, AsyncMock())
     assert worker._task is None and not claim.called
     await worker.start(); task = worker._task
@@ -26,6 +28,7 @@ async def test_construction_is_inert_and_idle_start_stop_owns_one_task(monkeypat
 async def test_repeated_stop_cancellation_drains_actual_evaluation_child(monkeypatch):
     store = LeaderboardDirtyStore(); claim = ChartClaim(1, uuid.uuid4(), None, None, None)
     monkeypatch.setattr(store, 'claim', AsyncMock(return_value=claim))
+    monkeypatch.setattr(store, 'readiness', AsyncMock(return_value=WorkReadiness(True, 0)))
     entered, cleanup, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     cancellations = 0
     async def evaluate(_claim):

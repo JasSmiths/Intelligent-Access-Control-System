@@ -31,6 +31,8 @@ from app.services.access.pipeline_contracts import (
     PipelineLeaseLost,
     WindowClaim,
 )
+from app.services.durable_readiness import readiness
+from app.services.durable_work import WorkReadiness, WorkTopic, notify_work
 
 COORDINATOR_LEASE_SECONDS = 120
 COORDINATOR_RENEWAL_SECONDS = 10
@@ -246,6 +248,21 @@ async def finalization_failed_in_session(
 
 
 class AccessPipelineStore:
+    async def readiness(self, *, owned: bool, quiet_seconds: float, max_seconds: float) -> WorkReadiness:
+        if not owned:
+            pending = await readiness(self.session_factory, (
+                "SELECT COALESCE(lease_until,t.now) FROM lpr_coordinator_state,t WHERE id=1",
+            ))
+            # An absent coordinator is immediately acquirable on first startup.
+            return pending if pending.delay_seconds is not None else WorkReadiness(True, 0)
+        return await readiness(self.session_factory, (
+            "SELECT t.now FROM t WHERE EXISTS (SELECT 1 FROM lpr_coordinator_state WHERE id=1 AND (boundary_phase IS NOT NULL OR boundary_ingest_id IS NOT NULL OR finalizing_window_id IS NOT NULL OR flush_clock IS NOT NULL OR flush_upper_ordinal IS NOT NULL OR flush_completed_ordinal IS NOT NULL))",
+            "SELECT t.now FROM lpr_ingest_events,t WHERE observation_state='ready' AND ready_ordinal > (SELECT handled_ready_ordinal FROM lpr_coordinator_state WHERE id=1) ORDER BY ready_ordinal LIMIT 1",
+            "SELECT capture_until FROM lpr_ingest_events WHERE observation_state='observing' ORDER BY capture_until,id LIMIT 1",
+            "SELECT updated_at + :quiet * INTERVAL '1 second' FROM lpr_debounce_windows WHERE state='open' ORDER BY updated_at,open_ordinal LIMIT 1",
+            "SELECT first_seen + :maximum * INTERVAL '1 second' FROM lpr_debounce_windows WHERE state='open' ORDER BY first_seen,open_ordinal LIMIT 1",
+        ), parameters={"quiet": quiet_seconds, "maximum": max_seconds})
+
     def __init__(self, session_factory: Callable[[], AsyncSession] = AsyncSessionLocal) -> None:
         self.session_factory = session_factory
 
@@ -317,14 +334,15 @@ class AccessPipelineStore:
         async with access_session(self.session_factory) as session:
             row = await assert_coordinator_in_session(session, claim)
             row.lease_token, row.lease_until = None, None
+            await notify_work(session, WorkTopic.LPR)
             await session.commit()
 
     async def has_pending_work(self, claim: CoordinatorClaim) -> bool:
         """One read-only idle probe; any work still enters the locked boundary path.
 
-        This snapshot grants no mutation authority. Arrival after the snapshot is
-        observed by the wake hint or the unchanged fallback poll; all processing
-        and lease checks retain their existing locked owners.
+        This snapshot grants no mutation authority. Committed/local hints,
+        durable deadlines and bounded safety probes cover later arrivals; all
+        processing and lease checks retain their existing locked owners.
         """
         ready = (
             select(LprIngestEvent.ready_ordinal)

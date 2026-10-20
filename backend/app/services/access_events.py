@@ -69,6 +69,7 @@ from app.services.access.reads import (
     _webhook_trace_for_window,
 )
 from app.services.access.window_store import AccessWindowStore
+from app.services.durable_work import WorkReadiness, WorkTopic, WorkWake, work_wake
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_controller import UnsupportedModuleError, get_gate_controller
 from app.services.gate_malfunctions import active_stuck_open_malfunction_at
@@ -131,13 +132,15 @@ class AccessEventService:
     policy, durable execution and optional enrichment to the access owners.
     """
 
-    def __init__(self) -> None:
-        self._wake = asyncio.Event()
+    def __init__(self, *, wake: WorkWake | None = None) -> None:
+        self._wake = wake if wake is not None else work_wake(WorkTopic.LPR)
         self._cleanup: asyncio.Task[None] | None = None
         self._pipeline = AccessPipelineStore(session_factory=lambda: AsyncSessionLocal())
         self._windows = AccessWindowStore(session_factory=lambda: AsyncSessionLocal())
         self._active_ingest: IngestClaim | None = None
         self._active_window: WindowClaim | None = None
+        self._wait_generation = 0
+        self._last_probe_generation = -1
         self._coordinator_owned = False
         self._worker: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -414,6 +417,8 @@ class AccessEventService:
             renewal: asyncio.Task[None] | None = None
             operation: asyncio.Task[bool] | None = None
             try:
+                self._wait_generation = self._wake.generation
+                await self._wait_until_ready(owned=False)
                 claim = await self._pipeline.acquire_coordinator()
                 if claim is None:
                     await self._wait_for_wake()
@@ -424,7 +429,11 @@ class AccessEventService:
                 )
                 while not self._stop_event.is_set():
                     self._active_ingest, self._active_window = None, None
-                    self._wake.clear()
+                    self._wait_generation = self._wake.generation
+                    await self._wait_until_ready(owned=True)
+                    if renewal.done():
+                        renewal.result()
+                        raise PipelineLeaseLost("coordinator_renewal_stopped")
                     operation = asyncio.create_task(
                         self._process_boundary(claim), name="lpr-read-flush-boundary"
                     )
@@ -478,19 +487,37 @@ class AccessEventService:
                         )
 
     async def _renew_coordinator(self, claim: CoordinatorClaim) -> None:
-        while True:
-            await asyncio.sleep(COORDINATOR_RENEWAL_SECONDS)
-            await self._pipeline.renew_coordinator(claim)
+        try:
+            while True:
+                await asyncio.sleep(COORDINATOR_RENEWAL_SECONDS)
+                await self._pipeline.renew_coordinator(claim)
+        finally:
+            self._wake.set()  # An idle coordinator must promptly observe renewal loss.
+
+    async def _wait_until_ready(self, *, owned: bool) -> None:
+        while not self._stop_event.is_set():
+            self._wait_generation = self._wake.generation
+            runtime = self._runtime
+            if owned and self._last_probe_generation != self._wait_generation:
+                self._last_probe_generation = self._wait_generation
+                return
+            pending = await self._pipeline.readiness(
+                owned=owned,
+                quiet_seconds=runtime.lpr_debounce_quiet_seconds if runtime else 0.5,
+                max_seconds=runtime.lpr_debounce_max_seconds if runtime else 1,
+            )
+            if pending.ready:
+                return
+            await self._wake.wait(self._wait_generation, pending, fallback_seconds=0.5)
+            self._last_heartbeat_at = datetime.now(tz=UTC)
 
     async def _wait_for_wake(self) -> None:
-        try:
-            await asyncio.wait_for(self._wake.wait(), timeout=0.5)
-        except TimeoutError:
-            pass
+        await self._wake.wait(self._wait_generation, WorkReadiness(False, 0.5), fallback_seconds=0.5)
 
     async def _process_boundary(self, coordinator: CoordinatorClaim) -> bool:
         async with asyncio.timeout(90):
             self._last_heartbeat_at = datetime.now(tz=UTC)
+            await self._lpr_ingest_repo().hold_expired_observations()
             if not await self._pipeline.has_pending_work(coordinator):
                 self._last_processed_at = datetime.now(tz=UTC)
                 return False

@@ -17,6 +17,7 @@ from app.models import AccessEvent, User, VisitorPass, VisitorPassReservationRec
 from app.models.enums import VisitorPassStatus, VisitorPassType
 from app.modules.dvla.vehicle_enquiry import normalize_registration_number
 from app.services.domain_events import publish_visitor_pass_status_changed
+from app.services.durable_work import WorkReadiness, WorkTopic, notify_work, work_wake
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.settings import get_runtime_config
 from app.services.telemetry import (
@@ -25,6 +26,13 @@ from app.services.telemetry import (
     actor_from_user,
     audit_diff,
     write_audit_log,
+)
+from app.services.visitor_lifecycle import (
+    BATCH_SIZE,
+    LANES,
+    VisitorLifecycleLane,
+    due_passes_in_session,
+    lifecycle_readiness,
 )
 
 logger = get_logger(__name__)
@@ -50,6 +58,8 @@ class VisitorPassService:
     def __init__(self) -> None:
         self._worker: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        self._wake = work_wake(WorkTopic.VISITOR)
+        self._lifecycle_lane = VisitorLifecycleLane.START
 
     async def start(self) -> None:
         if self._worker and not self._worker.done():
@@ -62,23 +72,27 @@ class VisitorPassService:
 
     async def stop(self) -> None:
         self._stop_event.set()
+        self._wake.set()
         if self._worker:
             await self._worker
         logger.info("visitor_pass_service_stopped")
 
     async def _run_lifecycle_worker(self) -> None:
         while not self._stop_event.is_set():
+            generation = self._wake.generation
             try:
-                await self.refresh_statuses()
-            except Exception as exc:  # noqa: BLE001 - Background integration failure remains observable and recoverable.
-                logger.warning("visitor_pass_lifecycle_refresh_failed", extra={"error": str(exc)})
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(),
-                    timeout=VISITOR_PASS_WORKER_INTERVAL_SECONDS,
-                )
-            except TimeoutError:
-                continue
+                pending = await lifecycle_readiness(lambda: AsyncSessionLocal())
+                if not pending.ready:
+                    await self._wake.wait(generation, pending, fallback_seconds=VISITOR_PASS_WORKER_INTERVAL_SECONDS)
+                    continue
+                changed = await self.refresh_statuses(batch_limit=BATCH_SIZE)
+                if changed:
+                    await asyncio.sleep(0)
+                    continue
+            except Exception as exc:  # noqa: BLE001 - Durable policy errors remain visible and retryable.
+                logger.warning("visitor_pass_lifecycle_refresh_failed", extra={"exception_class": type(exc).__name__})
+            await self._wake.wait(generation, WorkReadiness(False, VISITOR_PASS_WORKER_INTERVAL_SECONDS),
+                                  fallback_seconds=VISITOR_PASS_WORKER_INTERVAL_SECONDS)
 
     async def refresh_statuses(
         self,
@@ -88,6 +102,7 @@ class VisitorPassService:
         actor: str = "System",
         actor_user_id: uuid.UUID | str | None = None,
         publish: bool = True,
+        batch_limit: int | None = None,
     ) -> list[VisitorPass]:
         checked_at = _ensure_aware(now or datetime.now(tz=UTC))
         if session is not None:
@@ -97,6 +112,7 @@ class VisitorPassService:
                 actor=actor,
                 actor_user_id=actor_user_id,
                 publish=publish,
+                batch_limit=batch_limit,
             )
 
         async with AsyncSessionLocal() as own_session:
@@ -106,9 +122,12 @@ class VisitorPassService:
                 actor=actor,
                 actor_user_id=actor_user_id,
                 publish=False,
+                batch_limit=batch_limit,
             )
             payloads = [serialize_visitor_pass(pass_) for pass_ in changed]
             await own_session.commit()
+            if batch_limit is not None:
+                self._lifecycle_lane = LANES[(LANES.index(self._lifecycle_lane) + 1) % len(LANES)]
 
         if publish:
             for payload in payloads:
@@ -123,16 +142,18 @@ class VisitorPassService:
         actor: str,
         actor_user_id: uuid.UUID | str | None,
         publish: bool,
+        batch_limit: int | None = None,
     ) -> list[VisitorPass]:
-        passes = (
-            await session.scalars(
+        if batch_limit is not None:
+            passes = await due_passes_in_session(session, now, first_lane=self._lifecycle_lane)
+        else:
+            passes = list((await session.scalars(
                 select(VisitorPass)
                 .where(VisitorPass.status.in_(VISITOR_PASS_ACTIVE_STATUSES))
                 .order_by(VisitorPass.id)
                 .with_for_update()
                 .execution_options(populate_existing=True)
-            )
-        ).all()
+            )).all())
         changed: list[VisitorPass] = []
         for visitor_pass in passes:
             next_status = self.status_for(visitor_pass, now)
@@ -602,6 +623,7 @@ class VisitorPassService:
                     dispatch_deadline=dispatch_deadline,
                 )
                 session.add(row)
+                await notify_work(session, WorkTopic.MOVEMENT)
                 await session.flush()
                 await write_audit_log(
                     session,
@@ -1152,6 +1174,7 @@ class VisitorPassService:
         category: str,
         automation_payload: dict[str, Any] | None = None,
     ) -> None:
+        await notify_work(session, WorkTopic.VISITOR)
         audit = await write_audit_log(
             session,
             category=category,

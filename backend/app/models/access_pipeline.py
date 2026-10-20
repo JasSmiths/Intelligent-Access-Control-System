@@ -22,6 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -389,3 +390,17 @@ class HistoricalAccessCandidate(Base):
         ),
         Index("ix_historical_candidate_ready", "state", "due_at", "id"),
     )
+
+Index('ix_lpr_window_quiet_due', LprDebounceWindow.updated_at, LprDebounceWindow.open_ordinal, postgresql_where=text("state='open'"))
+
+Index('ix_lpr_window_max_due', LprDebounceWindow.first_seen, LprDebounceWindow.open_ordinal, postgresql_where=text("state='open'"))
+
+Index('ix_access_optional_due', AccessCompletionWork.due_at, AccessCompletionWork.id, postgresql_where=text("stage IN ('visual','snapshot','visitor_link','zone_shadow') AND state='queued'"))
+
+Index('ix_access_completion_lease_due', AccessCompletionWork.stage, text('(GREATEST(due_at,lease_until))'), AccessCompletionWork.id, postgresql_where=text("state='leased'"))
+
+Index('ix_access_optional_lease_due', text('(GREATEST(due_at,lease_until))'), AccessCompletionWork.id, postgresql_where=text("stage IN ('visual','snapshot','visitor_link','zone_shadow') AND state='leased'"))
+
+Index('ix_access_optional_wait_due', text('(GREATEST(due_at,deadline))'), AccessCompletionWork.id, postgresql_where=text("stage IN ('visual','snapshot','zone_shadow') AND state='waiting'"))
+
+Index('ix_ha_presence_target_deadline', HaPresenceTarget.deadline, HaPresenceTarget.target_key, postgresql_where=text("state='ready' AND barrier_attempt_id IS NULL"))

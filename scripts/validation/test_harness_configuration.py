@@ -161,6 +161,13 @@ class TypeCoverageTests(unittest.TestCase):
 
 
 class RecoveryProfileTests(unittest.TestCase):
+    def test_event_driven_regressions_and_timer_inventory_are_mandatory(self):
+        for name in ('workers', 'upgrade', 'efficiency'):
+            self.assertIn(f'scripts/validation/test_event_driven_{name}.py', recovery_checks.PERSISTENCE_TESTS)
+        self.assertIn('scripts/validation/test_background_polling_inventory.py', recovery_checks.HOST_TESTS)
+        self.assertIn('scripts/validation/background_polling_inventory.json', recovery_checks.REQUIRED_HELPERS)
+        self.assertIn('scripts/validation/event_driven_measurement.py', recovery_checks.REQUIRED_HELPERS)
+
     def test_obsolete_image_override_is_rejected_before_execution(self):
         for current in ({}, {'IACS_VALIDATION_BACKEND_IMAGE': 'current-image'}):
             with self.subTest(current=current):

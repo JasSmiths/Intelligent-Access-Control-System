@@ -40,6 +40,7 @@ from app.models.enums import (
     VisitorPassStatus,
     VisitorPassType,
 )
+from app.models.visitor_timing import EXPIRY_SQL, INVALID_WINDOW_SQL, START_SQL
 
 
 class TimestampMixin:
@@ -1611,3 +1612,27 @@ Index("ix_lpr_ingest_observing", LprIngestEvent.observation_state, LprIngestEven
 Index("ix_lpr_ingest_ready_order", LprIngestEvent.status, LprIngestEvent.ready_ordinal)
 Index("ix_lpr_ingest_observation_ready", LprIngestEvent.observation_state, LprIngestEvent.ready_ordinal)
 Index("ix_lpr_ingest_window", LprIngestEvent.window_id, LprIngestEvent.id)
+
+Index('ix_notification_lease_due', NotificationRun.lease_expires_at, NotificationRun.id, postgresql_where=text("recovery_version=1 AND status IN ('queued','processing')"))
+
+Index('ix_notification_unclaimed', NotificationRun.id, postgresql_where=text("recovery_version=1 AND status IN ('queued','processing') AND claim_token IS NULL"))
+
+Index('ix_automation_lease_due', AutomationRun.lease_expires_at, AutomationRun.id, postgresql_where=text("recovery_version=1 AND status IN ('queued','processing')"))
+
+Index('ix_automation_unleased', AutomationRun.id, postgresql_where=text("recovery_version=1 AND status IN ('queued','processing') AND (lease_expires_at IS NULL OR (status='processing' AND claim_token IS NULL))"))
+
+Index('ix_visitor_pass_lifecycle_start', text("(" + START_SQL + ")"), VisitorPass.id, postgresql_where=text("status='SCHEDULED'"))
+
+Index('ix_visitor_pass_lifecycle_expiry', text("(" + EXPIRY_SQL + ")"), VisitorPass.id, postgresql_where=text("status='ACTIVE'"))
+
+Index('ix_gate_command_lease_due', GateCommandRecord.lease_expires_at, GateCommandRecord.id, postgresql_where=text("state='LEASED'"))
+
+Index('ix_gate_command_confirmation_due', GateCommandRecord.completed_at, GateCommandRecord.id, postgresql_where=text("state='ACCEPTED' AND mechanically_confirmed IS FALSE"))
+
+Index('ix_movement_pending_due', MovementSagaRecord.updated_at, MovementSagaRecord.id, postgresql_where=text("state='PHYSICAL_COMMAND_PENDING'"))
+
+Index('ix_device_output_lease_due', AccessDeviceCommandRecord.lease_expires_at, AccessDeviceCommandRecord.id, postgresql_where=text("origin_context IS NOT NULL AND outcome_recorded_at IS NULL AND state IN ('prepared','attempting')"))
+
+Index('ix_actionable_dispatch_due', text("(metadata->>'dispatch_lease_expires_at')"), NotificationActionContext.id, postgresql_where=text("action IN ('gate.open','gate.force_open') AND consumed_at IS NOT NULL AND metadata->>'version'='2' AND outcome IN ('dispatch_pending','attempting','dispatch_revoked')"))
+
+Index("ix_visitor_pass_invalid_window", VisitorPass.id, postgresql_where=text(INVALID_WINDOW_SQL))

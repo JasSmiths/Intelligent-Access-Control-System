@@ -14,6 +14,9 @@ class FakeFlushSession:
 
     async def flush(self) -> None:
         self.flushes += 1
+    async def execute(self, statement, parameters):
+        assert "pg_notify" in str(statement)
+
 
 
 def test_gate_command_idempotency_prefers_explicit_key() -> None:

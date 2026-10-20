@@ -419,7 +419,8 @@ class Harness:
                 required, classification=classification)
         backend_check('isolation-db-free', ['/workspace/scripts/validation/preflight.py'], True)
         for index, relative in enumerate(HOST_TESTS):
-            name = ('snapshot-tests', 'harness-configuration-tests', 'storage-tests', 'ci-evidence-tests')[index]
+            name = ('snapshot-tests', 'harness-configuration-tests', 'storage-tests', 'ci-evidence-tests',
+                    'background-polling-inventory')[index]
             backend_check(name, ['/workspace/' + relative], True)
         backend_check('architecture-boundaries', ['/workspace/scripts/architecture/check_boundaries.py'],
                       classification='static')

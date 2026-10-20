@@ -28,6 +28,7 @@ from app.services.access.completion_store import (
 from app.services.access.pipeline_contracts import CompletionClaim, PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
 from app.services.access.publication import mark_public_event_changed_in_session
+from app.services.durable_work import WorkTopic, notify_work
 
 
 def compact_text(value: object) -> str | None:
@@ -92,6 +93,8 @@ async def release_visitor_link_in_session(session: AsyncSession, event: AccessEv
     if visitor_id is None:
         return
     result = work.result
+    if result.get("requested") and result.get("requested") == result.get("applied"):
+        return
     # A nonlocking readiness hint cannot authorize the applicator. Its exact
     # canonical saga/consumed reservation/current arrival are locked there.
     arrived = (
@@ -113,6 +116,8 @@ async def release_visitor_link_in_session(session: AsyncSession, event: AccessEv
                 None,
             )
             work.lease_token, work.lease_until = None, None
+
+            await notify_work(session, WorkTopic.COMPLETION)
     elif work.state != "leased":
         work.state, work.readiness = "waiting", "canonical_arrival_and_result"
 
@@ -274,6 +279,7 @@ async def reserve_information_in_session(
         )
         .on_conflict_do_nothing(index_elements=[VehicleInformationJob.event_id])
     )
+    await notify_work(session, WorkTopic.INFORMATION)
 
 
 async def accept_information_in_session(

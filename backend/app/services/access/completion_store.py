@@ -37,6 +37,8 @@ from app.services.access.completion_database import access_session
 from app.services.access.pipeline_contracts import CompletionClaim, PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
 from app.services.access.snapshot_identity import protect_event_id_from_payload
+from app.services.durable_readiness import readiness
+from app.services.durable_work import WorkReadiness, WorkTopic, notify_work
 from app.services.lpr_zone_shadow import compact_zone_shadow_read
 
 COMPLETION_SCAN_SIZE = 32
@@ -289,6 +291,7 @@ async def _reserve(
             )
         )
     await session.flush()
+    await notify_work(session, WorkTopic.COMPLETION)
 
 
 async def reserve_window_completion_in_session(
@@ -402,6 +405,26 @@ async def reserve_external_completion_in_session(
 
 
 class AccessCompletionStore:
+    async def readiness(self) -> WorkReadiness:
+        return await readiness(
+            self.session_factory,
+            (
+                (
+                    "SELECT due_at FROM access_completion_work WHERE stage IN "
+                    "('visual','snapshot','visitor_link','zone_shadow') AND state='queued' ORDER BY due_at,id LIMIT 1"
+                ),
+                (
+                    "SELECT GREATEST(due_at,lease_until) FROM access_completion_work WHERE stage IN "
+                    "('visual','snapshot','visitor_link','zone_shadow') AND state='leased' ORDER BY "
+                    "GREATEST(due_at,lease_until),id LIMIT 1"
+                ),
+                (
+                    "SELECT GREATEST(due_at,deadline) FROM access_completion_work WHERE stage IN "
+                    "('visual','snapshot','zone_shadow') AND state='waiting' ORDER BY GREATEST(due_at,deadline),id LIMIT 1"
+                ),
+            ),
+        )
+
     def __init__(self, session_factory: Callable[[], AsyncSession] = AsyncSessionLocal) -> None:
         self.session_factory = session_factory
 
@@ -582,6 +605,7 @@ class AccessCompletionStore:
                 due_at = min(due_at, claim.deadline)
             work.state, work.due_at, work.outcome = "queued", due_at, "retry_pending"
             work.lease_token, work.lease_until = None, None
+            await notify_work(session, WorkTopic.COMPLETION)
             await session.flush()
             final_now = await database_now(session)
             if (
@@ -593,6 +617,7 @@ class AccessCompletionStore:
                 )
             ):
                 raise PipelineLeaseLost("completion_lease_lost")
+
             await session.commit()
 
 

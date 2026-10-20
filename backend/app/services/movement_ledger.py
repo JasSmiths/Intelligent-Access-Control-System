@@ -18,6 +18,7 @@ from app.models import (
 )
 from app.models.enums import AccessDecision, AccessDirection, GateCommandState, MovementSagaState
 from app.services.access.publication import mark_public_event_changed_in_session
+from app.services.durable_work import WorkTopic, notify_work
 
 MOVEMENT_STATE_RANK = {
     MovementSagaState.OBSERVED: 10,
@@ -187,6 +188,7 @@ class MovementLedgerRepository:
         try:
             async with session.begin_nested():
                 session.add(row)
+                await notify_work(session, WorkTopic.MOVEMENT)
                 await session.flush()
         except IntegrityError:
             existing = await self.movement_saga_by_idempotency_key(session, idempotency_key)
@@ -304,6 +306,7 @@ class MovementLedgerRepository:
             *(row.state_history or []),
             self._history_item(state, at=now, detail=detail),
         ][-50:]
+        await notify_work(session, WorkTopic.MOVEMENT)
         await session.flush()
         if publish_change and row.access_event_id is not None:
             await mark_public_event_changed_in_session(session, row.access_event_id)
@@ -411,6 +414,7 @@ class MovementLedgerRepository:
             },
         )
         session.add(row)
+        await notify_work(session, WorkTopic.MOVEMENT)
         await session.flush()
         return row
 
@@ -447,6 +451,7 @@ class MovementLedgerRepository:
                         detail="Gate command lease expired; delivery remains unknown.",
                     )
                 if existing and existing.state in TERMINAL_GATE_COMMAND_STATES:
+                    await notify_work(session, WorkTopic.MOVEMENT)
                     await session.commit()
                     return GateCommandLease(
                         existing, existing.lease_token or "", already_completed=True
@@ -467,6 +472,7 @@ class MovementLedgerRepository:
                     record.leased_at = now
                     record.lease_expires_at = now + timedelta(seconds=lease_seconds)
                     record.started_at = now
+                    await notify_work(session, WorkTopic.MOVEMENT)
                     await session.commit()
                     await session.refresh(record)
                     return GateCommandLease(record, lease_token)
@@ -504,6 +510,7 @@ class MovementLedgerRepository:
                     self.mark_gate_command_uncertain(
                         row, at=now, detail="Gate command response arrived after its lease expired."
                     )
+                    await notify_work(session, WorkTopic.MOVEMENT)
                     await session.commit()
                 raise GateCommandLeaseLost(row)
             row.accepted = accepted
@@ -534,6 +541,7 @@ class MovementLedgerRepository:
                 row.state = GateCommandState.ACCEPTED
             else:
                 row.state = GateCommandState.REJECTED
+            await notify_work(session, WorkTopic.MOVEMENT)
             await session.commit()
             await session.refresh(row)
             return row
@@ -568,6 +576,7 @@ class MovementLedgerRepository:
         row.detail = detail
         row.state = GateCommandState.RECONCILED if success else GateCommandState.FAILED
         row.completed_at = utc_now()
+        await notify_work(session, WorkTopic.MOVEMENT)
         await session.flush()
 
     def outcome_payload_from_record(self, row: GateCommandRecord) -> dict[str, Any]:

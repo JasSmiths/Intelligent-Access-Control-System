@@ -23,6 +23,8 @@ from app.services.access.completion_database import access_session
 from app.services.access.event_reads import public_event_payload, public_event_query
 from app.services.access.pipeline_contracts import PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
+from app.services.durable_readiness import readiness
+from app.services.durable_work import WorkReadiness, WorkTopic, notify_work
 from app.services.settings import get_runtime_config_for_session
 from app.services.visitor_passes import serialize_visitor_pass
 
@@ -112,6 +114,7 @@ async def _reserve_checkpoint(session: AsyncSession, event_id: uuid.UUID, revisi
         work.state, work.due_at, work.completed_at, work.outcome = "queued", now, None, None
         work.lease_token, work.lease_until = None, None
     await session.flush()
+    await notify_work(session, WorkTopic.PUBLICATION)
 
 
 async def reserve_initial_publication_in_session(session: AsyncSession, event_id: uuid.UUID) -> int:
@@ -237,6 +240,21 @@ async def _current_projection(session: AsyncSession, event_id: uuid.UUID) -> dic
 
 
 class AccessPublicationStore:
+    async def readiness(self) -> WorkReadiness:
+        return await readiness(
+            self.session_factory,
+            (
+                (
+                    "SELECT due_at FROM access_completion_work WHERE stage='publication' AND state='queued' ORDER BY due_at,id "
+                    "LIMIT 1"
+                ),
+                (
+                    "SELECT GREATEST(due_at,lease_until) FROM access_completion_work WHERE stage='publication' AND "
+                    "state='leased' ORDER BY GREATEST(due_at,lease_until),id LIMIT 1"
+                ),
+            ),
+        )
+
     def __init__(self, session_factory: Callable[[], AsyncSession] = AsyncSessionLocal) -> None:
         self.session_factory = session_factory
 
@@ -368,9 +386,11 @@ class AccessPublicationStore:
             work.outcome = "newer_revision_pending" if trailing else "published"
             original_until = work.lease_until
             work.lease_token, work.lease_until = None, None
+            await notify_work(session, WorkTopic.PUBLICATION)
             await session.flush()
             if original_until is None or original_until <= await database_now(session):
                 raise PipelineLeaseLost("publication_lease_lost")
+
             await session.commit()
             return trailing
 
@@ -382,7 +402,9 @@ class AccessPublicationStore:
             original_until = work.lease_until
             work.lease_token, work.lease_until = None, None
             work.result = _published_result(work, _published_revision(work))
+            await notify_work(session, WorkTopic.PUBLICATION)
             await session.flush()
             if original_until is None or original_until <= await database_now(session):
                 raise PipelineLeaseLost("publication_lease_lost")
+
             await session.commit()

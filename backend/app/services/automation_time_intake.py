@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AutomationRule
 from app.services.automation_scheduling import due_time_trigger, next_run_for_triggers
+from app.services.durable_readiness import readiness
+from app.services.durable_work import WorkReadiness, WorkTopic, notify_work
 from app.services.workflow_session import SessionFactory
 from app.services.workflows.automation_definition import (
     AutomationContext,
@@ -27,6 +29,17 @@ class OccurrenceReservation(Protocol):
 
 
 class AutomationTimeIntake:
+    async def readiness(self) -> WorkReadiness:
+        return await readiness(
+            self.sessions,
+            (
+                (
+                    "SELECT next_run_at FROM automation_rules WHERE is_active IS TRUE AND next_run_at IS NOT NULL ORDER BY "
+                    "next_run_at LIMIT 1"
+                ),
+            ),
+        )
+
     def __init__(
         self, *, sessions: SessionFactory, reserve_occurrence: OccurrenceReservation
     ) -> None:
@@ -73,5 +86,7 @@ class AutomationTimeIntake:
                     )
                     count += 1
                 rule.next_run_at = next_run_for_triggers(triggers, now=now, last_fired_at=now)
+            if rules:
+                await notify_work(session, WorkTopic.AUTOMATION_CLOCK)
             await session.commit()
         return count

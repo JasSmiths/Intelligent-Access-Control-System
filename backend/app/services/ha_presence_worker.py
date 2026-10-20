@@ -15,6 +15,7 @@ from app.core.task_lifecycle import drain_owned
 from app.modules.home_assistant.client import HomeAssistantClient
 from app.modules.home_assistant.input_boolean_contracts import HaDelivery
 from app.modules.home_assistant.input_booleans import command_frozen_input_boolean
+from app.services.durable_work import WorkReadiness, WorkTopic, WorkWake, work_wake
 from app.services.ha_presence_attempts import HaPresenceAttemptStore
 from app.services.ha_presence_contracts import HaLeaseLost, PreparedHaAttempt
 from app.services.ha_presence_database import (
@@ -40,12 +41,13 @@ class HaPresenceWorker:
     def __init__(
         self, store: HaPresenceAttemptStore, *,
         client_factory: Callable[[], HomeAssistantClient] = HomeAssistantClient,
+        wake: WorkWake | None = None,
     ) -> None:
         self.store, self._client_factory = store, client_factory
         self._task: asyncio.Task[None] | None = None
         self._cleanup: asyncio.Task[None] | None = None
         self._active: asyncio.Task[bool] | None = None
-        self._wake = asyncio.Event()
+        self._wake = wake if wake is not None else work_wake(WorkTopic.HA)
         self._stopping = False
 
     async def start(self) -> None:
@@ -78,9 +80,13 @@ class HaPresenceWorker:
 
     async def _run(self) -> None:
         while not self._stopping:
+            generation = self._wake.generation
             try:
+                pending = await self.store.readiness()
+                if not pending.ready:
+                    await self._wake.wait(generation, pending, fallback_seconds=0.5)
+                    continue
                 await self._recover()
-                self._wake.clear()
                 self._active = asyncio.create_task(self._process_owned(), name="ha-presence-attempt")
                 try:
                     attempted = await asyncio.shield(self._active)
@@ -90,10 +96,7 @@ class HaPresenceWorker:
                     await drain_owned(asyncio.gather(self._active, return_exceptions=True))
                     self._active = None
                 if not attempted:
-                    try:
-                        await asyncio.wait_for(self._wake.wait(), .5)
-                    except TimeoutError:
-                        pass
+                    await self._wake.wait(generation, WorkReadiness(False, 0.5), fallback_seconds=0.5)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - Durable claims remain recoverable; never log provider text.

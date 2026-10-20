@@ -434,7 +434,19 @@ After an authorized deployment, check health and compare three quiet 60-second C
 and database samples. The operational target is PostgreSQL below 5% of one core and
 idle coordinator writes limited to acquisition, release and lease renewal. Investigate
 a missed target before declaring the CPU issue resolved; workload and host conditions
-can change the result. Access response deadlines and the 500 ms fallback remain intact.
+can change the result. The later event-driven worker change retains original
+execution deadlines, with a 60-second healthy repair check and the old lane-specific
+fallback cadence during detected listener outages. See
+[background workers](background-workers.md) for the deliberately retained safety timers.
+
+The event-driven index migration and backend are deployed together after separate
+authorization, with old workers stopped and a verified matching database/files/auth
+and image checkpoint retained. Mixed old/new workers are not a supported cutover:
+old producers do not publish the new committed hints. Reconnect/startup catch-up
+reads durable queues before relying on notifications. After deployment, compare
+three quiet 60-second samples, targeting backend below 1% and PostgreSQL below 0.5%
+of one CPU core. Attribute remaining safety work and investigate missed targets;
+synthetic or quiet-window results are not a guarantee for other workloads.
 
 Requested mobile snapshots currently have a boolean attachment request and no
 explicit optionality contract. A capture failure continues to fail that delivery;

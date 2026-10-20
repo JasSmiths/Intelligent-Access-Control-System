@@ -290,6 +290,10 @@ async def finalize_in_session(
             session, event=event, saga=saga, status=status, receipt=gate_receipt
         )
     await session.flush()
+    if mode == "live" and status == "verified" and event.direction == AccessDirection.ENTRY:
+        from app.services.access.completion_results import release_visitor_link_in_session
+
+        await release_visitor_link_in_session(session, event)
     ha_reservation = None
     if transition.changed and event.person_id is not None:
         origin_at = None

@@ -18,6 +18,7 @@ from app.models import GateMalfunctionState, NotificationActionContext, Person, 
 from app.models.enums import GateMalfunctionStatus, UserRole
 from app.modules.gate.base import GateCommandDelivery
 from app.modules.notifications.base import NotificationContext
+from app.services.durable_work import WorkTopic, notify_work
 from app.services.event_bus import event_bus
 from app.services.gate_commands import GateCommandIntent, get_gate_command_coordinator
 from app.services.mutation_context import MutationError, load_active_admin
@@ -302,6 +303,7 @@ class ActionableNotificationService:
                 if row.outcome is None:
                     row.outcome = "legacy_inert"
                     row.outcome_detail = "A legacy notification action lacked the current Admin and target binding."
+                    await notify_work(session, WorkTopic.MOVEMENT)
                     await session.commit()
                 return None, "This notification action requires a new approved request."
             if row.action != expected_action:
@@ -341,6 +343,7 @@ class ActionableNotificationService:
                     "dispatch_state": "active",
                     "dispatch_lease_expires_at": _dispatch_lease_expires_at(now),
                 }
+                await notify_work(session, WorkTopic.MOVEMENT)
                 await session.commit()
                 return bound, ""
 

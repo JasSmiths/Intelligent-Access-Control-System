@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -14,6 +13,7 @@ from app.core.logging import get_logger
 from app.core.task_lifecycle import drain_owned
 from app.models import NotificationRun
 from app.modules.notifications.base import NotificationDeliveryError
+from app.services.durable_work import WorkReadiness, WorkTopic, WorkWake, work_wake
 from app.services.notification_runs import (
     ClaimLost,
     NotificationRunStore,
@@ -39,10 +39,10 @@ type AuthorizationCallback = Callable[
 
 
 class NotificationDispatcher:
-    def __init__(self, service: NotificationDispatchOwner, store: NotificationRunStore):
+    def __init__(self, service: NotificationDispatchOwner, store: NotificationRunStore, *, wake: WorkWake | None = None) -> None:
         self.service = service
         self.store = store
-        self._wake = asyncio.Event()
+        self._wake = wake if wake is not None else work_wake(WorkTopic.NOTIFICATION)
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -60,16 +60,24 @@ class NotificationDispatcher:
 
     async def _worker(self) -> None:
         while True:
-            self._wake.clear()
+            generation = self._wake.generation
             try:
+                pending = await self.store.readiness()
+                if not pending.ready:
+                    await self._wake.wait(generation, pending, fallback_seconds=POLL_SECONDS)
+                    continue
                 # Bound each cycle and yield between runs; no unbounded local task fanout.
                 for _ in range(20):
                     if not await self.run_once():
                         break
+                else:
+                    await asyncio.sleep(0)
+                    continue
             except Exception:
                 logger.exception("notification_dispatch_tick_failed")
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._wake.wait(), timeout=POLL_SECONDS)
+                await asyncio.sleep(POLL_SECONDS)
+                continue
+            await self._wake.wait(generation, WorkReadiness(False, POLL_SECONDS), fallback_seconds=POLL_SECONDS)
 
     async def run_once(
         self, run_id: uuid.UUID | None = None, *, claimed: NotificationRun | None = None

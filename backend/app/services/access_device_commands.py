@@ -26,6 +26,7 @@ from app.models import (
 from app.models.enums import GateCommandState
 from app.modules.access_devices.base import gate_receipt_projection
 from app.modules.gate.base import CommandDelivery, GateState
+from app.services.durable_work import WorkTopic, notify_work
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_INTEGRATIONS,
     audit_log_event_payload,
@@ -134,6 +135,7 @@ class AccessDeviceCommandJournal:
             target_label=device.name if device else row.device_key,
             outcome=outcome, level=level, metadata=payload,
         )
+        await notify_work(session, WorkTopic.MOVEMENT)
         audit.id = audit_id
         return audit
 
@@ -345,6 +347,7 @@ class AccessDeviceCommandJournal:
             audit = await self.record_outcome_in_session(session, active)
             if audit is not None:
                 audits.append(audit)
+            await notify_work(session, WorkTopic.MOVEMENT)
             await session.flush()
         blocked = bool(active and active.state in UNRESOLVED_DEVICE_COMMAND_STATES)
         expired = bool(expires_at and expires_at < now)
@@ -367,6 +370,7 @@ class AccessDeviceCommandJournal:
             provider_receipts=[],
         )
         session.add(row)
+        await notify_work(session, WorkTopic.MOVEMENT)
         await session.flush()
         audit = await self.record_outcome_in_session(session, row)
         if audit is not None:
@@ -409,6 +413,7 @@ class AccessDeviceCommandJournal:
             "provider": provider, "external_id": external_id, "delivery": "unknown",
             "status": "attempting", "attempted_at": now.isoformat(),
         }][-MAX_PROVIDER_RECEIPTS:]
+        await notify_work(session, WorkTopic.MOVEMENT)
         await session.flush()
         return True
 
@@ -429,6 +434,7 @@ class AccessDeviceCommandJournal:
             if not self._owns(row, claim.token, "attempting", now):
                 self.expire(row, now)
                 audit = await self.record_outcome_in_session(session, row)
+                await notify_work(session, WorkTopic.MOVEMENT)
                 await session.commit()
                 committed = True
                 return row
@@ -457,6 +463,7 @@ class AccessDeviceCommandJournal:
             else:
                 self._terminal(row, delivery.value, now, detail, accepted=False)
             audit = await self.record_outcome_in_session(session, row)
+            await notify_work(session, WorkTopic.MOVEMENT)
             await session.commit()
             committed = True
             return row
@@ -474,6 +481,7 @@ class AccessDeviceCommandJournal:
         session = AsyncSessionLocal()
         try:
             row = await self.complete_prepared(session, claim, detail=detail, observation=observation, outcome_audits=audits)
+            await notify_work(session, WorkTopic.MOVEMENT)
             await session.commit()
             committed = True
             return row
@@ -526,6 +534,7 @@ class AccessDeviceCommandJournal:
             if row.state in {"accepted", "unknown"} and row.binding_fingerprint == binding_fingerprint:
                 await self._verify(session, row, observation, now)
             audit = await self.record_outcome_in_session(session, row)
+            await notify_work(session, WorkTopic.MOVEMENT)
             await session.commit()
             committed = True
             return row
@@ -565,6 +574,7 @@ class AccessDeviceCommandJournal:
                     row.state, row.completed_at = "verified", now
                     row.lease_token = row.lease_expires_at = None
             audit = await self.record_outcome_in_session(session, row)
+            await notify_work(session, WorkTopic.MOVEMENT)
             await session.commit()
             committed = True
             return row

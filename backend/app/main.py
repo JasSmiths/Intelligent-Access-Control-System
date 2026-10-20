@@ -28,6 +28,7 @@ from app.services.access_devices import get_access_device_service
 from app.services.access_events import get_access_event_service
 from app.services.auth import authenticate_request, count_users
 from app.services.automations import get_automation_service
+from app.services.durable_work import durable_work_listener
 from app.services.event_bus import event_bus
 from app.services.gate_malfunctions import get_gate_malfunction_service
 from app.services.ha_presence_attempts import HaPresenceAttemptStore
@@ -129,6 +130,8 @@ async def lifespan(app: FastAPI):
             resources.push_async_callback(_stop_owned_service, "home_assistant_client",
                 get_home_assistant_client().close)
             await init_database()
+            resources.push_async_callback(_stop_owned_service, "durable_work", durable_work_listener.stop)
+            await durable_work_listener.start()
             stages = AccessCompletionStages(visual=get_vehicle_visual_detection_recorder(),
                 snapshots=get_snapshot_manager(), protect=get_unifi_protect_service())
             completion = AccessCompletionOwner(AccessCompletionStore(), CompletionStageOwners(

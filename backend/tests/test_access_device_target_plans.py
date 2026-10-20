@@ -101,6 +101,9 @@ class FixedClockSession:
 
     async def flush(self):
         pass
+    async def execute(self, statement, parameters):
+        assert "pg_notify" in str(statement)
+
 
 
 def prepared(now, *, expiry=None):

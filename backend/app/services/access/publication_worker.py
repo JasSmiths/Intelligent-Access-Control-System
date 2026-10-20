@@ -14,6 +14,7 @@ from app.services.access.publication import (
     PublicationClaim,
     PublicationMessage,
 )
+from app.services.durable_work import WorkReadiness, WorkTopic, WorkWake, work_wake
 from app.services.realtime_contracts import PublicationTransport, RealtimePublishReceipt
 
 logger = get_logger(__name__)
@@ -26,10 +27,10 @@ class AccessPublicationLane:
     from its two media slots. Every processing/renewal child is awaited on stop.
     """
 
-    def __init__(self, store: AccessPublicationStore, transport: PublicationTransport) -> None:
+    def __init__(self, store: AccessPublicationStore, transport: PublicationTransport, wake: WorkWake | None = None) -> None:
         self.store, self.transport = store, transport
         self._task: asyncio.Task[None] | None = None
-        self._wake = asyncio.Event()
+        self._wake = wake if wake is not None else work_wake(WorkTopic.PUBLICATION)
         self._stopping = False
         self._cleanup: asyncio.Task[None] | None = None
 
@@ -60,8 +61,12 @@ class AccessPublicationLane:
 
     async def _run(self) -> None:
         while not self._stopping:
-            self._wake.clear()
+            generation = self._wake.generation
             try:
+                pending = await self.store.readiness()
+                if not pending.ready:
+                    await self._wake.wait(generation, pending, fallback_seconds=0.5)
+                    continue
                 claim = await self.store.claim()
                 if claim is not None:
                     await self.deliver(claim)
@@ -72,10 +77,9 @@ class AccessPublicationLane:
                 logger.warning(
                     "access_publication_failed", extra={"exception_class": type(exc).__name__}
                 )
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=0.5)
-            except TimeoutError:
-                pass
+                await asyncio.sleep(0.5)
+                continue
+            await self._wake.wait(generation, WorkReadiness(False, 0.5), fallback_seconds=0.5)
 
     async def deliver(self, claim: PublicationClaim) -> None:
         """One owned operation; IDs/claims only, no ORM state over transport I/O."""

@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from app.db.session import AsyncSessionLocal
 from app.services.access_events import get_access_event_service
+from app.services.durable_work import durable_work_listener
 from app.services.event_bus import event_bus
 from app.services.home_assistant import get_home_assistant_service
 from app.services.maintenance import get_status as get_maintenance_status
@@ -44,6 +45,8 @@ async def health() -> dict[str, object]:
     checks = {
         "database": database,
         "realtime": realtime,
+        "durable_work": {"status": "ok" if durable_work_listener.diagnostics()["connected"] else "degraded",
+                         **durable_work_listener.diagnostics()},
         "access_events": access_events,
         "maintenance": maintenance,
         "home_assistant": home_assistant,

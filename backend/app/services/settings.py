@@ -27,6 +27,7 @@ from app.modules.access_devices.binding_policies import (
 from app.modules.home_assistant.covers import normalize_cover_entities
 from app.services.access_device_commands import AccessDeviceCommandJournal
 from app.services.auth_root import reload_auth_root_for_transaction
+from app.services.durable_work import WorkTopic, notify_work
 from app.services.integration_settings import (
     ESPHomeEdit,
     IntegrationSettingsEdit,
@@ -832,6 +833,8 @@ async def update_settings(
                 from app.services.ha_presence_database import invalidate_configuration_in_session
 
                 await invalidate_configuration_in_session(session)
+            if set(changed_keys) & {"lpr_debounce_quiet_seconds", "lpr_debounce_max_seconds"}:
+                await notify_work(session, WorkTopic.LPR)
             # Prepare the public receipt before commit. A later read must never turn
             # an accepted save into an apparent rollback.
             rows = [setting_resource(record) for record in sorted(records.values(), key=lambda row: (row.category, row.key))

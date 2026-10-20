@@ -35,6 +35,15 @@ from app.services.access.completion_results import (
 from app.services.access.payloads import notification_facts
 from app.services.access.pipeline_contracts import PipelineLeaseLost
 from app.services.access.pipeline_store import database_now
+from app.services.durable_readiness import readiness
+from app.services.durable_work import (
+    WorkReadiness,
+    WorkTopic,
+    WorkWake,
+    notify_work,
+    wait_with_capacity,
+    work_wake,
+)
 from app.services.event_bus import event_bus
 from app.services.movement.sessions import ARRIVAL_GATE_STATES
 from app.services.notifications import get_notification_service
@@ -70,11 +79,30 @@ def eligible_arrival(direction: AccessDirection, gate_state: GateState) -> bool:
 class VehicleInformationWorker:
     """Two actual process-local slots, including provider cancellation cleanup."""
 
-    def __init__(self) -> None:
+    async def readiness(self) -> WorkReadiness:
+        return await readiness(
+            lambda: AsyncSessionLocal(),
+            (
+                (
+                    "SELECT t.now FROM t WHERE EXISTS (SELECT 1 FROM vehicle_information_jobs WHERE status IN "
+                    "('queued','processing') AND lease_until IS NULL)"
+                ),
+                (
+                    "SELECT lease_until FROM vehicle_information_jobs WHERE status IN ('queued','processing') AND lease_until "
+                    "IS NOT NULL ORDER BY lease_until,event_id LIMIT 1"
+                ),
+                (
+                    "SELECT deadline FROM vehicle_information_jobs WHERE status IN ('queued','processing') ORDER BY "
+                    "deadline,event_id LIMIT 1"
+                ),
+            ),
+        )
+
+    def __init__(self, *, wake: WorkWake | None = None) -> None:
         self._task: asyncio.Task[None] | None = None
         self._cleanup: asyncio.Task[None] | None = None
         self._operations: set[asyncio.Task[None]] = set()
-        self._wake = asyncio.Event()
+        self._wake = wake if wake is not None else work_wake(WorkTopic.INFORMATION)
         self._stopping = False
         self._scan_progress = False
 
@@ -170,20 +198,24 @@ class VehicleInformationWorker:
                         if task.done():
                             self._operations.remove(task)
                             task.result()
-                    self._wake.clear()
+                    generation = self._wake.generation
+                    if len(self._operations) == INFORMATION_SLOTS:
+                        await wait_with_capacity(self._wake, generation, WorkReadiness(), self._operations,
+                                                 full=True, fallback_seconds=2)
+                        continue
+                    pending = await self.readiness()
+                    if not pending.ready:
+                        await wait_with_capacity(self._wake, generation, pending, self._operations,
+                                                 full=False, fallback_seconds=2)
+                        continue
                     jobs = await self._claim(INFORMATION_SLOTS - len(self._operations))
                     for job in jobs:
                         self._operations.add(asyncio.create_task(
                             self._process(*job), name="vehicle-information-operation"
                         ))
-                    if self._operations:
-                        await asyncio.wait(tuple(self._operations), timeout=0.5,
-                                           return_when=asyncio.FIRST_COMPLETED)
-                    elif not self._scan_progress:
-                        try:
-                            await asyncio.wait_for(self._wake.wait(), timeout=2)
-                        except TimeoutError:
-                            pass
+                    if not jobs and not self._scan_progress:
+                        await wait_with_capacity(self._wake, generation, WorkReadiness(False, 2),
+                                                 self._operations, full=False, fallback_seconds=2)
                 except Exception as exc:  # noqa: BLE001 - durable optional work remains recoverable
                     logger.warning("vehicle_information_worker_failed",
                                    extra={"exception_class": type(exc).__name__})
@@ -421,6 +453,7 @@ class VehicleInformationWorker:
             if retry_at and now < retry_at < job.deadline:
                 job.status, job.outcome = "queued", "deferred"
                 job.lease_token, job.lease_until = None, retry_at
+                await notify_work(session, WorkTopic.INFORMATION)
                 await assert_information_before_commit(
                     session, event, job, claim, lease_until=old_until
                 )

@@ -14,6 +14,7 @@ from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
 from app.services.access.completion_database import access_session
 from app.services.access.pipeline_store import database_now
+from app.services.durable_work import WorkTopic, notify_work
 from app.services.movement.sessions import datetime_from_payload
 
 LPR_INGEST_PENDING_BATCH_SIZE = 50
@@ -54,6 +55,8 @@ class LprIngestRepository:
                 LprIngestEvent.idempotency_key == idempotency_key))
             if row is None:
                 raise RuntimeError("Durable LPR insert was not visible")
+
+            await notify_work(session, WorkTopic.LPR)
             await session.commit()
             return row, inserted is not None
 
@@ -82,10 +85,12 @@ class LprIngestRepository:
                 raise TypeError("Ready ordinal allocator unavailable")
             row.ready_ordinal = ordinal
             row.capture_token, row.capture_until = None, None
+            await notify_work(session, WorkTopic.LPR)
             await session.flush()
             if capture_until <= await database_now(session):
                 await session.rollback()
                 return None
+
             await session.commit()
             return row
 
@@ -98,6 +103,8 @@ class LprIngestRepository:
                 return False
             row.status, row.observation_state, row.terminal_reason = "skipped", "suppressed", reason
             row.processed_at, row.capture_token, row.capture_until = now, None, None
+
+            await notify_work(session, WorkTopic.LPR)
             await session.commit()
             return True
 

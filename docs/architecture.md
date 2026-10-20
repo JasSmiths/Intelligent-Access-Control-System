@@ -74,8 +74,10 @@ owner explicitly; vendor modules never construct business services.
    checks the current coordinator token/epoch/lease, retained boundary checkpoints,
    ready ordinals beyond the handled cursor and open debounce windows in one compact
    SELECT. Empty passes perform no writes or row locks. The probe grants no mutation
-   authority: existing fenced owners recheck all work. Local wake hints, the 500 ms
-   fallback poll, 10-second renewal and debounce deadlines remain unchanged.
+   authority: existing fenced owners recheck all work. Committed work hints and actual debounce deadlines wake the worker. A healthy
+   listener uses a 60-second repair check; listener outages restore the former
+   500 ms fallback. The 10-second coordinator renewal remains. See
+   [background workers](background-workers.md) for ownership and recovery details.
    [Pure candidate ranking](../backend/app/services/access/plate_matching.py)
    preserves exact/fuzzy priority. The worker queries normalized active exact
    candidates through a partial index before loading registrations for fuzzy
@@ -880,10 +882,11 @@ AccessExecution.persist_external_gate_open_admission in the coordinator's existi
 transaction; this supported port does not add a second admission path.
 
 Chart notifications reserve the existing NotificationRunStore directly in the
-chart transaction. The existing dispatcher discovers committed intents using its
-ordinary two-second polling interval after bounded serial batches; backlog and
-provider work can delay discovery. Original deadline checks remain authoritative.
-There is no chart-to-notification-service back-import or separate wake dispatcher.
+chart transaction. The run store emits a transactional wake hint so the dispatcher discovers
+committed intents immediately. A full bounded batch continues after yielding;
+backlog and provider work can still delay delivery. Original deadline checks remain
+authoritative. A 60-second healthy repair check and two-second degraded fallback
+recover missed hints without a chart-to-notification-service back-import.
 HA configuration reads and invalidation share the
 existing database owner's setting-lock helper. Only the connection reader decodes
 values; configuration invalidation needs the same locks and generation update.

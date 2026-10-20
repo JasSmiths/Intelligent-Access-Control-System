@@ -630,7 +630,7 @@ async def test_existing_unsafe_rule_can_be_disabled_without_deleting_its_configu
     triggers, actions = rule.triggers, rule.actions
     audit = AsyncMock()
     monkeypatch.setattr(automations, "write_audit_log", audit)
-    session = SimpleNamespace(refresh=AsyncMock(), flush=AsyncMock())
+    session = SimpleNamespace(refresh=AsyncMock(), flush=AsyncMock(), execute=AsyncMock())
     result = await AutomationService().update_rule(session, rule, actor=_policy_admin(), is_active=False)
     assert result is rule and not rule.is_active
     assert rule.triggers == triggers and rule.actions == actions

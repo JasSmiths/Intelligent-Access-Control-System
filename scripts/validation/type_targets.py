@@ -23,6 +23,11 @@ PROTECTED_PACKAGES = (
     'app/services/workflows', 'app/modules/dvsa',
 )
 TYPE_OWNERS = (
+    TypeOwner('app/services/durable_work.py', 'strict'),
+    TypeOwner('app/services/durable_readiness.py', 'strict'),
+    TypeOwner('app/services/visitor_lifecycle.py', 'strict'),
+    TypeOwner('app/services/movement_work.py', 'strict'),
+    TypeOwner('app/models/visitor_timing.py', 'strict'),
     TypeOwner('app/services/auth.py', 'checked'),
     TypeOwner('app/services/historical_discovery.py', 'strict'),
     TypeOwner('app/services/user_accounts.py', 'strict'),

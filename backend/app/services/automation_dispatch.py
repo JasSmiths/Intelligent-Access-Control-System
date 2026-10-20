@@ -8,7 +8,6 @@ before optional realtime reporting. It never retries an ambiguous action.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import uuid
 
 from app.core.logging import get_logger
@@ -17,6 +16,7 @@ from app.services.automation_execution import (
     AutomationClaimLost,
     AutomationRunStore,
 )
+from app.services.durable_work import WorkReadiness, WorkTopic, WorkWake, work_wake
 from app.services.workflow_dispatch_ports import AutomationDispatchOwner
 from app.services.workflows.execution_contracts import AutomationActionResult, checked_action
 
@@ -26,10 +26,10 @@ ACTION_TIMEOUT_SECONDS = 120
 
 
 class AutomationDispatcher:
-    def __init__(self, service: AutomationDispatchOwner, store: AutomationRunStore):
+    def __init__(self, service: AutomationDispatchOwner, store: AutomationRunStore, *, wake: WorkWake | None = None) -> None:
         self.service, self.store = service, store
         self._task: asyncio.Task[None] | None = None
-        self._wake = asyncio.Event()
+        self._wake = wake if wake is not None else work_wake(WorkTopic.AUTOMATION)
 
     def start(self) -> None:
         if self._task is None:
@@ -46,16 +46,24 @@ class AutomationDispatcher:
 
     async def _worker(self) -> None:
         while True:
-            self._wake.clear()
+            generation = self._wake.generation
             try:
+                pending = await self.store.readiness()
+                if not pending.ready:
+                    await self._wake.wait(generation, pending, fallback_seconds=POLL_SECONDS)
+                    continue
                 for _ in range(20):
                     if not await self.run_once():
                         break
+                else:
+                    await asyncio.sleep(0)
+                    continue
                 await self.service.recover_completion_audits()
             except Exception:
                 logger.exception("automation_dispatch_tick_failed")
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._wake.wait(), timeout=POLL_SECONDS)
+                await asyncio.sleep(POLL_SECONDS)
+                continue
+            await self._wake.wait(generation, WorkReadiness(False, POLL_SECONDS), fallback_seconds=POLL_SECONDS)
 
     async def run_once(self, run_id: uuid.UUID | None = None) -> bool:
         claimed = await self.store.claim(run_id)

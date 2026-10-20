@@ -13,6 +13,7 @@ from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, LeaderboardState
 from app.models.enums import AnomalySeverity
 from app.modules.notifications.base import NotificationContext
+from app.services.durable_work import WorkTopic, notify_work
 from app.services.event_bus import event_bus
 from app.services.leaderboard_dirty import ChartClaim, LeaderboardDirtyStore
 from app.services.leaderboard_notifications import chart_notification_id, chart_notification_origin
@@ -98,6 +99,8 @@ class LeaderboardService:
                 )
             dirty, _ = await self.dirty_store.lock_owned(session, claim)
             self.dirty_store.acknowledge(dirty, claim)
+
+            await notify_work(session, WorkTopic.CHART)
             await session.commit()
         if payload is not None:
             try:

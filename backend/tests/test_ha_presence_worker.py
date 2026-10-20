@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.durable_work import WorkReadiness
 from app.core.task_lifecycle import drain_owned
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantState
 from app.modules.home_assistant.input_boolean_contracts import FrozenHaConnection
@@ -26,6 +27,9 @@ def prepared(seconds=10):
 
 
 class Store(HaPresenceAttemptStore):
+    async def readiness(self):
+        return WorkReadiness(True, 0)
+
     def __init__(self, claim):
         self.claim = claim
         self.prepares = 0

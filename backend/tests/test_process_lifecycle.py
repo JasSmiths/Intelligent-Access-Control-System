@@ -40,6 +40,7 @@ def owned_resources(monkeypatch):
     monkeypatch.setattr(main, "configure_logging", lambda: None)
     monkeypatch.setattr(main, "validate_startup_security_config", lambda: None)
     monkeypatch.setattr(main, "init_database", AsyncMock())
+    monkeypatch.setattr(main, "durable_work_listener", service("durable_work"))
     monkeypatch.setattr(main, "engine", SimpleNamespace(dispose=service("database").stop))
     monkeypatch.setattr(main, "get_home_assistant_client",
         lambda: SimpleNamespace(close=service("home_assistant_client").stop))
@@ -67,7 +68,7 @@ def owned_resources(monkeypatch):
     return events, controls
 
 
-@pytest.mark.parametrize("failure", ("realtime", "vehicle_information_clients", "telemetry", "reports", "access_completion", "ha_presence", *SERVICE_NAMES))
+@pytest.mark.parametrize("failure", ("durable_work", "realtime", "vehicle_information_clients", "telemetry", "reports", "access_completion", "ha_presence", *SERVICE_NAMES))
 async def test_partial_startup_unwinds_every_started_service_in_reverse(owned_resources, failure):
     events, controls = owned_resources
     controls["fail_start"] = failure
@@ -93,8 +94,8 @@ async def test_cleanup_failure_preserves_startup_error_and_continues(owned_resou
     with pytest.raises(RuntimeError, match="synthetic startup failure"):
         async with main.lifespan(FastAPI()):
             pytest.fail("Startup failed")
-    assert events[-4:] == [("stop", "realtime"), ("stop", "vehicle_information_clients"),
-        ("stop", "home_assistant_client"), ("stop", "database")]
+    assert events[-5:] == [("stop", "realtime"), ("stop", "vehicle_information_clients"),
+        ("stop", "durable_work"), ("stop", "home_assistant_client"), ("stop", "database")]
     assert ("stop", "access_device") in events
 
 
@@ -171,8 +172,8 @@ async def test_timed_out_cooperative_cleanup_is_cancelled_before_later_resources
             pytest.fail('Startup failed')
     assert ('cancelled', 'access_device') in events
     assert events.index(('cancelled', 'access_device')) < events.index(('stop', 'notification'))
-    assert events[-4:] == [('stop', 'realtime'), ('stop', 'vehicle_information_clients'),
-        ('stop', 'home_assistant_client'), ('stop', 'database')]
+    assert events[-5:] == [('stop', 'realtime'), ('stop', 'vehicle_information_clients'),
+        ('stop', 'durable_work'), ('stop', 'home_assistant_client'), ('stop', 'database')]
 
 
 

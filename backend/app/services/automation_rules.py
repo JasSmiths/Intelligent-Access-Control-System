@@ -14,6 +14,7 @@ from app.services.automation_policy import hardware_configuration_error
 from app.services.automation_scheduling import next_run_for_triggers
 from app.services.automation_serialization import serialize_rule
 from app.services.automation_webhooks import harden_webhook_triggers_for_actions
+from app.services.durable_work import WorkTopic, notify_work
 from app.services.mutation_context import require_active_admin
 from app.services.telemetry import TELEMETRY_CATEGORY_CRUD, actor_from_user, audit_diff
 from app.services.workflows.action_definitions import WorkflowConfigurationError, validate_actions
@@ -93,6 +94,7 @@ class AutomationRuleService:
             target_label=rule.name,
             diff={"old": {}, "new": serialize_rule(rule)},
         )
+        await notify_work(session, WorkTopic.AUTOMATION_CLOCK)
         return rule
 
     async def update_rule(
@@ -167,6 +169,7 @@ class AutomationRuleService:
             target_label=rule.name,
             diff=audit_diff(before, serialize_rule(rule)),
         )
+        await notify_work(session, WorkTopic.AUTOMATION_CLOCK)
         return rule
 
     async def delete_rule(
@@ -187,6 +190,7 @@ class AutomationRuleService:
             diff={"old": before, "new": {}},
         )
         await session.delete(rule)
+        await notify_work(session, WorkTopic.AUTOMATION_CLOCK)
 
 
 def validated_rule_name(name: str) -> str:

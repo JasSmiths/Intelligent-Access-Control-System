@@ -32,6 +32,7 @@ from app.services.action_confirmations import (
 )
 from app.services.auth import authenticated_token
 from app.services.auth_root import reload_auth_root_for_transaction
+from app.services.durable_work import WorkTopic, notify_work
 from app.services.ha_presence_contracts import HaConfigurationUnavailable, HaCurrentPerson
 from app.services.ha_presence_database import (
     HA_OPERATION_SECONDS,
@@ -173,10 +174,12 @@ class HaPresenceResolutionService:
                       'barrier_version':resolution.barrier_version,
                       'previous_request_settled':True,'reason':resolution.reason},
         )
+        await notify_work(session, WorkTopic.HA)
         await session.flush()
         # clock_timestamp is sampled after every blocking confirmation/audit write.
         _require_unexpired(expires_at, await database_now(session))
         receipt = _receipt(resolution)
+
         await session.commit()
         return receipt
 

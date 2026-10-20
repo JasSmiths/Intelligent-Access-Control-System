@@ -22,6 +22,9 @@ class FakeFlushSession:
     async def flush(self) -> None:
         self.flushes += 1
 
+    async def execute(self, statement, parameters):
+        assert "pg_notify" in str(statement)
+
 
 class FakeClockSession(FakeFlushSession):
     async def scalar(self, _statement):

@@ -882,6 +882,40 @@ scanned work, a general speedup, process RSS or PostgreSQL memory bounds.
 
 ### Composed core checkpoints
 
+The [event-driven worker suite](../scripts/validation/test_event_driven_workers.py)
+checks committed notifications, rollback, subscription catch-up, reconnect,
+generation races, listener failure, bounded batches and deadline ordering against
+isolated PostgreSQL. The [upgrade suite](../scripts/validation/test_event_driven_upgrade.py)
+checks migration 20's indexes, preserved claims and receipts, atomic failure and
+the restore-required downgrade. Backend scheduling tests cover cancellation,
+capacity, held work and coordinator renewal failure. These supplement the earlier
+durable accounting tests below.
+
+The [event-driven cost suite](../scripts/validation/test_event_driven_efficiency.py)
+executes actual worker loops for 125 seconds. Each healthy idle lane may perform
+at most three readiness reads, allowing initial scheduling and two 60-second repair
+reads. Startup/acquisition is recorded outside the measured window; LPR lease renewals
+and listener liveness queries are recorded separately. Compact readiness queries
+are exercised with 100 and 100,000 retained rows, empty queues, future work and
+multiple due batches. Custom and generic plans must keep examined rows bounded
+and discovery must avoid locks, writes and payload hydration. Counts, plans,
+equivalent outputs, repeated timings and Python allocations are retained in
+`query-efficiency.json`. An optional read-only frozen baseline compares the old
+actual loops using `IACS_EVENT_DRIVEN_BASELINE`; candidate budgets remain mandatory
+without it. Timings are evidence, not CI thresholds or production CPU guarantees.
+Both source versions use the same migrated synthetic schema. Python allocations
+include query-capture instrumentation and retained SQL records; they exclude
+PostgreSQL memory and process RSS.
+
+The checked [timer inventory](../scripts/validation/background_polling_inventory.json)
+records the owner and purpose of remaining timers. Its mandatory host check fails
+when timer sites change without a corresponding review. The
+[zone refresh browser fixture](../frontend/e2e/zone-shadow-refresh.spec.ts) checks
+committed hints, no 15-second polling, 60-second visible repair and retained editor
+state in Chromium and WebKit using synthetic HTTP and WebSocket fixtures.
+See [background workers](background-workers.md) for the scheduling contract and
+the deliberate hardware, security and recovery timers that remain.
+
 The mandatory [idle worker suite](../scripts/validation/test_idle_background_work.py)
 checks terminal accounting, rollback/retry, concurrent callers, deterministic receipts,
 deleted rules, legacy exclusion and audit purge; it also drives empty LPR boundaries,

@@ -52,6 +52,7 @@ from app.services.automation_rules import AutomationRuleService
 from app.services.automation_serialization import serialize_rule, serialize_run
 from app.services.automation_time_intake import AutomationTimeIntake
 from app.services.automation_webhooks import AutomationWebhookIntake
+from app.services.durable_work import WorkReadiness, WorkTopic, work_wake
 from app.services.event_bus import event_bus
 from app.services.gate_commands import get_gate_command_coordinator
 from app.services.maintenance import is_maintenance_mode_active
@@ -856,9 +857,11 @@ class AutomationService:
         for identity in identities:
             await self.account_completed_run(identity)
 
-    async def _process_due_rules(self) -> None:
-        await self._reserve_due_rules()
-        self.dispatcher.wake()
+    async def _process_due_rules(self) -> int:
+        count = await self._reserve_due_rules()
+        if count:
+            self.dispatcher.wake()
+        return count
 
     async def _reserve_due_rules(self) -> int:
         return await self.time_intake.reserve_due()
@@ -934,12 +937,22 @@ class AutomationService:
         }
 
     async def _run_scheduler(self) -> None:
+        wake = work_wake(WorkTopic.AUTOMATION_CLOCK)
         while True:
+            generation = wake.generation
             try:
-                await self._process_due_rules()
+                pending = await self.time_intake.readiness()
+                if not pending.ready:
+                    await wake.wait(generation, pending, fallback_seconds=SCHEDULER_INTERVAL_SECONDS)
+                    continue
+                count = await self._process_due_rules()
+                if count:
+                    await asyncio.sleep(0)
+                    continue
             except Exception:
                 logger.exception("automation_scheduler_tick_failed")
-            await asyncio.sleep(SCHEDULER_INTERVAL_SECONDS)
+            await wake.wait(generation, WorkReadiness(False, SCHEDULER_INTERVAL_SECONDS),
+                            fallback_seconds=SCHEDULER_INTERVAL_SECONDS)
 
     async def _evaluate_condition(
         self,

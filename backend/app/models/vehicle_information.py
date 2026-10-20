@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,3 +36,7 @@ class VehicleInformationJob(Base):
     accepted_result_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     accepted_result: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     __table_args__ = (Index("ix_vehicle_information_jobs_ready", "status", "created_at", "event_id"),)
+
+Index('ix_information_lease_due', VehicleInformationJob.lease_until, VehicleInformationJob.event_id, postgresql_where=text("status IN ('queued','processing')"))
+
+Index('ix_information_deadline_due', VehicleInformationJob.deadline, VehicleInformationJob.event_id, postgresql_where=text("status IN ('queued','processing')"))

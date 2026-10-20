@@ -20,6 +20,7 @@ from app.models import (
     SystemSetting,
 )
 from app.services.auth_root import try_reload_auth_root_for_transaction
+from app.services.durable_work import WorkTopic, notify_work
 from app.services.ha_presence_contracts import HA_SETTING_KEYS, HaCoordinationBusy, HaCurrentPerson
 
 HA_LEASE_SECONDS = 30
@@ -108,6 +109,7 @@ async def invalidate_configuration_in_session(session: AsyncSession) -> int:
             generation=generation, state="invalidated", updated_at=now,
         ))
         await session.flush()
+        await notify_work(session, WorkTopic.HA)
         return generation
     except DBAPIError as exc:
         if getattr(exc.orig, "sqlstate", None) == "55P03":

@@ -8,6 +8,7 @@ from typing import Any
 
 from app.core.logging import get_logger
 from app.core.task_lifecycle import drain_owned
+from app.services.durable_work import WorkReadiness, WorkTopic, WorkWake, work_wake
 from app.services.leaderboard_dirty import (
     CHART_RENEW_SECONDS,
     ChartClaim,
@@ -19,10 +20,10 @@ logger = get_logger(__name__)
 
 
 class LeaderboardWorker:
-    def __init__(self, store: LeaderboardDirtyStore, evaluate: Callable[[ChartClaim], Coroutine[Any, Any, None]]) -> None:
+    def __init__(self, store: LeaderboardDirtyStore, evaluate: Callable[[ChartClaim], Coroutine[Any, Any, None]], wake: WorkWake | None = None) -> None:
         self.store, self.evaluate = store, evaluate
         self._task: asyncio.Task[None] | None = None
-        self._wake = asyncio.Event()
+        self._wake = wake if wake is not None else work_wake(WorkTopic.CHART)
         self._stopping = False
         self._cleanup: asyncio.Task[None] | None = None
 
@@ -51,8 +52,12 @@ class LeaderboardWorker:
 
     async def _run(self) -> None:
         while not self._stopping:
-            self._wake.clear()
+            generation = self._wake.generation
             try:
+                pending = await self.store.readiness()
+                if not pending.ready:
+                    await self._wake.wait(generation, pending, fallback_seconds=0.5)
+                    continue
                 claim = await self.store.claim()
                 if claim is not None:
                     await self.process(claim)
@@ -63,10 +68,9 @@ class LeaderboardWorker:
                 raise
             except Exception:  # noqa: BLE001 - durable dirty work survives evaluator/database failures
                 logger.warning("Leaderboard refresh deferred")
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=0.5)
-            except TimeoutError:
-                pass
+                await asyncio.sleep(0.5)
+                continue
+            await self._wake.wait(generation, WorkReadiness(False, 0.5), fallback_seconds=0.5)
 
     async def process(self, claim: ChartClaim) -> None:
         operation = asyncio.create_task(self.evaluate(claim), name="leaderboard-evaluate")

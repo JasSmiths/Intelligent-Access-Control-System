@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 
+from app.services.durable_work import WorkReadiness
 from app.services.access import publication_worker
 from app.services.access.pipeline_contracts import PipelineLeaseLost
 from app.services.access.publication import AccessPublicationStore,PublicationClaim,PublicationMessage
@@ -13,6 +14,9 @@ from app.services.realtime_contracts import RealtimePublishReceipt
 
 
 class Store(AccessPublicationStore):
+    async def readiness(self):
+        return WorkReadiness(bool(self.claims), 0 if self.claims else None)
+
     def __init__(self,count=1):
         self.claims=[PublicationClaim(uuid.uuid4(),uuid.uuid4(),uuid.uuid4()) for _ in range(count)]
         self.acked=[];self.retried=[];self.claim_count=0;self.renew_lost=False

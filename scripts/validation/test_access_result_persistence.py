@@ -243,7 +243,7 @@ async def test_duplicate_wake_and_restarted_same_reference_do_not_duplicate_muta
     async with AsyncSessionLocal() as session:
         event=await session.get(AccessEvent,ids[0],with_for_update=True)
         await release_visitor_link_in_session(session,event);await session.commit()
-    assert await link()=="already_linked"
+    assert not await AccessCompletionStore().claim(1)
     assert (await rows(ids))[2]==1
 
 
@@ -478,3 +478,64 @@ async def test_malformed_saved_result_readiness_is_durably_explained_without_los
     async with AsyncSessionLocal() as session:
         visual_work=await session.scalar(select(AccessCompletionWork).where(AccessCompletionWork.event_id==ids[0],AccessCompletionWork.stage=="visual"))
         assert visual_work.state=="succeeded" and visual_work.result["accepted"]["revision"]==1
+
+
+@pytest.mark.parametrize('commit', [False, True])
+async def test_actual_finalizer_releases_preaccepted_visitor_result_atomically(monkeypatch, commit):
+    """Canonical admission joins retained-link readiness; no new provider attempt."""
+    from unittest.mock import AsyncMock
+
+    from test_movement_admission import evidence
+
+    from app.services.access_device_commands import AccessDeviceCommandJournal
+    from app.services.durable_work import DurableWorkListener, WorkReadiness, WorkTopic, WorkWake
+    from app.services.movement.admission import finalize_in_session
+
+    ids = await context(consumed=False)
+    await visual(ids, 'Blue')
+    assert (await rows(ids))[1].state == 'waiting'
+    parent_id = await evidence(ids[0], ids[2], verified=True)
+    no_attempt = AsyncMock(side_effect=AssertionError('finalization must never attempt provider I/O'))
+    monkeypatch.setattr(AccessDeviceCommandJournal, 'begin_attempt', no_attempt)
+    wake = WorkWake()
+    listener = DurableWorkListener(wakes={WorkTopic.COMPLETION: wake})
+    await listener.start()
+    try:
+        assert listener.diagnostics()['connected']
+        generation = wake.generation
+        before_origin = (await rows(ids))[1].origin_at
+        async with AsyncSessionLocal() as session:
+            result = await finalize_in_session(session, saga_id=ids[2], gate_command_id=parent_id)
+            assert result.admission_status == 'verified'
+            if commit:
+                await session.commit()
+            else:
+                await session.rollback()
+        if not commit:
+            await asyncio.sleep(.05)
+            visitor, work, audits, _ = await rows(ids)
+            assert visitor.arrival_event_id is None and work.state == 'waiting' and audits == 0
+            assert wake.generation == generation
+            return
+        await asyncio.wait_for(wake.wait(generation, WorkReadiness(), fallback_seconds=2), 2)
+        assert wake.generation != generation
+        visitor, work, _, _ = await rows(ids)
+        assert visitor.arrival_event_id == ids[0] and work.state == 'queued'
+        assert work.origin_at == before_origin
+        assert await link() == 'arrival_enriched'
+        visitor, work, audits, _ = await rows(ids)
+        assert visitor.vehicle_colour == 'Blue' and audits == 1
+        applied = deepcopy(work.result['applied'])
+        generation = wake.generation
+        async with AsyncSessionLocal() as session:
+            await finalize_in_session(session, saga_id=ids[2], gate_command_id=parent_id)
+            await session.commit()
+        await asyncio.sleep(.05)
+        assert wake.generation == generation
+        assert not await AccessCompletionStore().claim(1)
+        visitor, work, audits, _ = await rows(ids)
+        assert work.result['applied'] == applied and audits == 1
+        assert visitor.arrival_event_id == ids[0]
+        no_attempt.assert_not_awaited()
+    finally:
+        await listener.stop()

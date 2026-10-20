@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import HaPresenceDesired, HaPresenceTarget, Person, Presence
 from app.modules.home_assistant.input_boolean_contracts import home_assistant_connection_fingerprint
 from app.services.auth_root import try_reload_auth_root_for_transaction
+from app.services.durable_work import WorkTopic, notify_work
 from app.services.ha_presence_contracts import (
     HaConfigurationUnavailable,
     HaCoordinationBusy,
@@ -159,6 +160,8 @@ async def reserve_all_in_session(
             else:
                 invalidated += 1
         await session.flush()
+        if applied or invalidated:
+            await notify_work(session, WorkTopic.HA)
         return HaReservationSummary(applied, invalidated, skipped)
     except DBAPIError as exc:
         if getattr(exc.orig, "sqlstate", None) == "55P03":
@@ -201,6 +204,7 @@ async def invalidate_people_in_session(
             HaPresenceTarget.person_id.in_(selected),
         ).values(generation=generation, state="invalidated", updated_at=now))
         await session.flush()
+        await notify_work(session, WorkTopic.HA)
         return generation
     except DBAPIError as exc:
         if getattr(exc.orig, "sqlstate", None) == "55P03":
