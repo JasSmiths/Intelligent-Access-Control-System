@@ -303,6 +303,15 @@ A failed latest test is shown even if an earlier passing test has a future expir
 Missing records and provider errors never imply an expired MOT, and MOT data never
 grants or denies access. Provider expiry/due dates are evaluated in the site timezone.
 
+DVSA model labels are shortened to the first word and title-cased for shared
+vehicle information, including unknown-arrival notifications: `ZS EXCLUSIVE EV`
+becomes `Zs`, `T-ROC LIFE TSI S-A` becomes `T-Roc`, and `TRANSIT CUSTOM 320LMTD
+EBLUE A` becomes `Transit`. Known two-word model names, such as Tesla `Model Y`
+and Land Rover `Range Rover`, stay together. Make casing is unchanged. Complete
+provider model labels remain in the allowlisted provider records; cached and
+retained results use the same presentation policy without another provider call.
+Existing saved directory models and historical events/notifications are not rewritten.
+
 Live eligible arrivals enqueue optional refresh work after access execution.
 Unknown plates use a temporary cache and a compact event summary; they do not
 create directory vehicles. The database worker claims at most two jobs from a

@@ -12,6 +12,32 @@ Outcome = Literal["found", "not_found", "disabled", "deferred", "failed"]
 Freshness = Literal["fresh", "stale", "unknown"]
 
 
+def vehicle_model_name(make: str | None, model: str | None) -> str | None:
+    """Keep the first model word, preserving known names that need two words.
+
+    DVSA combines model, trim and powertrain in one field. This is a display
+    policy; the provider record keeps its complete model for saved evidence.
+    """
+    words = model.split() if model else []
+    if not words:
+        return None
+    manufacturer = " ".join((make or "").upper().split())
+    first = words[0].upper()
+    second = words[1].upper() if len(words) > 1 else ""
+    paired = (
+        (manufacturer == "TESLA" and first == "MODEL" and second in {"3", "S", "X", "Y"})
+        or (manufacturer == "LAND ROVER" and first == "RANGE" and second == "ROVER")
+        or (manufacturer == "BMW" and first in {"1", "2", "3", "4", "5", "6", "7", "8"} and second == "SERIES")
+        or (manufacturer == "HYUNDAI" and first == "SANTA" and second == "FE")
+        or (manufacturer == "HYUNDAI" and first == "IONIQ" and second in {"5", "6"})
+        or (manufacturer == "JEEP" and first == "GRAND" and second == "CHEROKEE")
+        or (manufacturer == "RENAULT" and first == "GRAND" and second == "SCENIC")
+        or (manufacturer == "SUZUKI" and first == "GRAND" and second == "VITARA")
+        or (manufacturer == "FORD" and first == "GRAND" and second == "C-MAX")
+    )
+    return " ".join(words[:2] if paired else words[:1]).title()
+
+
 class MotDefect(BaseModel):
     text: str | None = None
     type: str | None = None
@@ -153,8 +179,8 @@ def resolve_information(registration: str, results: dict[Provider, ProviderResul
         info.tax_status, info.tax_expiry = record.tax_status, record.tax_expiry
         info.last_dvla_lookup_date = dvla.checked_at.astimezone(ZoneInfo(timezone)).date() if dvla.checked_at else None
     if dvsa and dvsa.record:
-        info.model = dvsa.record.model
         info.make = info.make or dvsa.record.make
+        info.model = vehicle_model_name(dvsa.record.make or info.make, dvsa.record.model)
         info.colour = info.colour or dvsa.record.colour
         info.fuel_type = info.fuel_type or dvsa.record.fuel_type
     candidates: list[tuple[bool, Provider, ProviderResult]] = []

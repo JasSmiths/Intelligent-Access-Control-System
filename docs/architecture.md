@@ -637,6 +637,10 @@ checks prevent late refreshes overwriting a changed plate or newer data. Existin
 models are preserved; DVSA fills blanks. Editor request cancellation and individual
 field edits remain owned by the directory feature. Source and freshness travel
 with summaries; raw provider responses never become API or audit data.
+The pure contracts also own DVSA model presentation: first word in title case,
+with make-specific exceptions for known two-word names. Resolution applies this
+to fresh, cached and retained records while preserving complete provider labels.
+The same summary reaches setup, arrivals, charts and notification enrichment.
 
 
 ### Accepted optional results and visitor arrival hydration

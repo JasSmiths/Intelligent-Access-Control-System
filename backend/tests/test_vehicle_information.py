@@ -16,7 +16,7 @@ from app.services.telemetry import sanitize_payload
 from app.services.vehicle_information import VehicleInformationService, next_midnight
 from app.services.vehicle_information_contracts import (
     ProviderResult, VehicleInformation, VehicleLookup, VehicleLookupRequest, VehicleRecord,
-    dated_mot_status, normalize_dvsa, resolve_information,
+    dated_mot_status, normalize_dvsa, resolve_information, vehicle_model_name,
 )
 from app.services.vehicle_information_jobs import eligible_arrival
 from app.models.enums import AccessDirection
@@ -58,6 +58,71 @@ class Cache:
             if self.values.get(key) == args[0]: self.values.pop(key)
         return 1
     async def aclose(self): pass
+
+
+@pytest.mark.parametrize("make,model,expected", [
+    ("MG", "ZS EXCLUSIVE EV", "Zs"),
+    ("Mercedes-Benz", "SPRINTER", "Sprinter"),
+    ("Volkswagen", "T-ROC LIFE TSI S-A", "T-Roc"),
+    ("Volkswagen", "CADDY", "Caddy"),
+    ("Iveco", "DAILY 35S14B", "Daily"),
+    ("Iveco", "DAILY 35C14B", "Daily"),
+    ("Renault", "TRAFIC ADVANCE RC LL30 ETCH EV", "Trafic"),
+    ("Cupra", "FORMENTOR V1 PHEV S-A", "Formentor"),
+    ("Ford", "TRANSIT CUSTOM 320LMTD EBLUE A", "Transit"),
+    ("Ford", "FOCUS TITANIUM TDCI", "Focus"),
+    ("Unknown make", "NEW-MODEL EXCLUSIVE EV", "New-Model"),
+    (None, "  fOcUs\tTITANIUM  ", "Focus"),
+    ("MG", None, None),
+    ("MG", "", None),
+    ("MG", " \t ", None),
+    ("  tesla ", "model\ty LONG RANGE AWD", "Model Y"),
+    ("Tesla", "MODEL 3 PERFORMANCE AWD", "Model 3"),
+    ("Land Rover", "RANGE ROVER EVOQUE DYNAMIC", "Range Rover"),
+    ("BMW", "3 SERIES 320D M SPORT", "3 Series"),
+    ("Hyundai", "SANTA FE PREMIUM CRDI", "Santa Fe"),
+    ("Hyundai", "IONIQ 5 ULTIMATE EV", "Ioniq 5"),
+    ("Jeep", "GRAND CHEROKEE LIMITED", "Grand Cherokee"),
+    ("Renault", "GRAND SCENIC DYNAMIQUE", "Grand Scenic"),
+    ("Suzuki", "GRAND VITARA SZ5", "Grand Vitara"),
+    ("Ford", "GRAND C-MAX TITANIUM", "Grand C-Max"),
+    ("Other", "MODEL Y TRIM", "Model"),
+    ("Tesla", "MODEL UNKNOWN TRIM", "Model"),
+])
+def test_model_names_drop_trim_and_title_case_without_losing_known_names(make, model, expected):
+    assert vehicle_model_name(make, model) == expected
+
+
+@pytest.mark.parametrize("status", ["found", "failed"])
+def test_model_presentation_keeps_complete_provider_evidence_and_make(status):
+    record = normalize_dvsa(payload(make="MG", model="ZS EXCLUSIVE EV"), "TEST123")
+    result = ProviderResult(status=status, record=record, checked_at=NOW)
+    info = resolve_information("TEST123", {"dvsa": result}, now=NOW, timezone="Europe/London")
+    assert info.make == "MG" and info.model == "Zs"
+    assert result.record.model == "ZS EXCLUSIVE EV"
+
+
+def test_model_names_can_use_dvla_make_when_missing_from_dvsa():
+    results = {
+        "dvla": ProviderResult(status="found", record=VehicleRecord(registration_number="TEST123", make="Tesla")),
+        "dvsa": ProviderResult(status="found", record=VehicleRecord(registration_number="TEST123", model="MODEL Y LONG RANGE")),
+    }
+    info = resolve_information("TEST123", results, now=NOW, timezone="Europe/London")
+    assert info.model == "Model Y"
+
+
+@pytest.mark.asyncio
+async def test_cached_provider_model_uses_short_name_without_another_lookup():
+    fetch = AsyncMock(return_value=payload(make="MG", model="ZS EXCLUSIVE EV"))
+    service = VehicleInformationService(Cache(), SimpleNamespace(lookup=fetch, close=AsyncMock()))
+    try:
+        await service.lookup("TEST123", config=config())
+        cached = await service.lookup("TEST123", config=config(), cached_only=True)
+        assert cached.information.make == "MG" and cached.information.model == "Zs"
+        assert cached.results["dvsa"].record.model == "ZS EXCLUSIVE EV"
+        fetch.assert_awaited_once()
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio

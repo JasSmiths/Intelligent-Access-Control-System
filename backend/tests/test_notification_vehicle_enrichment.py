@@ -1,5 +1,6 @@
 """Unknown-vehicle notices own their optional enrichment before rendering."""
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import uuid
@@ -7,6 +8,7 @@ import uuid
 import pytest
 
 from app.services import notifications as owner
+from app.services.vehicle_information_contracts import ProviderResult, VehicleRecord, resolve_information
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,6 +34,26 @@ async def test_unknown_notice_enriches_before_rendering(monkeypatch):
     assert row.context["facts"]["vehicle_make"] == "FORD"
     assert row.context["facts"]["vehicle_color"] == "BLUE"
     lookup.assert_awaited_once_with("AB12CDE")
+
+
+@pytest.mark.parametrize("make,model,expected", [
+    ("MG", "ZS EXCLUSIVE EV", "MG Zs"),
+    ("Volkswagen", "T-ROC LIFE TSI S-A", "Volkswagen T-Roc"),
+    ("Ford", "TRANSIT CUSTOM 320LMTD EBLUE A", "Ford Transit"),
+])
+async def test_unknown_notice_uses_short_model_from_shared_information(monkeypatch, make, model, expected):
+    information = resolve_information("AB12CDE", {
+        "dvsa": ProviderResult(status="found", record=VehicleRecord(
+            registration_number="AB12CDE", make=make, model=model,
+        )),
+    }, now=datetime.now(UTC), timezone="Europe/London")
+    lookup = AsyncMock(return_value=SimpleNamespace(information=information))
+    monkeypatch.setattr(owner, "get_vehicle_information_service", lambda: SimpleNamespace(lookup=lookup))
+    row = notice()
+    row.rules_override[0]["actions"][0]["message_template"] = "@VehicleMake @VehicleModel"
+    plan = await owner.NotificationService().prepare_delivery_plan(row)
+    assert plan[0]["action"]["message"] == expected
+    assert row.context["facts"]["vehicle_model"] == information.model
 
 
 @pytest.mark.parametrize("error", [RuntimeError("provider unavailable"), TimeoutError()])

@@ -93,7 +93,9 @@ async def test_jobs_deduplicate_commit_enrichment_and_notice_atomically(records,
         saved = await session.get(Vehicle, vehicle.id)
         assert saved.model == "Manual model" and saved.mot_source == "dvsa"
         result = await session.get(AccessEvent, event.id)
-        assert result.raw_payload["retained"] and result.raw_payload["vehicle_information"]["model"] == "Provider Model"
+        assert result.raw_payload["retained"] and result.raw_payload["vehicle_information"]["model"] == "Provider"
+        snapshot = await session.get(VehicleInformationSnapshot, vehicle.id)
+        assert snapshot.dvsa["record"]["model"] == "Provider Model"
         assert "tests" not in json.dumps(result.raw_payload)
         notice = await session.get(NotificationRun, uuid.uuid5(event.id,"expired_mot_detected"))
         assert notice and notice.status == "queued"
@@ -151,7 +153,7 @@ async def test_history_paging_stale_write_and_bounded_directory_reads(records):
         old.results["dvsa"].record.model="Old model"
         old.results["dvsa"].record.mot_expiry = datetime.now(UTC).date()+timedelta(days=30)
         retained = await apply_information(session,saved,old,timezone="Europe/London");await session.commit()
-        assert retained.model == "Provider Model" and retained.mot_status == "Expired"
+        assert retained.model == "Provider" and retained.mot_status == "Expired"
         page=await read_mot_history(session,vehicle.id,cursor=None,limit=10)
         second=await read_mot_history(session,vehicle.id,cursor=page.next_cursor,limit=10)
         assert page.total==25 and len(page.items)==len(second.items)==10
@@ -294,7 +296,7 @@ async def test_unknown_arrival_enriches_facts_without_directory_or_hardware(reco
     await worker._process(*(await worker._claim())[0])
     async with AsyncSessionLocal() as session:
         saved = await session.get(AccessEvent, event.id)
-        assert saved.raw_payload["vehicle_information"]["model"] == "Provider Model"
+        assert saved.raw_payload["vehicle_information"]["model"] == "Provider"
         assert saved.decision == AccessDecision.DENIED and saved.vehicle_id is None
         assert await session.scalar(select(func.count()).select_from(Vehicle)) == before
         assert await session.scalar(select(func.count()).select_from(GateCommandRecord)) == 0

@@ -59,6 +59,14 @@ Read only the guides relevant to the task:
 
 ## Maintainability and efficiency
 
+- All agents working on IACS must use this priority order for reliable changes:
+  prevent mistakes through clear ownership, strong types and enforced invariants;
+  catch regressions with static analysis, meaningful tests and CI; use concise
+  written guidance for judgment that cannot be enforced; focus human review on
+  architecture, risk and consequential actions. Turn recurring mistakes into
+  structural fixes or executable checks. Resolve routine uncertainty with small,
+  isolated prototypes and measured evidence. Preserve all safety and approval
+  requirements above. See [the rationale](https://x.com/poteto/status/2111133080526495985).
 - Follow the [extension rules](docs/architecture.md#extension-rules). Give each
   change a clear owner; keep API adapters and route views thin. Extract coherent
   policy, request lifetimes or rendering responsibilities instead of growing
