@@ -198,6 +198,10 @@ The frontend lock includes `source-map-js` 1.2.2, which rejects malformed or
 oversized indexed source-map offsets ([GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q)).
 Preserve these fixes when refreshing the dependency locks.
 
+Certifi is constrained to 2026.10.19 or later to remove the compromised emSign
+trust root ([GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2)).
+Rebuild backend images after updating this lock so the installed CA bundle changes.
+
 The October 2026 refresh updates application and development dependencies,
 including `uiprotect==23.1.2` and Mako 1.4.3 (the Windows
 `TemplateLookup` traversal fix is in 1.4.2,
