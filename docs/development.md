@@ -235,7 +235,8 @@ and fixture ownership separately before changing this dependency bound; retain
 the supported recovery expiry and rollback assertions.
 
 Use the [isolated validation harness](validation.md) for backend regression.
-Use `--mode db-free` by default; full mode includes an opt-in restore rehearsal.
+Use full mode for backend regression; add `--database-restore` only when the user
+explicitly requests the synthetic restore rehearsal.
 If backend source is mounted into a running installation, report that constraint
 before editing it; do not create a branch or worktree automatically. Existing
 installation startup, deployment, production migration, provider sends, and hardware tests require

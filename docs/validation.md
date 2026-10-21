@@ -16,7 +16,7 @@ these opt-in actions. Preserve existing backups and evidence.
 | --- | --- |
 | Documentation | Check links, referenced paths and commands; run `git diff --check`. |
 | Frontend | In `frontend/`, run `npm run build` and `npm test`. Add browser checks for layout, interaction, navigation or role changes. |
-| Backend, schema or cross-system | Run the isolated harness with `--mode db-free`; add relevant isolated database checks without backup or restore steps and report missing coverage. Run full mode only when a restore rehearsal is explicitly requested. |
+| Backend, schema or cross-system | Run the full isolated harness below. Add `--database-restore` only when the user explicitly requests a restore rehearsal. |
 | Harness or source selection | Also run `python3 scripts/validation/test_source_snapshot.py` and `python3 scripts/validation/test_harness_configuration.py`. |
 
 Current source and tests are the contract. A past passing run does not validate
@@ -227,15 +227,15 @@ repository and operational bind mounts:
 
 ```sh
 # Default checks with exact-lock installation and image pulls permitted.
-python3 scripts/validation/validate.py --mode db-free --allow-downloads \
+python3 scripts/validation/validate.py --mode full --allow-downloads \
   --evidence-root /private/tmp/iacs-validation-evidence
 
 # Deliberately keep one new verified preparation for later read-only reuse.
-python3 scripts/validation/validate.py --mode db-free --allow-downloads --retain-dependencies \
+python3 scripts/validation/validate.py --mode full --allow-downloads --retain-dependencies \
   --evidence-root /private/tmp/iacs-validation-evidence
 
 # Default checks with an existing trusted dependency preparation.
-python3 scripts/validation/validate.py --mode db-free \
+python3 scripts/validation/validate.py --mode full \
   --reuse-dependencies /absolute/path/to/prior-run \
   --evidence-root /private/tmp/iacs-validation-evidence
 
@@ -249,12 +249,13 @@ python3 scripts/validation/validate.py --mode snapshot \
   --evidence-root /private/tmp/iacs-validation-evidence
 ```
 
-The executable still defaults to full mode, which automatically performs a
-database restore rehearsal. Always select `--mode db-free` for routine validation;
-use full mode only when the user explicitly requests a rehearsal. The existing
-[project-checks.yml](../.github/workflows/project-checks.yml) CI workflow also
-invokes full mode, so triggering it requires that explicit request too. Markdown
-policy does not change runner or CI behavior.
+The executable defaults to full mode, with database restore rehearsals disabled.
+Only `--database-restore` opts in, and it requires full mode plus the user's
+explicit request. The [project-checks.yml](../.github/workflows/project-checks.yml)
+CI workflow runs full validation on matching pushes and pull requests without
+rehearsals. For an explicitly requested CI rehearsal, manually dispatch **Project
+Checks** with its `database_restore` Boolean input enabled; its default is false.
+Push and pull-request events cannot enable this input's rehearsal path.
 Both `full` and `db-free` require an explicit
 `--allow-downloads` or `--reuse-dependencies`; the bare command refuses to guess.
 Preparation uses `uv sync --locked --extra dev --no-install-project` and
@@ -280,26 +281,28 @@ The harness runs the repository dependency/side-effect scan once as
 Access persistence tests verify command ordering and outcomes; synthetic timing
 samples are not performance acceptance checks.
 
-When a restore rehearsal is explicitly requested, full mode runs host
-source/configuration tests, architecture and Python checks, backend tests,
-full-source Ruff checks, undefined-name checks for backend and
+Full mode runs host source/configuration tests, architecture and Python checks,
+backend tests, full-source Ruff checks, undefined-name checks for backend and
 isolated validation fixtures, checked-body mypy checks, strict typed
 contract checks, generated workflow contract freshness, frontend tests/build and Compose configuration
 validation. It then migrates disposable PostgreSQL, checks Alembic state and
 drift, runs persistence suites with separate database/Redis state, required
-schema and recovery diagnostics, and a synthetic `pg_dump`/`pg_restore` rehearsal.
+schema and recovery diagnostics. An explicitly requested `--database-restore` run
+also performs a synthetic `pg_dump`/`pg_restore` rehearsal before test databases
+are cloned. Without it, `checks.json` records `database-restore` as not attempted
+and `manifest.json` records `database_restore: false`; no rehearsal databases or
+rehearsal dump are created. An opted-in run records `database_restore: true`.
 [recovery_checks.py](../scripts/validation/recovery_checks.py) owns the required
 inventory; new `scripts/validation/test_*.py` suites must be classified there.
 
 `--mode db-free` runs the checks that need no database services or migrations;
 it cannot establish persistence, recovery or schema behavior. `--check-only`
 aliases snapshot mode; `--no-migrations` aliases DB-free mode. Snapshot success
-establishes source capture only. Full mode always includes the restore rehearsal;
-omitting `--database-restore` does not skip it. Additional `--persistence-test`,
+establishes source capture only. Full mode omits the restore rehearsal unless
+`--database-restore` is supplied. Additional `--persistence-test`,
 `--diagnostic` and `--schema-check` selections are additive and full-mode only.
-Review their side effects before running them. Do not use full mode solely to
-reach these checks unless the restore rehearsal has also been explicitly requested.
-Report unattempted database coverage instead of claiming DB-free equivalence.
+These selections do not imply a restore request. Review their side effects before
+running them and report unattempted coverage instead of claiming DB-free equivalence.
 
 ## Disk-space safety
 
@@ -417,7 +420,10 @@ logs; each suite's JUnit and query measurements; named schema/restore summaries;
 and the runtime smoke report/PDF when produced. It does not recursively upload
 `artifacts/`: pytest temporary trees, generated keys, input images, raw database
 state/dumps, environments, caches and unrelated JSON/log files remain excluded.
-The restore rehearsal still creates, restores and verifies its disposable dump.
+When requested, the restore rehearsal creates, restores and verifies its disposable
+dump. Successful CI evidence collection requires the manifest's Boolean restore
+selection. An unrequested rehearsal needs an explicit not-attempted check;
+an opted-in rehearsal requires a successful result, its summary and verification.
 The collector never deletes owning-test output. `collection.json` records retained
 hashes, bytes, missing reports and partial/failed runs. A claimed successful run
 missing required proof fails collection; partial failure evidence is still staged.

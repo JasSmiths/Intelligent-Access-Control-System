@@ -58,7 +58,7 @@ def arguments(argv=None):
     parser.add_argument('--schema-check', action='append', default=[], metavar='REPO_RELATIVE_SCRIPT',
                         help='Run a schema-check CLI inside the disposable database namespace.')
     parser.add_argument('--database-restore', action='store_true',
-                        help='Explicit spelling of the pg_dump/pg_restore rehearsal already required in full mode.')
+                        help='Opt in to the synthetic pg_dump/pg_restore rehearsal; requires --mode full.')
     args = parser.parse_args(argv)
     if 'PHASE1_BACKEND_IMAGE' in os.environ:
         parser.error('PHASE1_BACKEND_IMAGE is no longer supported; use IACS_VALIDATION_BACKEND_IMAGE')
@@ -71,7 +71,7 @@ def arguments(argv=None):
     if args.retain_dependencies and (not args.allow_downloads or args.reuse_dependencies or args.mode == 'snapshot'):
         parser.error('--retain-dependencies requires a new --allow-downloads preparation')
     if args.mode != 'full' and (args.diagnostic or args.persistence_test or args.schema_check or args.database_restore):
-        parser.error('Diagnostics, persistence tests and schema checks require --mode full')
+        parser.error('Diagnostics, persistence tests, schema checks and restore rehearsals require --mode full')
     if args.mode != 'snapshot' and not (args.reuse_dependencies or args.allow_downloads):
         parser.error('Execution requires --reuse-dependencies or explicit --allow-downloads for exact locks')
     return args
@@ -476,10 +476,12 @@ class Harness:
         backend_check('migration-current', ['-m', 'alembic', 'current'], persistent=True, classification='schema')
         if migrated:
             backend_check('migration-check', ['-m', 'alembic', 'check'], persistent=True, classification='schema')
-            from database_restore import run_rehearsal
-            # The migrated template has no application connections or test rows.
-            # The rehearsal owns its two extra databases and never mutates it.
-            run_rehearsal(self, images, persistence_env, mounts, namespace)
+            if self.args.database_restore:
+                from database_restore import run_rehearsal
+                # The rehearsal owns its two extra databases, not the migrated template.
+                run_rehearsal(self, images, persistence_env, mounts, namespace)
+            else:
+                self.skip('database-restore', 'Not requested; opt in with --database-restore')
         else:
             for name in ('migration-check', 'persistence-tests', 'diagnostics', 'database-restore'):
                 self.skip(name, 'migration-up failed; no schema-dependent tests attempted')
@@ -579,7 +581,8 @@ def run(args):
         'commit': harness.capture('git', '-C', str(ROOT), 'rev-parse', 'HEAD'),
         'status': harness.capture('git', '-C', str(ROOT), 'status', '--short'),
         'diff_stat': harness.capture('git', '-C', str(ROOT), 'diff', '--stat'),
-        'mode': args.mode, 'inventory': inventory, 'sha256': hashes,
+        'mode': args.mode, 'database_restore': args.database_restore,
+        'inventory': inventory, 'sha256': hashes,
         'source_fingerprint': source_fingerprint(hashes), 'dependency_manifests': manifest_hashes(snapshot),
         'host_python': sys.version, 'host_platform': platform.platform(), 'argv': sys.argv,
     })

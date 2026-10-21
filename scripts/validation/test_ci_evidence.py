@@ -29,6 +29,7 @@ class CIEvidenceTests(unittest.TestCase):
         for name in ["manifest.json", "checks.json", "source-integrity.json", "dependencies.json", "images.json",
                      "cleanup.json", "production-before.json", "production-after.json", "storage.json", "database-restore.json"]:
             self.put(self.run / name, {"synthetic": True})
+        self.put(self.run / "manifest.json", {"database_restore": True})
         self.put(self.run / "results.json", {"backend-tests": 0, "database-restore": 0, "cleanup": 0,
             "source_integrity": 0, "production_unchanged": True})
         self.put(self.run / "checks.json", {"backend-tests": {"status": "passed", "exit_code": 0}})
@@ -39,6 +40,57 @@ class CIEvidenceTests(unittest.TestCase):
 
     def collect(self):
         return collect([("validation", self.validation), ("runtime", self.runtime)], self.output)
+
+    def test_unrequested_restore_needs_skip_evidence_without_restore_reports(self):
+        self.complete()
+        self.put(self.run / "manifest.json", {"database_restore": False})
+        results = json.loads((self.run / "results.json").read_text())
+        del results["database-restore"]
+        self.put(self.run / "results.json", results)
+        self.put(self.run / "checks.json", {"database-restore": {
+            "status": "not_attempted", "reason": "Not requested; opt in with --database-restore"}})
+        for name in ("database-restore.json", "artifacts/database-restore/verification.json"):
+            (self.run / name).unlink()
+        report = self.collect()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["runs"][0]["status"], "passed")
+        self.assertEqual(report["runs"][0]["missing"], [])
+
+    def test_requested_restore_still_requires_success_and_verification(self):
+        self.complete()
+        (self.run / "artifacts/database-restore/verification.json").unlink()
+        report = self.collect()
+        self.assertTrue(report["errors"])
+        self.assertIn("artifacts/database-restore/verification.json", report["runs"][0]["missing"])
+
+    def test_requested_restore_cannot_pass_without_its_result(self):
+        self.complete()
+        results = json.loads((self.run / "results.json").read_text())
+        del results["database-restore"]
+        self.put(self.run / "results.json", results)
+        report = self.collect()
+        self.assertTrue(any("has no successful result" in error for error in report["errors"]))
+
+    def test_unrequested_restore_needs_an_explicit_not_attempted_check(self):
+        self.complete()
+        self.put(self.run / "manifest.json", {"database_restore": False})
+        results = json.loads((self.run / "results.json").read_text())
+        del results["database-restore"]
+        self.put(self.run / "results.json", results)
+        report = self.collect()
+        self.assertTrue(any("must be recorded as not attempted" in error for error in report["errors"]))
+
+    def test_missing_restore_selection_cannot_claim_success(self):
+        self.complete()
+        self.put(self.run / "manifest.json", {})
+        report = self.collect()
+        self.assertTrue(any("Boolean database_restore selection" in error for error in report["errors"]))
+
+    def test_unrequested_restore_cannot_claim_it_was_executed(self):
+        self.complete()
+        self.put(self.run / "manifest.json", {"database_restore": False})
+        report = self.collect()
+        self.assertTrue(any("must be recorded as not attempted" in error for error in report["errors"]))
 
     def test_clean_pass_retains_reports_without_scratch_or_allowed_looking_extensions(self):
         self.complete()
@@ -212,6 +264,9 @@ class CIEvidenceTests(unittest.TestCase):
         import yaml
         workflow = Path(__file__).resolve().parents[2] / ".github/workflows/project-checks.yml"
         data = yaml.load(workflow.read_text(), Loader=yaml.BaseLoader)
+        restore_input = data["on"]["workflow_dispatch"]["inputs"]["database_restore"]
+        self.assertEqual(restore_input["type"], "boolean")
+        self.assertEqual(restore_input["default"], "false")
         self.assertEqual(set(data["jobs"]), {"isolated-contracts", "dependency-audits", "image-builds"})
         self.assertEqual(data["permissions"], {"contents": "read"})
         job = data["jobs"]["isolated-contracts"]
@@ -225,6 +280,30 @@ class CIEvidenceTests(unittest.TestCase):
         self.assertEqual(upload["with"]["path"], "${{ runner.temp }}/iacs-upload-evidence")
         self.assertLess(steps.index(selection), steps.index(upload))
         self.assertTrue(any("validate.py --mode full --allow-downloads" in step.get("run", "") for step in steps))
+
+    @unittest.skipUnless(importlib.util.find_spec("yaml"), "PyYAML is available in the locked harness dependencies")
+    def test_workflow_shell_only_enables_restore_for_an_explicit_manual_request(self):
+        import yaml
+        workflow = Path(__file__).resolve().parents[2] / ".github/workflows/project-checks.yml"
+        data = yaml.load(workflow.read_text(), Loader=yaml.BaseLoader)
+        steps = data["jobs"]["isolated-contracts"]["steps"]
+        validation = next(step for step in steps if "validate.py --mode full" in step.get("run", ""))
+        self.assertEqual(validation["env"], {
+            "VALIDATION_EVENT": "${{ github.event_name }}",
+            "DATABASE_RESTORE_REQUESTED": "${{ inputs.database_restore }}"})
+        script = 'python3() { printf "%s\\n" "$@"; }\n' + validation["run"].replace("${{ runner.temp }}", "/synthetic")
+        for event, requested in (("push", "true"), ("pull_request", "true"),
+                                 ("workflow_dispatch", "false"), ("workflow_dispatch", ""),
+                                 ("workflow_dispatch", "true")):
+            with self.subTest(event=event, requested=requested):
+                result = subprocess.run(["/bin/bash", "-euo", "pipefail", "-c", script],
+                    env={"VALIDATION_EVENT": event, "DATABASE_RESTORE_REQUESTED": requested},
+                    capture_output=True, text=True, check=True)
+                arguments = result.stdout.splitlines()
+                self.assertIn("--mode", arguments)
+                self.assertIn("full", arguments)
+                self.assertEqual("--database-restore" in arguments,
+                    event == "workflow_dispatch" and requested == "true")
 
 
 if __name__ == "__main__":

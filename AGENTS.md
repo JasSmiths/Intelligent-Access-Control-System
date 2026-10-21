@@ -106,13 +106,12 @@ Read only the guides relevant to the task:
 - Docs only: check links, source paths/commands, and `git diff --check`.
 - Frontend only: `cd frontend && npm run build && npm test`; follow validation's
   browser checks when interaction or layout changes.
-- Backend, schema, or cross-system: run the isolated harness with `--mode db-free`
+- Backend, schema, or cross-system: run the full isolated harness with `--mode full`
   and `--reuse-dependencies` or `--allow-downloads`, following the validation guide.
-  Add relevant isolated database checks that do not create backups or run restore
-  rehearsals; report any unattempted migration, persistence or recovery checks.
-  The full harness automatically runs a database restore rehearsal, so invoke it
-  only when the user explicitly requests that rehearsal. The same restriction
-  applies to triggering workflows that invoke full mode.
+  It includes source, backend/frontend, migration, persistence and diagnostic checks.
+  Add `--database-restore` only when the user explicitly requests a restore rehearsal.
+  CI push/PR checks omit rehearsals; a requested manual run must explicitly enable
+  its `database_restore` input. Report checks that were not attempted.
 - Harness/source selection: also run
   `python3 scripts/validation/test_source_snapshot.py` and
   `python3 scripts/validation/test_harness_configuration.py`.

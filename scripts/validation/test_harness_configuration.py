@@ -161,6 +161,14 @@ class TypeCoverageTests(unittest.TestCase):
 
 
 class RecoveryProfileTests(unittest.TestCase):
+    def test_restore_rehearsal_requires_explicit_full_mode_selection(self):
+        self.assertFalse(arguments(['--allow-downloads']).database_restore)
+        requested = arguments(['--mode', 'full', '--allow-downloads', '--database-restore'])
+        self.assertTrue(requested.database_restore)
+        for mode in ('snapshot', 'db-free'):
+            with self.subTest(mode=mode), patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit):
+                arguments(['--mode', mode, '--allow-downloads', '--database-restore'])
+
     def test_event_driven_regressions_and_timer_inventory_are_mandatory(self):
         for name in ('workers', 'upgrade', 'efficiency'):
             self.assertIn(f'scripts/validation/test_event_driven_{name}.py', recovery_checks.PERSISTENCE_TESTS)
@@ -363,7 +371,21 @@ class IsolatedCommandTests(unittest.TestCase):
             self.harness.execute()
         return restore
 
-    def test_full_checks_require_schema_and_real_restore_before_any_test_clone(self):
+    def test_full_checks_skip_unrequested_restore_and_keep_database_coverage(self):
+        restore = self.execute()
+        restore.assert_not_called()
+        self.assertEqual(self.harness.checks['database-restore']['status'], 'not_attempted')
+        self.assertIn('--database-restore', self.harness.checks['database-restore']['reason'])
+        names = [name for name, _, _ in self.calls]
+        self.assertIn('migration-check', names)
+        self.assertIn('schema-check-1', names)
+        for index, _ in enumerate(recovery_checks.persistence_checks(self.args), 1):
+            name, _ = recovery_checks.suite_identity(self.harness.prefix, index)
+            self.assertIn(name, names)
+            self.assertIn(name + '-drop', names)
+
+    def test_requested_restore_runs_after_migration_before_any_test_clone(self):
+        self.args.database_restore = True
         restore = self.execute()
         restore.assert_called_once()
         names = [name for name, _, _ in self.calls]
@@ -429,6 +451,7 @@ class IsolatedCommandTests(unittest.TestCase):
         self.assertEqual(self.harness.checks['suite-001']['status'], 'not_attempted')
 
     def test_failed_migration_never_clones_or_runs_schema_dependent_pytest(self):
+        self.args.database_restore = True
         self.fail['migration-up'] = 1
         restore = self.execute()
         restore.assert_not_called()

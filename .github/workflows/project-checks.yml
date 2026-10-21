@@ -1,6 +1,12 @@
 name: Project Checks
 
 on:
+  workflow_dispatch:
+    inputs:
+      database_restore:
+        description: Run the synthetic database restore rehearsal
+        type: boolean
+        default: false
   pull_request:
     paths:
       - "backend/**"
@@ -49,9 +55,16 @@ jobs:
           python3 scripts/validation/runtime_pdf_smoke.py --image iacs-backend:ci-runtime
           --evidence-root "${{ runner.temp }}/iacs-runtime-pdf-evidence"
       - name: Run the same isolated locked checks as local development
-        run: >-
-          python3 scripts/validation/validate.py --mode full --allow-downloads
-          --evidence-root "${{ runner.temp }}/iacs-evidence"
+        env:
+          VALIDATION_EVENT: ${{ github.event_name }}
+          DATABASE_RESTORE_REQUESTED: ${{ inputs.database_restore }}
+        run: |
+          restore_args=()
+          if [[ "$VALIDATION_EVENT" == "workflow_dispatch" && "$DATABASE_RESTORE_REQUESTED" == "true" ]]; then
+            restore_args+=(--database-restore)
+          fi
+          python3 scripts/validation/validate.py --mode full --allow-downloads \
+            --evidence-root "${{ runner.temp }}/iacs-evidence" "${restore_args[@]}"
       - name: Select named validation evidence without test scratch
         if: always()
         run: >-

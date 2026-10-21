@@ -43,6 +43,20 @@ SCHEMA_REPORTS = frozenset((
 ))
 
 
+def restore_reports(manifest, checks, results):
+    """Require proof of the explicit selection and any requested rehearsal."""
+    if not isinstance(manifest, dict) or type(manifest.get("database_restore")) is not bool:
+        raise ValueError("Successful validation requires a Boolean database_restore selection in manifest.json")
+    if manifest["database_restore"]:
+        if results.get("database-restore") != 0:
+            raise ValueError("Requested database restore rehearsal has no successful result")
+        return {"database-restore.json", "artifacts/database-restore/verification.json"}
+    check = checks.get("database-restore")
+    if not isinstance(check, dict) or check.get("status") != "not_attempted" or "database-restore" in results:
+        raise ValueError("Unrequested database restore rehearsal must be recorded as not attempted")
+    return set()
+
+
 def selected(relative, *, runtime=False):
     """Finite producer locations, never recursive extension-based scratch matching."""
     parts = relative.parts
@@ -156,8 +170,9 @@ def collect(roots, output, *, check_storage=lambda: None):
                     required |= {"cleanup.json", "production-before.json", "production-after.json", "storage.json"}
                     if category == "validation":
                         required |= {"manifest.json", "source-integrity.json", "dependencies.json", "images.json",
-                            "persistence-suites.json", "database-restore.json", "artifacts/backend-tests/junit.xml",
-                            "artifacts/database-restore/verification.json"}
+                            "persistence-suites.json", "artifacts/backend-tests/junit.xml"}
+                        manifest = json.loads((staged / "manifest.json").read_text())
+                        required |= restore_reports(manifest, checks, results)
                         suites = json.loads((output / category / run.name / "persistence-suites.json").read_text())
                         required |= {item["evidence"] + "/junit.xml" for item in suites}
                         schemas = [name for name in names if re.fullmatch(r"artifacts/schema-contract-[0-9a-f]{12}/report.json", name)]
