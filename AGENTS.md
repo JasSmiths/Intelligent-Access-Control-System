@@ -30,6 +30,12 @@ Read only the guides relevant to the task:
 
 ## Working rules
 
+- Work in the primary checkout on `main` by default. Create a branch or another
+  worktree only when the user explicitly requests it.
+- Create or test backups and run database restore rehearsals only when the user
+  explicitly requests those actions. A request to edit, validate, commit, push,
+  deploy or migrate does not implicitly request them. Preserve existing backups
+  and recovery evidence; report any resulting validation or recovery limits.
 - Complete the requested change, update affected docs, and run relevant checks.
   Resolve routine choices from existing owners; ask when missing intent changes
   scope or requires live access.
@@ -46,8 +52,9 @@ Read only the guides relevant to the task:
   runs. Preserve source, evidence, production data and required rollback points.
   After a disk incident, bulk validation stays paused until storage safeguards
   are implemented and checked; documentation alone does not lift that pause.
-- Preserve unrelated changes. If backend source is mounted into a running app,
-  use an isolated checkout for code changes and validation.
+- Preserve unrelated changes. Before editing backend source mounted into a running
+  app, report the live-source constraint; do not create isolation automatically or
+  change live source as routine development work.
 - Locate owners with `rg -l`, then use bounded reads. Read applicable guides once
   unless they change. Default combined tool output to about 2,000 tokens; retain
   verbose validation output in a local log and report status and relevant failures.
@@ -99,11 +106,13 @@ Read only the guides relevant to the task:
 - Docs only: check links, source paths/commands, and `git diff --check`.
 - Frontend only: `cd frontend && npm run build && npm test`; follow validation's
   browser checks when interaction or layout changes.
-- Backend, schema, or cross-system: run the full isolated harness,
-  `python3 scripts/validation/validate.py`, with `--reuse-dependencies` or
-  `--allow-downloads` and the prerequisites in the validation guide. It includes
-  source checks, backend/frontend checks, migrations, persistence, diagnostics,
-  and a database restore rehearsal.
+- Backend, schema, or cross-system: run the isolated harness with `--mode db-free`
+  and `--reuse-dependencies` or `--allow-downloads`, following the validation guide.
+  Add relevant isolated database checks that do not create backups or run restore
+  rehearsals; report any unattempted migration, persistence or recovery checks.
+  The full harness automatically runs a database restore rehearsal, so invoke it
+  only when the user explicitly requests that rehearsal. The same restriction
+  applies to triggering workflows that invoke full mode.
 - Harness/source selection: also run
   `python3 scripts/validation/test_source_snapshot.py` and
   `python3 scripts/validation/test_harness_configuration.py`.

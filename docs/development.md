@@ -5,6 +5,15 @@ Use this guide for a new local instance and routine source work. The
 [integrations and safety](integrations.md) covers provider and hardware effects;
 [validation](validation.md) defines the required checks.
 
+## Default working policy
+
+Work in the primary checkout on `main`. Create branches or additional worktrees,
+create or test backups, and run database restore rehearsals only when the user
+explicitly requests the corresponding action. Editing, validation, commit, push,
+deployment and migration requests do not imply those requests. Preserve existing
+work, backups and recovery evidence. Report validation and recovery limits when
+an opt-in action has not been requested; do not perform it as a prerequisite.
+
 ## Report export limits
 
 Preview and PDF activity share a 10,000-row representation limit: selected events,
@@ -117,8 +126,9 @@ Delete older backup and preview trees only after their retention is explicitly
 authorized and no container mount uses them. Do not recreate a retired preview
 from historical receipts without a separately authorized deployment.
 
-Inventory existing checkpoints before making another full backup. Reuse an
-existing image archive when its verified image identities satisfy the new
+When the user requests a backup, inventory existing checkpoints before making
+another full backup. Reuse an existing image archive when its verified image
+identities satisfy the new
 checkpoint, recording the shared archive reference and checksum. Database and
 application-data backups represent separate recovery points even when their sizes
 match. Consolidate duplicate archives only when rollback instructions remain
@@ -225,17 +235,18 @@ and fixture ownership separately before changing this dependency bound; retain
 the supported recovery expiry and rollback assertions.
 
 Use the [isolated validation harness](validation.md) for backend regression.
-If backend source is mounted into a running installation, perform code changes
-and validation in an isolated checkout. Existing installation startup,
-deployment, production migration, provider sends, and hardware tests require
+Use `--mode db-free` by default; full mode includes an opt-in restore rehearsal.
+If backend source is mounted into a running installation, report that constraint
+before editing it; do not create a branch or worktree automatically. Existing
+installation startup, deployment, production migration, provider sends, and hardware tests require
 separate authorization.
 
 ## Change review and handoff
 
-Before editing, record the checkout path, branch/HEAD and existing changes. Reuse
-an appropriate isolated checkout when source is mounted into a running application.
-Use a named task branch for new isolated work; identify existing detached work
-explicitly at handoff. Preserve the original working state and separate pre-existing
+Before editing, record the checkout path, branch/HEAD and existing changes. Work
+on `main` in the primary checkout by default. Create a branch or worktree only
+when explicitly requested; identify any requested isolated or detached work at
+handoff. Preserve the original working state and separate pre-existing
 changes from the implementation diff. Do not claim work is committed, merged or
 deployed when it is only present as local edits.
 
@@ -262,8 +273,10 @@ requirements and fix concrete issues found:
    failures must not relabel an accepted save or deletion as a failed mutation.
 5. Callers, tests, registrations, migrations and affected guides change together.
    Run the [required checks](validation.md#choose-the-checks); fix failures and
-   rerun checks affected by the repair. Do not substitute DB-free checks for full
-   persistence, recovery and restore validation.
+   rerun checks affected by the repair. DB-free checks do not establish persistence
+   or recovery behavior: run relevant isolated database checks without backup or
+   restore steps, and report any coverage left unattempted. Restore rehearsals
+   require the user's explicit request.
 
 Handoff includes a plain-English result, the exact worktree and branch/HEAD,
 commit state, checks and retained evidence, unresolved limitations and deployment
@@ -309,9 +322,11 @@ Use [Alembic migrations](../backend/alembic/versions/) for schema changes.
 `IACS_AUTO_CREATE_SCHEMA` controls `alembic upgrade head` at startup; it is not an
 ORM table bootstrap. For a managed deployment, disable automatic migration and
 apply an explicitly authorized migration using the matching backend artifact.
-Stop old workers before upgrading, retain matching source and backend/frontend
-images, and back up PostgreSQL plus application files and the auth secret before
-any destructive change.
+Stop old workers before upgrading and retain matching source and backend/frontend
+images. Create or test a backup only when explicitly requested. A requested backup
+should cover PostgreSQL, application files and the auth secret as appropriate.
+Before an authorized destructive change, state the available recovery point and
+any recovery limit; do not create or test a backup automatically.
 
 Read the touched migrations' upgrade and downgrade behavior. The
 [updater retirement](../backend/alembic/versions/20260920_0008_remove_dependency_updaters.py)
@@ -327,8 +342,8 @@ revision matches that image's Alembic head, and permits authentication plus a
 bounded set of recovery reads. It rejects mutations and WebSockets and reports
 readiness as 503. Before reactivation, reconcile external effects accepted after
 the restored backup: those receipts may be missing from the restored database.
-The harness's synthetic restore rehearsal validates its fixtures, not an
-installation's real backup or permission to resume delivery.
+When explicitly requested, the harness's synthetic restore rehearsal validates
+its fixtures, not an installation's real backup or permission to resume delivery.
 
 ## Directory read contracts
 

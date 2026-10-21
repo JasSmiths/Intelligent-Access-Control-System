@@ -8,6 +8,12 @@ provider offers a simpler direct command. See [architecture](architecture.md)
 for the access and movement flow and [validation](validation.md) for isolated
 checks.
 
+Follow the [default working policy](development.md#default-working-policy): use
+`main`, and create branches/worktrees, create or test backups, and run database
+restore rehearsals only when the user explicitly requests those actions. An
+authorized deployment, migration or repair does not implicitly request them.
+Preserve existing recovery assets and explain any recovery limits.
+
 ## Implemented integrations
 
 | Integration | Current use and configuration |
@@ -87,8 +93,9 @@ confirmed update. Authentication reads only its canonical settings projection,
 so unrelated broken integration/policy values do not block repair login. Invalid
 authentication settings still fail closed; a still-valid bearer session can reach
 the diagnostic and repair endpoint without cookie configuration. If no such
-session exists, keep execution stopped and arrange an explicitly authorized,
-backup-first offline repair; this development task does not authorize that write.
+session exists, keep execution stopped and arrange an explicitly authorized
+offline repair; create or test a backup only if explicitly requested. This
+development task does not authorize that write.
 
 A PATCH returns `saved`, public `settings`, actual `changed_keys` and an
 `activation` receipt. Persistence/audit acceptance is separate from process-local
@@ -131,8 +138,10 @@ any action runs. No calendar operation can be submitted to the new catalog.
 
 Production upgrade is a separate operator action; development validation never
 runs it. Stop and drain every old backend/worker before cutover: mixed old/new
-workers are unsupported. Take and verify a matching database, configured data
-files/auth-root and image backup. Inspect open/uncertain visitor work first. Run
+workers are unsupported. Review existing recovery assets and explain any recovery
+limits. If the user explicitly requests a backup, include the matching database,
+configured data files/auth-root and images; test it only when explicitly requested.
+Inspect open/uncertain visitor work first. Run
 the normal Alembic upgrade with the new image while workers remain stopped; a
 blocker rolls back all retirement SQL, including credential deletion. Correct only
 the identified provenance/reservation/visit condition through its established owner
@@ -140,7 +149,7 @@ and retry after deliberate review. Start the new version only after migration an
 schema checks succeed. Review disabled workflows and create a supported replacement
 explicitly; never remove one retired step and replay the remaining hardware plan.
 
-After a successful upgrade and verified backup, an operator may inspect only the
+After a successful upgrade, a separately authorized cleanup may inspect only the
 `icloud-calendar-sessions` child of the deployment's configured `IACS_DATA_DIR`.
 Confirm it is the retired session directory, is not a symlink, and no old process
 uses it. Remove that exact directory offline if desired; never delete the parent,
@@ -247,8 +256,9 @@ cannot be consumed through the current controller. Provider-unprovable gaps need
 deliberate review against retained controller evidence.
 
 Upgrade migrations `20261014_0017` and `20261014_0018` require a separately
-authorized deployment and tested pre-upgrade database backup. The first holds
-legacy selected Apprise/ambiguous recipient work while preserving definitions,
+authorized deployment. Explain the available pre-upgrade recovery point and any
+recovery limits; create or test a backup only when explicitly requested. The first
+holds legacy selected Apprise/ambiguous recipient work while preserving definitions,
 accepted/uncertain receipts and completed history. Re-select intended destinations
 in the workflow editor before deliberately re-enabling affected workflows. An
 unrelated edit must not silently bind an old numeric target to a new recipient.
@@ -432,8 +442,9 @@ isolated fixture and restore checks do not authorize deployment or live sends.
 
 The idle-worker migration `20261019_0019` and backend must be deployed together
 under separate production authorization, with the old worker stopped before upgrade:
-old code cannot create the new terminal accounting checkpoint. Preserve a verified
-matching pre-upgrade database/image recovery pair. The downgrade deliberately refuses
+old code cannot create the new terminal accounting checkpoint. Preserve any existing
+matching pre-upgrade database/image recovery pair; creating or testing one requires
+the user's explicit request. The downgrade deliberately refuses
 to discard accounting state; recovery requires that matching restore and uncertainty
 review. The migration only backfills missing completion receipts and adds indexes;
 it imports no application services and dispatches no work. Once accounting commits,

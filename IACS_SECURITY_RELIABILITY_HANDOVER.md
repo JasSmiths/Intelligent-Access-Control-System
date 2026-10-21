@@ -1,3 +1,9 @@
+> Historical handover: current [agent guidance](AGENTS.md#working-rules) and
+> [default working policy](docs/development.md#default-working-policy) govern
+> future work. Branch/worktree creation, backup creation/testing and database
+> restore rehearsals require the user's explicit request; earlier rollout
+> instructions below do not request or mandate those actions.
+
 IACS had several timing and ownership problems in its account, live dashboard, notification selection and missed-event recovery paths. A login could verify an old password and then acquire a newer session version after a reset. Concurrent resets could miss an invalidation, and concurrent administrator edits could release their protective locks too early. Account changes now recheck current authority after expensive password work and keep confirmation, the last-administrator rule, the change and its required audit in one transaction.
 
 Live dashboard connections now enforce expiry and recheck current account authority before sending and while idle. Standard users receive limited refresh hints instead of administrative audit details. Connection cancellation, blocked sends, Redis shutdown and repeated cleanup have one owner, with explicit failure when cleanup cannot finish. The browser refreshes current data after reconnecting while preserving open drafts and history filters.

@@ -5,13 +5,18 @@ save verbose output to a local log. Report the commands, exit status, retained
 evidence, failures and unattempted checks; repeat checks only after relevant
 changes or to resolve a failure.
 
+Branches, additional worktrees, backup creation/testing and database restore
+rehearsals require the user's explicit request for each action. Routine work uses
+the primary checkout on `main`. A validation or release request does not authorize
+these opt-in actions. Preserve existing backups and evidence.
+
 ## Choose the checks
 
 | Change | Required validation |
 | --- | --- |
 | Documentation | Check links, referenced paths and commands; run `git diff --check`. |
 | Frontend | In `frontend/`, run `npm run build` and `npm test`. Add browser checks for layout, interaction, navigation or role changes. |
-| Backend, schema or cross-system | Run the full isolated harness below. |
+| Backend, schema or cross-system | Run the isolated harness with `--mode db-free`; add relevant isolated database checks without backup or restore steps and report missing coverage. Run full mode only when a restore rehearsal is explicitly requested. |
 | Harness or source selection | Also run `python3 scripts/validation/test_source_snapshot.py` and `python3 scripts/validation/test_harness_configuration.py`. |
 
 Current source and tests are the contract. A past passing run does not validate
@@ -192,9 +197,9 @@ checks as well as full runs.
 
 [validate.py](../scripts/validation/validate.py) copies and hashes the current source,
 then executes against private resources. It does not isolate earlier edits to
-an operational bind mount: use an isolated checkout for code changes when the
-backend is mounted into a running application. Do not use `scripts/backend-pytest`
-for isolated regression; it can select the running Compose backend.
+an operational bind mount: report a live-source constraint before editing mounted
+backend source; create isolation only when explicitly requested. Do not use
+`scripts/backend-pytest` for isolated regression; it can select the running Compose backend.
 
 Use Python 3.12 or newer for the host harness and source checks; the architecture
 scanner parses Python 3.12 syntax. Execution also needs Docker and a compatible
@@ -221,16 +226,21 @@ Run from the repository root. Choose an evidence directory outside the
 repository and operational bind mounts:
 
 ```sh
-# Full regression with exact-lock installation and image pulls permitted.
-python3 scripts/validation/validate.py --allow-downloads \
+# Default checks with exact-lock installation and image pulls permitted.
+python3 scripts/validation/validate.py --mode db-free --allow-downloads \
   --evidence-root /private/tmp/iacs-validation-evidence
 
 # Deliberately keep one new verified preparation for later read-only reuse.
-python3 scripts/validation/validate.py --allow-downloads --retain-dependencies \
+python3 scripts/validation/validate.py --mode db-free --allow-downloads --retain-dependencies \
   --evidence-root /private/tmp/iacs-validation-evidence
 
-# Full regression with an existing trusted dependency preparation.
-python3 scripts/validation/validate.py \
+# Default checks with an existing trusted dependency preparation.
+python3 scripts/validation/validate.py --mode db-free \
+  --reuse-dependencies /absolute/path/to/prior-run \
+  --evidence-root /private/tmp/iacs-validation-evidence
+
+# Only after the user explicitly requests a database restore rehearsal.
+python3 scripts/validation/validate.py --mode full --database-restore \
   --reuse-dependencies /absolute/path/to/prior-run \
   --evidence-root /private/tmp/iacs-validation-evidence
 
@@ -239,7 +249,13 @@ python3 scripts/validation/validate.py --mode snapshot \
   --evidence-root /private/tmp/iacs-validation-evidence
 ```
 
-Full mode is the default. Both `full` and `db-free` require an explicit
+The executable still defaults to full mode, which automatically performs a
+database restore rehearsal. Always select `--mode db-free` for routine validation;
+use full mode only when the user explicitly requests a rehearsal. The existing
+[project-checks.yml](../.github/workflows/project-checks.yml) CI workflow also
+invokes full mode, so triggering it requires that explicit request too. Markdown
+policy does not change runner or CI behavior.
+Both `full` and `db-free` require an explicit
 `--allow-downloads` or `--reuse-dependencies`; the bare command refuses to guess.
 Preparation uses `uv sync --locked --extra dev --no-install-project` and
 `npm ci --ignore-scripts`. Reuse must match the copied manifests, lockfiles and
@@ -264,8 +280,9 @@ The harness runs the repository dependency/side-effect scan once as
 Access persistence tests verify command ordering and outcomes; synthetic timing
 samples are not performance acceptance checks.
 
-Full mode runs host source/configuration tests, architecture and Python checks,
-backend tests, full-source Ruff checks, undefined-name checks for backend and
+When a restore rehearsal is explicitly requested, full mode runs host
+source/configuration tests, architecture and Python checks, backend tests,
+full-source Ruff checks, undefined-name checks for backend and
 isolated validation fixtures, checked-body mypy checks, strict typed
 contract checks, generated workflow contract freshness, frontend tests/build and Compose configuration
 validation. It then migrates disposable PostgreSQL, checks Alembic state and
@@ -277,10 +294,12 @@ inventory; new `scripts/validation/test_*.py` suites must be classified there.
 `--mode db-free` runs the checks that need no database services or migrations;
 it cannot establish persistence, recovery or schema behavior. `--check-only`
 aliases snapshot mode; `--no-migrations` aliases DB-free mode. Snapshot success
-establishes source capture only. Full mode already requires the restore rehearsal;
-`--database-restore` simply spells out that default. Additional `--persistence-test`,
+establishes source capture only. Full mode always includes the restore rehearsal;
+omitting `--database-restore` does not skip it. Additional `--persistence-test`,
 `--diagnostic` and `--schema-check` selections are additive and full-mode only.
-Review their side effects before running them.
+Review their side effects before running them. Do not use full mode solely to
+reach these checks unless the restore rehearsal has also been explicitly requested.
+Report unattempted database coverage instead of claiming DB-free equivalence.
 
 ## Disk-space safety
 

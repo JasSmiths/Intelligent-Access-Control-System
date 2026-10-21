@@ -1,3 +1,9 @@
+> Historical handover: current [agent guidance](AGENTS.md#working-rules) and
+> [default working policy](docs/development.md#default-working-policy) govern
+> future work. Branch/worktree creation, backup creation/testing and database
+> restore rehearsals require the user's explicit request; earlier rollout
+> instructions below do not request or mandate those actions.
+
 Two remaining integration-edit defects are fixed in the local IACS files. Concurrent ESPHome, Apprise and Home Assistant discovery edits now apply to fresh configuration inside the existing settings transaction, so two successful additions preserve both. Apprise deletion also binds approval to the exact destination and list revision: if another screen removes an earlier entry, the stale request reports a conflict instead of removing the wrong destination.
 
 All earlier uncommitted remediation is preserved. The real API/PostgreSQL regression inventory went from **16 failed / 7 passed** on the captured starting application to **23 passed**. The final isolated harness, affected browser checks and runtime checks pass. Changes remain local and uncommitted; production was not migrated or deployed, live containers were not restarted, and no real providers or hardware were contacted. Deploy the matching backend/frontend together later under separate authorization; refresh old Apprise editors and confirm stale deletions again.
