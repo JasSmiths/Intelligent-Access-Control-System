@@ -61,6 +61,7 @@ from app.services.movement_fsm import (
     MovementIntent,
     RecoveryDirectionIntent,
 )
+from app.services.resident_location_contracts import LocationRefresh
 from app.services.schedules import (
     ScheduleEvaluation,
     evaluate_vehicle_schedule,
@@ -100,6 +101,12 @@ class CameraEvidenceRequired(Exception):
         self.display_name = person.display_name
 
 
+class LocationRefreshRequired(Exception):
+    """Only an authorized exact-plate recovery probe may request a phone fix."""
+    def __init__(self, person: Person, vehicle: Vehicle) -> None:
+        self.person, self.vehicle = person, vehicle
+
+
 @dataclass(frozen=True)
 class AccessEvidence:
     vehicle: Vehicle | None
@@ -123,6 +130,7 @@ class AccessEvidenceResolver:
     async def prepare_camera_evidence(
         self, read: PlateRead, direction_read: PlateRead,
         external_admission: dict[str, Any] | None, trace: Any,
+        *, location_refresh: LocationRefresh | None = None,
     ) -> PreparedCameraEvidence | None:
         runtime = self._runtime or await get_runtime_config()
         gate_state = coerce_gate_state(gate_observation_from_read(direction_read).get("state"))
@@ -147,7 +155,7 @@ class AccessEvidenceResolver:
                 return None
             try:
                 await self.resolve(session, read, direction_read, external_admission, trace,
-                                   probe_camera=True)
+                                   probe_camera=True, location_refresh=location_refresh)
             except CameraEvidenceRequired as needed:
                 request = needed
         if request is None:
@@ -187,6 +195,8 @@ class AccessEvidenceResolver:
         *,
         camera_evidence: PreparedCameraEvidence | None = None,
         probe_camera: bool = False,
+        probe_location: bool = False,
+        location_refresh: LocationRefresh | None = None,
     ) -> AccessEvidence:
         vehicle = await self._lookup_active_vehicle(session, read, trace)
         person = vehicle.owner if vehicle else None
@@ -240,8 +250,10 @@ class AccessEvidenceResolver:
                 observation_state, candidate_presence, explicit_direction_from_read(direction_read))
             if relevant_conflict and await has_conflict(session, person, vehicle, read.captured_at):
                 ready, reason, checks = (await evaluate_phone(session, person=person, vehicle=vehicle,
-                    read=direction_read, config=runtime, claim=not probe_camera) if allowed else
+                    read=direction_read, config=runtime, claim=not probe_camera, refresh=location_refresh) if allowed else
                     (False, "schedule_or_identity_denied", {"exact_plate": _is_exact_known_vehicle_plate_match(read) and read.registration_number == vehicle.registration_number}))
+                if probe_location and allowed and not ready and reason == "location_stale":
+                    raise LocationRefreshRequired(person, vehicle)
                 recovery = {"ready": ready, "reason": reason, "checks": checks, "method": "none",
                             "approval_eligible": False}
         direction_span = trace.start_span(

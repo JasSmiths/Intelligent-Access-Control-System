@@ -8,6 +8,8 @@ from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from typing import Any
 
+from app.services.resident_location_contracts import LocationRefresh
+
 POLICY_VERSION = 1
 MAX_SAMPLES = 64
 
@@ -133,4 +135,51 @@ def evaluate_journey(samples: list[dict], *, prior_entry_at: datetime | None,
     if latest["distance_m"]+latest["accuracy_m"] > 150:
         return False, "outside_gate_proximity", checks
     checks["requirements"] = {"away": True, "approach": True, "freshness": True, "proximity": True}
+    return True, "phone_return_corroborated", checks
+
+
+def evaluate_refreshed_journey(samples: list[dict[str, Any]], *,
+                               prior_entry_at: datetime | None, captured_at: datetime,
+                               now: datetime, refresh: LocationRefresh) -> tuple[bool, str, dict[str, Any]]:
+    """A requested near-gate fix can complete an already established away episode.
+
+    Ordinary unsolicited evidence retains its stricter three-fix approach policy.
+    The caller must validate the request's resident/configuration/connection binding.
+    """
+    checks: dict[str, Any] = {"location_refresh_id": str(refresh.run_id),
+                              "location_refresh_deadline": refresh.expires_at.isoformat()}
+    if not refresh.requested_at <= now < refresh.expires_at or prior_entry_at is None:
+        return False, "location_refresh_expired", checks
+    valid = [s for s in samples if (at := parse_time(s.get("at"))) is not None and at > prior_entry_at]
+    if len(valid) < 3:
+        return False, "away_not_established", checks
+    times = [parse_time(s.get("at")) for s in valid]
+    if any(at is None for at in times) or any(a >= b for a, b in pairwise(times)):
+        return False, "out_of_order_update", checks
+    latest, latest_at = valid[-1], times[-1]
+    if not refresh.requested_at < latest_at <= now or latest_at >= refresh.expires_at:
+        return False, "location_refresh_not_received", checks
+    if any(not 0 < s.get("accuracy_m", 0) <= 50 for s in valid):
+        return False, "accuracy_insufficient", checks
+    if latest["distance_m"] + latest["accuracy_m"] > 150:
+        return False, "outside_gate_proximity", checks
+    if any(s["distance_m"] + s["accuracy_m"] <= 150 for s in valid[:-1]):
+        return False, "completed_arrival_episode", checks
+    away = [s for s in valid[:-1] if parse_time(s["at"]) <= captured_at
+            and s["distance_m"] - s["accuracy_m"] >= 500]
+    if len(away) < 2 or (parse_time(away[-1]["at"]) - parse_time(away[0]["at"])).total_seconds() < 300:
+        return False, "away_not_established", checks
+    if not 0 <= (captured_at - parse_time(away[-1]["at"])).total_seconds() <= 300:
+        return False, "away_evidence_stale", checks
+    approach = [s for s in valid if parse_time(s["at"]) >= parse_time(away[-1]["at"])]
+    for left, right in pairwise(approach):
+        elapsed = (parse_time(right["at"]) - parse_time(left["at"])).total_seconds()
+        uncertainty = left["accuracy_m"] + right["accuracy_m"]
+        if right["distance_m"] - left["distance_m"] > uncertainty:
+            return False, "approach_not_established", checks
+        if max(0, abs(left["distance_m"] - right["distance_m"]) - uncertainty) / elapsed > 55:
+            return False, "implausible_location_jump", checks
+    checks.update(latest_distance_m=latest["distance_m"], latest_accuracy_m=latest["accuracy_m"],
+                  latest_age_at_decision_s=(now - latest_at).total_seconds(),
+                  away_sample_count=len(away), requested_fix=True)
     return True, "phone_return_corroborated", checks

@@ -567,7 +567,7 @@ def access_event_vehicle_triggers(
     vehicle_id = optional_text(payload.get("vehicle_id"))
     if decision == "granted" and vehicle_id:
         trigger_key = "vehicle.known_plate"
-    elif decision == "denied" and vehicle_id:
+    elif decision == "denied" and vehicle_id and payload.get("schedule_allowed") is False:
         trigger_key = "vehicle.outside_schedule"
     elif decision == "denied" and not vehicle_id:
         trigger_key = "vehicle.unknown_plate"

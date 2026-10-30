@@ -23,6 +23,8 @@ PROTECTED_PACKAGES = (
     'app/services/workflows', 'app/modules/dvsa',
 )
 TYPE_OWNERS = (
+    TypeOwner('app/services/resident_location_contracts.py', 'strict'),
+    TypeOwner('app/services/resident_location_refresh.py', 'strict'),
     TypeOwner('app/services/durable_work.py', 'strict'),
     TypeOwner('app/services/durable_readiness.py', 'strict'),
     TypeOwner('app/services/visitor_lifecycle.py', 'strict'),

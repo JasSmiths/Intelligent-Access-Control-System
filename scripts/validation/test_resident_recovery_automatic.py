@@ -19,13 +19,14 @@ import pytest_asyncio
 from sqlalchemy import delete, func, select, text
 
 from app.db.session import AsyncSessionLocal
-from app.models import (AccessEvent, LprIngestEvent, MissedExitRecoveryAttempt,
+from app.models import (AccessEvent, Anomaly, NotificationRun, LprIngestEvent, MissedExitRecoveryAttempt,
                         MovementSagaRecord, Person, Presence, ResidentRecoveryJourney,
                         SystemSetting, Vehicle)
 from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification
 from app.modules.gate.base import CommandDelivery, GateState
 from app.modules.lpr.base import PlateRead
 from app.services import resident_recovery as recovery
+from app.services import resident_location_refresh as location
 from app.services.access import authorization, evidence, execution, hardware
 from app.services.access.evidence import AccessEvidenceResolver
 from app.services.access.execution import AccessExecution
@@ -38,6 +39,7 @@ from access_window_fixture import claimed_window
 from app.services.movement.sessions import MovementSessionService
 from app.services.movement_ledger import get_movement_ledger_repository
 from app.services.resident_recovery_evidence import configuration_binding
+from app.services.notification_authorization import NotificationAuthorization
 from app.services.settings import get_runtime_config_for_session as load_runtime
 from test_resident_recovery import target_plan
 
@@ -137,7 +139,7 @@ async def h(isolated_resources, monkeypatch):
             is_secret=False) for key, value in SETTINGS.items()])
         await session.commit()
     value = Harness()
-    for module in (recovery, execution, authorization):
+    for module in (recovery, execution, authorization, location):
         monkeypatch.setattr(module, "get_runtime_config_for_session", value.runtime)
     monkeypatch.setattr(evidence, "get_runtime_config", value.current_runtime)
     monkeypatch.setattr(AccessDeviceConfiguration, "preview_gate_open", AsyncMock(return_value=target_plan()))
@@ -187,12 +189,13 @@ async def seed(h, *, trip=True):
         return SimpleNamespace(person=person, vehicles=vehicles, now=now)
 
 
-async def plate_read(h, item, index=0, *, gate="closed", explicit=None):
+async def plate_read(h, item, index=0, *, gate="closed", explicit=None, capture_age=0):
     async with AsyncSessionLocal() as session:
-        captured = await session.scalar(select(func.clock_timestamp()))
+        observed = await session.scalar(select(func.clock_timestamp()))
+    captured = observed-timedelta(seconds=capture_age)
     vehicle = item.vehicles[index]
     raw = {"cameraId": "synthetic-camera", "eventId": str(uuid.uuid4()),
-        GATE_OBSERVATION_PAYLOAD_KEY: {"state": gate, "observed_at": captured.isoformat()},
+        GATE_OBSERVATION_PAYLOAD_KEY: {"state": gate, "observed_at": observed.isoformat()},
         KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY: {"exact": True,
             "registration_number": vehicle.registration_number,
             "observed_registration_number": vehicle.registration_number}}
@@ -222,6 +225,151 @@ async def gps_state(latitude):
         now = await session.scalar(select(func.clock_timestamp()))
     return {"state": "not_home", "last_updated": now.isoformat(), "attributes": {
         "source_type": "gps", "latitude": latitude, "longitude": -1.0, "gps_accuracy": 20}}
+
+
+async def stale_trip(h):
+    item = await seed(h)
+    async with AsyncSessionLocal() as session:
+        row = await session.get(ResidentRecoveryJourney, item.person.id)
+        row.samples = [{"at": (item.now-timedelta(seconds=age)).isoformat(), "distance_m": distance,
+                        "accuracy_m": 3} for age, distance in [(740, 6762), (440, 3550), (140, 1197)]]
+        row.latest_at = item.now-timedelta(seconds=140)
+        await session.commit()
+    return item
+
+
+async def fresh_fix(item):
+    old = await gps_state(51.01077)
+    old["last_updated"] = (item.now-timedelta(seconds=140)).isoformat()
+    await recovery.observe_tracker(item.person.missed_exit_recovery_tracker_entity_id,
+                                   await gps_state(51.00006), old)
+
+
+async def test_requested_fix_completes_admission_and_request_is_single_use(h, monkeypatch):
+    item = await stale_trip(h)
+    original_wait = location.wait_for_location
+    request_ids = []
+
+    async def respond(refresh):
+        request_ids.append(refresh.run_id)
+        async with AsyncSessionLocal() as session:
+            run = await session.get(NotificationRun, refresh.run_id)
+            assert run.delivery_plan[0]["action"]["message"] == "request_location_update"
+            assert await location.authorize_output(session, run.context, run.id, run.delivery_plan[0]["action"]) is None
+            authority = NotificationAuthorization(config=h.runtime, actionable=lambda: None)
+            for final in (False, True):
+                _config, policy = await authority.authorize_attempt_with_config(session, run.context,
+                    run.id, action=run.delivery_plan[0]["action"], final=final)
+                assert policy is None
+        await fresh_fix(item)
+        return await original_wait(refresh)
+
+    monkeypatch.setattr(execution, "wait_for_location", respond)
+    monkeypatch.setattr(location, "get_gate_controller", lambda _: SimpleNamespace(
+        current_state=AsyncMock(return_value=GateState.CLOSED)))
+    read = await plate_read(h, item)
+    event_id = await h.execute(read)
+    assert len(request_ids) == len(h.intents) == len(h.authorized) == 1
+    async with AsyncSessionLocal() as session:
+        event = await session.get(AccessEvent, event_id)
+        assert event.decision == AccessDecision.GRANTED
+        assert event.raw_payload["direction_resolution"]["missed_exit_recovery"]["checks"]["requested_fix"]
+        run = await session.get(NotificationRun, request_ids[0])
+        assert await location.authorize_output(session, run.context, run.id, run.delivery_plan[0]["action"]) == "location_request_encounter_ended"
+    await h.execute(read)
+    assert len(h.intents) == 1
+
+
+async def test_location_timeout_uses_approval_without_outside_schedule_anomaly(h, monkeypatch):
+    item = await stale_trip(h)
+
+    async def timeout(refresh):
+        return await location.wait_for_location(replace(refresh, expires_at=datetime.now(UTC)))
+
+    monkeypatch.setattr(execution, "wait_for_location", timeout)
+    await h.execute(await plate_read(h, item))
+    assert h.intents == []
+    assert await rows(Anomaly) == []
+    attempts = await rows(MissedExitRecoveryAttempt)
+    assert len(attempts) == 1 and attempts[0].outcome == "awaiting_resident"
+    runs = await rows(NotificationRun)
+    assert len([run for run in runs if run.trigger_event == location.TRIGGER]) == 1
+    assert not any(run.trigger_event == "outside_schedule" for run in runs)
+    # A second car/read cannot repeatedly wake the same resident's phone.
+    await h.execute(await plate_read(h, item))
+    assert len([run for run in await rows(NotificationRun) if run.trigger_event == location.TRIGGER]) == 1
+    assert h.intents == []
+
+
+async def test_cancelling_location_wait_closes_request_and_removes_wake_listener(h, monkeypatch):
+    item = await stale_trip(h)
+    entered = asyncio.Event()
+    original_wait = location.wait_for_location
+    listener_count = location.event_bus.status()["listeners"]
+
+    async def waiting(refresh):
+        entered.set()
+        return await original_wait(refresh)
+
+    monkeypatch.setattr(execution, "wait_for_location", waiting)
+    task = asyncio.create_task(h.execute(await plate_read(h, item)))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    runs = [run for run in await rows(NotificationRun) if run.trigger_event == location.TRIGGER]
+    assert len(runs) == 1 and runs[0].context[location.ORIGIN]["closed"]
+    assert location.event_bus.status()["listeners"] == listener_count
+    assert h.intents == []
+
+
+async def test_request_never_extends_original_recognition_deadline(h, monkeypatch):
+    item = await stale_trip(h)
+    read = await plate_read(h, item, capture_age=58)
+    wait = AsyncMock()
+    monkeypatch.setattr(execution, "wait_for_location", wait)
+    await h.execute(read)
+    wait.assert_not_awaited()
+    assert not [run for run in await rows(NotificationRun) if run.trigger_event == location.TRIGGER]
+    assert h.intents == []
+
+
+async def test_permission_revoked_during_refresh_cannot_open(h, monkeypatch):
+    item = await stale_trip(h)
+
+    async def revoke(refresh):
+        async with AsyncSessionLocal() as session:
+            person = await session.get(Person, item.person.id)
+            person.is_active = False
+            await session.commit()
+        async with AsyncSessionLocal() as session:
+            run = await session.get(NotificationRun, refresh.run_id)
+            authority = NotificationAuthorization(config=h.runtime, actionable=lambda: None)
+            _config, policy = await authority.authorize_attempt_with_config(session, run.context,
+                run.id, action=run.delivery_plan[0]["action"], final=True)
+            assert policy.action_skip == "location_request_revoked"
+        await fresh_fix(item)
+        return await location.wait_for_location(replace(refresh, expires_at=datetime.now(UTC)))
+
+    monkeypatch.setattr(execution, "wait_for_location", revoke)
+    await h.execute(await plate_read(h, item))
+    assert h.intents == []
+
+
+async def test_tracker_person_read_lock_allows_authorization_read_but_blocks_mutation(h):
+    item = await seed(h)
+    async with AsyncSessionLocal() as tracker, AsyncSessionLocal() as authority:
+        await recovery.lock_owner(tracker, item.person.id, read_only=True)
+        assert await recovery.lock_owner(authority, item.person.id, read_only=True, nowait=True)
+        await authority.rollback()
+        from sqlalchemy.exc import DBAPIError
+        with pytest.raises(DBAPIError):
+            await recovery.lock_owner(authority, item.person.id, nowait=True)
+        await authority.rollback()
 
 
 async def test_warm_ready_phone_local_evaluation_records_timings(h, capsys):

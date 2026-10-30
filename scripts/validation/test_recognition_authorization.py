@@ -183,3 +183,36 @@ async def test_domain_notification_authority_does_not_shorten_dispatch_age_to_si
         with pytest.raises(RecognitionAuthorizationDenied, match="older than 60"):
             await assert_current_recognition_authorization(session, event_id=event.id,
                                                           now=NOW + timedelta(seconds=120))
+
+
+@pytest.mark.parametrize("presence_first", [True, False])
+async def test_presence_and_recognition_readers_coexist_but_person_edits_wait(presence_first):
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
+    from app.services.ha_presence_database import lock_current_people
+
+    event = await observation()
+    async with AsyncSessionLocal() as presence, AsyncSessionLocal() as attempt, AsyncSessionLocal() as edit:
+        async def read_presence():
+            people = await lock_current_people(presence, [event.person_id])
+            assert people[event.person_id].is_active
+
+        async def authorize():
+            checkpoint = await assert_current_recognition_authorization(attempt, event_id=event.id, now=NOW)
+            assert checkpoint.person_id == event.person_id
+
+        first, second = (read_presence, authorize) if presence_first else (authorize, read_presence)
+        await first()
+        await second()
+        # End recognition's lock: the HA reader alone must still fence edits.
+        await attempt.commit()
+        await edit.execute(text("SET LOCAL lock_timeout = '100ms'"))
+        with pytest.raises(DBAPIError) as blocked:
+            await edit.execute(update(Person).where(Person.id == event.person_id).values(is_active=False))
+        assert blocked.value.orig.sqlstate == "55P03"
+        await edit.rollback()
+        await presence.commit()
+        await edit.execute(update(Person).where(Person.id == event.person_id).values(is_active=False))
+        await edit.commit()
+        with pytest.raises(RecognitionAuthorizationDenied, match="identity"):
+            await authorize()

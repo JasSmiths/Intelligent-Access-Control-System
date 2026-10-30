@@ -231,7 +231,7 @@ def test_event_bridge_uses_direct_access_event_domain_events() -> None:
         occurred_at=created_at,
     )
     outside_schedule = automation_triggers_for_origin(
-        "access_event.finalized", {"decision": "denied", "vehicle_id": "vehicle-1", "occurred_at": created_at},
+        "access_event.finalized", {"decision": "denied", "vehicle_id": "vehicle-1", "occurred_at": created_at, "schedule_allowed": False},
         occurred_at=created_at,
     )
     unknown = automation_triggers_for_origin(
@@ -247,6 +247,13 @@ def test_event_bridge_uses_direct_access_event_domain_events() -> None:
     assert outside_schedule[0][0] == "vehicle.outside_schedule"
     assert unknown[0][0] == "vehicle.unknown_plate"
     assert backfilled == []
+
+
+@pytest.mark.parametrize("schedule_allowed", [True, None, "false"])
+def test_failed_return_verification_is_not_an_out_of_hours_trigger(schedule_allowed):
+    assert automation_triggers_for_origin("access_event.finalized", {
+        "decision": "denied", "vehicle_id": "vehicle-1", "schedule_allowed": schedule_allowed,
+    }, occurred_at="2026-10-30T19:09:23+00:00") == []
 
 
 def test_event_bridge_ignores_notification_and_automation_status_events() -> None:

@@ -91,6 +91,7 @@ def access_event_realtime_payload(
         "registration_number": event.registration_number,
         "direction": event.direction.value,
         "decision": event.decision.value,
+        "schedule_allowed": ((event.raw_payload or {}).get("schedule") or {}).get("allowed"),
         "confidence": event.confidence,
         "source": event.source,
         "occurred_at": event.occurred_at.isoformat(),

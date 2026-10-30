@@ -60,14 +60,20 @@ async def lock_ha_coordinator(session: AsyncSession) -> HaPresenceCoordinator:
 async def lock_current_people(
     session: AsyncSession, person_ids: Sequence[uuid.UUID],
 ) -> dict[uuid.UUID, HaCurrentPerson]:
-    """Current binding authority excludes profile-photo/notes and relationships."""
+    """Hold binding authority against edits without excluding other readers.
+
+    Recognition dispatch also holds FOR SHARE on Person. Presence reservations
+    and attempts only read these rows; their writes serialize on the HA
+    coordinator. An exclusive Person lock here can suppress the garage command
+    triggered by the same arrival. Keep NOWAIT so actual edits still fail closed.
+    """
     rows = (await session.execute(select(
         Person.id, Person.is_active,
         Person.home_assistant_presence_input_boolean_entity_ids,
         Person.home_assistant_presence_input_boolean_entry_action,
         Person.home_assistant_presence_input_boolean_exit_action,
     ).where(Person.id.in_(person_ids)).order_by(Person.id)
-        .with_for_update(nowait=True))).all()
+        .with_for_update(read=True, nowait=True))).all()
     return {row.id: HaCurrentPerson(
         row.id, row.is_active, row.home_assistant_presence_input_boolean_entity_ids,
         row.home_assistant_presence_input_boolean_entry_action,

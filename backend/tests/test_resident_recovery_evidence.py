@@ -1,14 +1,63 @@
 """Synthetic GPS evidence contracts; no database, HTTP, camera or hardware I/O."""
 import hashlib
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from app.services import resident_recovery_evidence as evidence
+from app.services.resident_location_contracts import LocationRefresh
 
 NOW = datetime(2026, 10, 2, 12, tzinfo=UTC)
 PRIOR_ENTRY = NOW - timedelta(hours=1)
+
+
+def sample(seconds_before, distance, accuracy=20):
+    return {"at": (NOW - timedelta(seconds=seconds_before)).isoformat(),
+            "distance_m": distance, "accuracy_m": accuracy}
+
+
+def refreshed(samples, *, now=None, prior_entry_at=PRIOR_ENTRY):
+    refresh = LocationRefresh(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), "synthetic", NOW, NOW + timedelta(seconds=1),
+                              NOW + timedelta(seconds=21), "binding", "epoch")
+    return evidence.evaluate_refreshed_journey(samples, prior_entry_at=prior_entry_at,
+        captured_at=NOW, now=now or NOW + timedelta(seconds=15), refresh=refresh)
+
+
+def test_requested_post_capture_fix_completes_realistic_five_minute_updates():
+    samples = [sample(740, 6762, 3), sample(440, 3550, 3), sample(140, 1197, 3), sample(-13, 7, 3)]
+    assert evaluate(samples)[0] is False
+    ready, reason, checks = refreshed(samples)
+    assert ready and reason == "phone_return_corroborated"
+    assert checks["requested_fix"] is True
+
+
+@pytest.mark.parametrize("samples,now", [
+    ([sample(740, 6762), sample(440, 3550), sample(140, 1197)], NOW + timedelta(seconds=15)),
+    ([sample(740, 6762), sample(440, 3550), sample(0, 7)], NOW + timedelta(seconds=15)),
+    ([sample(740, 6762), sample(440, 3550), sample(-13, 7)], NOW + timedelta(seconds=15)),
+    ([sample(440, 3550), sample(140, 1197), sample(-13, 140)], NOW + timedelta(seconds=15)),
+    ([sample(440, 3550), sample(140, 1197), sample(-13, 7, 51)], NOW + timedelta(seconds=15)),
+    ([sample(440, 3550), sample(140, 1197), sample(-13, 7)], NOW + timedelta(seconds=21)),
+    ([sample(440, 3550), sample(140, 1197), sample(-16, 7)], NOW + timedelta(seconds=15)),
+    ([sample(440, 3550), sample(140, 1197), sample(-4, 10), sample(-13, 7)], NOW + timedelta(seconds=15)),
+    ([sample(440, 3550), sample(140, 1197), sample(-4, 2000), sample(-13, 7)], NOW + timedelta(seconds=15)),
+])
+def test_requested_location_never_authorizes_stale_inaccurate_replayed_or_late_fix(samples, now):
+    assert refreshed(samples, now=now)[0] is False
+
+
+def test_refresh_proof_is_bound_to_resident_read_configuration_and_connection():
+    person_id = uuid.uuid4()
+    vehicle_id = uuid.uuid4()
+    refresh = LocationRefresh(uuid.uuid4(), person_id, vehicle_id, "synthetic", NOW, NOW, NOW + timedelta(seconds=20), "a", "b")
+    facts = dict(person_id=person_id, vehicle_id=vehicle_id, source="synthetic", captured_at=NOW, binding="a", epoch="b", now=NOW)
+    assert refresh.current(**facts)
+    for key, value in [("person_id", uuid.uuid4()), ("vehicle_id", uuid.uuid4()), ("source", "other"),
+                       ("captured_at", NOW + timedelta(seconds=1)),
+                       ("binding", "changed"), ("epoch", "reconnected"), ("now", refresh.expires_at)]:
+        assert not refresh.current(**{**facts, key: value})
 
 
 def config(**overrides):
@@ -22,11 +71,6 @@ def config(**overrides):
         "apprise_urls": "",
     }
     return SimpleNamespace(**(values | overrides))
-
-
-def sample(seconds_before, distance, accuracy=20):
-    return {"at": (NOW - timedelta(seconds=seconds_before)).isoformat(),
-            "distance_m": distance, "accuracy_m": accuracy}
 
 
 def return_samples():

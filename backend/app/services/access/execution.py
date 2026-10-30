@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -16,6 +16,7 @@ from app.models import (
     MovementSessionRecord,
     Person,
     Presence,
+    ResidentRecoveryJourney,
     Vehicle,
     VisitorPass,
 )
@@ -44,7 +45,11 @@ from app.services.access.completion_store import (
     reserve_window_completion_in_session,
 )
 from app.services.access.delivery import reserve_observation_outputs
-from app.services.access.evidence import AccessEvidenceResolver
+from app.services.access.evidence import (
+    AccessEvidenceResolver,
+    CameraEvidenceRequired,
+    LocationRefreshRequired,
+)
 from app.services.access.hardware import open_gate_for_access_event, publish_gate_open_skipped
 from app.services.access.payloads import (
     _access_event_raw_payload,
@@ -83,6 +88,8 @@ from app.services.movement.sessions import (
     gate_observation_from_read,
 )
 from app.services.movement_ledger import MovementLedgerRepository
+from app.services.resident_location_refresh import reserve_in_session as reserve_location_refresh
+from app.services.resident_location_refresh import wait_for_location
 from app.services.schedules import ScheduleEvaluation
 from app.services.settings import RuntimeConfig, get_runtime_config_for_session
 from app.services.snapshots import alert_snapshot_metadata_from_event
@@ -126,8 +133,29 @@ class AccessExecution:
             if await self._reuse_window_in_session(session, window, claim, read):
                 await session.commit()
                 return None
+        location_refresh = None
+        if runtime.missed_exit_recovery_enabled and not external_admission:
+            async with access_session(AsyncSessionLocal) as session:
+                runtime = await get_runtime_config_for_session(session)
+                candidate = await session.scalar(select(Person.id).join(Vehicle, Vehicle.person_id == Person.id)
+                    .join(ResidentRecoveryJourney, ResidentRecoveryJourney.person_id == Person.id).where(
+                    Vehicle.registration_number == read.registration_number, Vehicle.is_active.is_(True),
+                    Person.is_active.is_(True), Person.missed_exit_recovery_enabled.is_(True),
+                    ResidentRecoveryJourney.latest_at < direction_read.captured_at-timedelta(seconds=60)).limit(1))
+                try:
+                    if candidate is not None:
+                        await AccessEvidenceResolver(runtime).resolve(session, read, direction_read,
+                            external_admission, trace, probe_camera=True, probe_location=True)
+                except LocationRefreshRequired as request:
+                    location_refresh = await reserve_location_refresh(session, person=request.person,
+                        vehicle=request.vehicle, config=runtime, read=direction_read, window=window, claim=claim)
+                    await session.commit()
+                except CameraEvidenceRequired:
+                    pass
+            if location_refresh is not None:
+                location_refresh = await wait_for_location(location_refresh)
         camera_evidence = await AccessEvidenceResolver(runtime).prepare_camera_evidence(
-            read, direction_read, external_admission, trace
+            read, direction_read, external_admission, trace, location_refresh=location_refresh
         )
         async with access_session(AsyncSessionLocal) as session:
             if await self._reuse_window_in_session(session, window, claim, read):
@@ -136,7 +164,6 @@ class AccessExecution:
             runtime = await get_runtime_config_for_session(session)
             # Serialize owner journeys across concurrent plate reads and all owned vehicles.
             if getattr(runtime, "missed_exit_recovery_enabled", False):
-                from app.models import Vehicle
                 from app.services.resident_recovery import lock_owner
 
                 candidate_owner = await session.scalar(
@@ -154,6 +181,7 @@ class AccessExecution:
                 external_admission,
                 trace,
                 camera_evidence=camera_evidence,
+                location_refresh=location_refresh,
             )
             vehicle, person = evidence.vehicle, evidence.person
             visitor_pass, visitor_pass_mode = evidence.visitor_pass, evidence.visitor_pass_mode
@@ -503,13 +531,16 @@ class AccessExecution:
             return anomalies
 
         if not allowed:
+            # A failed return-verification is not a failed schedule evaluation.
+            if ((event.raw_payload or {}).get("schedule") or {}).get("allowed") is not False:
+                return anomalies
             subject = person.display_name if person else event.registration_number
             anomalies.append(
                 Anomaly(
                     event=event,
                     anomaly_type=AnomalyType.OUTSIDE_SCHEDULE,
                     severity=AnomalySeverity.WARNING,
-                    message=f"{subject} was denied by schedule or access policy.",
+                    message=f"{subject} was denied by schedule.",
                     context={
                         "person_id": str(person.id) if person else None,
                         "vehicle_id": str(vehicle.id),

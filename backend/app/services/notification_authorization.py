@@ -71,6 +71,11 @@ class NotificationAuthorization:
         vehicle_denial = await vehicle_information_notice_denial(session, payload, run_id)
         if vehicle_denial:
             return vehicle_denial
+        if payload.get("resident_location_origin") is not None:
+            from app.services.resident_location_refresh import authorize_output
+
+            denial = await authorize_output(session, payload, run_id, action)
+            return NotificationActionAuthorization(action_skip=denial) if denial else None
         if payload.get("resident_recovery_origin") is not None:
             from app.services.resident_recovery import authorize_mobile_output
 
@@ -162,6 +167,12 @@ class NotificationAuthorization:
     ) -> NotificationPolicy:
         if action is not None and (reason := recipient_binding_error(action, config.apprise_urls)):
             return NotificationActionAuthorization(review_reason=reason)
+        if action is not None and action.get("resident_location_output") is not None:
+            from app.services.resident_location_refresh import authorize_output
+
+            denial = await authorize_output(session, payload or {}, run_id, action)
+            if denial:
+                return NotificationActionAuthorization(action_skip=denial)
         if action is not None and action.get("resident_recovery_output") is not None:
             from app.services.resident_recovery import authorize_mobile_output
 

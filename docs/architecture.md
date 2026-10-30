@@ -117,6 +117,18 @@ a command is required; persisted journals, movement sagas and receipts retain
 command authority and outcome. Resident recovery retains its command requirement in the persisted movement
 saga.
 
+[Resident location refresh](../backend/app/services/resident_location_refresh.py)
+owns the durable, one-shot phone request and bounded wait for stale-GPS recovery.
+Its typed request binds the resident, plate capture, configuration and tracker
+connection to a 20-second deadline capped by recognition expiry. Notification
+dispatch additionally checks the current window/coordinator lease and destination.
+Committed tracker updates wake the waiter through the event bus; hints carry only
+the resident ID and the waiter re-reads the bounded journey. No SQL transaction
+spans the wait. The ordinary three-sample approach policy remains unchanged;
+only an active requested-fix window can use the established-away/near-gate path.
+Tracker updates and read-only recovery authority take shared Person locks;
+journey mutation and resident-approval consumption retain their serialization.
+
 Execution handoffs return only the created event UUID. Enrichment stays on the
 persisted event; durable publication reservations own logical idempotency. Network
 delivery is reconcilable, not a claim of exactly-once delivery.
@@ -755,8 +767,12 @@ through completion.
 The dormant [HA presence repository](../backend/app/services/ha_presence_attempts.py)
 separates latest desired state from immutable physical attempts and retained UNKNOWN
 barriers. Its last-flush participant uses the auth owner's nonblocking root fence,
-locked scalar Person bindings and only the two relevant HA settings. Profile photos
-and unrelated settings are excluded. The setting fence uses the existing settings
+locked scalar Person bindings and only the two relevant HA settings. Person reads
+use `FOR SHARE NOWAIT`: presence reservations/attempts and recognition dispatch
+can read the same person concurrently, while edits/deletions remain fenced until
+commit. HA writes still serialize on their coordinator; using `FOR UPDATE` for
+these binding reads can withhold the garage command from the same arrival.
+Profile photos and unrelated settings are excluded. The setting fence uses the existing settings
 writer's `iacs:setting:{key}` advisory namespace, including when the setting row has
 not yet been created. Pure binding policy preserves ordered entity
 IDs and the existing turn_off defaults for both entry and exit; it uses final Presence,

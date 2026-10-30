@@ -221,6 +221,26 @@ gate policy and uses the same command owner. Resident approval preserves the
 original denial and creates a linked recovery event. Recovery never invents an
 exit or bypasses unknown-plate, pending-command or admission checks.
 
+When that resident's recorded GPS location is stale, a live authorised plate
+observation can reserve one silent Home Assistant `request_location_update`
+notification through the existing notification journal. Requests coalesce across
+the resident's vehicles for one minute. The arrival waits at most 20 seconds,
+within its original 60-second recognition deadline, without holding SQL locks.
+A changed, accurate near-gate fix after the request can complete an established
+away episode: at least two away samples spanning five minutes, with the latest
+away sample within five minutes before recognition. Cached coordinates, poor
+accuracy, outward/implausible movement, consumed journeys, reconnection or changed
+configuration do not authorize entry. Current gate evidence and access authority
+are checked again; gate and garage commands still use their audited owners.
+
+Phone delivery or a fresh GPS fix is not guaranteed, particularly when the phone
+OS restricts background activity. Timeout retains camera/resident-approval
+fallback. Cancellation closes the queued request; a late fix cannot reopen a
+completed encounter. Failed return verification does not emit an out-of-hours
+alert when the saved schedule evaluation allowed access. Silent requests are
+automatic recovery outputs, not notification tests; live testing still requires
+the separate authorization described above.
+
 Notification delivery also retains attempted and uncertain outcomes durably.
 Unknown results require review without automatic resend; historical unfinished
 delivery records are not permission to send again.

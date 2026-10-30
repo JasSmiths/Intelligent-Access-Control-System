@@ -454,6 +454,79 @@ async def test_assigned_schedule_writer_contention_and_committed_denial_both_pre
     assert "does not allow" in denied.detail and provider.calls == []
 
 
+@pytest.mark.parametrize("competing_lock", ["presence_read", "old_exclusive_read", "revocation"])
+async def test_garage_recognition_dispatch_during_person_contention(monkeypatch, maintenance_owner, competing_lock):
+    from app.models import AccessEvent, LprIngestEvent, Person, Schedule, Vehicle
+    from app.models.enums import AccessDecision, AccessDirection
+    from app.services.access.authorization import assert_current_recognition_authorization
+    from app.services.ha_presence_database import lock_current_people
+
+    device = await persisted_device(kind="garage_door")
+    provider, service = InertProvider(), AccessDeviceService()
+    wire_provider(monkeypatch, provider, None)
+    async with AsyncSessionLocal() as session:
+        schedule = Schedule(name=f"Synthetic arrival {uuid.uuid4()}", time_blocks={
+            str(day): [{"start": "00:00", "end": "24:00"}] for day in range(7)})
+        session.add(schedule)
+        await session.flush()
+        person = Person(display_name="Synthetic arrival", schedule_id=schedule.id,
+            garage_door_entity_ids=[device.key])
+        session.add(person)
+        await session.flush()
+        vehicle = Vehicle(registration_number=f"SYN{uuid.uuid4().hex[:10]}", person_id=person.id)
+        session.add(vehicle)
+        await session.flush()
+        now = await session.scalar(select(func.clock_timestamp()))
+        event = AccessEvent(person_id=person.id, vehicle_id=vehicle.id,
+            registration_number=vehicle.registration_number, direction=AccessDirection.ENTRY,
+            decision=AccessDecision.GRANTED, confidence=1, source="synthetic", occurred_at=now)
+        session.add(event)
+        await session.flush()
+        session.add(LprIngestEvent(idempotency_key=str(uuid.uuid4()), source="synthetic",
+            registration_number=vehicle.registration_number, captured_at=now, received_at=now,
+            status="succeeded", access_event_id=event.id))
+        saved_device = await session.get(AccessDevice, device.id)
+        saved_device.schedule_id = schedule.id
+        await session.commit()
+
+    async def authorize(session):
+        await assert_current_recognition_authorization(session, event_id=event.id)
+
+    identity = str(uuid.uuid5(event.id, f"automatic-garage-open:{device.id}"))
+    operation_key = f"garage-command:open:{device.id}:event:{event.id}"
+
+    async def invoke():
+        return await service.command_device(device.key, "open", "Synthetic arrival",
+            intent_id=identity, idempotency_key=operation_key, expires_at=now + timedelta(seconds=60),
+            authorize_dispatch=authorize, schedule_source="garage_door",
+            origin_context={"kind": "automatic_access_garage", "access_event_id": str(event.id),
+                            "target_label": "Synthetic garage"})
+
+    async with AsyncSessionLocal() as competing:
+        if competing_lock == "presence_read":
+            await lock_current_people(competing, [person.id])
+        else:
+            # Reproduce the old HA reader's exclusive lock alongside a real edit.
+            locked = await competing.get(Person, person.id, with_for_update=True)
+            if competing_lock == "revocation":
+                locked.is_active = False
+                await competing.flush()
+        result = await asyncio.wait_for(invoke(), timeout=5)
+        if competing_lock == "presence_read":
+            assert result.accepted and len(provider.calls) == 1
+            replay = await asyncio.wait_for(invoke(), timeout=5)
+            assert replay.metadata["command_id"] == result.metadata["command_id"] and len(provider.calls) == 1
+        else:
+            assert result.delivery == CommandDelivery.NOT_SENT and provider.calls == []
+            assert "being changed" in result.detail
+        await competing.commit()
+    if competing_lock == "revocation":
+        async with AsyncSessionLocal() as fresh:
+            with pytest.raises(ValueError, match="identity"):
+                await authorize(fresh)
+        assert provider.calls == []
+
+
 async def test_service_replay_after_terminal_device_deletion_returns_original_receipt(monkeypatch):
     persisted = await persisted_device()
     provider, service = InertProvider(), AccessDeviceService()

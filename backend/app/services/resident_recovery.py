@@ -19,7 +19,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 
 from app.core.auth_secret import get_auth_secret
 from app.db.session import AsyncSessionLocal
@@ -56,11 +56,13 @@ from app.services.ha_presence_contracts import HaCoordinationBusy
 from app.services.ha_presence_reservations import reserve_all_in_session
 from app.services.leaderboard import get_leaderboard_service
 from app.services.notification_runs import NotificationRunStore
+from app.services.resident_location_contracts import LOCATION_UPDATED, LocationRefresh
 from app.services.resident_recovery_evidence import (
     MAX_SAMPLES,
     POLICY_VERSION,
     configuration_binding,
     evaluate_journey,
+    evaluate_refreshed_journey,
     gate_coordinates,
     location_sample,
     parse_time,
@@ -100,8 +102,14 @@ def add_stage(attempt: MissedExitRecoveryAttempt, stage: str, status: str, reaso
     attempt.timeline = [*(attempt.timeline or [])[-39:], item]
 
 
-async def lock_owner(session: AsyncSession, person_id: uuid.UUID, *, nowait: bool = False) -> Person | None:
-    return await session.scalar(select(Person).where(Person.id == person_id).with_for_update(nowait=nowait)
+def connection_epoch() -> str | None:
+    return _epoch if _connected else None
+
+
+async def lock_owner(session: AsyncSession, person_id: uuid.UUID, *, nowait: bool = False,
+                     read_only: bool = False) -> Person | None:
+    return await session.scalar(select(Person).options(defer(Person.profile_photo_data_url, raiseload=True),
+        defer(Person.notes, raiseload=True)).where(Person.id == person_id).with_for_update(nowait=nowait, read=read_only)
                                 .execution_options(populate_existing=True))
 
 
@@ -122,8 +130,8 @@ async def observe_tracker(entity_id: str, new_state: dict, old_state: dict) -> N
             Person.missed_exit_recovery_tracker_entity_id == entity_id))).all())
         if len(ids) != 1:
             return
-        person = await lock_owner(session, ids[0])
-        if person.missed_exit_recovery_tracker_entity_id != entity_id or not person.missed_exit_recovery_enabled:
+        person = await lock_owner(session, ids[0], read_only=True)
+        if person is None or person.missed_exit_recovery_tracker_entity_id != entity_id or not person.missed_exit_recovery_enabled:
             return
         if not _connected or received_epoch != _epoch:
             return
@@ -178,6 +186,10 @@ async def observe_tracker(entity_id: str, new_state: dict, old_state: dict) -> N
             return
         await session.commit()
 
+    # Wake hints carry no coordinates and never supply authority themselves.
+    from app.services.event_bus import event_bus
+    await event_bus.publish(LOCATION_UPDATED, {"person_id": str(person.id)})
+
 
 async def has_conflict(session: AsyncSession, person: Person, vehicle: Vehicle, captured_at: datetime) -> bool:
     from app.models.core import LIVE_ACCESS_EVENT_PREDICATE
@@ -215,7 +227,8 @@ async def blockers(session: AsyncSession, *, now: datetime, exclude_saga_id: uui
 
 
 async def evaluate_phone(session: AsyncSession, *, person: Person, vehicle: Vehicle,
-                         read: Any, config: Any, claim: bool = False) -> tuple[bool, str, dict]:
+                         read: Any, config: Any, claim: bool = False,
+                         refresh: LocationRefresh | None = None) -> tuple[bool, str, dict]:
     started = time.monotonic()
     from app.services.access.reads import _is_exact_known_vehicle_plate_match
     checks: dict = {"policy_version": POLICY_VERSION, "connection_current": _connected,
@@ -228,6 +241,11 @@ async def evaluate_phone(session: AsyncSession, *, person: Person, vehicle: Vehi
         gate_observation_from_read,
     )
     observation = gate_observation_from_read(read)
+    refresh_current = refresh is not None and refresh.current(person_id=person.id,
+        vehicle_id=vehicle.id, source=read.source, captured_at=read.captured_at,
+        binding=configuration_binding(person, config), epoch=_epoch, now=now)
+    if refresh_current and refresh.gate_observed_at is not None:
+        observation = {"state": refresh.gate_state, "observed_at": refresh.gate_observed_at.isoformat()}
     observed_at = parse_time(observation.get("observed_at"))
     checks["gate_state"] = observation.get("state")
     checks["gate_observation_age_s"] = (now-observed_at).total_seconds() if observed_at else None
@@ -258,8 +276,12 @@ async def evaluate_phone(session: AsyncSession, *, person: Person, vehicle: Vehi
         AccessEvent.person_id == person.id, AccessEvent.direction == AccessDirection.ENTRY,
         AccessEvent.decision == AccessDecision.GRANTED, AccessEvent.occurred_at < read.captured_at,
         ~AccessEvent.source.ilike("%backfill%")).order_by(AccessEvent.occurred_at.desc()).limit(1))
-    ready, reason, evidence = evaluate_journey(row.samples, prior_entry_at=prior,
-                                             captured_at=read.captured_at, now=now)
+    if refresh_current:
+        ready, reason, evidence = evaluate_refreshed_journey(row.samples, prior_entry_at=prior,
+            captured_at=read.captured_at, now=now, refresh=refresh)
+    else:
+        ready, reason, evidence = evaluate_journey(row.samples, prior_entry_at=prior,
+                                                 captured_at=read.captured_at, now=now)
     checks.update(evidence, phone_evaluation_ms=round((time.monotonic()-started)*1000, 2))
     return ready, reason, checks
 
@@ -415,7 +437,8 @@ async def reserve_mobile_output(session: AsyncSession, attempt: MissedExitRecove
 
 
 async def _current_resident_authority(session: AsyncSession, context: NotificationActionContext,
-                                      *, now: datetime, dispatch: bool = False) -> tuple[Person, Vehicle, Any]:
+                                      *, now: datetime, dispatch: bool = False,
+                                      read_only: bool = False) -> tuple[Person, Vehicle, Any]:
     """Current scoped policy. NOWAIT domain locks refuse contended mutation."""
     from app.models import LprIngestEvent, Schedule, ScheduleOverride
     from app.services.schedules import evaluate_vehicle_schedule
@@ -426,7 +449,7 @@ async def _current_resident_authority(session: AsyncSession, context: Notificati
     if not config.missed_exit_recovery_enabled or context.expires_at <= now:
         raise ValueError("approval_expired_or_disabled")
     metadata = context.metadata_ or {}
-    person = await lock_owner(session, context.person_id, nowait=True)
+    person = await lock_owner(session, context.person_id, nowait=True, read_only=read_only or dispatch)
     vehicle = await session.scalar(select(Vehicle).where(Vehicle.id == uuid.UUID(metadata["vehicle_id"]))
         .with_for_update(read=True, nowait=True).execution_options(populate_existing=True))
     if (person is None or not person.is_active or not person.missed_exit_recovery_enabled or
@@ -642,7 +665,7 @@ async def authorize_mobile_output(session: AsyncSession, payload: dict, run_id: 
         expires_at = parse_time(origin.get("expires_at"))
         if attempt is None or expires_at is None or expires_at <= now:
             return "recovery_output_expired"
-        person = await lock_owner(session, attempt.owner_id, nowait=True)
+        person = await lock_owner(session, attempt.owner_id, nowait=True, read_only=True)
         config = await get_runtime_config_for_session(session)
         if (person is None or not person.is_active or not person.missed_exit_recovery_enabled
             or not config.missed_exit_recovery_enabled or configuration_binding(person, config) != origin.get("binding")):
@@ -656,7 +679,7 @@ async def authorize_mobile_output(session: AsyncSession, payload: dict, run_id: 
             context = await session.get(NotificationActionContext, uuid.UUID(origin["context_id"]))
             if context is None or context.consumed_at or context.expires_at <= now or attempt.outcome != "awaiting_resident":
                 return "recovery_request_resolved"
-            await _current_resident_authority(session, context, now=now)
+            await _current_resident_authority(session, context, now=now, read_only=True)
             expected = uuid.uuid5(context.id, "resident-approval-notification")
         elif origin["kind"] == "apology" and attempt.outcome == "verified":
             expected = uuid.uuid5(attempt.id, "resident-apology")
@@ -729,7 +752,7 @@ async def _authorize_automatic_recovery_facts(session: AsyncSession, *, event_id
     now = await session.scalar(select(func.clock_timestamp()))
     await session.scalars(select(SystemSetting).where(SystemSetting.key.in_(SETTINGS_KEYS))
         .order_by(SystemSetting.key).with_for_update(read=True, nowait=True))
-    person = await lock_owner(session, event.person_id, nowait=True)
+    person = await lock_owner(session, event.person_id, nowait=True, read_only=True)
     config = await get_runtime_config_for_session(session)
     if not recovery.get("target_plan"):
         raise ValueError("recovery_target_unavailable")
