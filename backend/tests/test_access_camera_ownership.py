@@ -59,7 +59,7 @@ async def test_recovery_camera_drains_single_cancel_and_discards_late_success(mo
             await release.wait()
             return {"direction": "exit", "confidence": 1.0, "reason": "late success"}
 
-    monkeypatch.setattr(resolver, "_resolve_duplicate_arrival_with_camera", camera)
+    monkeypatch.setattr(owner, "recovery_camera", camera)
     task = asyncio.create_task(resolver.prepare_camera_evidence(read, read, None, None))
     try:
         await asyncio.wait_for(entered.wait(), 3)
@@ -146,7 +146,7 @@ async def test_recovery_camera_discards_done_result_when_timeout_resume_is_late(
         clock[0] = 15.001
         return tasks, set()
 
-    monkeypatch.setattr(resolver, '_resolve_duplicate_arrival_with_camera', camera)
+    monkeypatch.setattr(owner, "recovery_camera", camera)
     monkeypatch.setattr(owner.asyncio, 'wait', delayed_wait)
     result = await resolver.prepare_camera_evidence(read, read, None, None)
     assert result.decision['reason'] == 'camera_timeout'

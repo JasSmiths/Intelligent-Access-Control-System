@@ -145,6 +145,7 @@ async def test_compact_projection_uses_current_columns_and_named_json_never_full
     saga_id = uuid.uuid4()
     identity=await reserve(snapshot_path='synthetic/committed.jpg',snapshot_bytes=123,snapshot_width=640,snapshot_height=480,
         snapshot_camera='camera',snapshot_captured_at=NOW,raw_payload={'vendor_blob':'x'*900000,
+        'direction_resolution':{'missed_exit_recovery':{'attempt_id':str(uuid.uuid4())}},
         'visitor_pass':{'id':str(uuid.uuid4()),'visitor_name':'Guest','mode':'arrival','unused':'y'*90000},
         'movement_saga':{'id':str(saga_id),'state':'failed','presence_committed':True,'admission_status':'verified',
             'admission_evidence':{'provider_raw':'z'*90000},'gate':{'command_id':str(uuid.uuid4()),'accepted':True,'state':'open',
@@ -165,6 +166,7 @@ async def test_compact_projection_uses_current_columns_and_named_json_never_full
     assert len(captured)==1 and 'access_events.raw_payload,' not in captured[0]
     body=json.dumps(message.payload)
     assert len(body)<4000 and 'vendor_blob' not in body and 'admission_evidence' not in body and 'unused' not in body
+    assert message.payload['has_recovery_attempt'] is True and 'attempt_id' not in body
     assert message.payload['visitor_name']=='Guest' and message.payload['snapshot_bytes']==123
     assert message.payload['snapshot_url'].endswith(f'{identity}/snapshot')
     assert message.payload['movement_saga']['state'] == 'completed'

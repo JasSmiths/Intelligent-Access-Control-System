@@ -276,6 +276,7 @@ def serialize_person(
         "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
         "home_assistant_mobile_app_notify_service": person.home_assistant_mobile_app_notify_service,
         "missed_exit_recovery_enabled": person.missed_exit_recovery_enabled,
+        "missed_exit_recovery_expiry_notify_service": person.missed_exit_recovery_expiry_notify_service,
         "missed_exit_recovery_tracker_entity_id": person.missed_exit_recovery_tracker_entity_id,
         "home_assistant_presence_input_boolean_entity_ids": list(
             getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or []
@@ -324,6 +325,7 @@ def person_audit_snapshot(person: Person) -> dict:
         "garage_door_entity_ids": list(person.garage_door_entity_ids or []),
         "home_assistant_mobile_app_notify_service": person.home_assistant_mobile_app_notify_service,
         "missed_exit_recovery_enabled": person.missed_exit_recovery_enabled,
+        "missed_exit_recovery_expiry_notify_service": person.missed_exit_recovery_expiry_notify_service,
         "missed_exit_recovery_tracker_entity_id": person.missed_exit_recovery_tracker_entity_id,
         "home_assistant_presence_input_boolean_entity_ids": list(
             getattr(person, "home_assistant_presence_input_boolean_entity_ids", None) or []

@@ -431,6 +431,35 @@ async def get_unifi_protect_snapshot(
     return ProtectMedia(content=content, content_type="image/jpeg")
 
 
+class DirectionFrameError(UnifiProtectError):
+    def __init__(self, reason: str, frame: int | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.frame = frame
+
+
+async def get_direction_frames(
+    api: Any, camera_id: str, captured_at: datetime,
+) -> tuple[ProtectMedia, ProtectMedia]:
+    """Two ordered recording lookups from one camera on the same connection."""
+    try:
+        camera = await get_camera_by_identifier(api, camera_id)
+    except UnifiProtectError as exc:
+        raise DirectionFrameError("recording_camera_lookup_failed") from exc
+    frames = []
+    for index, at in enumerate((captured_at - timedelta(seconds=6), captured_at), start=1):
+        try:
+            content = await camera.get_snapshot(width=1280, height=720, dt=at)
+        except Exception as exc:
+            raise DirectionFrameError("recording_frame_read_failed", index) from exc
+        if not content:
+            raise DirectionFrameError("recording_frame_empty", index)
+        if len(content) > 2 * 1024 * 1024:
+            raise DirectionFrameError("recording_frame_too_large", index)
+        frames.append(ProtectMedia(content=content, content_type="image/jpeg"))
+    return frames[0], frames[1]
+
+
 async def get_unifi_protect_event_thumbnail(
     api: Any,
     event_id: str,

@@ -35,6 +35,13 @@ outcome. Accepted commits retain their receipt. See the measured
 [runtime resource envelope](validation.md#final-runtime-pdf-capability) when sizing
 exports; input caps do not guarantee a fixed memory footprint.
 
+A visitor report attributes a movement to its saved pass ID, reservation or
+recorded arrival/departure event. Conflicting links exclude the event from the
+selected visit. Older unlinked observations can match by exact plate within
+one unambiguous pass window, provided the event does not identify a resident
+or registered vehicle. The separate site-wide comparison timeline keeps its
+existing scope.
+
 ## Start a new local instance
 
 Install Docker with Compose v2. The images supply Python 3.12, PostgreSQL 16 with
@@ -257,6 +264,8 @@ and, for a hot path, how read/query count, retained history and payload size sca
 Extend an existing owner when its responsibility fits; a new feature should not
 require copying policy into routes, the shell, vendor modules or multiple facades.
 
+During implementation, use [focused validation](validation.md#fast-feedback-while-editing) for the affected tests. At handoff, report the local full result or the [verified CI run](validation.md#count-an-existing-ci-result) for the exact committed source.
+
 Before handing off a change, review the complete implementation against these
 requirements and fix concrete issues found:
 
@@ -324,7 +333,9 @@ Use [Alembic migrations](../backend/alembic/versions/) for schema changes.
 ORM table bootstrap. For a managed deployment, disable automatic migration and
 apply an explicitly authorized migration using the matching backend artifact.
 Stop old workers before upgrading and retain matching source and backend/frontend
-images. Create or test a backup only when explicitly requested. A requested backup
+images. The resident recovery migration preserves existing notifications as immediately
+eligible and leaves expiry notices disabled for existing residents. Its downgrade
+guard protects scheduled delivery deadlines and saved recipient settings. Create or test a backup only when explicitly requested. A requested backup
 should cover PostgreSQL, application files and the auth secret as appropriate.
 Before an authorized destructive change, state the available recovery point and
 any recovery limit; do not create or test a backup automatically.

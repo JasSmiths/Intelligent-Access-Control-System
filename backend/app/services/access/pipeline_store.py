@@ -22,6 +22,7 @@ from app.models import (
     LprDebounceWindow,
     LprIngestEvent,
 )
+from app.models.access_pipeline import LprRecoveryBlockedRead, LprRecoveryWindow
 from app.services.access.completion_database import access_session
 from app.services.access.pipeline_contracts import (
     MAX_PLATE_READ_PROCESSING_ATTEMPTS,
@@ -248,23 +249,27 @@ async def finalization_failed_in_session(
 
 
 class AccessPipelineStore:
-    async def readiness(self, *, owned: bool, quiet_seconds: float, max_seconds: float) -> WorkReadiness:
+    async def readiness(self, *, owned: bool, quiet_seconds: float, max_seconds: float,
+                        recover_parked: bool = False) -> WorkReadiness:
         if not owned:
             pending = await readiness(self.session_factory, (
                 "SELECT COALESCE(lease_until,t.now) FROM lpr_coordinator_state,t WHERE id=1",
             ))
             # An absent coordinator is immediately acquirable on first startup.
             return pending if pending.delay_seconds is not None else WorkReadiness(True, 0)
+        recoverable = ("EXISTS (SELECT 1 FROM lpr_recovery_windows)" if recover_parked else
+                       "EXISTS (SELECT 1 FROM lpr_recovery_windows WHERE state='released')")
         return await readiness(self.session_factory, (
-            "SELECT t.now FROM t WHERE EXISTS (SELECT 1 FROM lpr_coordinator_state WHERE id=1 AND (boundary_phase IS NOT NULL OR boundary_ingest_id IS NOT NULL OR finalizing_window_id IS NOT NULL OR flush_clock IS NOT NULL OR flush_upper_ordinal IS NOT NULL OR flush_completed_ordinal IS NOT NULL))",
+            "SELECT t.now FROM t WHERE EXISTS (SELECT 1 FROM lpr_coordinator_state WHERE id=1 AND (boundary_phase IS NOT NULL OR boundary_ingest_id IS NOT NULL OR finalizing_window_id IS NOT NULL OR flush_clock IS NOT NULL OR flush_upper_ordinal IS NOT NULL OR flush_completed_ordinal IS NOT NULL)) OR " + recoverable,
             "SELECT t.now FROM lpr_ingest_events,t WHERE observation_state='ready' AND ready_ordinal > (SELECT handled_ready_ordinal FROM lpr_coordinator_state WHERE id=1) ORDER BY ready_ordinal LIMIT 1",
             "SELECT capture_until FROM lpr_ingest_events WHERE observation_state='observing' ORDER BY capture_until,id LIMIT 1",
-            "SELECT updated_at + :quiet * INTERVAL '1 second' FROM lpr_debounce_windows WHERE state='open' ORDER BY updated_at,open_ordinal LIMIT 1",
-            "SELECT first_seen + :maximum * INTERVAL '1 second' FROM lpr_debounce_windows WHERE state='open' ORDER BY first_seen,open_ordinal LIMIT 1",
+            "SELECT updated_at + :quiet * INTERVAL '1 second' FROM lpr_debounce_windows WHERE state='open' AND wait_for_recovery IS NULL ORDER BY updated_at,open_ordinal LIMIT 1",
+            "SELECT first_seen + :maximum * INTERVAL '1 second' FROM lpr_debounce_windows WHERE state='open' AND wait_for_recovery IS NULL ORDER BY first_seen,open_ordinal LIMIT 1",
         ), parameters={"quiet": quiet_seconds, "maximum": max_seconds})
 
     def __init__(self, session_factory: Callable[[], AsyncSession] = AsyncSessionLocal) -> None:
         self.session_factory = session_factory
+        self._released_dependencies: bool | None = None
 
     async def backlog_status(self) -> dict[str, int | float | str | None]:
         """Indexed scalar diagnostics; readiness never needs durable backlog detail."""
@@ -361,7 +366,7 @@ class AccessPipelineStore:
         # lookups retain indexed bounds even when all retained history is handled.
         windows = (
             select(LprDebounceWindow.open_ordinal)
-            .where(LprDebounceWindow.state == "open")
+            .where(LprDebounceWindow.state == "open", LprDebounceWindow.wait_for_recovery.is_(None))
             .order_by(LprDebounceWindow.source, LprDebounceWindow.open_ordinal)
             .limit(1)
             .scalar_subquery()
@@ -369,12 +374,16 @@ class AccessPipelineStore:
         )
         async with access_session(self.session_factory) as session:
             result = (await session.execute(
-                select(LprCoordinatorState, func.clock_timestamp(), ready, windows)
+                select(LprCoordinatorState, func.clock_timestamp(), ready, windows,
+                    select(LprRecoveryWindow.window_id).where(LprRecoveryWindow.state == "released").exists(),
+                    select(LprIngestEvent.capture_until).where(LprIngestEvent.observation_state == "observing")
+                    .order_by(LprIngestEvent.capture_until, LprIngestEvent.id).limit(1).scalar_subquery())
                 .where(LprCoordinatorState.id == 1)
             )).one_or_none()
             if result is None:
                 raise PipelineLeaseLost("coordinator_missing")
-            row, now, has_ready, has_windows = result
+            row, now, has_ready, has_windows, released, capture_deadline = result
+            self._released_dependencies = bool(released)
             if not isinstance(now, datetime):
                 raise PipelineLeaseLost("database_clock_unavailable")
             _check_coordinator(row, claim, now)
@@ -382,7 +391,8 @@ class AccessPipelineStore:
                 row.boundary_phase, row.boundary_ingest_id, row.finalizing_window_id,
                 row.flush_clock, row.flush_upper_ordinal, row.flush_completed_ordinal,
             ))
-            return retained_boundary or bool(has_ready) or bool(has_windows)
+            return (retained_boundary or bool(has_ready) or bool(has_windows) or bool(released)
+                    or (capture_deadline is not None and capture_deadline <= now))
 
     async def boundary(self, claim: CoordinatorClaim) -> CoordinatorBoundary:
         async with access_session(self.session_factory) as session:
@@ -414,36 +424,62 @@ class AccessPipelineStore:
                 coordinator = await assert_coordinator_in_session(session, claim)
                 if coordinator.boundary_phase is not None:
                     raise PipelineLeaseLost("unfinished_read_flush_boundary")
-                # At most50 small identities/statuses. Hydrate only the one read
-                # actually admitted; original vendor bodies are not queue entries.
-                page = (
-                    await session.execute(
-                        select(
-                            LprIngestEvent.id, LprIngestEvent.status, LprIngestEvent.ready_ordinal
-                        )
-                        .where(
-                            LprIngestEvent.observation_state == "ready",
-                            LprIngestEvent.ready_ordinal > coordinator.handled_ready_ordinal,
-                        )
-                        .order_by(LprIngestEvent.ready_ordinal)
-                        .limit(50)
-                        .with_for_update()
-                    )
-                ).all()
+                # Released dependencies are older than the receipt cursor. Drain them first
+                # and remove their checkpoint atomically with the new fenced claim.
+                dependency = None
+                if self._released_dependencies is not False:
+                    dependency = await session.scalar(select(LprRecoveryBlockedRead)
+                        .join(LprRecoveryWindow, LprRecoveryWindow.window_id == LprRecoveryBlockedRead.window_id)
+                        .where(LprRecoveryWindow.state == "released")
+                        .order_by(LprRecoveryBlockedRead.ready_ordinal).limit(1))
+                self._released_dependencies = None  # The inspection hint is for this one boundary.
                 selected_id = None
-                for identity, status, ordinal in page:
-                    if status in {"succeeded", "skipped", "failed", "held"}:
-                        coordinator.handled_ready_ordinal = ordinal
-                        continue
-                    selected_id = identity
-                    break
-                if selected_id is None:
+                if dependency is not None:
+                    selected_id = dependency.ingest_id
+                    checkpoint_id = dependency.window_id
+                    # The oldest related receipt is returning to preparation. Its
+                    # original window can accept it before the next serial flush.
+                    await session.execute(update(LprDebounceWindow)
+                        .where(LprDebounceWindow.wait_for_recovery == checkpoint_id)
+                        .values(wait_for_recovery=None))
+                    await session.delete(dependency)
                     await session.flush()
-                    await assert_coordinator_in_session(session, claim)
-                    await session.commit()
-                    if len(page) == 50:
-                        continue  # short committed terminal-prefix checkpoint
-                    return None
+                    more = await session.scalar(select(LprRecoveryBlockedRead.ingest_id)
+                        .where(LprRecoveryBlockedRead.window_id == checkpoint_id).limit(1))
+                    if more is None:
+                        checkpoint = await session.get(LprRecoveryWindow, checkpoint_id)
+                        if checkpoint is not None:
+                            await session.delete(checkpoint)
+                else:
+                    # At most50 small identities/statuses. Hydrate only the one read
+                    # actually admitted; original vendor bodies are not queue entries.
+                    page = (
+                        await session.execute(
+                            select(
+                                LprIngestEvent.id, LprIngestEvent.status, LprIngestEvent.ready_ordinal
+                            )
+                            .where(
+                                LprIngestEvent.observation_state == "ready",
+                                LprIngestEvent.ready_ordinal > coordinator.handled_ready_ordinal,
+                            )
+                            .order_by(LprIngestEvent.ready_ordinal)
+                            .limit(50)
+                            .with_for_update()
+                        )
+                    ).all()
+                    for identity, status, ordinal in page:
+                        if status in {"succeeded", "skipped", "failed", "held"}:
+                            coordinator.handled_ready_ordinal = ordinal
+                            continue
+                        selected_id = identity
+                        break
+                    if selected_id is None:
+                        await session.flush()
+                        await assert_coordinator_in_session(session, claim)
+                        await session.commit()
+                        if len(page) == 50:
+                            continue  # short committed terminal-prefix checkpoint
+                        return None
                 selected = await session.get(
                     LprIngestEvent, selected_id, with_for_update=True, populate_existing=True
                 )
@@ -612,6 +648,7 @@ class AccessPipelineStore:
                         select(LprDebounceWindow)
                         .where(
                             LprDebounceWindow.state == "open",
+                            LprDebounceWindow.wait_for_recovery.is_(None),
                             LprDebounceWindow.open_ordinal
                             > int(coordinator.flush_completed_ordinal or 0),
                             LprDebounceWindow.open_ordinal

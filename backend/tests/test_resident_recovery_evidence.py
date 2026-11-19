@@ -33,6 +33,12 @@ def test_requested_post_capture_fix_completes_realistic_five_minute_updates():
     assert checks["requested_fix"] is True
 
 
+def test_refreshed_away_cutoff_explains_the_denial():
+    ready, reason, checks = refreshed([sample(705, 3500), sample(405, 1197), sample(-4, 7)])
+    assert not ready and reason == "away_evidence_stale"
+    assert (checks["last_away_age_s"], checks["last_away_limit_s"]) == (405, 300)
+
+
 @pytest.mark.parametrize("samples,now", [
     ([sample(740, 6762), sample(440, 3550), sample(140, 1197)], NOW + timedelta(seconds=15)),
     ([sample(740, 6762), sample(440, 3550), sample(0, 7)], NOW + timedelta(seconds=15)),

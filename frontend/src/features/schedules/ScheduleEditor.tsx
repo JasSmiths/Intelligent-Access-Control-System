@@ -31,29 +31,12 @@ export function ScheduleEditor({
     description: schedule?.description ?? "",
     time_blocks: normalizeScheduleBlocks(schedule?.time_blocks ?? emptyScheduleBlocks())
   });
-  const [dependencies, setDependencies] = React.useState<ScheduleDependencies | null>(null);
-  const [dependenciesLoading, setDependenciesLoading] = React.useState(false);
-  const [dependenciesError, setDependenciesError] = React.useState(false);
   const [error, setError] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const submittingRef = React.useRef(false);
   const originalForm = React.useRef(JSON.stringify(form));
   const requestClose = useEditorDismiss(onClose, JSON.stringify(form) !== originalForm.current, submitting, "schedule changes");
   useModalFocus(modalRef, true, requestClose);
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    setDependencies(null);
-    setDependenciesError(false);
-    setDependenciesLoading(Boolean(schedule));
-    if (schedule) {
-      schedulesApi.dependencies(schedule.id, { signal: controller.signal })
-        .then((value) => { if (!controller.signal.aborted) setDependencies(value); })
-        .catch(() => { if (!controller.signal.aborted) { setDependencies(null); setDependenciesError(true); } })
-        .finally(() => { if (!controller.signal.aborted) setDependenciesLoading(false); });
-    }
-    return () => controller.abort();
-  }, [schedule]);
 
   const update = <K extends keyof typeof form>(field: K, value: (typeof form)[K]) => {
     setForm((current) => ({ ...current, [field]: value }));
@@ -112,7 +95,7 @@ export function ScheduleEditor({
               <span>Description</span>
               <textarea value={form.description} onChange={(event) => update("description", event.target.value)} />
             </label>
-            <ScheduleDependencyPanel dependencies={dependencies} loading={dependenciesLoading} unavailable={dependenciesError} />
+            <ScheduleDependencyPanel key={schedule?.id} scheduleId={schedule?.id} />
           </div>
 
           <WeeklyScheduleGrid
@@ -133,15 +116,37 @@ export function ScheduleEditor({
   );
 }
 
-function ScheduleDependencyPanel({
-  dependencies,
-  loading,
-  unavailable
-}: {
-  dependencies: ScheduleDependencies | null;
-  loading: boolean;
-  unavailable: boolean;
-}) {
+function ScheduleDependencyPanel({ scheduleId }: { scheduleId?: string }) {
+  const [dependencies, setDependencies] = React.useState<ScheduleDependencies | null>(null);
+  const [trail, setTrail] = React.useState<string[]>([]);
+  const [loading, setLoading] = React.useState(Boolean(scheduleId));
+  const [failedPage, setFailedPage] = React.useState<string[] | null>(null);
+  const active = React.useRef<AbortController | null>(null);
+
+  const load = React.useCallback(async (next: string[]) => {
+    if (!scheduleId) return;
+    active.current?.abort();
+    const request = new AbortController();
+    active.current = request;
+    setLoading(true);
+    setFailedPage(null);
+    try {
+      const page = await schedulesApi.dependencies(scheduleId, { signal: request.signal }, next[next.length - 1]);
+      if (!request.signal.aborted) {
+        setDependencies(page);
+        setTrail(next);
+      }
+    } catch {
+      if (!request.signal.aborted) setFailedPage(next);
+    } finally {
+      if (!request.signal.aborted) setLoading(false);
+    }
+  }, [scheduleId]);
+
+  React.useEffect(() => {
+    void load([]);
+    return () => active.current?.abort();
+  }, [load]);
   const items = dependencies ? [
     ...dependencies.people.map((item) => ({ ...item, tone: "blue" as BadgeTone })),
     ...dependencies.vehicles.map((item) => ({ ...item, tone: "green" as BadgeTone })),
@@ -152,12 +157,10 @@ function ScheduleDependencyPanel({
     <section className="schedule-dependencies">
       <div className="panel-header">
         <h2>In Use By</h2>
-        <Badge tone={items.length ? "blue" : "gray"}>{loading ? "Loading" : `${items.length} assignment${items.length === 1 ? "" : "s"}`}</Badge>
+        <Badge tone={items.length ? "blue" : "gray"}>{loading ? "Loading" : `${items.length} shown`}</Badge>
       </div>
-      {loading ? (
+      {loading && !dependencies ? (
         <div className="schedule-dependency-empty">Loading dependencies</div>
-      ) : unavailable ? (
-        <div className="schedule-dependency-empty" role="alert">Assignments unavailable. Try again after the dependency read succeeds.</div>
       ) : items.length ? (
         <div className="schedule-dependency-list">
           {items.map((item) => (
@@ -168,8 +171,16 @@ function ScheduleDependencyPanel({
           ))}
         </div>
       ) : (
-        <div className="schedule-dependency-empty">No assignments</div>
+        !failedPage && <div className="schedule-dependency-empty">No assignments</div>
       )}
+      {failedPage && <div role="alert">Assignments unavailable. <button type="button" onClick={() => void load(failedPage)}>Retry</button></div>}
+      {(trail.length > 0 || dependencies?.next_cursor) && <nav aria-label="Schedule assignment pages">
+        <button type="button" disabled={loading || !trail.length} onClick={() => void load(trail.slice(0, -1))}>Previous</button>
+        <span> Page {trail.length + 1} </span>
+        <button type="button" disabled={loading || !dependencies?.next_cursor} onClick={() => {
+          if (dependencies?.next_cursor) void load([...trail, dependencies.next_cursor]);
+        }}>Next</button>
+      </nav>}
     </section>
   );
 }

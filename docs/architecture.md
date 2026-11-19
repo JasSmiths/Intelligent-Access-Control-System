@@ -126,6 +126,21 @@ Committed tracker updates wake the waiter through the event bus; hints carry onl
 the resident ID and the waiter re-reads the bounded journey. No SQL transaction
 spans the wait. The ordinary three-sample approach policy remains unchanged;
 only an active requested-fix window can use the established-away/near-gate path.
+The [recovery evidence lane](../backend/app/services/access/recovery_evidence_lane.py)
+collects phone and camera evidence for at most two frozen windows at a time.
+The [scheduling store](../backend/app/services/access/recovery_queue.py) retains
+the original window and a dependency for later reads of its resident or vehicle.
+The coordinator can decide unrelated reads as evidence arrives. It resumes the
+waiting resident's window through the original policy, admission and dispatch
+owners. Recovery after a lost lease closes the old phone request and retains the
+original recognition deadline and processing-attempt budget.
+The location request producer and dispatcher validate the same literal mobile
+action contract. The waiter reads the request's delivery checkpoint alongside
+the resident journey and retains a pre-dispatch rejection in the recovery checks.
+[Recovery camera evidence](../backend/app/services/access/recovery_camera.py)
+compares two capture-time frames from one Protect connection outside the SQL
+transaction. The movement FSM requires confirmed same-plate motion and sufficient
+confidence before treating a recovery camera result as either entry or exit.
 Tracker updates and read-only recovery authority take shared Person locks;
 journey mutation and resident-approval consumption retain their serialization.
 
@@ -204,6 +219,18 @@ members with a window-bound cursor. Event preview totals and references distingu
 that bounded preview from complete evidence. Runtime source is composed; final
 P6 integrated validation and approval remain separate gates in the closure record.
 
+[Movement history](../backend/app/services/access/movement_history.py) resolves the
+latest eligible direction from indexed candidates. A completed, audited operator
+exit is scoped to the matching resident and vehicle. Optional recovery expiry
+notices use the notification journal’s database-clock scheduling and current
+recipient authorization, one reservation for each original approval.
+
+A granted live entry whose admission was definitively denied is excluded from
+direction history. Pending commands continue to hold recovery and remain
+reconcilable. Records predating admission tracking retain their original
+direction semantics. Recovery checks the outstanding admission index once
+per evidence evaluation, and rechecks current authority at hardware dispatch.
+
 ## Other application flows
 
 People, groups, vehicles, schedules, and visitor passes provide identity and access
@@ -225,6 +252,24 @@ and [dispatcher](../backend/app/services/notification_dispatch.py) persist attem
 and outcomes around provider I/O. Automations have their own durable runs and
 route hardware actions through the same command owners. An uncertain attempted
 effect needs review rather than an automatic resend.
+
+Visitor-pass browsing projects the effective status from the same UTC boundaries
+as the lifecycle worker. Status filtering happens before the page limit. Only the
+lifecycle or mutation owner writes transitions. Schedule assignment pages select
+names and IDs, with a schedule-scoped continuation in display order. Deletion
+checks for any assignment under the schedule lock.
+
+Recovery history uses compact rows and loads the selected timeline on demand.
+Recovery-related access updates invalidate the matching screen. One timer refreshes
+the page or selected detail at its next applicable approval expiry, including an
+empty expired-results view. The API supplies the remaining time from the server
+clock. After all matching approvals expire, the timer stops.
+Selecting an owner starts phone discovery. The database reads the selected
+resident and checks for a competing notification destination, including inactive
+owners. It releases the connection before reading Home Assistant. A proposed
+tracker receives a final targeted ownership check.
+Investigation views retain loaded history pages when new activity appears;
+failed evidence reads can be retried deliberately.
 
 Directory routes delegate mutations, assignments and audit to the directory
 services. Read operations return bounded pages; editors hydrate explicitly selected

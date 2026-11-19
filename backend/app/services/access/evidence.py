@@ -13,9 +13,9 @@ from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import literal_column, select, union_all
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import defer, load_only, selectinload
+from sqlalchemy.orm import defer, selectinload
 
 from app.ai.providers import analyze_image_with_provider
 from app.core.config import settings
@@ -23,7 +23,6 @@ from app.core.logging import get_logger
 from app.core.task_lifecycle import drain_owned
 from app.db.session import AsyncSessionLocal
 from app.models import AccessEvent, Person, Presence, Vehicle, VisitorPass
-from app.models.core import LIVE_ACCESS_EVENT_PREDICATE
 from app.models.enums import AccessDecision, AccessDirection, PresenceState, TimingClassification
 from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
@@ -34,6 +33,7 @@ from app.services.access.decision import (
     identity_is_active,
     plan_access,
 )
+from app.services.access.movement_history import latest_confirmed_movement
 from app.services.access.payloads import vehicle_display_name
 from app.services.access.reads import (
     CAMERA_TIEBREAKER_MIN_CONFIDENCE,
@@ -44,6 +44,7 @@ from app.services.access.reads import (
     _visitor_pass_candidate_kind,
     _visitor_pass_plate_match_from_read,
 )
+from app.services.access.recovery_camera import recovery_camera
 from app.services.access.timing import classify_timing
 from app.services.event_bus import event_bus
 from app.services.movement.sessions import (
@@ -95,7 +96,8 @@ def _read_fingerprint(read: PlateRead) -> str:
 
 class CameraEvidenceRequired(Exception):
     """A read-only probe must end its transaction before optional vendor I/O."""
-    def __init__(self, person: Person, *, recovery: bool = False):
+    def __init__(self, person: Person, *, recovery: bool = False, vehicle_id: uuid.UUID | None = None):
+        self.vehicle_id = vehicle_id
         self.recovery = recovery
         self.person_id = person.id
         self.display_name = person.display_name
@@ -130,7 +132,8 @@ class AccessEvidenceResolver:
     async def prepare_camera_evidence(
         self, read: PlateRead, direction_read: PlateRead,
         external_admission: dict[str, Any] | None, trace: Any,
-        *, location_refresh: LocationRefresh | None = None,
+        *, location_refresh: LocationRefresh | None = None, defer_recovery: bool = False,
+        recovery_only: bool = False,
     ) -> PreparedCameraEvidence | None:
         runtime = self._runtime or await get_runtime_config()
         gate_state = coerce_gate_state(gate_observation_from_read(direction_read).get("state"))
@@ -158,14 +161,15 @@ class AccessEvidenceResolver:
                                    probe_camera=True, location_refresh=location_refresh)
             except CameraEvidenceRequired as needed:
                 request = needed
-        if request is None:
+        if request is None or (recovery_only and not request.recovery):
             return None
+        if defer_recovery and request.recovery:
+            raise request
         # Only immutable identifying presentation crosses this seam; the final
         # transaction resolves identity, permissions and presence again.
-        person = SimpleNamespace(id=request.person_id, display_name=request.display_name)
         started = time.monotonic()
         if request.recovery:
-            task = asyncio.create_task(self._resolve_duplicate_arrival_with_camera(direction_read, person, trace=trace))
+            task = asyncio.create_task(recovery_camera(direction_read, trace))
             deadline = started + 5
             try:
                 done, _ = await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
@@ -181,6 +185,7 @@ class AccessEvidenceResolver:
                     task.cancel()
                 await drain_owned(asyncio.gather(task, return_exceptions=True))
         else:
+            person = SimpleNamespace(id=request.person_id, display_name=request.display_name)
             decision = await self._resolve_duplicate_arrival_with_camera(direction_read, person, trace=trace)
         decision["elapsed_ms"] = round((time.monotonic()-started)*1000, 2)
         return PreparedCameraEvidence.for_read(request.person_id, direction_read, decision)
@@ -240,17 +245,19 @@ class AccessEvidenceResolver:
             external_admission_matched=bool(external_admission),
         )
         recovery: dict[str, Any] | None = None
+        safety_block = None
         if (not external_admission and person and vehicle
                 and getattr(runtime, "missed_exit_recovery_enabled", False)
                 and getattr(person, "missed_exit_recovery_enabled", False)):
-            from app.services.resident_recovery import evaluate_phone, has_conflict
+            from app.services.resident_recovery import blockers, evaluate_phone, has_conflict
             candidate_presence = await self._presence_state_for_person(session, person)
             observation_state = coerce_gate_state(gate_observation_from_read(direction_read).get("state"))
             relevant_conflict = self._movement_direction_fsm.recovery_conflict_is_relevant(
                 observation_state, candidate_presence, explicit_direction_from_read(direction_read))
             if relevant_conflict and await has_conflict(session, person, vehicle, read.captured_at):
+                safety_block = await blockers(session)
                 ready, reason, checks = (await evaluate_phone(session, person=person, vehicle=vehicle,
-                    read=direction_read, config=runtime, claim=not probe_camera, refresh=location_refresh) if allowed else
+                    read=direction_read, config=runtime, safety_block=safety_block, claim=not probe_camera, refresh=location_refresh) if allowed else
                     (False, "schedule_or_identity_denied", {"exact_plate": _is_exact_known_vehicle_plate_match(read) and read.registration_number == vehicle.registration_number}))
                 if probe_location and allowed and not ready and reason == "location_stale":
                     raise LocationRefreshRequired(person, vehicle)
@@ -277,25 +284,24 @@ class AccessEvidenceResolver:
             camera = (camera_evidence.decision if camera_evidence and camera_evidence.person_id == person.id
                 and camera_evidence.read_fingerprint == _read_fingerprint(direction_read) else {})
             clear_camera = self._camera_tiebreaker_is_clear(camera)
-            from sqlalchemy import func
-
-            from app.services.resident_recovery import blockers
-            safety_block = await blockers(session, now=await session.scalar(select(func.clock_timestamp())))
             recovery_decision = self._movement_direction_fsm.resolve_recovery(RecoveryDirectionIntent(
                 allowed=allowed,
                 exact_plate=_is_exact_known_vehicle_plate_match(read) and read.registration_number == vehicle.registration_number,
                 explicit_direction=explicit, phone_ready=bool(recovery["ready"]), phone_reason=recovery["reason"],
                 safety_block=safety_block, camera_direction=coerce_access_direction(camera.get("direction")),
-                camera_clear=clear_camera, probe_camera=probe_camera))
+                camera_clear=clear_camera, camera_motion_confirmed=camera.get("motion_confirmed") is True, probe_camera=probe_camera))
             if recovery_decision.requires_camera:
                 direction_span.finish(output_payload={"requires_external_evidence": "recovery_camera"})
-                raise CameraEvidenceRequired(person, recovery=True)
+                raise CameraEvidenceRequired(person, recovery=True, vehicle_id=vehicle.id)
             direction, allowed = recovery_decision.direction, recovery_decision.allowed
             recovery.update(ready=recovery_decision.phone_ready, reason=recovery_decision.reason,
                 method=recovery_decision.method, approval_eligible=recovery_decision.approval_eligible)
             recovery["camera_elapsed_ms"] = camera.get("elapsed_ms")
             recovery["checks"].update(camera_direction=camera.get("direction"), camera_clear=clear_camera,
-                                      camera_elapsed_ms=camera.get("elapsed_ms"))
+                                      camera_elapsed_ms=camera.get("elapsed_ms"),
+                                      camera_motion_confirmed=camera.get("motion_confirmed") is True,
+                                      camera_reason=camera.get("reason"), camera_failed_frame=camera.get("frame"),
+                                      camera_retried=camera.get("retried"))
             direction_resolution = {"reason": recovery["reason"], "gate_observation": gate_observation_from_read(direction_read),
                                     "missed_exit_recovery": recovery}
         else:
@@ -407,41 +413,6 @@ class AccessEvidenceResolver:
             if isinstance(parsed, dict):
                 return parsed
         return None
-
-    async def _latest_live_person_or_vehicle_event(
-        self,
-        session: AsyncSession,
-        *,
-        person: Person | None,
-        vehicle: Vehicle | None,
-        before: datetime,
-    ) -> AccessEvent | None:
-        identity_filters = []
-        if person and getattr(person, "id", None):
-            identity_filters.append(AccessEvent.person_id == person.id)
-        if vehicle and getattr(vehicle, "id", None):
-            identity_filters.append(AccessEvent.vehicle_id == vehicle.id)
-        if not identity_filters:
-            return None
-        live_ids = select(AccessEvent.id, AccessEvent.occurred_at).where(
-            # Fixed policy literals let generic plans prove the partial index;
-            # identities/time remain bound. Seek each identity independently:
-            # an OR can otherwise filter the entire live-history index.
-            AccessEvent.decision == literal_column("'GRANTED'"),
-            AccessEvent.direction.in_([literal_column("'ENTRY'"), literal_column("'EXIT'")]),
-            AccessEvent.occurred_at < before,
-            LIVE_ACCESS_EVENT_PREDICATE,
-        )
-        branches = [live_ids.where(identity).order_by(
-            AccessEvent.occurred_at.desc(), AccessEvent.id.desc()).limit(1)
-            for identity in identity_filters]
-        candidates = (union_all(*branches) if len(branches) > 1 else branches[0]).subquery()
-        winner = select(candidates.c.id).order_by(
-            candidates.c.occurred_at.desc(), candidates.c.id.desc()).limit(1).scalar_subquery()
-        # Keep selection and narrow hydration in one statement/snapshot.
-        return await session.scalar(select(AccessEvent).where(AccessEvent.id == winner).options(
-            load_only(AccessEvent.id, AccessEvent.person_id, AccessEvent.vehicle_id,
-                      AccessEvent.direction, AccessEvent.occurred_at, raiseload=True)))
 
     async def _lookup_active_vehicle(
         self, session: AsyncSession, read: PlateRead, trace: Any
@@ -614,7 +585,7 @@ class AccessEvidenceResolver:
         previous_event: AccessEvent | None = None
         previous_event_payload: dict[str, Any] = {}
         if gate_malfunction and (person or vehicle):
-            previous_event = await self._latest_live_person_or_vehicle_event(
+            previous_event = await latest_confirmed_movement(
                 session,
                 person=person,
                 vehicle=vehicle,

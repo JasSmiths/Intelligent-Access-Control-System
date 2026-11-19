@@ -30,7 +30,7 @@ it("edits a real weekly selection through presets without changing other form ow
   expect(screen.getByRole("button", { name: "Monday 09:00-09:30 allowed" })).toBeInTheDocument();
 });
 it("saves the edited payload and keeps the form available after a failed confirmation", async () => {
-  vi.spyOn(schedulesApi, "dependencies").mockResolvedValue({ people: [], vehicles: [], doors: [] });
+  vi.spyOn(schedulesApi, "dependencies").mockResolvedValue({ people: [], vehicles: [], doors: [], next_cursor: null });
   const save = vi.spyOn(schedulesApi, "save").mockRejectedValueOnce(new Error("Confirmation denied")).mockResolvedValue(schedule);
   const onSaved = vi.fn().mockResolvedValue(undefined);
   render(<ScheduleEditor mode="edit" schedule={schedule} onClose={() => {}} onSaved={onSaved} setPageError={() => {}} />);
@@ -61,4 +61,23 @@ it("refreshes the schedule default policy through the existing settings owner", 
   await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   await act(async () => { await signals.publish({ type: "refresh", reason: "manual", resetHistory: false }); });
   expect(read.mock.calls.map(([url]) => url)).toEqual(["/api/v1/schedules", "/api/v1/settings?category=access", "/api/v1/schedules", "/api/v1/settings?category=access"]);
+});
+
+it("pages assignments without losing the displayed page or the schedule draft on failure", async () => {
+  const first = { people: [{ id: "a", name: "First assignee", kind: "person" }], vehicles: [], doors: [], next_cursor: "next" };
+  const second = { people: [], vehicles: [{ id: "b", name: "CAR2", kind: "vehicle" }], doors: [], next_cursor: null };
+  const read = vi.spyOn(schedulesApi, "dependencies").mockResolvedValueOnce(first)
+    .mockRejectedValueOnce(new Error("Unavailable")).mockResolvedValueOnce(second).mockResolvedValueOnce(first);
+  render(<ScheduleEditor mode="edit" schedule={schedule} onClose={() => {}} onSaved={async () => {}} setPageError={() => {}} />);
+  await screen.findByText("First assignee");
+  fireEvent.change(screen.getByLabelText("Schedule name"), { target: { value: "Edited draft" } });
+  fireEvent.click(screen.getByRole("button", { name: "Next" }));
+  await screen.findByRole("alert");
+  expect(screen.getByText("First assignee")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await screen.findByText("CAR2");
+  expect(read.mock.calls[2]?.[2]).toBe("next");
+  fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+  await screen.findByText("First assignee");
+  expect(screen.getByLabelText("Schedule name")).toHaveValue("Edited draft");
 });

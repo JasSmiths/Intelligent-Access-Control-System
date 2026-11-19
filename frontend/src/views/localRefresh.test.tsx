@@ -121,7 +121,7 @@ it("refreshes recovery owner identities locally after an accepted save while mai
   const get = vi.spyOn(api, "get").mockImplementation(async (path) => {
     if (path.includes("maintenance")) return maintenance.promise;
     if (path.startsWith("/api/v1/people?")) return page([changed ? { ...person, missed_exit_recovery_enabled: true } : person]);
-    if (path.includes("recovery-trackers")) return { status: "complete", trackers: [], mappings: [] };
+    if (path.includes("recovery-trackers")) return { status: "complete", trackers: [], mapping: null };
     return [];
   });
   vi.spyOn(api, "post").mockResolvedValue({ confirmation_token: "inert" });

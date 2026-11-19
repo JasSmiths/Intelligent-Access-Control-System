@@ -44,7 +44,8 @@ async def test_actual_plate_query_uses_index_with_generic_prepared_plan(monkeypa
                 return await session.scalars(statement)
 
         monkeypatch.setattr(access_events, "AsyncSessionLocal", QuerySession)
-        assert await access_events.AccessEventService()._matching_vehicle_registrations(("AB10CDE",)) == ["ab-10 cde"]
+        match = await access_events.AccessEventService()._known_vehicle_match(("AB10CDE",), 0.78)
+        assert match["registration_number"] == "AB-10CDE" and match["exact"]
         assert len(captured) == 1 and scope_closes == [True]
         compiled = captured[0].compile(dialect=dialect(), compile_kwargs={"render_postcompile": True})
         assert list(compiled.params.values()) == ["AB10CDE"]

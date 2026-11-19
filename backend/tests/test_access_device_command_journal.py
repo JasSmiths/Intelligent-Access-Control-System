@@ -646,18 +646,43 @@ async def test_many_old_unknowns_do_not_starve_fresh_reconcilable_target(monkeyp
     owned = await claim(journal, selected)
     assert await begin(journal, owned)
     await journal.finish_attempt(owned, delivery=CommandDelivery.UNKNOWN, state=GateState.UNKNOWN, detail="lost reply")
+    historical_ids = set()
     async with AsyncSessionLocal() as session:
         now = await session.scalar(select(func.clock_timestamp()))
         for _ in range(101):
             item = target()
-            session.add(AccessDeviceCommandRecord(target_device_id=uuid.UUID(item["target_device_id"]),
+            identity = uuid.uuid4()
+            historical_ids.add(identity)
+            session.add(AccessDeviceCommandRecord(id=identity, target_device_id=uuid.UUID(item["target_device_id"]),
                 device_key=item["device_key"], action="open", intent_id=str(uuid.uuid4()),
                 idempotency_key=f"synthetic-old-{uuid.uuid4()}", state="unknown", accepted=None,
                 binding_snapshot=item["binding_snapshot"], binding_fingerprint=item["binding_fingerprint"],
                 attempted_at=now - timedelta(days=2), created_at=now - timedelta(days=2), provider_receipts=[]))
         await session.commit()
+    calls = AsyncMock(wraps=journal.reconcile_recorded_observation)
+    monkeypatch.setattr(journal, "reconcile_recorded_observation", calls)
     await service.reconcile_commands()
     assert (await row_for(owned.record.id)).state == "verified"
+    while service._reconciliation_cursor is not None:
+        await service.reconcile_commands()
+    assert historical_ids.issubset({call.args[0] for call in calls.await_args_list})
+    calls.reset_mock()
+    await service.reconcile_commands()
+    assert not historical_ids.intersection(call.args[0] for call in calls.await_args_list)
+
+    # A later repair sweep can still use evidence recorded after the first one.
+    identity = next(iter(historical_ids))
+    async with AsyncSessionLocal() as session:
+        command = await session.get(AccessDeviceCommandRecord, identity)
+        session.add(GateStateObservation(gate_entity_id=command.device_key, state="open",
+            access_device_id=command.target_device_id, binding_fingerprint=command.binding_fingerprint,
+            observed_at=command.attempted_at + timedelta(seconds=1), source="home_assistant"))
+        await session.commit()
+    service._historical_recheck_at = 0
+    await service.reconcile_commands()
+    while service._reconciliation_cursor is not None:
+        await service.reconcile_commands()
+    assert (await row_for(identity)).state == "verified"
     assert provider.calls == []
 
 
@@ -805,6 +830,51 @@ async def test_receipt_lists_page_equal_timestamps_without_mutation_or_child_dup
     after = [(row.id, row.state, row.updated_at, row.lease_expires_at)
              for row in [await row_for(owned.record.id) for owned in [*direct, child]]]
     assert before == after  # Listing cannot expire leases or reconcile receipts.
+
+
+@pytest.mark.parametrize("size", [3, 100])
+async def test_gate_receipt_page_uses_one_child_query_at_each_page_size(size):
+    from sqlalchemy import event as sql_events
+    from app.models import GateCommandRecord
+    from app.models.enums import GateCommandState
+    from app.services.gate_commands import GateCommandCoordinator
+
+    parent_ids = [uuid.uuid4() for _ in range(size)]
+    targets = {identity: [target(), target()] for identity in parent_ids}
+    created = datetime.now(UTC) + timedelta(days=40000)
+    async with AsyncSessionLocal() as session:
+        for identity in parent_ids:
+            session.add(GateCommandRecord(id=identity, created_at=created,
+                idempotency_key=f"synthetic-batch:{identity}", controller="configured",
+                source="synthetic", reason="Synthetic page", state=GateCommandState.LEASED,
+                command_metadata={"recovery_version": 2, "target_plan": {"targets": targets[identity]}}))
+        await session.flush()
+        for identity, ordered in targets.items():
+            for entry in reversed(ordered):
+                session.add(AccessDeviceCommandRecord(gate_command_id=identity,
+                    target_device_id=uuid.UUID(entry["target_device_id"]), device_key=entry["device_key"],
+                    action="open", state="verified", accepted=True, gate_state="open", intent_id=str(identity),
+                    idempotency_key=f"child:{uuid.uuid4()}", binding_snapshot=entry["binding_snapshot"],
+                    binding_fingerprint=entry["binding_fingerprint"]))
+        await session.commit()
+
+    queries = []
+    def observe(_connection, _cursor, sql, *_args):
+        if sql.lstrip().upper().startswith("SELECT"):
+            queries.append(sql)
+
+    sql_events.listen(engine.sync_engine, "before_cursor_execute", observe)
+    try:
+        page = await GateCommandCoordinator().list_receipts(limit=size)
+    finally:
+        sql_events.remove(engine.sync_engine, "before_cursor_execute", observe)
+    assert set(parent_ids) == {uuid.UUID(item["command_id"]) for item in page["items"]}
+    for item in page["items"]:
+        assert not item["requires_reconciliation"]
+        assert [child["target_device_id"] for child in item["target_receipts"]] == [
+            entry["target_device_id"] for entry in targets[uuid.UUID(item["command_id"])]]
+    assert len(queries) == 2
+    assert "access_device_command_records" in queries[1]
 
 
 async def test_parent_projection_refreshes_preloaded_child_after_another_worker_verifies():
@@ -1026,7 +1096,7 @@ async def test_accepted_then_verified_audits_share_state_commits_and_replay_dedu
     await journal.reconcile_recorded_observation(accepted.id)
     assert len(await command_audits(accepted.id)) == 2
     assert [hint['action'] for hint in outcome_hints] == [
-        'access_device.command.accepted', 'access_device.command.verified', 'access_device.command.verified']
+        'access_device.command.accepted', 'access_device.command.verified']
 
 
 async def test_successful_claim_hints_prior_expired_outcome_after_close(monkeypatch, outcome_hints):

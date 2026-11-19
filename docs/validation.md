@@ -16,7 +16,7 @@ these opt-in actions. Preserve existing backups and evidence.
 | --- | --- |
 | Documentation | Check links, referenced paths and commands; run `git diff --check`. |
 | Frontend | In `frontend/`, run `npm run build` and `npm test`. Add browser checks for layout, interaction, navigation or role changes. |
-| Backend, schema or cross-system | Run the full isolated harness below. Add `--database-restore` only when the user explicitly requests a restore rehearsal. |
+| Backend, schema or cross-system | Use focused tests while editing. At handoff run the full isolated harness or verify a matching green CI receipt for the clean committed checkout. Add `--database-restore` only when the user explicitly requests a restore rehearsal. |
 | Harness or source selection | Also run `python3 scripts/validation/test_source_snapshot.py` and `python3 scripts/validation/test_harness_configuration.py`. |
 
 Current source and tests are the contract. A past passing run does not validate
@@ -249,6 +249,52 @@ python3 scripts/validation/validate.py --mode snapshot \
   --evidence-root /private/tmp/iacs-validation-evidence
 ```
 
+### Fast feedback while editing
+
+Use Python 3.12+, the same evidence root across iterations and the trusted preparation
+described above. Each `--test` selects a registered database or diagnostic suite,
+a backend unit-test file, or a pytest node within one. Quote parameterized node IDs.
+Selections from one file share one pytest process. Each selected persistence file
+gets a fresh migrated database clone and Redis namespace. Unit-only runs use the
+disconnected test environment. The shared execution lock, storage checks and cleanup
+also apply to focused runs. The exit status covers only the selected tests.
+
+```sh
+python3 scripts/validation/validate.py --mode focused \
+  --test scripts/validation/test_resident_recovery_automatic.py::test_parked_phone_preserves_resident_order_while_another_vehicle_passes \
+  --test scripts/validation/test_access_pipeline_persistence.py \
+  --test backend/tests/test_access_device_command_journal.py \
+  --reuse-dependencies /absolute/path/to/prior-run \
+  --evidence-root /private/tmp/iacs-validation-evidence
+```
+
+Once focused checks pass, use full validation for handoff. Full mode orders its
+database and diagnostic suites using recent failures from this checkout, changed
+test files, recently focused suites and source-name matches. It reads up to eight
+recent runs from the evidence root. With a clean checkout it uses the latest
+commit's changes when its parent is available. The complete inventory still runs.
+Look up each suite by file in `persistence-suites.json`; its number is run-specific.
+
+### Count an existing CI result
+
+On a clean committed checkout with GitHub CLI read access to its origin, run:
+
+```sh
+python3 scripts/validation/ci_receipt.py verify
+# Select a specific run if needed.
+python3 scripts/validation/ci_receipt.py verify --run RUN_ID
+```
+
+A successful exit and run URL satisfy the full-harness requirement. The verifier
+checks GitHub's completed Project Checks workflow, the isolated job, its current
+attempt, and its unexpired receipt for the exact Git tree and source fingerprint.
+For a same-repository pull request, the tested merge tree must equal the checkout
+being handed over. A merge that changes files requires its own validation.
+CI retains receipts for 14 days. Dirty worktrees, older workflows without a
+receipt, expired receipts and unavailable GitHub access use local full validation.
+Separately requested checks such as browser testing or a restore rehearsal still
+need their own evidence.
+
 The executable defaults to full mode, with database restore rehearsals disabled.
 Only `--database-restore` opts in, and it requires full mode plus the user's
 explicit request. The [project-checks.yml](../.github/workflows/project-checks.yml)
@@ -256,7 +302,7 @@ CI workflow runs full validation on matching pushes and pull requests without
 rehearsals. For an explicitly requested CI rehearsal, manually dispatch **Project
 Checks** with its `database_restore` Boolean input enabled; its default is false.
 Push and pull-request events cannot enable this input's rehearsal path.
-Both `full` and `db-free` require an explicit
+All executing modes require an explicit
 `--allow-downloads` or `--reuse-dependencies`; the bare command refuses to guess.
 Preparation uses `uv sync --locked --extra dev --no-install-project` and
 `npm ci --ignore-scripts`. Reuse must match the copied manifests, lockfiles and
@@ -440,6 +486,13 @@ nonzero. A failed migration prevents dependent persistence checks; schema checks
 can still assess their own scratch databases. Normal interrupts clean up only
 containers owned by the run. After SIGKILL or host loss, use the retained ownership
 record to identify that run's resources. Do not delete unrelated resources.
+
+The isolated visitor, schedule and resident suites cover simultaneous browsing
+and reservation, same-plate pass attribution, assignment cursor ties, refused
+admissions, approval contention and parked evidence across coordinator changes.
+The access-efficiency fixture retains exact and approximate plate lookup plans,
+transferred candidates, timings and memory at both directory sizes. Synthetic
+measurements do not establish production arrival latency.
 
 ## Recovery and schema proof limits
 

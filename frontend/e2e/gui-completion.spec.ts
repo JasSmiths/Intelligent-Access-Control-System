@@ -1,5 +1,6 @@
 import reportPreviewContract from "../src/api/fixtures/reportPreview.generated.json" with { type: "json" };
-import { expect, test, type Page } from "playwright/test";
+import type { RecoveryAttempt } from "../src/api/missedExitRecovery";
+import { expect, test, type Page, type WebSocketRoute } from "playwright/test";
 
 const now = "2026-09-23T10:30:00Z";
 const account = (role: "admin" | "standard") => ({ id: `fixture-${role}`, username: role, first_name: "Alex", last_name: "Operator", full_name: "Alex Operator", role, is_active: true, preferences: { sidebarCollapsed: false }, profile_photo_data_url: null });
@@ -9,12 +10,12 @@ const person = { id: "person-1", first_name: "Ada", last_name: "Resident", displ
 const blocks = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [String(day), day < 5 ? [{ start: "08:00", end: "18:00" }] : []]));
 const schedule = { id: "schedule-1", name: "Weekday access", description: "Work hours", time_blocks: blocks };
 const event = { id: "event-1", registration_number: "AB12 CDE", direction: "entry", decision: "granted", confidence: .98, source: "lpr", occurred_at: now, timing_classification: "on_time", anomaly_count: 0, visitor_pass_id: null, visitor_name: null, snapshot_url: null, movement_saga: null };
-const movement = { id: "movement-1", source: "lpr", state: "pending", access_event_id: "event-1", registration_number: "AB12 CDE", direction: "entry", decision: "granted", occurred_at: now, gate_command_required: true, presence_committed: true, reconciliation_required: false, failure_detail: null, updated_at: now, gate_commands: [], intent_payload: { source: "synthetic fixture" }, decision_payload: { decision: "granted" }, state_history: [] };
+const movement = { id: "movement-1", source: "lpr", state: "pending", access_event_id: "event-1", registration_number: "AB12 CDE", direction: "entry", decision: "granted", occurred_at: now, gate_command_required: true, presence_committed: true, reconciliation_required: false, failure_detail: null, updated_at: now, gate_commands: [], intent_payload: { source: "synthetic fixture" }, decision_payload: { decision: "granted" }, state_history: [{ state: "observed", detail: "Synthetic recorded observation" }] };
 const pass = { id: "pass-1", visitor_name: "Sam Visitor", pass_type: "one-time", visitor_phone: null, expected_time: now, window_minutes: 30, valid_from: null, valid_until: null, window_start: now, window_end: "2026-09-23T11:00:00Z", status: "scheduled", creation_source: "manual", source_reference: null, created_by_user_id: null, created_by: null, arrival_time: null, departure_time: null, number_plate: null, vehicle_make: null, vehicle_colour: null, duration_on_site_seconds: null, duration_human: null, arrival_event_id: null, departure_event_id: null, telemetry_trace_id: null, created_at: now, updated_at: now };
 
 function history(items: unknown[]) { return { items, next_cursor: null, as_of: now }; }
 
-async function installFixtures(page: Page, role: "admin" | "standard" = "admin") {
+async function installFixtures(page: Page, role: "admin" | "standard" = "admin", onSocket: (socket: WebSocketRoute) => void = socket => socket.close()) {
   const unexpected: string[] = [];
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
@@ -28,7 +29,10 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
       case "/api/v1/events": body = [event]; break;
       case "/api/v1/events/history": body = history([event]); break;
       case "/api/v1/events/event-1": body = event; break;
-      case "/api/v1/access/movements/history": body = history([movement]); break;
+      case "/api/v1/access/movements/history": {
+        const { intent_payload, decision_payload, state_history, ...summary } = movement;
+        body = history([summary]); break;
+      }
       case "/api/v1/access/movements/movement-1": body = movement; break;
       case "/api/v1/alerts": body = []; break;
       case "/api/v1/alerts/history": body = history([]); break;
@@ -36,7 +40,11 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
       case "/api/v1/vehicles": body = { items: [vehicle], total: 1, next_cursor: null }; break;
       case "/api/v1/groups": body = [group]; break;
       case "/api/v1/schedules": body = [schedule]; break;
-      case "/api/v1/schedules/schedule-1/dependencies": body = { people: [person], vehicles: [vehicle], doors: [] }; break;
+      case "/api/v1/schedules/schedule-1/dependencies":
+        body = new URL(request.url()).searchParams.has("cursor")
+          ? { people: [], vehicles: [{ id: vehicle.id, name: vehicle.registration_number, kind: "vehicle", registration_number: vehicle.registration_number, owner: person.display_name }], doors: [], next_cursor: null }
+          : { people: [{ id: person.id, name: person.display_name, kind: "person" }], vehicles: [], doors: [], next_cursor: "fixture-page-2" };
+        break;
       case "/api/v1/visitor-passes": body = [pass]; break;
       case "/api/v1/integrations/gate/status": body = { configured: false, connected: false, gate_entity_id: null, default_media_player: null, last_gate_state: "unknown", garage_door_entities: [] }; break;
       case "/api/v1/integrations/gate/commands": body = { items: [], next_cursor: null }; break;
@@ -45,7 +53,7 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
       case "/api/v1/integrations/unifi-protect/status": body = { configured: false, connected: false, realtime_connected: false }; break;
       case "/api/v1/integrations/unifi-protect/cameras": body = { cameras: [] }; break;
       case "/api/v1/integrations/home-assistant/entities": body = { cover_entities: [] }; break;
-      case "/api/v1/integrations/home-assistant/recovery-trackers": body = { trackers: [], mappings: [], reason: "not_configured" }; break;
+      case "/api/v1/integrations/home-assistant/recovery-trackers": body = { trackers: [], mapping: null, status: "unavailable", reason: "not_configured" }; break;
       case "/api/v1/integrations/esphome/entities": body = { cover_entities: [] }; break;
       case "/api/v1/access-devices": body = []; break;
       case "/api/v1/maintenance/status": body = { is_active: false, enabled_by: null, enabled_at: null, source: null, reason: null, duration_seconds: 0, duration_label: null }; break;
@@ -67,7 +75,7 @@ async function installFixtures(page: Page, role: "admin" | "standard" = "admin")
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
-  page.routeWebSocket("**/*", (socket) => socket.close());
+  await page.routeWebSocket("**/*", onSocket);
   return unexpected;
 }
 
@@ -373,6 +381,23 @@ test("keeps Schedule actions reachable on a short phone", async ({ page }, testI
   expect(unexpected).toEqual([]);
 });
 
+test("pages schedule assignments while keeping a changed schedule name", async ({ page }) => {
+  const unexpected = await installFixtures(page);
+  await page.goto("/schedules");
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  const editor = page.getByRole("dialog", { name: "Schedule" });
+  await expect(editor.getByText(person.display_name, { exact: true })).toBeVisible();
+  const name = editor.getByLabel("Schedule name");
+  await name.fill("Changed hours");
+  const pages = editor.getByRole("navigation", { name: "Schedule assignment pages" });
+  await pages.getByRole("button", { name: "Next" }).click();
+  await expect(editor.getByText(vehicle.registration_number, { exact: true })).toBeVisible();
+  await pages.getByRole("button", { name: "Previous" }).click();
+  await expect(editor.getByText(person.display_name, { exact: true })).toBeVisible();
+  await expect(name).toHaveValue("Changed hours");
+  expect(unexpected).toEqual([]);
+});
+
 test("keeps Notification Save, Test, Cancel and preview reachable on mobile", async ({ page }, testInfo) => {
   const unexpected = await installFixtures(page);
   await page.setViewportSize({ width: 390, height: 600 });
@@ -497,13 +522,75 @@ test("clears search and account state across logout and another login", async ({
   expect(unexpected).toEqual([]);
 });
 
+test("retains older investigation activity across updates and retries failed evidence on request", async ({ page }) => {
+  let announceUpdate: (() => void) | undefined;
+  const unexpected = await installFixtures(page, "admin", socket => {
+    announceUpdate = () => socket.send(JSON.stringify({ type: "audit.log.created", payload: { log: { action: "access.denied" } }, created_at: now }));
+    socket.onMessage(raw => {
+      const message = JSON.parse(String(raw));
+      if (message.type === "client.ping") socket.send(JSON.stringify({ type: "connection.pong", payload: { id: message.payload.id }, created_at: now }));
+    });
+  });
+  const blocked = { episode_id: "trace-fixture-denied", kind: "trace", occurred_at: now, title: "Entry outside schedule", summary: "The weekday schedule withheld access.", outcome: "blocked" };
+  const older = { ...blocked, episode_id: "trace-fixture-older", occurred_at: "2026-09-23T10:00:00Z", title: "Earlier authorized departure", outcome: "succeeded" };
+  const latest = { ...blocked, episode_id: "trace-fixture-new", title: "Newly recorded entry" };
+  const cursors: (string | null)[] = [];
+  let detailRequests = 0, hasUpdate = false;
+  await page.route("**/api/v1/telemetry/investigation-overview", route => route.fulfill({ json: {
+    site_timezone: "Europe/London", resolved_range: {}, recent_problems: [blocked], incomplete_runs: [], repeated_problems: [], important_activity: [],
+  } }));
+  await page.route("**/api/v1/telemetry/activity?**", route => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    cursors.push(cursor);
+    return route.fulfill({ json: { site_timezone: "Europe/London", resolved_range: {}, items: cursor ? [older] : hasUpdate ? [latest] : [blocked], next_cursor: cursor || hasUpdate ? null : "older-page" } });
+  });
+  await page.route("**/api/v1/telemetry/activity/trace-fixture-denied", route => {
+    detailRequests++;
+    if (detailRequests === 1) return route.fulfill({ status: 503, json: { detail: "Evidence temporarily unavailable" } });
+    return route.fulfill({ json: {
+      episode: blocked, site_timezone: "Europe/London", citations: [], configuration_context: [], raw: {},
+      timeline: [{ id: "schedule-check", timestamp: now, title: "Schedule checked at observation time", description: "The stored schedule excluded this time." }],
+    } });
+  });
+  await page.goto("/logs");
+  const timeline = page.getByRole("region", { name: "Recorded activity" });
+  await expect(timeline.getByText(blocked.title, { exact: true })).toBeVisible();
+  await page.getByRole("region", { name: "Problems and blocked actions" }).getByRole("button", { name: /Entry outside schedule/ }).click();
+  const retry = timeline.getByRole("button", { name: "Retry evidence" });
+  await expect(retry).toBeVisible();
+  await timeline.getByRole("button", { name: "Load older activity" }).click();
+  await expect(timeline.getByText(older.title, { exact: true })).toBeVisible();
+  expect(detailRequests).toBe(1);
+  await retry.click();
+  await expect(timeline.getByText("Schedule checked at observation time")).toBeVisible();
+  expect(detailRequests).toBe(2);
+  await expect.poll(() => Boolean(announceUpdate)).toBe(true);
+  hasUpdate = true;
+  announceUpdate!();
+  const showLatest = page.getByRole("button", { name: "Show latest activity" });
+  await expect(showLatest).toBeVisible({ timeout: 10_000 });
+  await expect(timeline.getByText(older.title, { exact: true })).toBeVisible();
+  expect(cursors).toEqual([null, "older-page"]);
+  await showLatest.click();
+  await expect(timeline.getByText(latest.title, { exact: true })).toBeVisible();
+  await expect(timeline.getByText(older.title, { exact: true })).toHaveCount(0);
+  expect(cursors).toEqual([null, "older-page", null]);
+  expect(unexpected).toEqual([]);
+});
+
 test("shows movement detail without clipping on desktop and mobile", async ({ page }, testInfo) => {
   const unexpected = await installFixtures(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
+  let detailReads = 0;
+  page.on("request", request => {
+    if (new URL(request.url()).pathname === "/api/v1/access/movements/movement-1") detailReads++;
+  });
   await page.goto("/movements");
   await page.getByRole("button", { name: /View movement AB12 CDE/ }).click();
   await expect(page.getByText("A gate command was required, but no command record is available.").first()).toBeVisible();
   const detail = page.locator(".movement-detail-panel");
+  await expect(detail.getByText("Synthetic recorded observation")).toBeVisible();
+  expect(detailReads).toBe(1);
   const bounds = await detail.boundingBox();
   expect(bounds).not.toBeNull();
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
@@ -812,5 +899,49 @@ test("shows partial voice delivery truth and retired integration absence using i
   await page.goto("/integrations");
   await expect(page.getByRole("button", { name: /^Home Assistant/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /iCloud Calendar/ })).toHaveCount(0);
+  expect(unexpected).toEqual([]);
+});
+
+test("shows the resident’s approval device, expiry and GPS cutoff across screen sizes", async ({ page }, testInfo) => {
+  const unexpected = await installFixtures(page);
+  const attempt: RecoveryAttempt = {
+    duration_ms: 4300, saga_id: null, command_id: null,
+    id: "attempt-1", occurred_at: now, owner_id: person.id, owner_name: person.display_name,
+    vehicle_id: vehicle.id, registration_number: vehicle.registration_number, event_id: "event-1",
+    outcome: "expired", method: "none", reason: "resident_approval_expired", policy_version: 1,
+    checks: { last_away_age_s: 405, last_away_limit_s: 300 }, timeline: [],
+    notification: { approval_recipient: person.display_name, approval_device: "notify.mobile_app_resident",
+      approval_action_state: "expired", approval_provider_accepted_at: now }
+  };
+  let receiptReads = 0;
+  await page.route("**/api/v1/missed-exit-recovery/attempts/attempt-1", route => {
+    receiptReads++;
+    return route.fulfill({ json: receiptReads === 1 ? {
+      ...attempt, outcome: "awaiting_resident", reason: "resident_approval_pending", next_expiry_in_ms: 250,
+      notification: { ...attempt.notification, approval_action_state: "pending" },
+    } : attempt });
+  });
+  const trackerReads: string[] = [];
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname.endsWith("/recovery-trackers")) trackerReads.push(url.searchParams.get("owner_id") ?? "");
+  });
+  await page.goto("/settings/missed-exit-recovery?attempt=attempt-1");
+  const detail = page.getByRole("region", { name: "Recovery attempt details" });
+  await expect(detail.getByText("resident_approval_expired")).toBeVisible();
+  expect(receiptReads).toBe(2);
+  for (const [width, height] of [[1366, 900], [768, 1024], [390, 844], [844, 390]]) {
+    await page.setViewportSize({ width, height });
+    await expect(detail.getByText("notify.mobile_app_resident")).toBeVisible();
+    await expect(detail.getByText("405", { exact: true })).toBeVisible();
+    await expect(detail.getByText("300", { exact: true })).toBeVisible();
+    await expect(page.getByLabel(/Notify when this resident/)).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+    await detail.getByText("notify.mobile_app_resident").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`recovery-${width}x${height}.png`), animations: "disabled" });
+  }
+  expect(trackerReads).toEqual([]);
+  await page.getByRole("combobox", { name: "Configure owner" }).selectOption(person.id);
+  await expect.poll(() => trackerReads).toEqual([person.id]);
   expect(unexpected).toEqual([]);
 });

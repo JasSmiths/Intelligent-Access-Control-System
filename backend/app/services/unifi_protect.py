@@ -12,10 +12,12 @@ from typing import Any, TypeVar
 from app.core.logging import get_logger
 from app.core.task_lifecycle import drain_owned
 from app.modules.unifi_protect.client import (
+    ProtectMedia,
     ProtectRecoveryPage,
     UnifiProtectError,
     build_unifi_protect_client,
     close_unifi_protect_client,
+    get_direction_frames,
     get_unifi_protect_event_thumbnail,
     get_unifi_protect_event_video,
     get_unifi_protect_snapshot,
@@ -427,6 +429,11 @@ class UnifiProtectIntegrationService:
                 api, camera_id, width=width, height=height, channel=channel
             ),
             media=True,
+        )
+
+    async def direction_frames(self, camera_id: str, captured_at: datetime) -> tuple[ProtectMedia, ProtectMedia]:
+        return await self._run_current(
+            lambda api: get_direction_frames(api, camera_id, captured_at), media=True,
         )
 
     async def event_thumbnail(

@@ -52,6 +52,12 @@
       "purpose": "Durable lane uses committed wake hints and earliest eligible deadline, with sixty-second healthy repair and existing fast outage fallback; active leases retain independent renewal and cleanup."
     },
     {
+      "path": "backend/app/services/access/recovery_camera.py",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "One delayed archive retry on an empty recording within the original recognition camera deadline."
+    },
+    {
       "path": "backend/app/services/access_devices.py",
       "timer_sites": 4,
       "classification": "physical_state",
@@ -134,6 +140,18 @@
       "timer_sites": 4,
       "classification": "transport_authority",
       "purpose": "Retain two-second authority checks, per-send checks, exact token expiry timer and bounded actual transport cleanup."
+    },
+    {
+      "path": "backend/app/services/resident_location_refresh.py",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "During a single outstanding silent phone request, recheck its indexed journal checkpoint every half second until delivery or the original recognition deadline."
+    },
+    {
+      "path": "backend/app/services/resident_recovery.py",
+      "timer_sites": 1,
+      "classification": "bounded_request",
+      "purpose": "An unattempted resident approval tap retries transient lock contention twice, after 100 and 300 milliseconds, before recording one informational response."
     },
     {
       "path": "backend/app/services/restart_backfill.py",
@@ -248,6 +266,12 @@
       "timer_sites": 1,
       "classification": "display_interaction",
       "purpose": "Demand-driven editor/search/save debounce, focus placement or message dismissal retains current feature request and draft lifetimes; no recurring collection polling."
+    },
+    {
+      "path": "frontend/src/features/missedExitRecovery/MissedExitRecoveryView.tsx",
+      "timer_sites": 1,
+      "classification": "display_interaction",
+      "purpose": "One timer for the next approval expiry affecting the active filters or selected attempt, canceled on scope changes and unmount."
     },
     {
       "path": "frontend/src/features/schedules/SchedulesView.tsx",

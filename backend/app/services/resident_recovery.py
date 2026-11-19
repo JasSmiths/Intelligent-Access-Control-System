@@ -6,6 +6,7 @@ One owner journey is consumed across all vehicles. Approval is a separate
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import re
@@ -15,7 +16,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, literal_column, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -119,16 +120,20 @@ async def observe_tracker(entity_id: str, new_state: dict, old_state: dict) -> N
     if not _connected:
         return
     async with AsyncSessionLocal() as session:
+        enabled = select(SystemSetting.key).where(
+            SystemSetting.key == "missed_exit_recovery_enabled",
+            SystemSetting.value.contains({"plain": True}),
+        ).exists()
+        ids = list((await session.scalars(select(Person.id).where(
+            enabled, Person.is_active.is_(True), Person.missed_exit_recovery_enabled.is_(True),
+            Person.missed_exit_recovery_tracker_entity_id == entity_id).limit(2))).all())
+        if len(ids) != 1:
+            return
         config = await get_runtime_config_for_session(session)
         from app.modules.home_assistant.input_boolean_contracts import (
             home_assistant_connection_fingerprint,
         )
         if not config.missed_exit_recovery_enabled or _connection_binding != home_assistant_connection_fingerprint(config):
-            return
-        ids = list((await session.scalars(select(Person.id).where(Person.is_active.is_(True),
-            Person.missed_exit_recovery_enabled.is_(True),
-            Person.missed_exit_recovery_tracker_entity_id == entity_id))).all())
-        if len(ids) != 1:
             return
         person = await lock_owner(session, ids[0], read_only=True)
         if person is None or person.missed_exit_recovery_tracker_entity_id != entity_id or not person.missed_exit_recovery_enabled:
@@ -192,17 +197,16 @@ async def observe_tracker(entity_id: str, new_state: dict, old_state: dict) -> N
 
 
 async def has_conflict(session: AsyncSession, person: Person, vehicle: Vehicle, captured_at: datetime) -> bool:
-    from app.models.core import LIVE_ACCESS_EVENT_PREDICATE
+    from app.services.access.movement_history import latest_confirmed_movement
     from app.services.movement_fsm import MovementDirectionFSM
 
     presence = await session.scalar(select(Presence.state).where(Presence.person_id == person.id))
-    latest = await session.scalar(select(AccessEvent.direction).where(AccessEvent.vehicle_id == vehicle.id,
-        AccessEvent.decision == AccessDecision.GRANTED, AccessEvent.occurred_at < captured_at,
-        LIVE_ACCESS_EVENT_PREDICATE).order_by(AccessEvent.occurred_at.desc(), AccessEvent.id.desc()).limit(1))
-    return MovementDirectionFSM.has_arrival_conflict(presence, latest)
+    latest = await latest_confirmed_movement(session, person=person, vehicle=vehicle,
+                                             before=captured_at, include_person_history=False)
+    return MovementDirectionFSM.has_arrival_conflict(presence, latest.direction if latest else None)
 
 
-async def blockers(session: AsyncSession, *, now: datetime, exclude_saga_id: uuid.UUID | None = None, exclude_command_key: str | None = None) -> str | None:
+async def blockers(session: AsyncSession, *, exclude_saga_id: uuid.UUID | None = None, exclude_command_key: str | None = None) -> str | None:
     maintenance = await session.scalar(select(MaintenanceModeState.is_active))
     if maintenance:
         return "maintenance_mode"
@@ -218,7 +222,7 @@ async def blockers(session: AsyncSession, *, now: datetime, exclude_saga_id: uui
     pending = await session.scalar(pending_query.limit(1))
     if pending:
         return "unresolved_gate_command"
-    sagas = select(MovementSagaRecord.id).where(MovementSagaRecord.admission_status == "pending")
+    sagas = select(MovementSagaRecord.id).where(MovementSagaRecord.admission_status == literal_column("'pending'"))
     if exclude_saga_id:
         sagas = sagas.where(MovementSagaRecord.id != exclude_saga_id)
     if await session.scalar(sagas.limit(1)):
@@ -227,7 +231,7 @@ async def blockers(session: AsyncSession, *, now: datetime, exclude_saga_id: uui
 
 
 async def evaluate_phone(session: AsyncSession, *, person: Person, vehicle: Vehicle,
-                         read: Any, config: Any, claim: bool = False,
+                         read: Any, config: Any, safety_block: str | None, claim: bool = False,
                          refresh: LocationRefresh | None = None) -> tuple[bool, str, dict]:
     started = time.monotonic()
     from app.services.access.reads import _is_exact_known_vehicle_plate_match
@@ -244,6 +248,8 @@ async def evaluate_phone(session: AsyncSession, *, person: Person, vehicle: Vehi
     refresh_current = refresh is not None and refresh.current(person_id=person.id,
         vehicle_id=vehicle.id, source=read.source, captured_at=read.captured_at,
         binding=configuration_binding(person, config), epoch=_epoch, now=now)
+    if refresh is not None and refresh.delivery_failure:
+        checks["location_request_failure"] = refresh.delivery_failure
     if refresh_current and refresh.gate_observed_at is not None:
         observation = {"state": refresh.gate_state, "observed_at": refresh.gate_observed_at.isoformat()}
     observed_at = parse_time(observation.get("observed_at"))
@@ -253,9 +259,8 @@ async def evaluate_phone(session: AsyncSession, *, person: Person, vehicle: Vehi
         return False, "fresh_closed_gate_required", checks
     if explicit_direction_from_read(read) == AccessDirection.EXIT:
         return False, "departure_evidence", checks
-    blocked = await blockers(session, now=now)
-    if blocked:
-        return False, blocked, checks
+    if safety_block:
+        return False, safety_block, checks
     if not _connected:
         return False, "tracker_disconnected", checks
     if gate_coordinates(config) is None:
@@ -363,7 +368,7 @@ async def reserve_approval(session: AsyncSession, *, attempt: MissedExitRecovery
     if expires <= now:
         attempt.reason, attempt.outcome = "approval_already_expired", "expired"
         return
-    blocked = await blockers(session, now=now)
+    blocked = await blockers(session)
     if blocked:
         attempt.reason = blocked
         return
@@ -415,15 +420,26 @@ async def reserve_approval(session: AsyncSession, *, attempt: MissedExitRecovery
                "This request expires in two minutes after the plate read.")
     await reserve_mobile_output(session, attempt, person, config, kind="approval", message=message,
                                 expires_at=expires, context_id=identity)
+    if person.missed_exit_recovery_expiry_notify_service:
+        notice = await reserve_mobile_output(session, attempt, person, config, kind="expiry",
+            message=f"{attempt.owner_name}’s gate entry approval expired without a response.",
+            expires_at=expires + timedelta(minutes=5), context_id=identity, not_before=expires)
+        attempt.notification = {**attempt.notification, "expiry_delivery_id": str(notice)}
     add_stage(attempt, "notification", "queued", "resident_approval_requested", at=now)
 
 
 async def reserve_mobile_output(session: AsyncSession, attempt: MissedExitRecoveryAttempt,
     person: Person, config: Any, *, kind: str, message: str, expires_at: datetime,
-    context_id: uuid.UUID | None = None) -> None:
-    identity = uuid.uuid5(context_id or attempt.id, "resident-approval-notification" if kind == "approval" else "resident-apology")
-    action = {"type": "mobile", "target": person.home_assistant_mobile_app_notify_service,
-              "title": "Allow entry" if kind == "approval" else "Entry confirmed",
+    context_id: uuid.UUID | None = None, not_before: datetime | None = None) -> uuid.UUID:
+    labels = {"approval": ("resident-approval-notification", "Allow entry"),
+              "busy": ("resident-approval-busy", "Gate entry is still waiting"),
+              "expiry": ("resident-expiry-notification", "Entry request expired"),
+              "apology": ("resident-apology", "Entry confirmed")}
+    key, title = labels[kind]
+    identity = uuid.uuid5(context_id or attempt.id, key)
+    target = (person.missed_exit_recovery_expiry_notify_service if kind == "expiry"
+              else person.home_assistant_mobile_app_notify_service)
+    action = {"type": "mobile", "target": target, "title": title,
               "message": message, "delivery_mode": "literal",
               "resident_recovery_output": {"attempt_id": str(attempt.id), "kind": kind,
                                            "context_id": str(context_id) if context_id else None}}
@@ -432,8 +448,9 @@ async def reserve_mobile_output(session: AsyncSession, attempt: MissedExitRecove
     payload["resident_recovery_origin"] = {"attempt_id": str(attempt.id), "kind": kind,
         "context_id": str(context_id) if context_id else None, "expires_at": expires_at.isoformat(),
         "binding": configuration_binding(person, config), "notify_service": action["target"]}
-    await NotificationRunStore().enqueue_prepared_in_session(session, payload, run_id=identity,
+    await NotificationRunStore().enqueue_prepared_in_session(session, payload, run_id=identity, not_before=not_before,
         plan=[{"rule": {"id": "resident-recovery-v1", "name": "Resident recovery"}, "action": action, "state": "pending"}])
+    return identity
 
 
 async def _current_resident_authority(session: AsyncSession, context: NotificationActionContext,
@@ -450,7 +467,8 @@ async def _current_resident_authority(session: AsyncSession, context: Notificati
         raise ValueError("approval_expired_or_disabled")
     metadata = context.metadata_ or {}
     person = await lock_owner(session, context.person_id, nowait=True, read_only=read_only or dispatch)
-    vehicle = await session.scalar(select(Vehicle).where(Vehicle.id == uuid.UUID(metadata["vehicle_id"]))
+    vehicle = await session.scalar(select(Vehicle).options(defer(Vehicle.vehicle_photo_data_url, raiseload=True))
+        .where(Vehicle.id == uuid.UUID(metadata["vehicle_id"]))
         .with_for_update(read=True, nowait=True).execution_options(populate_existing=True))
     if (person is None or not person.is_active or not person.missed_exit_recovery_enabled or
             vehicle is None or not vehicle.is_active or vehicle.person_id != person.id or
@@ -495,18 +513,25 @@ async def _current_resident_authority(session: AsyncSession, context: Notificati
     await session.scalars(select(ScheduleOverride).where(ScheduleOverride.person_id == person.id)
         .order_by(ScheduleOverride.id).with_for_update(read=True, nowait=True))
     vehicle = await session.scalar(select(Vehicle).where(Vehicle.id == vehicle.id)
-        .options(selectinload(Vehicle.schedule), selectinload(Vehicle.owner).selectinload(Person.schedule))
+        .options(defer(Vehicle.vehicle_photo_data_url, raiseload=True), selectinload(Vehicle.schedule),
+                 selectinload(Vehicle.owner).defer(Person.profile_photo_data_url, raiseload=True),
+                 selectinload(Vehicle.owner).selectinload(Person.schedule))
         .execution_options(populate_existing=True))
     schedule = await evaluate_vehicle_schedule(session, vehicle, now,
         timezone_name=config.site_timezone, default_policy=config.schedule_default_policy)
     if not schedule.allowed:
         raise ValueError("current_schedule_denied")
-    blocked = await blockers(session, now=now,
+    blocked = await blockers(session,
         exclude_saga_id=uuid.UUID(metadata["saga_id"]) if metadata.get("saga_id") else None,
         exclude_command_key=f"gate-command:resident-recovery:{context.id}" if dispatch else None)
     if blocked:
         raise ValueError(blocked)
     return person, vehicle, config
+
+
+class _TapContended(Exception):
+    def __init__(self, context_id: uuid.UUID) -> None:
+        self.context_id = context_id
 
 
 async def handle_resident_action(action_id: str, *, gate_intent_factory, execute_gate,
@@ -517,6 +542,43 @@ async def handle_resident_action(action_id: str, *, gate_intent_factory, execute
     token = action_id[len(PREFIX):]
     if not re.fullmatch(r"[0-9a-f]{64}", token):
         return True
+    retry_delays = iter((0.1, 0.3))
+    while True:
+        try:
+            return await _apply_resident_tap(token, gate_intent_factory=gate_intent_factory,
+                execute_gate=execute_gate, finalize_admission=finalize_admission,
+                admission_input_factory=admission_input_factory)
+        except _TapContended as busy:
+            delay = next(retry_delays, None)
+            if delay is None:
+                await _queue_busy_notice(busy.context_id)
+                return True
+            await asyncio.sleep(delay)
+
+
+async def _queue_busy_notice(context_id: uuid.UUID) -> None:
+    """Leave one durable informational response; do not consume the capability."""
+    async with AsyncSessionLocal() as session:
+        context = await session.get(NotificationActionContext, context_id)
+        now = await session.scalar(select(func.clock_timestamp()))
+        if context is None or context.consumed_at or context.expires_at <= now:
+            return
+        attempt = await session.get(MissedExitRecoveryAttempt, uuid.UUID(context.metadata_["attempt_id"]))
+        person = await session.scalar(select(Person).where(Person.id == context.person_id)
+            .options(defer(Person.profile_photo_data_url, raiseload=True), defer(Person.notes, raiseload=True)))
+        config = await get_runtime_config_for_session(session)
+        if (attempt is None or attempt.action_context_id != context.id or person is None
+                or person.home_assistant_mobile_app_notify_service != context.notify_service
+                or configuration_binding(person, config) != context.metadata_.get("binding")):
+            return
+        await reserve_mobile_output(session, attempt, person, config, kind="busy",
+            message="Your entry could not be confirmed. Retry the original approval before it expires, or contact the gate operator.",
+            expires_at=context.expires_at, context_id=context.id)
+        await session.commit()
+
+
+async def _apply_resident_tap(token: str, *, gate_intent_factory, execute_gate,
+                              finalize_admission, admission_input_factory) -> bool:
     dispatch = None
     async with AsyncSessionLocal() as session:
         # Snapshot to locate owner; final checks reload every authority under locks.
@@ -524,6 +586,7 @@ async def handle_resident_action(action_id: str, *, gate_intent_factory, execute
             NotificationActionContext.token_hash == token_hash(token), NotificationActionContext.action == ACTION))
         if snapshot is None:
             return True
+        context_id = snapshot.id
         try:
             # Fixed domain lock order: settings -> owner -> vehicle -> context -> attempt.
             async with session.begin_nested():
@@ -593,13 +656,13 @@ async def handle_resident_action(action_id: str, *, gate_intent_factory, execute
                             vehicle.registration_number, config.gate_admission_device_key, context.metadata_["target_plan"])
             await reserve_all_in_session(session, [admission.ha_reservation] if admission.ha_reservation else [])
             await session.commit()
-        except Exception as exc:  # noqa: BLE001 - fence scoped capability on any unexpected domain failure.
+        except Exception as exc:
             # NOWAIT contention is a deferred tap, not a spent/revoked capability.
             if isinstance(exc, HaCoordinationBusy) or (
                 isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "55P03"
             ):
                 await session.rollback()
-                return True
+                raise _TapContended(context_id) from exc
             # Rollback nested domain work; record only bounded reason codes, never a token/error payload.
             reason = str(exc) if isinstance(exc, ValueError) and re.fullmatch(r"[a-z_]{1,120}", str(exc)) else "current_authority_unavailable"
             context = await session.get(NotificationActionContext, snapshot.id, with_for_update=True, populate_existing=True)
@@ -665,12 +728,14 @@ async def authorize_mobile_output(session: AsyncSession, payload: dict, run_id: 
         expires_at = parse_time(origin.get("expires_at"))
         if attempt is None or expires_at is None or expires_at <= now:
             return "recovery_output_expired"
-        person = await lock_owner(session, attempt.owner_id, nowait=True, read_only=True)
+        person = await lock_owner(session, attempt.owner_id, nowait=origin["kind"] != "busy", read_only=True)
         config = await get_runtime_config_for_session(session)
         if (person is None or not person.is_active or not person.missed_exit_recovery_enabled
             or not config.missed_exit_recovery_enabled or configuration_binding(person, config) != origin.get("binding")):
             return "recovery_output_revoked"
-        if not action or action.get("target") != person.home_assistant_mobile_app_notify_service or action.get("target") != origin.get("notify_service"):
+        destination = (person.missed_exit_recovery_expiry_notify_service if origin["kind"] == "expiry"
+                       else person.home_assistant_mobile_app_notify_service)
+        if not destination or not action or action.get("target") != destination or destination != origin.get("notify_service"):
             return "recovery_output_destination_changed"
         descriptor = action.get("resident_recovery_output") or {}
         if descriptor != {"attempt_id": origin["attempt_id"], "kind": origin["kind"], "context_id": origin.get("context_id")}:
@@ -681,6 +746,23 @@ async def authorize_mobile_output(session: AsyncSession, payload: dict, run_id: 
                 return "recovery_request_resolved"
             await _current_resident_authority(session, context, now=now, read_only=True)
             expected = uuid.uuid5(context.id, "resident-approval-notification")
+        elif origin["kind"] == "busy":
+            context = await session.get(NotificationActionContext, uuid.UUID(origin["context_id"]))
+            if (context is None or context.id != attempt.action_context_id or context.action != ACTION
+                    or context.access_event_id != attempt.event_id or context.person_id != person.id
+                    or context.notify_service != destination or context.consumed_at or context.expires_at <= now
+                    or context.metadata_.get("binding") != origin.get("binding")
+                    or attempt.outcome != "awaiting_resident"):
+                return "recovery_request_resolved"
+            expected = uuid.uuid5(context.id, "resident-approval-busy")
+        elif origin["kind"] == "expiry":
+            context = await session.get(NotificationActionContext, uuid.UUID(origin["context_id"]))
+            if (context is None or context.id != attempt.action_context_id or context.action != ACTION
+                    or context.access_event_id != attempt.event_id or context.person_id != person.id
+                    or context.expires_at > now or context.consumed_at or context.outcome
+                    or attempt.outcome != "awaiting_resident"):
+                return "recovery_request_resolved"
+            expected = uuid.uuid5(context.id, "resident-expiry-notification")
         elif origin["kind"] == "apology" and attempt.outcome == "verified":
             expected = uuid.uuid5(attempt.id, "resident-apology")
         else:
@@ -760,7 +842,7 @@ async def _authorize_automatic_recovery_facts(session: AsyncSession, *, event_id
             or configuration_binding(person, config) != recovery.get("binding")):
         raise ValueError("recovery_dispatch_configuration_changed")
     own_saga_id = await session.scalar(select(MovementSagaRecord.id).where(MovementSagaRecord.access_event_id == event.id))
-    blocked = await blockers(session, now=now, exclude_saga_id=own_saga_id,
+    blocked = await blockers(session, exclude_saga_id=own_saga_id,
                              exclude_command_key=f"gate-command:open:default:event:{event.id}")
     if blocked:
         raise ValueError(blocked)

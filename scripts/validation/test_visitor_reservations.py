@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import uuid
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.db.session import AsyncSessionLocal
 from app.models import AccessDeviceCommandRecord, AccessEvent, AutomationRule, AutomationRun, GateCommandRecord, MovementSagaRecord, NotificationRun, Person, Presence, VisitorPass, VisitorPassReservationRecord
@@ -64,6 +64,37 @@ async def finalized(saga_id):
 async def rows(visitor_id, reservation_id):
     async with AsyncSessionLocal() as session:
         return await session.get(VisitorPass, visitor_id), await session.get(VisitorPassReservationRecord, reservation_id)
+
+
+async def test_list_and_detail_project_status_without_writing_or_blocking_admission():
+    from app.api.v1.visitor_passes import get_visitor_pass, list_visitor_passes
+
+    label = f"Read-while-arriving {uuid.uuid4()}"
+    visitor_id, now = await context(status=VisitorPassStatus.SCHEDULED)
+    async with AsyncSessionLocal() as writer:
+        due = await writer.get(VisitorPass, visitor_id)
+        due.visitor_name = label
+        future = VisitorPass(visitor_name=label, expected_time=now + timedelta(days=1),
+            window_minutes=30, status=VisitorPassStatus.ACTIVE)
+        past = VisitorPass(visitor_name=label, expected_time=now - timedelta(days=1),
+            window_minutes=30, status=VisitorPassStatus.ACTIVE)
+        writer.add_all([future, past])
+        await writer.commit()
+    arrival, _ = await event_for(visitor_id, now)
+    async with AsyncSessionLocal() as reader:
+        await reader.execute(text("SET TRANSACTION READ ONLY"))
+        for status, expected_id in ((VisitorPassStatus.ACTIVE, visitor_id),
+                                    (VisitorPassStatus.SCHEDULED, future.id),
+                                    (VisitorPassStatus.EXPIRED, past.id)):
+            passes = await list_visitor_passes(None, reader, statuses=[status], q=label, limit=1)
+            assert [(str(item.id), item.status) for item in passes] == [(str(expected_id), status.value)]
+        detail = await get_visitor_pass(visitor_id, None, reader)
+        assert detail.status == VisitorPassStatus.ACTIVE.value
+        # The reader's transaction stays open through the real NOWAIT reservation.
+        reservation_id = await reserve(visitor_id, arrival)
+        assert reader.in_transaction()
+    saved, reservation = await rows(visitor_id, reservation_id)
+    assert saved.status == VisitorPassStatus.SCHEDULED and reservation.state == "reserved"
 
 
 async def test_reservation_is_exclusive_and_does_not_consume_or_bind_pass():

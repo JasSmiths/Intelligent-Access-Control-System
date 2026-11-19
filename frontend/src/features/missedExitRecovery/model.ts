@@ -28,7 +28,7 @@ export function safeDiagnosticRows(value: Record<string, unknown>, prefix = ""):
     if (item && typeof item === "object" && !Array.isArray(item)) {
       rows.push(...safeDiagnosticRows(item as Record<string, unknown>, label));
     } else if (typeof item === "boolean" || typeof item === "number" || item === null ||
-      (typeof item === "string" && /(?:status|reason|outcome|method|policy|entity|check|source|state|direction|at|age|accuracy|distance|error)/i.test(key))) {
+      (typeof item === "string" && (key === "approval_device" || key === "approval_recipient" || /(?:status|reason|outcome|method|policy|entity|check|source|state|direction|at|age|accuracy|distance|error)/i.test(key)))) {
       rows.push({ label, value: item === null ? "Unavailable" : typeof item === "boolean" ? item ? "Yes" : "No" : String(item).slice(0, 300) });
     }
   }
@@ -37,6 +37,11 @@ export function safeDiagnosticRows(value: Record<string, unknown>, prefix = ""):
 
 function diagnosticLabel(key: string) {
   const labels: Record<string, string> = {
+    approval_device: "Approval notification device", approval_recipient: "Approval recipient",
+    approval_provider_accepted_at: "Home Assistant accepted approval at",
+    last_away_age_s: "Last away reading before capture (seconds)",
+    last_away_limit_s: "Maximum age of away reading (seconds)",
+    camera_failed_frame: "Failed recording frame", camera_retried: "Recording retried",
     latest_age_at_capture_s: "Latest sample age at capture (seconds)",
     latest_age_at_decision_s: "Latest sample age at decision (seconds)",
     latest_distance_m: "Latest distance to gate (metres)",

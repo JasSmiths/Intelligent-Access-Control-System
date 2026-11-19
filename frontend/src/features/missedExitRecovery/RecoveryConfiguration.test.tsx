@@ -33,9 +33,9 @@ function invalidate(people?: Person[]) {
   if (people) serverPeople(people);
   void signals.publish({ type: "refresh", reason: "manual", resetHistory: false }).catch(() => undefined);
 }
-const matched: RecoveryTrackerDiscovery = { status: "complete", reason: null,
+const matched = { status: "complete", reason: null,
   trackers: [{ entity_id: "device_tracker.renamed_iphone", name: "Synthetic iPhone", available: true, eligible: true, reason: null }],
-  mappings: [{ person_id: owner.id, notify_service_id: owner.home_assistant_mobile_app_notify_service, suggested_tracker_entity_id: "device_tracker.renamed_iphone", status: "matched", reason: null }] };
+  mapping: { person_id: owner.id, notify_service_id: owner.home_assistant_mobile_app_notify_service, suggested_tracker_entity_id: "device_tracker.renamed_iphone", status: "matched", reason: null } } satisfies RecoveryTrackerDiscovery;
 function editGlobal() {
   fireEvent.change(globalToggle(), { target: { value: "true" } });
   fireEvent.change(latitude(), { target: { value: "51.5" } });
@@ -51,7 +51,7 @@ beforeEach(() => {
   vi.spyOn(directory, "readDirectory").mockResolvedValue({ items: [owner, second], total: 2, next_cursor: null });
   vi.spyOn(directory, "lookupDirectory").mockImplementation(async (_kind, ids) => [owner, second].filter((item) => ids.includes(item.id)));
   vi.spyOn(client.api, "get").mockImplementation(async <T,>() => rows() as T);
-  vi.spyOn(integrationsApi, "getRecoveryTrackers").mockResolvedValue({ status: "complete", reason: null, trackers: [], mappings: [] });
+  vi.spyOn(integrationsApi, "getRecoveryTrackers").mockResolvedValue({ status: "complete", reason: null, trackers: [], mapping: null });
   vi.spyOn(client.api, "patch").mockResolvedValue(rows(true, 51.5, -0.1));
   vi.spyOn(client, "createActionConfirmation").mockResolvedValue({ confirmation_id: "synthetic", confirmation_token: "synthetic", action: "settings.update", expires_at: "" });
   vi.spyOn(missedExitRecoveryApi, "saveOwner").mockResolvedValue({ ...owner, missed_exit_recovery_enabled: true, missed_exit_recovery_tracker_entity_id: "device_tracker.first" });
@@ -64,7 +64,7 @@ it("preserves global drafts through identical realtime settings responses", asyn
   editGlobal();
   await act(async () => invalidate());
   expect(globalToggle()).toHaveValue("true"); expect(latitude()).toHaveValue(51.5); expect(longitude()).toHaveValue(-0.1);
-  expect(integrationsApi.getRecoveryTrackers).toHaveBeenCalledTimes(1);
+  expect(integrationsApi.getRecoveryTrackers).not.toHaveBeenCalled();
 });
 
 it("keeps editing usable while a background reload is in flight and retains drafts on reload failure", async () => {
@@ -162,7 +162,7 @@ it("retains rejected owner drafts through directory refreshes", async () => {
 it("offers the exact matched tracker without saving or enabling recovery", async () => {
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce(matched);
   await act(async () => render(configuration()));
-  fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
+  await act(async () => fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } }));
   expect(tracker()).toHaveValue("device_tracker.renamed_iphone"); expect(ownerToggle()).toHaveValue("false");
   expect(screen.getByText(/matched to this owner's saved notification destination/)).toBeInTheDocument();
   expect(missedExitRecoveryApi.saveOwner).not.toHaveBeenCalled(); expect(client.api.patch).not.toHaveBeenCalled();
@@ -172,7 +172,7 @@ it("preserves configured trackers, manual changes and deliberate clearing on dis
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValue(matched);
   const configured = { ...owner, missed_exit_recovery_tracker_entity_id: "device_tracker.configured" };
   await act(async () => render(configuration([configured, second])));
-  fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
+  await act(async () => fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } }));
   expect(tracker()).toHaveValue("device_tracker.configured");
   fireEvent.change(tracker(), { target: { value: "device_tracker.manual" } });
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Refresh phone trackers" })));
@@ -183,9 +183,9 @@ it("preserves configured trackers, manual changes and deliberate clearing on dis
 });
 
 it.each(["ambiguous", "not_found", "unavailable"] as const)("keeps manual selection when association is %s", async (status) => {
-  vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce({ ...matched, mappings: [{ ...matched.mappings[0], status, suggested_tracker_entity_id: null, reason: "No unique association" }] });
+  vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce({ ...matched, mapping: { ...matched.mapping, status, suggested_tracker_entity_id: null, reason: "No unique association" } });
   await act(async () => render(configuration()));
-  fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
+  await act(async () => fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } }));
   expect(tracker()).toHaveValue("");
   fireEvent.change(screen.getByRole("combobox", { name: "Discovered phone tracker" }), { target: { value: "device_tracker.renamed_iphone" } });
   expect(tracker()).toHaveValue("device_tracker.renamed_iphone"); expect(ownerToggle()).toHaveValue("false");
@@ -195,7 +195,7 @@ it("does not use a stale discovery response after the saved notification destina
   const pending = deferred<RecoveryTrackerDiscovery>(); vi.mocked(integrationsApi.getRecoveryTrackers).mockReturnValueOnce(pending.promise);
   let view!: ReturnType<typeof render>;
   await act(async () => { view = render(configuration()); });
-  fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
+  await act(async () => fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } }));
   vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }]);
   await act(async () => invalidate([{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }, second]));
   await act(async () => pending.resolve(matched));
@@ -206,7 +206,7 @@ it("revokes an untouched automatic suggestion when the saved destination changes
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce(matched);
   let view!: ReturnType<typeof render>;
   await act(async () => { view = render(configuration()); });
-  fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
+  await act(async () => fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } }));
   expect(tracker()).toHaveValue("device_tracker.renamed_iphone");
   vi.mocked(directory.lookupDirectory).mockResolvedValueOnce([{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }]);
   await act(async () => invalidate([{ ...owner, home_assistant_mobile_app_notify_service: "notify.mobile_app_changed" }, second]));
@@ -216,7 +216,11 @@ it("revokes an untouched automatic suggestion when the saved destination changes
 it("aborts and ignores discovery after unmount", async () => {
   const pending = deferred<RecoveryTrackerDiscovery>(); vi.mocked(integrationsApi.getRecoveryTrackers).mockReturnValueOnce(pending.promise);
   const view = render(configuration());
-  const signal = vi.mocked(integrationsApi.getRecoveryTrackers).mock.calls[0][0]!.signal!;
+  await screen.findByRole("option", { name: owner.display_name });
+  await act(async () => fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } }));
+  const [ownerId, options] = vi.mocked(integrationsApi.getRecoveryTrackers).mock.calls[0];
+  expect(ownerId).toBe(owner.id);
+  const signal = options!.signal!;
   view.unmount(); expect(signal.aborted).toBe(true);
   await act(async () => pending.resolve(matched));
   expect(missedExitRecoveryApi.saveOwner).not.toHaveBeenCalled();
@@ -225,9 +229,9 @@ it("aborts and ignores discovery after unmount", async () => {
 it("hides ineligible entities from phone choices and explains a missing destination", async () => {
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce({ ...matched,
     trackers: [{ ...matched.trackers[0], eligible: false, reason: "not_gps" }],
-    mappings: [{ ...matched.mappings[0], status: "not_found", suggested_tracker_entity_id: null, reason: "saved_notify_service_missing" }] });
+    mapping: { ...matched.mapping, status: "not_found", suggested_tracker_entity_id: null, reason: "saved_notify_service_missing" } });
   await act(async () => render(configuration()));
-  fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
+  await act(async () => fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } }));
   expect(screen.queryByRole("option", { name: /Synthetic iPhone/ })).not.toBeInTheDocument();
   expect(screen.getByText(/Configure this resident's phone notification destination in People/)).toBeInTheDocument();
   expect(screen.queryByText("saved_notify_service_missing")).not.toBeInTheDocument();
@@ -238,7 +242,7 @@ it("hides ineligible entities from phone choices and explains a missing destinat
 it("shows discovery failure despite a previous association and removes the proposal hint after save", async () => {
   vi.mocked(integrationsApi.getRecoveryTrackers).mockResolvedValueOnce(matched);
   await act(async () => render(configuration()));
-  fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } });
+  await act(async () => fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: owner.id } }));
   vi.mocked(missedExitRecoveryApi.saveOwner).mockResolvedValueOnce({ ...owner, missed_exit_recovery_tracker_entity_id: "device_tracker.renamed_iphone" });
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save owner configuration" })));
   expect(screen.queryByText(/Save owner configuration to apply it/)).not.toBeInTheDocument();

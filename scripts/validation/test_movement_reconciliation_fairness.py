@@ -19,9 +19,9 @@ pytestmark = pytest.mark.asyncio
 OLD = datetime(2026, 9, 1, tzinfo=UTC)
 
 
-async def held_batch(*, standalone):
+async def held_batch(*, standalone, first=1, size=25):
     async with AsyncSessionLocal() as session:
-        for number in range(1, 26):
+        for number in range(first, first + size):
             identity = uuid.UUID(int=number)
             if not standalone:
                 session.add(MovementSagaRecord(id=identity, idempotency_key=f"synthetic-held-saga-{number}",
@@ -70,6 +70,28 @@ async def test_twenty_five_held_sagas_do_not_starve_later_verified_admission():
     await assert_held_unchanged(standalone=False)
 
 
+async def test_finished_owner_waits_for_next_sweep_while_other_pages_continue(monkeypatch):
+    await held_batch(standalone=False, size=26)
+    await held_batch(standalone=True, first=100, size=51)
+    service = MovementReconciliationService()
+    sagas, commands = [], []
+
+    async def record_saga(session, row, **kwargs):
+        sagas.append(row.id.int)
+        return 0
+
+    async def record_command(session, row):
+        commands.append(row.id.int)
+        return 0
+
+    monkeypatch.setattr(service, "_reconcile_saga", record_saga)
+    monkeypatch.setattr(service, "_reconcile_standalone_gate_command", record_command)
+    for _ in range(3):
+        assert await service.reconcile_once() == 0
+    assert sagas == list(range(1, 27))
+    assert commands == list(range(100, 151))
+
+
 async def test_twenty_five_held_standalone_commands_do_not_starve_later_verified_receipt():
     await held_batch(standalone=True)
     parent_id = await evidence(None, None, verified=True)
@@ -89,9 +111,10 @@ async def test_twenty_five_held_standalone_commands_do_not_starve_later_verified
 async def test_actionable_scan_failure_does_not_block_verified_gate_reconciliation(monkeypatch):
     from types import SimpleNamespace
 
-    reconcile = AsyncMock(side_effect=RuntimeError("Synthetic output scan failure"))
+    reconcile = AsyncMock(side_effect=[RuntimeError("Synthetic output scan failure"), (0, None)])
     monkeypatch.setattr(reconciliation_owner, "get_actionable_notification_service",
                         lambda: SimpleNamespace(reconcile_actionable_outputs=reconcile))
+    await held_batch(standalone=False, size=26)
     parent_id = await evidence(None, None, verified=True)
     service = MovementReconciliationService()
     cursor = uuid.uuid4()
@@ -103,6 +126,17 @@ async def test_actionable_scan_failure_does_not_block_verified_gate_reconciliati
         parent = await session.get(GateCommandRecord, parent_id)
         assert parent.state == GateCommandState.RECONCILED and parent.mechanically_confirmed
         assert not parent.requires_reconciliation
+
+    # Finish the other owner's second page without retrying the failed scan.
+    assert await service.reconcile_once() == 0
+    reconcile.assert_awaited_once_with(after_id=cursor)
+    assert not service._next_pages
+
+    # The next sweep retries the saved position and can clear it on success.
+    assert await service.reconcile_once() == 0
+    assert reconcile.await_count == 2
+    reconcile.assert_awaited_with(after_id=cursor)
+    assert service._actionable_cursor is None
 
 
 @pytest.mark.parametrize("hint_fails", [False, True])

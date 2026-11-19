@@ -976,11 +976,6 @@ class ActionableNotificationService:
         async with AsyncSessionLocal() as session:
             now = await session.scalar(select(func.clock_timestamp()))
             rows = await self._unfinished_recovery_rows(session, limit=limit, after_id=after_id, now=now)
-            if not rows and after_id is not None:
-                # Explicit rollover prevents a high UUID cursor from starving
-                # older unresolved contexts after new rows arrive.
-                now = await session.scalar(select(func.clock_timestamp()))
-                rows = await self._unfinished_recovery_rows(session, limit=limit, after_id=None, now=now)
             bound_rows: list[BoundActionContext] = []
             changed = False
             for row in rows:

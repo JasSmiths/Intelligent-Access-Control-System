@@ -120,11 +120,16 @@ async def test_empty_upgrade_downgrade_and_complete_metadata_parity(scratch):
             await transaction.rollback()
 
 
-async def test_legacy_pending_processing_hold_preserves_original_values():
-    async with engine.connect() as connection:
+async def test_legacy_pending_processing_hold_preserves_original_values(scratch):
+    # Seed the actual predecessor. A downgrade invoked against a later head can
+    # neither recreate this schema nor know the dependencies added by successors.
+    assert schema.migrate(scratch.name, 'upgrade', '20261007_0012', scratch.output, 'legacy-pipeline-predecessor')
+    async with AsyncExitStack() as resources:
+        scratch_engine = create_async_engine(schema.scratch_url(scratch.name))
+        resources.push_async_callback(scratch_engine.dispose)
+        connection = await resources.enter_async_context(scratch_engine.connect())
         transaction = await connection.begin()
         try:
-            await connection.run_sync(lambda sync: migrate(sync, 'downgrade'))
             # Genuine pre-P6 columns, including original JSONB binary representation.
             for index, status in enumerate(('pending','processing','succeeded','failed','skipped')):
                 await connection.execute(text("""INSERT INTO lpr_ingest_events

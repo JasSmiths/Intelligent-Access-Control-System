@@ -79,11 +79,13 @@ class OpenAIResponsesProvider(BaseHttpProvider):
     name = "openai"
 
     async def analyze_image(self, prompt: str, image_bytes: bytes, mime_type: str) -> ImageAnalysisResult:
+        return await self.analyze_images(prompt, ((image_bytes, mime_type),))
+
+    async def analyze_images(self, prompt: str, images: tuple[tuple[bytes, str], ...]) -> ImageAnalysisResult:
         config = await get_runtime_config()
         if not config.openai_api_key:
             raise ProviderNotConfiguredError("OpenAI API key is not configured.")
 
-        data_url = _image_data_url(image_bytes, mime_type)
         data = await self._post(
             f"{config.openai_base_url.rstrip('/')}/responses",
             headers={
@@ -97,7 +99,8 @@ class OpenAIResponsesProvider(BaseHttpProvider):
                         "role": "user",
                         "content": [
                             {"type": "input_text", "text": prompt},
-                            {"type": "input_image", "image_url": data_url, "detail": "auto"},
+                            *({"type": "input_image", "image_url": _image_data_url(content, mime), "detail": "auto"}
+                              for content, mime in images),
                         ],
                     }
                 ],

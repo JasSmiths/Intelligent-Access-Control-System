@@ -552,3 +552,44 @@ async def test_dated_access_schedule_edit_after_enqueue_denies_real_final_author
     records = await audit_rows(admin.id)
     assert [record.action for record in records] == ['schedule.create', 'schedule.update']
     assert records[-1].diff['new']['time_blocks']['2026-10-25'] == []
+
+
+async def test_dependency_pages_project_labels_and_delete_uses_existence():
+    from sqlalchemy import event
+    from app.services.schedule_dependency_reads import has_schedule_assignments, schedule_dependency_page
+    schedule = Schedule(name="Dependency pages " + uuid.uuid4().hex, time_blocks={})
+    async with AsyncSessionLocal() as session:
+        session.add(schedule)
+        await session.flush()
+        people = [Person(display_name="Same name", schedule_id=schedule.id,
+                         profile_photo_data_url="x" * 65536) for _ in range(26)]
+        session.add_all(people)
+        await session.flush()
+        vehicle = Vehicle(registration_number=uuid.uuid4().hex[:12], person_id=people[0].id,
+                          schedule_id=schedule.id, vehicle_photo_data_url="x" * 65536)
+        device = AccessDevice(key="door-" + uuid.uuid4().hex, kind="garage_door",
+                              name="Garage", schedule_id=schedule.id)
+        session.add_all([vehicle, device])
+        await session.commit()
+        identity, plate, door_key = schedule.id, vehicle.registration_number, device.key
+
+    statements = []
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.lower())
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        async with AsyncSessionLocal() as session:
+            first = await schedule_dependency_page(session, identity, None)
+            assert len(first.people) == 25 and not first.vehicles and first.next_cursor
+            second = await schedule_dependency_page(session, identity, first.next_cursor)
+            assert second.next_cursor is None and len(second.people) == 1
+            assert len({p.id for p in first.people + second.people}) == 26
+            assert second.vehicles[0].name == plate and second.vehicles[0].owner == "Same name"
+            assert second.doors[0].id == door_key
+            with pytest.raises(ValueError):
+                await schedule_dependency_page(session, uuid.uuid4(), first.next_cursor)
+            assert await has_schedule_assignments(session, identity)
+        assert len(statements) == 3 and "exists" in statements[-1]
+        assert all("photo_data_url" not in sql for sql in statements)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)

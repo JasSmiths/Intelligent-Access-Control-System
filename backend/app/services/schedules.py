@@ -6,9 +6,8 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from app.models import AccessDevice, Person, Schedule, ScheduleOverride, Vehicle
+from app.models import Person, Schedule, ScheduleOverride, Vehicle
 
 MINUTES_PER_SLOT = 30
 SLOTS_PER_DAY = 48
@@ -210,56 +209,6 @@ async def active_schedule_override(
         if override.vehicle_id is None or (vehicle_id and override.vehicle_id == vehicle_id):
             return override
     return None
-
-
-async def schedule_dependencies(session: AsyncSession, schedule_id: uuid.UUID) -> dict[str, list[dict[str, str | None]]]:
-    people = (
-        await session.scalars(
-            select(Person).where(Person.schedule_id == schedule_id).order_by(Person.display_name)
-        )
-    ).all()
-    vehicles = (
-        await session.scalars(
-            select(Vehicle)
-            .options(selectinload(Vehicle.owner))
-            .where(Vehicle.schedule_id == schedule_id)
-            .order_by(Vehicle.registration_number)
-        )
-    ).all()
-    # Dependency reporting is a persistence query, not a hardware operation.
-    # Use the caller's transaction so deletion sees one authoritative snapshot.
-    devices = (await session.scalars(select(AccessDevice).where(AccessDevice.schedule_id == schedule_id)
-                                    .order_by(AccessDevice.sort_order, AccessDevice.name))).all()
-    doors = [
-        {
-            "id": device.key,
-            "name": device.name,
-            "entity_id": device.key,
-            "kind": device.kind,
-        }
-        for device in devices
-    ]
-    return {
-        "people": [
-            {
-                "id": str(person.id),
-                "name": person.display_name,
-                "kind": "person",
-            }
-            for person in people
-        ],
-        "vehicles": [
-            {
-                "id": str(vehicle.id),
-                "name": vehicle.registration_number,
-                "registration_number": vehicle.registration_number,
-                "owner": vehicle.owner.display_name if vehicle.owner else None,
-                "kind": "vehicle",
-            }
-            for vehicle in vehicles
-        ],
-        "doors": doors,
-    }
 
 
 async def _schedule_for_id(

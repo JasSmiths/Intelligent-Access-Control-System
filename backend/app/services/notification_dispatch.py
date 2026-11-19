@@ -47,7 +47,14 @@ class NotificationDispatcher:
 
     def start(self) -> None:
         if self._task is None:
-            self._task = asyncio.create_task(self._worker(), name="notification-dispatch")
+            self._task = asyncio.create_task(self._workers(), name="notification-dispatch")
+
+    async def _workers(self) -> None:
+        # Both consumers use the same locked journal and attempt checkpoint. One
+        # slot stays available for expiring GPS requests during ordinary sends.
+        async with asyncio.TaskGroup() as workers:
+            workers.create_task(self._worker(), name="notification-general")
+            workers.create_task(self._worker(location_only=True), name="notification-location")
 
     async def stop(self) -> None:
         task, self._task = self._task, None
@@ -58,17 +65,18 @@ class NotificationDispatcher:
     def wake(self) -> None:
         self._wake.set()
 
-    async def _worker(self) -> None:
+    async def _worker(self, *, location_only: bool = False) -> None:
+        wake = work_wake(WorkTopic.LOCATION_NOTIFICATION) if location_only else self._wake
         while True:
-            generation = self._wake.generation
+            generation = wake.generation
             try:
-                pending = await self.store.readiness()
+                pending = await self.store.readiness(location_only=location_only)
                 if not pending.ready:
-                    await self._wake.wait(generation, pending, fallback_seconds=POLL_SECONDS)
+                    await wake.wait(generation, pending, fallback_seconds=POLL_SECONDS)
                     continue
                 # Bound each cycle and yield between runs; no unbounded local task fanout.
                 for _ in range(20):
-                    if not await self.run_once():
+                    if not await self.run_once(location_only=location_only):
                         break
                 else:
                     await asyncio.sleep(0)
@@ -77,12 +85,13 @@ class NotificationDispatcher:
                 logger.exception("notification_dispatch_tick_failed")
                 await asyncio.sleep(POLL_SECONDS)
                 continue
-            await self._wake.wait(generation, WorkReadiness(False, POLL_SECONDS), fallback_seconds=POLL_SECONDS)
+            await wake.wait(generation, WorkReadiness(False, POLL_SECONDS), fallback_seconds=POLL_SECONDS)
 
     async def run_once(
-        self, run_id: uuid.UUID | None = None, *, claimed: NotificationRun | None = None
+        self, run_id: uuid.UUID | None = None, *, claimed: NotificationRun | None = None,
+        location_only: bool = False,
     ) -> bool:
-        row = claimed if claimed is not None else await self.store.claim(run_id)
+        row = claimed if claimed is not None else await self.store.claim(run_id, location_only=location_only)
         if row is None:
             return False
         token = row.claim_token

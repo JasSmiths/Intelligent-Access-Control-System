@@ -317,10 +317,14 @@ async def esphome_entities(
 
 @router.get("/home-assistant/recovery-trackers", response_model=RecoveryTrackerDiscovery)
 async def home_assistant_recovery_trackers(
+    owner_id: UUID,
     _: Annotated[User, Depends(admin_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> RecoveryTrackerDiscovery:
-    return await discover_recovery_trackers(session, _home_assistant_client())
+    discovery = await discover_recovery_trackers(session, _home_assistant_client(), owner_id)
+    if discovery is None:
+        raise HTTPException(status_code=404, detail="Recovery owner not found.")
+    return discovery
 
 
 @router.get("/home-assistant/entities")

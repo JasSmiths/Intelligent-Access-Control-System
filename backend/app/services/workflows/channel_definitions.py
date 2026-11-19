@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -16,6 +17,22 @@ from app.services.workflows.action_definitions import (
 
 GateMalfunctionStage = Literal["initial", "30m", "60m", "2hrs", "fubar", "resolved"]
 NotificationTargetMode = Literal["all", "many", "selected"]
+
+
+class ResidentLocationAction(Configuration):
+    type: Literal["mobile"] = "mobile"
+    target: str = Field(pattern=r"^notify\.mobile_app_[A-Za-z0-9_]{1,192}$")
+    title: Literal[""] = ""
+    message: Literal["request_location_update"] = "request_location_update"
+    delivery_mode: Literal["literal"] = "literal"
+    resident_location_output: str
+
+    @field_validator("resident_location_output")
+    @classmethod
+    def canonical_run_id(cls, value: str) -> str:
+        if str(uuid.UUID(value)) != value:
+            raise ValueError("Expected a canonical notification run ID.")
+        return value
 
 
 class NotificationMedia(Configuration):
@@ -160,6 +177,12 @@ def pending_notification_error(plan: object) -> str | None:
         if not isinstance(action, dict) or not isinstance(item.get("rule"), dict):
             return "unsupported_action_configuration"
         try:
+            if "resident_location_output" in action:
+                # Frozen actions must include the complete shape, including literal defaults.
+                if action.keys() != ResidentLocationAction.model_fields.keys():
+                    return "unsupported_action_configuration"
+                validate_configuration(ResidentLocationAction, action)
+                continue
             definition = channel_definition(str(action.get("type") or ""))
             if action.get("delivery_mode") == "literal":
                 # These existing producers identify the action by ordered run

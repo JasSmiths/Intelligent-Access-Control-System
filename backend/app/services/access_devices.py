@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -76,6 +77,7 @@ def bind_home_assistant_status(status: HomeAssistantStatus) -> None:
 
 
 STATE_POLL_INTERVAL_SECONDS = 10.0
+HISTORICAL_COMMAND_RECHECK_SECONDS = 600.0
 COMMAND_CONFIRMATION_TIMEOUT_SECONDS = 5.0
 CLOSE_COMMAND_CONFIRMATION_TIMEOUT_SECONDS = 60.0
 COMMAND_CONFIRMATION_POLL_SECONDS = 0.5
@@ -104,6 +106,7 @@ class AccessDeviceService:
         self._configuration = AccessDeviceConfiguration()
         self._journal = AccessDeviceCommandJournal()
         self._reconciliation_cursor: uuid.UUID | None = None
+        self._historical_recheck_at = 0.0
         self._poll_task: asyncio.Task | None = None
         self._subscription_tasks: dict[str, asyncio.Task] = {}
         self._subscription_status: dict[str, dict[str, Any]] = {}
@@ -112,6 +115,8 @@ class AccessDeviceService:
 
     async def start(self) -> None:
         if not self._poll_task or self._poll_task.done():
+            self._historical_recheck_at = 0.0
+            self._reconciliation_cursor = None
             self._poll_task = asyncio.create_task(
                 self._poll_states(), name="access-device-state-poller"
             )
@@ -447,6 +452,8 @@ class AccessDeviceService:
 
     async def reconcile_commands(self) -> int:
         """Read-only provider observations may settle receipts; recovery never sends."""
+        historical_due = time.monotonic() >= self._historical_recheck_at
+        historic_ids: list[uuid.UUID] = []
         async with AsyncSessionLocal() as session:
             now = await session.scalar(select(func.clock_timestamp()))
             active = AccessDeviceCommandRecord.state.in_(UNRESOLVED_DEVICE_COMMAND_STATES)
@@ -465,19 +472,11 @@ class AccessDeviceService:
                     )
                 ).all()
             )
-            historical = select(AccessDeviceCommandRecord.id).where(active, ~current)
-            if self._reconciliation_cursor:
-                historical = historical.where(
-                    AccessDeviceCommandRecord.id > self._reconciliation_cursor
-                )
-            historic_ids = list(
-                (
-                    await session.scalars(
-                        historical.order_by(AccessDeviceCommandRecord.id).limit(100)
-                    )
-                ).all()
-            )
-            self._reconciliation_cursor = historic_ids[-1] if len(historic_ids) == 100 else None
+            if historical_due:
+                historical = select(AccessDeviceCommandRecord.id).where(active, ~current)
+                if self._reconciliation_cursor:
+                    historical = historical.where(AccessDeviceCommandRecord.id > self._reconciliation_cursor)
+                historic_ids = list(await session.scalars(historical.order_by(AccessDeviceCommandRecord.id).limit(100)))
             ids = list(dict.fromkeys([*recent_ids, *historic_ids]))
         changed = 0
         for identity in ids:
@@ -507,6 +506,13 @@ class AccessDeviceService:
                     identity, binding_fingerprint=row.binding_fingerprint, observation=observation
                 )
                 changed += bool(resolved and resolved.state == "verified")
+        if historical_due:
+            # Late-arriving recorded evidence can still settle old commands.
+            # Advance only after processing; retry failed pages and let fresh
+            # commands retain their fast path between bounded historical pages.
+            self._reconciliation_cursor = historic_ids[-1] if len(historic_ids) == 100 else None
+            if self._reconciliation_cursor is None:
+                self._historical_recheck_at = time.monotonic() + HISTORICAL_COMMAND_RECHECK_SECONDS
         return changed
 
     async def command_receipt(

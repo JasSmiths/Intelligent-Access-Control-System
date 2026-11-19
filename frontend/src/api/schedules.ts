@@ -1,4 +1,5 @@
-
+import { api, createActionConfirmation, type ApiRequestOptions } from "./client";
+import type { Schedule } from "./types";
 
 type ScheduleDependencyItem = {
   id: string;
@@ -13,16 +14,15 @@ export type ScheduleDependencies = {
   people: ScheduleDependencyItem[];
   vehicles: ScheduleDependencyItem[];
   doors: ScheduleDependencyItem[];
+  next_cursor: string | null;
 };
-
-import { api, createActionConfirmation, type ApiRequestOptions } from "./client";
-import type { Schedule } from "./types";
 
 export type SchedulePayload = Pick<Schedule, "name" | "description" | "time_blocks">;
 
 export const schedulesApi = {
-  dependencies(id: string, options: ApiRequestOptions = {}) {
-    return api.get<ScheduleDependencies>(`/api/v1/schedules/${id}/dependencies`, options);
+  dependencies(id: string, options: ApiRequestOptions = {}, cursor?: string) {
+    const params = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+    return api.get<ScheduleDependencies>(`/api/v1/schedules/${id}/dependencies${params}`, options);
   },
   async save(payload: SchedulePayload, schedule?: Schedule | null): Promise<Schedule> {
     const confirmation = await createActionConfirmation(

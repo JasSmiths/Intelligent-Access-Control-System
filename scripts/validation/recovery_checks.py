@@ -91,7 +91,8 @@ HOST_CHECKS: dict[str, str] = {
     'ci-evidence-tests': 'scripts/validation/test_ci_evidence.py',
     'background-polling-inventory': 'scripts/validation/test_background_polling_inventory.py',
 }
-REQUIRED_HELPERS = ['scripts/validation/recovery_checks.py', 'scripts/validation/database_restore.py',
+REQUIRED_HELPERS = ['scripts/validation/recovery_checks.py', 'scripts/validation/suite_selection.py',
+                    'scripts/validation/ci_receipt.py', 'scripts/validation/database_restore.py',
                     'scripts/validation/event_driven_measurement.py',
                     'scripts/validation/background_polling_inventory.json',
                     'scripts/validation/storage.py',
@@ -106,6 +107,8 @@ def persistence_checks(args):
     """Keep defaults mandatory and additional selections deduplicated by path."""
     selected = {path: 'persistence' for path in PERSISTENCE_TESTS}
     selected.update({path: 'diagnostic' for path in DIAGNOSTIC_TESTS})
+    if args.mode == 'focused':
+        return [(path, selected[path]) for path in args.targets if path in selected]
     for path in args.persistence_test:
         selected.setdefault(path, 'persistence')
     for path in args.diagnostic:
@@ -114,11 +117,11 @@ def persistence_checks(args):
 
 
 def schema_checks(args):
-    return list(dict.fromkeys(SCHEMA_CHECKS + args.schema_check))
+    return [] if args.mode == 'focused' else list(dict.fromkeys(SCHEMA_CHECKS + args.schema_check))
 
 
 def required_sources(args):
-    required = list(args.include) + args.diagnostic + args.persistence_test + args.schema_check
+    required = list(args.targets) + list(args.include) + args.diagnostic + args.persistence_test + args.schema_check
     if args.mode == 'full':
         required += list(HOST_CHECKS.values()) + REQUIRED_HELPERS + schema_checks(args)
         required += [path for path, _ in persistence_checks(args)]

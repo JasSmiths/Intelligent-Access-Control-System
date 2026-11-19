@@ -55,6 +55,7 @@ class PersonResponse(BaseModel):
     garage_door_entity_ids: list[str]
     home_assistant_mobile_app_notify_service: str | None
     missed_exit_recovery_enabled: bool = False
+    missed_exit_recovery_expiry_notify_service: str | None = None
     missed_exit_recovery_tracker_entity_id: str | None = None
     home_assistant_presence_input_boolean_entity_ids: list[str]
     home_assistant_presence_input_boolean_entry_action: Literal["turn_on", "turn_off"]
@@ -73,6 +74,7 @@ class CreatePersonRequest(BaseModel):
     garage_door_entity_ids: list[str] = Field(default_factory=list)
     home_assistant_mobile_app_notify_service: str | None = Field(default=None, max_length=255)
     missed_exit_recovery_enabled: bool = False
+    missed_exit_recovery_expiry_notify_service: str | None = Field(default=None, pattern=r"^notify\.mobile_app_[A-Za-z0-9_]{1,192}$")
     missed_exit_recovery_tracker_entity_id: str | None = Field(default=None, max_length=255)
     home_assistant_presence_input_boolean_entity_ids: list[str] = Field(default_factory=list)
     home_assistant_presence_input_boolean_entry_action: str = Field(
@@ -99,6 +101,7 @@ class UpdatePersonRequest(BaseModel):
     garage_door_entity_ids: list[str] | None = None
     home_assistant_mobile_app_notify_service: str | None = Field(default=None, max_length=255)
     missed_exit_recovery_enabled: bool | None = None
+    missed_exit_recovery_expiry_notify_service: str | None = Field(default=None, pattern=r"^notify\.mobile_app_[A-Za-z0-9_]{1,192}$")
     missed_exit_recovery_tracker_entity_id: str | None = Field(default=None, max_length=255)
     home_assistant_presence_input_boolean_entity_ids: list[str] | None = None
     home_assistant_presence_input_boolean_entry_action: str | None = Field(

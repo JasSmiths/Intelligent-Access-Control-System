@@ -29,6 +29,7 @@ class WorkTopic(StrEnum):
     HA = "ha_presence"
     CHART = "chart"
     NOTIFICATION = "notification"
+    LOCATION_NOTIFICATION = "location_notification"
     AUTOMATION = "automation"
     INFORMATION = "information"
     AUTOMATION_CLOCK = "automation_clock"

@@ -51,6 +51,27 @@ passes. Cancellation drains owned work; a notification never makes an uncertain
 physical effect safe to replay. Recovery hold leaves normal executors stopped.
 LPR retains idle coordinator ownership and its ten-second lease renewal.
 
+## Resident evidence waits
+
+A plate awaiting a phone fix or recorded camera motion keeps its frozen window,
+membership, original receipt time and lease in PostgreSQL. The coordinator parks
+the window and continues with other vehicles. At most two evidence operations
+run at once. Additional windows stay in the database. Later observations for
+the same vehicle or resident wait before movement suppression, and already-open
+windows for a sibling vehicle also retain that dependency.
+
+Completing an evidence task wakes the coordinator. It rechecks identity, policy,
+presence, timing and the current fence before committing the decision and using
+the existing gate owner. Afterward it releases related reads in their receipt
+order. Stopping the worker cancels and drains evidence tasks. A replacement
+coordinator reclaims the original window against its existing retry budget.
+A phone request bound to a previous lease closes without a new send. Camera
+evidence remains subject to the original recognition deadline. A completed
+window only releases its remaining dependencies during restart.
+[Evidence worker](../backend/app/services/access/recovery_evidence_lane.py)
+and [durable queue](../backend/app/services/access/recovery_queue.py).
+
+
 Visitor processing uses up to three indexed claims for scheduled starts, active
 expiries and malformed explicit windows, sharing a total 25-row lock budget.
 Each query skips locked rows before limiting; the first lane rotates after commit.
@@ -66,6 +87,13 @@ hint through their coordinated read owner. Initial, reconnect, manual and
 visibility-resume refreshes remain. A visible page repairs missed hints every
 60 seconds; hidden/unmounted pages have no periodic repair timer. Observation
 refresh does not invalidate settings drafts or extend account/request lifetimes.
+
+The notification dispatcher reserves capacity for the short-lived resident
+location request. Both consumers claim through the same durable journal and
+attempt fence. Device reconciliation checks recent commands with the physical
+poll. Historical receipts stay eligible for bounded periodic repair; unchanged
+evidence does not create a new movement wake or repeat an audit hint. Each
+movement repair sweep remembers which independent lists have finished.
 
 ## Intentional periodic work
 

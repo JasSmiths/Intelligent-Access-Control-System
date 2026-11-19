@@ -20,6 +20,7 @@ from app.models import (AccessEvent, MissedExitRecoveryAttempt, MovementSagaReco
                         NotificationRun, Person, ResidentRecoveryJourney, Vehicle, LprIngestEvent)
 from app.models.enums import AccessDecision, AccessDirection, MovementSagaState, TimingClassification
 from app.services import resident_recovery as recovery
+from app.services.workflows.channel_definitions import pending_notification_error
 from app.services.resident_recovery_evidence import configuration_binding
 from app.services.access_device_configuration import AccessDeviceConfiguration
 from app.services.gate_commands import GateCommandOutcome
@@ -58,18 +59,22 @@ async def resources(isolated_resources, monkeypatch):
     recovery.invalidate_connection()
 
 
-async def fixture(runtime, *, capture_age=0, allow=True, owner_id=None, plate="SYNREC1"):
+async def fixture(runtime, *, capture_age=0, allow=True, owner_id=None, plate="SYNREC1", expiry_target=None, vehicle_id=None):
     async with AsyncSessionLocal() as session:
         now = await session.scalar(select(func.clock_timestamp()))
         person = await session.get(Person, owner_id) if owner_id else Person(display_name="Synthetic Recovery",
             is_active=True, missed_exit_recovery_enabled=True, missed_exit_recovery_tracker_entity_id="device_tracker.synthetic",
+            missed_exit_recovery_expiry_notify_service=expiry_target,
             home_assistant_mobile_app_notify_service="notify.mobile_app_synthetic_recovery")
         if not owner_id:
             session.add(person)
             await session.flush()
-        vehicle = Vehicle(registration_number=plate, person_id=person.id, is_active=True)
-        session.add(vehicle)
-        await session.flush()
+        if vehicle_id:
+            vehicle = await session.get(Vehicle, vehicle_id)
+        else:
+            vehicle = Vehicle(registration_number=plate, person_id=person.id, is_active=True)
+            session.add(vehicle)
+            await session.flush()
         event = AccessEvent(vehicle_id=vehicle.id, person_id=person.id, registration_number=plate,
             direction=AccessDirection.ENTRY, decision=AccessDecision.DENIED, confidence=1,
             source="synthetic_lpr", occurred_at=now-timedelta(seconds=capture_age),
@@ -215,10 +220,41 @@ async def test_owner_contention_defers_tap_without_spending_capability(resources
         await asyncio.wait_for(invoke_action(action), timeout=8)
         assert execute.await_count == 0
         await mutation.rollback()
+    notices = [r for r in await rows(NotificationRun) if r.context.get("resident_recovery_origin", {}).get("kind") == "busy"]
+    assert len(notices) == 1
+    notice = notices[0]
+    assert pending_notification_error(notice.delivery_plan) is None
+    notice_action = notice.delivery_plan[0]["action"]
+    assert not await recovery.resolve_mobile_actions(notice_action)
+    async with AsyncSessionLocal() as session:
+        assert await recovery.authorize_mobile_output(session, notice.context, notice.id, notice_action) is None
     contexts = await rows(NotificationActionContext)
     assert next(c for c in contexts if c.id == context.id).consumed_at is None
     await invoke_action(action)
     assert execute.await_count == 1
+
+    async with AsyncSessionLocal() as session:
+        assert await recovery.authorize_mobile_output(session, notice.context, notice.id, notice_action) == "recovery_request_resolved"
+
+
+async def test_short_owner_contention_completes_original_tap_once(resources, monkeypatch):
+    item = await fixture(resources)
+    action, _ = await action_for(item)
+    execute = AsyncMock(side_effect=inert_command)
+    from app.services import gate_commands
+    monkeypatch.setattr(gate_commands, "get_gate_command_coordinator", lambda: SimpleNamespace(execute_open=execute))
+    async with AsyncSessionLocal() as mutation:
+        await recovery.lock_owner(mutation, item.person.id)
+        tap = asyncio.create_task(invoke_action(action))
+        try:
+            await asyncio.sleep(.05)
+            await mutation.rollback()
+            assert await asyncio.wait_for(tap, timeout=8)
+        finally:
+            tap.cancel()
+            await asyncio.gather(tap, return_exceptions=True)
+    assert execute.await_count == 1
+    assert not [r for r in await rows(NotificationRun) if r.context.get("resident_recovery_origin", {}).get("kind") == "busy"]
 
 
 async def test_other_vehicle_cannot_rebind_pending_request(resources):
@@ -291,3 +327,175 @@ async def test_manual_authority_cannot_launder_historical_origin(resources, monk
     await invoke_action(action)
     assert execute.await_count == 0
     assert (await rows(MissedExitRecoveryAttempt))[0].reason == "historical_origin_ineligible"
+
+
+@pytest.mark.parametrize("change,expected", [(None, None), ("answered", "recovery_request_resolved"),
+                                            ("unsubscribed", "recovery_output_destination_changed")])
+async def test_expiry_notice_is_scheduled_revocable_and_information_only(resources, change, expected):
+    from app.services.notification_runs import NotificationRunStore
+
+    item = await fixture(resources, expiry_target="notify.mobile_app_synthetic_observer")
+    run = next(r for r in await rows(NotificationRun) if r.id == uuid.UUID(item.attempt.notification["expiry_delivery_id"]))
+    _, context = await action_for(item)
+    action = run.delivery_plan[0]["action"]
+    assert run.not_before == context.expires_at
+    assert action["target"] == "notify.mobile_app_synthetic_observer"
+    assert await recovery.resolve_mobile_actions(action) is None
+    store = NotificationRunStore()
+    assert await store.claim(run.id) is None
+    async with AsyncSessionLocal() as session:
+        assert await recovery.authorize_mobile_output(session, run.context, run.id, action) == "recovery_request_resolved"
+        expiry = datetime.now(UTC) - timedelta(seconds=1)
+        row = await session.get(NotificationActionContext, context.id)
+        row.expires_at = expiry
+        if change == "answered":
+            row.consumed_at = expiry
+            row.outcome = "authorized"
+        if change == "unsubscribed":
+            person = await session.get(Person, item.person.id)
+            person.missed_exit_recovery_expiry_notify_service = None
+        scheduled = await session.get(NotificationRun, run.id)
+        scheduled.not_before = expiry
+        await session.commit()
+        assert await recovery.authorize_mobile_output(session, run.context, run.id, action) == expected
+    assert await store.claim(run.id) is not None
+
+
+async def test_repeat_read_shares_approval_device_and_single_expiry_notice(resources):
+    from app.api.v1.missed_exit_recovery import serialize_attempts
+
+    original = await fixture(resources, expiry_target="notify.mobile_app_synthetic_observer")
+    repeat = await fixture(resources, owner_id=original.person.id, vehicle_id=original.vehicle.id)
+    assert repeat.attempt.outcome == "coalesced"
+    assert repeat.attempt.action_context_id == original.attempt.action_context_id
+    assert len(await rows(NotificationRun)) == 2
+    async with AsyncSessionLocal() as session:
+        items = await serialize_attempts(session, [original.attempt, repeat.attempt],
+                                        original.event.occurred_at + timedelta(minutes=3))
+    assert items[0]["outcome"] == items[1]["notification"]["canonical_outcome"] == "expired"
+    for key in ("approval_device", "approval_recipient", "delivery_id", "expiry_delivery_id", "approval_action_state"):
+        assert items[0]["notification"][key] == items[1]["notification"][key]
+    assert items[1]["notification"]["approval_device"] == original.person.home_assistant_mobile_app_notify_service
+    assert items[1]["notification"]["approval_action_state"] == "expired"
+
+async def test_recovery_list_uses_summary_columns_and_preserves_expired_filter(resources):
+    from sqlalchemy import event as sql_event
+    from app.api.v1.missed_exit_recovery import list_attempts
+    from app.db.session import engine
+
+    original = await fixture(resources)
+    async with AsyncSessionLocal() as session:
+        pending = await list_attempts(None, session, owner_id=original.person.id, outcome="expired")
+        assert pending["items"] == [] and pending["next_expiry_in_ms"] > 0
+        unrelated = await list_attempts(None, session, owner_id=uuid.uuid4(), outcome="expired")
+        assert "next_expiry_in_ms" not in unrelated
+        context = await session.get(NotificationActionContext, original.attempt.action_context_id)
+        context.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+        queries = []
+
+        def record(_conn, _cursor, sql, _params, _context, _many):
+            queries.append(sql.lower())
+
+        sql_event.listen(engine.sync_engine, "before_cursor_execute", record)
+        try:
+            page = await list_attempts(None, session, owner_id=original.person.id, outcome="expired")
+        finally:
+            sql_event.remove(engine.sync_engine, "before_cursor_execute", record)
+    assert len(queries) == 2
+    assert not any(field in sql for sql in queries for field in (
+        "missed_exit_recovery_attempts.checks", "missed_exit_recovery_attempts.timeline", "notification_runs",
+    ))
+    assert page["total"] == 1 and "next_expiry_in_ms" not in page
+    summary, = page["items"]
+    assert set(summary) == {"id", "occurred_at", "registration_number", "owner_name", "method", "reason", "outcome"}
+    assert summary["id"] == original.attempt.id and summary["outcome"] == "expired"
+    assert summary["reason"] == "resident_approval_expired"
+
+
+@pytest.mark.parametrize("page_size", [1, 100])
+async def test_recovery_history_payload_budget_at_page_sizes(resources, tmp_path, page_size):
+    from fastapi.encoders import jsonable_encoder
+    from sqlalchemy import event as sql_event
+    from starlette.responses import JSONResponse
+
+    from app.api.v1.missed_exit_recovery import list_attempts, serialize_attempts
+    from app.db.session import engine
+    from scripts.benchmarks.evidence import write_evidence
+
+    item = await fixture(resources)
+    attempt = MissedExitRecoveryAttempt
+    now = datetime.now(UTC)
+    async with AsyncSessionLocal() as session:
+        original = await session.get(attempt, item.attempt.id)
+        context = await session.get(NotificationActionContext, original.action_context_id)
+        context.expires_at = now - timedelta(seconds=1)
+        stages = [
+            ("plate", "recorded", "known_vehicle_matched"),
+            ("presence", "conflict", "resident_already_present"),
+            ("schedule", "checked", "entry_schedule_allows"),
+            ("phone_journey", "checked", "phone_journey_missing"),
+            ("camera_motion", "checked", "recent_camera_motion_missing"),
+        ]
+        timeline = [{"at": now.isoformat(), "stage": stage, "status": status, "reason": reason}
+                    for stage, status, reason in stages]
+        original.timeline = [*timeline, *original.timeline]
+        events = [AccessEvent(
+            person_id=item.person.id, vehicle_id=item.vehicle.id, registration_number=item.vehicle.registration_number,
+            direction=AccessDirection.ENTRY, decision=AccessDecision.DENIED, confidence=1, source="synthetic_lpr",
+            occurred_at=original.occurred_at + timedelta(milliseconds=i + 1),
+        ) for i in range(page_size - 1)]
+        session.add_all(events)
+        await session.flush()
+        for i, event in enumerate(events):
+            coalesced = i % 2 == 0
+            session.add(attempt(
+                event_id=event.id, occurred_at=event.occurred_at, owner_id=item.person.id,
+                owner_name=item.person.display_name, registration_number=event.registration_number,
+                vehicle_id=item.vehicle.id, method="resident_approval" if coalesced else "none",
+                outcome="coalesced" if coalesced else "denied",
+                reason="approval_already_pending" if coalesced else "phone_journey_missing",
+                checks={"phone": {"journey_available": False}, "camera": {"motion_available": False}},
+                timeline=timeline, action_context_id=context.id if coalesced else None,
+                notification={"canonical_attempt_id": str(original.id)} if coalesced else {},
+            ))
+        await session.commit()
+
+    statements = []
+    def capture(_conn, _cursor, sql, _params, _context, _many):
+        statements.append(sql.lower())
+
+    sql_event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        async with AsyncSessionLocal() as session:
+            full = {"total": await session.scalar(select(func.count()).select_from(attempt).where(
+                attempt.owner_id == item.person.id)), "offset": 0, "limit": page_size}
+            rows = list(await session.scalars(select(attempt).where(attempt.owner_id == item.person.id)
+                        .order_by(attempt.occurred_at.desc(), attempt.id.desc()).limit(page_size)))
+            full["items"] = await serialize_attempts(session, rows, now)
+        detail_statements = statements.copy()
+        statements.clear()
+        async with AsyncSessionLocal() as session:
+            compact = await list_attempts(None, session, owner_id=item.person.id, limit=page_size)
+    finally:
+        sql_event.remove(engine.sync_engine, "before_cursor_execute", capture)
+
+    fields = {"id", "occurred_at", "owner_name", "registration_number", "method", "outcome", "reason"}
+    assert compact == {**full, "items": [{key: row[key] for key in fields} for row in full["items"]]}
+    assert compact["total"] == len(compact["items"]) == page_size
+    assert compact["items"][-1]["outcome"] == "expired"
+    assert len(statements) == 2 and len(detail_statements) > len(statements)
+    for field in ("missed_exit_recovery_attempts.timeline", "missed_exit_recovery_attempts.checks",
+                  "missed_exit_recovery_attempts.notification", "notification_runs"):
+        assert all(field not in sql for sql in statements)
+        assert any(field in sql for sql in detail_statements)
+    full_bytes = len(JSONResponse(jsonable_encoder(full)).body)
+    compact_bytes = len(JSONResponse(jsonable_encoder(compact)).body)
+    assert compact_bytes * 3 < full_bytes
+    write_evidence(tmp_path / f"recovery-history-{page_size}.json", {
+        "dataset": {"returned_attempts": page_size, "minimum_recorded_stages_per_attempt": len(stages)},
+        "equivalent_order_and_summary_fields": sorted(fields),
+        "full_detail": {"json_utf8_bytes": full_bytes, "selects": len(detail_statements)},
+        "compact_page": {"json_utf8_bytes": compact_bytes, "selects": len(statements)},
+        "limits": "Synthetic uncompressed HTTP JSON body bytes, with batched full-detail hydration as baseline.",
+    })

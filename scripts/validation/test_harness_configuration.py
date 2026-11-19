@@ -291,6 +291,41 @@ class RecoveryProfileTests(unittest.TestCase):
         self.assertNotIn('/artifacts/**', workflow)
 
 
+class FocusedSelectionTests(unittest.TestCase):
+    def test_full_file_and_nodes_are_grouped_without_broadening_other_files(self):
+        path, other = recovery_checks.PERSISTENCE_TESTS[:2]
+        args = arguments(['--mode', 'focused', '--allow-downloads', '--test', path + '::test_a',
+                          '--test', other + '::TestCase::test_b[case]', '--test', path, '--test', path + '::test_c'])
+        self.assertEqual(args.targets, {path: [path], other: [other + '::TestCase::test_b[case]']})
+        self.assertEqual(recovery_checks.required_sources(args), [path, other])
+        self.assertEqual(recovery_checks.persistence_checks(args), [(path, 'persistence'), (other, 'persistence')])
+
+    def test_invalid_targets_and_modes_are_refused(self):
+        for args in (['--mode', 'focused'], ['--test', 'backend/tests/test_a.py'],
+                     ['--mode', 'focused', '--test', '../backend/tests/test_a.py'],
+                     ['--mode', 'focused', '--test', 'backend/tests/test_a.py::'],
+                     ['--mode', 'focused', '--test', 'backend/tests/test_a.py', '--database-restore']):
+            with self.subTest(args=args), patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit):
+                arguments(['--allow-downloads', *args])
+
+    def test_failed_changed_and_recent_files_move_up_without_dropping_or_duplicating(self):
+        from suite_selection import prioritize, recent_suites
+        suites = [('test_unrelated.py', 'diagnostic'), ('test_gate_commands.py', 'persistence'),
+                  ('test_visitor.py', 'persistence'), ('test_recovery.py', 'persistence')]
+        with tempfile.TemporaryDirectory() as folder:
+            parent = Path(folder)
+            run = parent / 'iacs-validation-history'
+            run.mkdir()
+            (run/'manifest.json').write_text(json.dumps({'repository': str(ROOT), 'mode': 'focused'}))
+            (run/'persistence-suites.json').write_text(json.dumps([
+                {'check': 'suite-001', 'path': suites[2][0]}, {'check': 'suite-002', 'path': suites[3][0]}]))
+            (run/'checks.json').write_text(json.dumps({'suite-001': {'status': 'failed'}, 'suite-002': {'status': 'passed'}}))
+            hints = recent_suites(ROOT, parent, parent/'current')
+            self.assertEqual(prioritize(suites, ['backend/app/services/gate_commands.py'], *hints),
+                             [suites[2], suites[3], suites[1], suites[0]])
+            self.assertEqual(recent_suites(parent, parent, parent/'current'), (set(), set()))
+
+
 class FullRunLockTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -370,6 +405,26 @@ class IsolatedCommandTests(unittest.TestCase):
                 side_effect=lambda *args: self.calls.append(('database-restore', [], {}))))
             self.harness.execute()
         return restore
+
+    def test_focused_node_uses_migrated_clone_and_only_selected_pytest_node(self):
+        path = recovery_checks.PERSISTENCE_TESTS[0]
+        target = path + '::test_synthetic'
+        self.harness.args = arguments(['--mode', 'focused', '--test', target, '--allow-downloads'])
+        self.execute()
+        commands = {name: cmd for name, cmd, _ in self.calls}
+        self.assertIn('/workspace/' + target, commands['suite-001'])
+        for name in ['isolation-db-free', 'isolation-persistence', 'migration-up', 'suite-001-create', 'suite-001-drop']:
+            self.assertIn(name, commands)
+        for name in ['backend-tests', 'frontend-tests', 'suite-002', 'schema-check-1']:
+            self.assertNotIn(name, commands)
+
+    def test_focused_unit_skips_database_and_broad_checks(self):
+        self.harness.args = arguments(['--mode', 'focused', '--test', 'backend/tests/test_plate_lookup.py', '--allow-downloads'])
+        self.execute()
+        commands = {name: cmd for name, cmd, _ in self.calls}
+        self.assertIn('/workspace/backend/tests/test_plate_lookup.py', commands['focused-unit-tests'])
+        self.assertNotIn('postgres-start', commands)
+        self.assertNotIn('backend-tests', commands)
 
     def test_full_checks_skip_unrequested_restore_and_keep_database_coverage(self):
         restore = self.execute()

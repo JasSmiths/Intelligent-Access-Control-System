@@ -162,13 +162,10 @@ async def list_visitor_passes(
 ) -> list[VisitorPassResponse]:
     service = get_visitor_pass_service()
     try:
-        changed = await service.refresh_statuses(session=session, publish=False)
-        if changed:
-            await session.commit()
         passes = await service.list_passes(
             session, statuses=statuses or None, search=q, limit=limit
         )
-        return [visitor_pass_response(serialize_visitor_pass(pass_)) for pass_ in passes]
+        return [visitor_pass_response(pass_) for pass_ in passes]
     except Exception as exc:
         await session.rollback()
         raise visitor_pass_server_error("load", exc) from exc
@@ -231,14 +228,12 @@ async def get_visitor_pass(
 ) -> VisitorPassResponse:
     service = get_visitor_pass_service()
     try:
-        await service.refresh_statuses(session=session, publish=False)
-        visitor_pass = await service.get_pass(session, pass_id)
+        visitor_pass = await service.pass_detail(session, pass_id)
         if not visitor_pass:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Visitor pass not found"
             )
-        await session.commit()
-        return visitor_pass_response(serialize_visitor_pass(visitor_pass))
+        return visitor_pass_response(visitor_pass)
     except HTTPException:
         raise
     except Exception as exc:

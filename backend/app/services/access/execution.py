@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -49,6 +50,7 @@ from app.services.access.evidence import (
     AccessEvidenceResolver,
     CameraEvidenceRequired,
     LocationRefreshRequired,
+    PreparedCameraEvidence,
 )
 from app.services.access.hardware import open_gate_for_access_event, publish_gate_open_skipped
 from app.services.access.payloads import (
@@ -75,6 +77,7 @@ from app.services.access.reads import (
     _movement_saga_idempotency_key,
     _webhook_trace_from_read,
 )
+from app.services.access.recovery_queue import RecoveryWindowParked, park_in_session
 from app.services.access.window_store import AccessWindowStore, StoredWindow
 from app.services.gate_commands import GateCommandOutcome
 from app.services.ha_presence_reservations import reserve_all_in_session
@@ -88,6 +91,7 @@ from app.services.movement.sessions import (
     gate_observation_from_read,
 )
 from app.services.movement_ledger import MovementLedgerRepository
+from app.services.resident_location_contracts import LocationRefresh
 from app.services.resident_location_refresh import reserve_in_session as reserve_location_refresh
 from app.services.resident_location_refresh import wait_for_location
 from app.services.schedules import ScheduleEvaluation
@@ -97,6 +101,12 @@ from app.services.vehicle_information_jobs import eligible_arrival
 from app.services.visitor_passes import VisitorPassReservationConflict, get_visitor_pass_service
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class CollectedRecoveryEvidence:
+    camera: PreparedCameraEvidence | None
+    location: LocationRefresh | None
 
 
 class AccessExecution:
@@ -121,6 +131,8 @@ class AccessExecution:
         trace: Any,
         finalize_started_at: datetime,
         webhook_trace: dict[str, Any],
+        park_recovery: bool = False,
+        collected: CollectedRecoveryEvidence | None = None,
     ) -> uuid.UUID | None:
         execution_started = time.monotonic()
         external_admission = _external_admission_from_read(read)
@@ -134,7 +146,7 @@ class AccessExecution:
                 await session.commit()
                 return None
         location_refresh = None
-        if runtime.missed_exit_recovery_enabled and not external_admission:
+        if collected is None and runtime.missed_exit_recovery_enabled and not external_admission:
             async with access_session(AsyncSessionLocal) as session:
                 runtime = await get_runtime_config_for_session(session)
                 candidate = await session.scalar(select(Person.id).join(Vehicle, Vehicle.person_id == Person.id)
@@ -149,14 +161,31 @@ class AccessExecution:
                 except LocationRefreshRequired as request:
                     location_refresh = await reserve_location_refresh(session, person=request.person,
                         vehicle=request.vehicle, config=runtime, read=direction_read, window=window, claim=claim)
+                    if park_recovery and location_refresh is not None:
+                        await park_in_session(session, claim, owner_id=request.person.id,
+                            vehicle_id=request.vehicle.id, phone_epoch=location_refresh.epoch)
+                        await session.commit()
+                        raise RecoveryWindowParked()
                     await session.commit()
                 except CameraEvidenceRequired:
                     pass
             if location_refresh is not None:
                 location_refresh = await wait_for_location(location_refresh)
-        camera_evidence = await AccessEvidenceResolver(runtime).prepare_camera_evidence(
-            read, direction_read, external_admission, trace, location_refresh=location_refresh
-        )
+        if collected is not None:
+            camera_evidence, location_refresh = collected.camera, collected.location
+        else:
+            try:
+                camera_evidence = await AccessEvidenceResolver(runtime).prepare_camera_evidence(
+                    read, direction_read, external_admission, trace, location_refresh=location_refresh,
+                    defer_recovery=park_recovery)
+            except CameraEvidenceRequired as request:
+                if not park_recovery or not request.recovery or request.vehicle_id is None:
+                    raise
+                async with access_session(AsyncSessionLocal) as session:
+                    await park_in_session(session, claim, owner_id=request.person_id,
+                        vehicle_id=request.vehicle_id, phone_epoch=None)
+                    await session.commit()
+                raise RecoveryWindowParked() from None
         async with access_session(AsyncSessionLocal) as session:
             if await self._reuse_window_in_session(session, window, claim, read):
                 await session.commit()

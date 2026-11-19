@@ -646,7 +646,7 @@ async def test_preview_complete_history_duration_and_media_are_shared_with_expor
     assert exported["report_id"] == "123456"
 
 
-async def test_preview_visitor_keeps_existing_attribution_filter_and_options(monkeypatch):
+async def test_preview_visitor_uses_scoped_attribution_and_options(monkeypatch):
     monkeypatch.setattr(reports_service, "get_runtime_config", london_report_config)
     forbid_report_effects(monkeypatch)
     arrival = make_event(occurred_at=datetime(2026, 7, 14, 8, tzinfo=UTC), direction=AccessDirection.ENTRY)
@@ -671,7 +671,7 @@ async def test_preview_visitor_keeps_existing_attribution_filter_and_options(mon
     assert len(preview["report"]["events"]) == 1
     assert preview["report"]["events"][0]["snapshot_url"] is None
     params = session.queries[0].compile().params.values()
-    assert {"visitor_pass": {"id": str(visitor.id)}} in params
+    assert str(visitor.id) in params
     assert "SYNTH01" in params
     assert [arrival.id] in params
 

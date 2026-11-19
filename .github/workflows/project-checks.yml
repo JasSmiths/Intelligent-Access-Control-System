@@ -41,6 +41,8 @@ jobs:
       IACS_VALIDATION_BACKEND_IMAGE: iacs-backend:ci-runtime
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -80,6 +82,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           path: ${{ runner.temp }}/iacs-upload-evidence
+
+      - name: Identify the full result for local reuse
+        id: full-receipt
+        run: |
+          name=$(python3 scripts/validation/ci_receipt.py name --root "$RUNNER_TEMP/iacs-evidence" --attempt "$GITHUB_RUN_ATTEMPT")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Publish verified full-run receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.full-receipt.outputs.name }}
+          path: ${{ runner.temp }}/iacs-evidence/iacs-validation-*/manifest.json
+          if-no-files-found: error
+          retention-days: 14
 
   dependency-audits:
     runs-on: ubuntu-latest

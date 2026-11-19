@@ -84,6 +84,7 @@ class Person(Base, TimestampMixin):
     missed_exit_recovery_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
+    missed_exit_recovery_expiry_notify_service: Mapped[str | None] = mapped_column(String(255))
     missed_exit_recovery_tracker_entity_id: Mapped[str | None] = mapped_column(String(255))
     home_assistant_presence_input_boolean_entity_ids: Mapped[list[str]] = mapped_column(
         JSONB, default=list, nullable=False
@@ -107,6 +108,8 @@ class Person(Base, TimestampMixin):
     presence: Mapped["Presence | None"] = relationship(back_populates="person")
 
 
+Index("ix_people_mobile_destination", Person.home_assistant_mobile_app_notify_service,
+      postgresql_where=text("home_assistant_mobile_app_notify_service IS NOT NULL"))
 Index(
     "uq_people_recovery_tracker",
     Person.missed_exit_recovery_tracker_entity_id,
@@ -592,6 +595,7 @@ class NotificationRun(Base, TimestampMixin):
     rules_override: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB(none_as_null=True))
     review_reason: Mapped[str | None] = mapped_column(String(120))
     claim_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     trigger_event: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     severity: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
@@ -608,6 +612,11 @@ class NotificationRun(Base, TimestampMixin):
     error: Mapped[str | None] = mapped_column(Text)
 
 
+Index("ix_notification_runs_scheduled", NotificationRun.not_before, NotificationRun.id,
+      postgresql_where=text("not_before IS NOT NULL AND claim_token IS NULL AND recovery_version=1 AND status IN ('queued','processing')"))
+Index("ix_notification_runs_active_location", NotificationRun.queued_at, NotificationRun.id,
+      postgresql_where=text("recovery_version=1 AND status IN ('queued','processing') "
+                            "AND trigger_event='resident_location_refresh'"))
 Index("ix_notification_runs_status_queued", NotificationRun.status, NotificationRun.queued_at)
 Index(
     "ix_notification_runs_trigger_queued", NotificationRun.trigger_event, NotificationRun.queued_at
@@ -923,6 +932,11 @@ for _identity in (AccessEvent.person_id, AccessEvent.vehicle_id):
         & AccessEvent.direction.in_([AccessDirection.ENTRY, AccessDirection.EXIT]))
 
 
+Index("ix_access_events_visitor_pass_time", text("((raw_payload -> 'visitor_pass'::text) ->> 'id'::text)"),
+      AccessEvent.occurred_at.desc(), AccessEvent.id.desc(),
+      postgresql_where=text("((raw_payload -> 'visitor_pass'::text) ->> 'id'::text) IS NOT NULL"))
+Index("ix_access_events_operator_exit_time", AccessEvent.vehicle_id, AccessEvent.occurred_at.desc(), AccessEvent.id.desc(),
+      postgresql_where=text("source='operator_reported_backfill' AND direction='EXIT' AND decision='GRANTED'"))
 Index("ix_access_events_created_at", AccessEvent.created_at)
 Index(
     "ix_access_events_decision_occurred_person_vehicle",
@@ -1297,6 +1311,8 @@ class MovementSessionRecord(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
 
 
+Index("ix_movement_sagas_pending_admission", MovementSagaRecord.id,
+      postgresql_where=text("admission_status='pending'"))
 Index("ix_movement_sagas_state_updated_at", MovementSagaRecord.state, MovementSagaRecord.updated_at)
 Index(
     "ix_movement_sagas_reconciliation_updated_at",

@@ -25,14 +25,15 @@ from app.services.access.window_store import StoredWindow
 from app.services.event_bus import RealtimeEvent, event_bus
 from app.services.gate_controller import get_gate_controller
 from app.services.notification_runs import NotificationRunStore
+from app.services.resident_location_contracts import LOCATION_REFRESH_TRIGGER as TRIGGER
 from app.services.resident_location_contracts import LOCATION_UPDATED, LocationRefresh
 from app.services.resident_recovery import MOBILE_PATTERN, connection_epoch, lock_owner
 from app.services.resident_recovery_evidence import configuration_binding, parse_time
 from app.services.schedules import evaluate_vehicle_schedule
 from app.services.settings import RuntimeConfig, get_runtime_config_for_session
+from app.services.workflows.channel_definitions import ResidentLocationAction
 from app.services.workflows.notification_payloads import notification_context_payload
 
-TRIGGER = "resident_location_refresh"
 ORIGIN = "resident_location_origin"
 
 
@@ -72,9 +73,7 @@ async def reserve_in_session(session: AsyncSession, *, person: Person, vehicle: 
               "registration_number": vehicle.registration_number, "binding": binding,
               "requested_at": now.isoformat(), "expires_at": expires.isoformat(),
               "captured_at": read.captured_at.isoformat(), "notify_service": target}
-    action = {"type": "mobile", "target": target, "title": "",
-              "message": "request_location_update", "delivery_mode": "literal",
-              "resident_location_output": str(run_id)}
+    action = ResidentLocationAction(target=target, resident_location_output=str(run_id)).model_dump()
     payload = notification_context_payload(NotificationContext(event_type=TRIGGER,
         subject=str(person.id), severity="info", facts={}))
     payload[ORIGIN] = origin
@@ -82,6 +81,27 @@ async def reserve_in_session(session: AsyncSession, *, person: Person, vehicle: 
         plan=[{"rule": {"id": TRIGGER, "name": "Resident location refresh"},
                "action": action, "state": "pending"}])
     return LocationRefresh(run_id, person.id, vehicle.id, read.source, read.captured_at, now, expires, binding, epoch)
+
+
+async def resume_location(claim: WindowClaim, read: PlateRead, *, epoch: str) -> LocationRefresh | None:
+    """Rejoin the one original request. A replacement lease cannot renew or resend it."""
+    run_id = uuid.uuid5(claim.window_id, TRIGGER)
+    async with access_session(AsyncSessionLocal) as session:
+        context = await session.scalar(select(NotificationRun.context).where(NotificationRun.id == run_id))
+    origin = (context or {}).get(ORIGIN) or {}
+    if (origin.get("closed") or epoch != connection_epoch()
+            or origin.get("window_token") != str(claim.token)
+            or origin.get("coordinator_token") != str(claim.coordinator.token)):
+        if origin and not origin.get("closed"):
+            await _close_request(run_id)
+        return None
+    requested = parse_time(origin.get("requested_at"))
+    expires = parse_time(origin.get("expires_at"))
+    captured = parse_time(origin.get("captured_at"))
+    if requested is None or expires is None or captured != read.captured_at:
+        raise ValueError("invalid_resident_location_checkpoint")
+    return await wait_for_location(LocationRefresh(run_id, uuid.UUID(origin["person_id"]),
+        uuid.UUID(origin["vehicle_id"]), read.source, read.captured_at, requested, expires, origin["binding"], epoch))
 
 
 async def wait_for_location(refresh: LocationRefresh) -> LocationRefresh:
@@ -122,12 +142,23 @@ async def _wait_for_location(refresh: LocationRefresh, wake: asyncio.Event) -> L
         if connection_epoch() != refresh.epoch:
             return refresh
         async with access_session(AsyncSessionLocal) as session:
-            row = (await session.execute(select(ResidentRecoveryJourney.latest_at,
-                ResidentRecoveryJourney.invalid_reason).where(
-                    ResidentRecoveryJourney.person_id == refresh.person_id))).first()
-        if row and row.invalid_reason:
+            row = (await session.execute(select(
+                ResidentRecoveryJourney.latest_at, ResidentRecoveryJourney.invalid_reason,
+                NotificationRun.status, NotificationRun.review_reason,
+                NotificationRun.delivery_plan[0]["state"].astext.label("action_state"),
+                NotificationRun.delivery_plan[0]["reason"].astext.label("skip_reason"),
+            ).select_from(NotificationRun).outerjoin(ResidentRecoveryJourney,
+                ResidentRecoveryJourney.person_id == refresh.person_id
+            ).where(NotificationRun.id == refresh.run_id))).one_or_none()
+        if row is None:
+            return replace(refresh, delivery_failure="location_request_missing")
+        if row.action_state in {"failed", "skipped"}:
+            return replace(refresh, delivery_failure=row.skip_reason or f"location_request_{row.action_state}")
+        if row.status == "review_required" and row.action_state in {None, "pending"}:
+            return replace(refresh, delivery_failure=row.review_reason or "location_request_held")
+        if row.invalid_reason:
             return refresh
-        if row and row.latest_at and row.latest_at > refresh.requested_at:
+        if row.latest_at and row.latest_at > refresh.requested_at:
             observed_at = datetime.now(UTC)
             remaining = min(2.0, deadline - loop.time(), (refresh.expires_at - observed_at).total_seconds())
             if remaining <= 0:
@@ -138,7 +169,15 @@ async def _wait_for_location(refresh: LocationRefresh, wake: asyncio.Event) -> L
                 return replace(refresh, gate_observed_at=observed_at, gate_state=state.value)
             except Exception:  # noqa: BLE001 - unavailable gate evidence fails closed into resident approval.
                 return refresh
-        await wake.wait()
+        if row.action_state in {"pending", "attempting"}:
+            # A pre-dispatch hold or skip has no tracker event to wake this waiter.
+            # Only an outstanding request polls its own indexed journal row.
+            try:
+                await asyncio.wait_for(wake.wait(), timeout=0.5)
+            except TimeoutError:
+                pass
+        else:
+            await wake.wait()
     return refresh
 
 

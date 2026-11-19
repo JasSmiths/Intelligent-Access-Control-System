@@ -106,8 +106,12 @@ Read only the guides relevant to the task:
 - Docs only: check links, source paths/commands, and `git diff --check`.
 - Frontend only: `cd frontend && npm run build && npm test`; follow validation's
   browser checks when interaction or layout changes.
-- Backend, schema, or cross-system: run the full isolated harness with `--mode full`
-  and `--reuse-dependencies` or `--allow-downloads`, following the validation guide.
+- Backend, schema, or cross-system: iterate with `--mode focused --test FILE[::NODE]`
+  and a verified dependency preparation. At handoff run the full isolated harness
+  with `--mode full` and `--reuse-dependencies` or `--allow-downloads`, or for
+  a clean committed checkout use `python3 scripts/validation/ci_receipt.py verify`
+  and retain its successful Project Checks run URL. Use local full validation for
+  uncommitted code or when matching CI proof is unavailable. See the validation guide.
   It includes source, backend/frontend, migration, persistence and diagnostic checks.
   Add `--database-restore` only when the user explicitly requests a restore rehearsal.
   CI push/PR checks omit rehearsals; a requested manual run must explicitly enable

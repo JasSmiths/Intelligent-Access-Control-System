@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,8 +11,9 @@ from app.api.dependencies import admin_user, current_user
 from app.db.session import get_db_session
 from app.models import Schedule, User
 from app.services import schedule_operations
+from app.services.schedule_dependency_reads import ScheduleDependencyPage, schedule_dependency_page
 from app.services.schedule_operations import ScheduleOperationError
-from app.services.schedules import empty_time_blocks, normalize_time_blocks, schedule_dependencies
+from app.services.schedules import empty_time_blocks, normalize_time_blocks
 
 router = APIRouter()
 
@@ -35,12 +36,6 @@ class ScheduleResponse(BaseModel):
     time_blocks: dict[str, list[dict[str, str]]]
     created_at: str
     updated_at: str
-
-
-class ScheduleDependenciesResponse(BaseModel):
-    people: list[dict[str, str | None]]
-    vehicles: list[dict[str, str | None]]
-    doors: list[dict[str, str | None]]
 
 
 def serialize_schedule(schedule: Schedule) -> dict[str, Any]:
@@ -132,17 +127,20 @@ async def update_schedule(
     return ScheduleResponse(**serialize_schedule(schedule))
 
 
-@router.get("/{schedule_id}/dependencies", response_model=ScheduleDependenciesResponse)
+@router.get("/{schedule_id}/dependencies", response_model=ScheduleDependencyPage)
 async def get_schedule_dependencies(
     schedule_id: uuid.UUID,
     _: Annotated[User, Depends(current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> ScheduleDependenciesResponse:
+    cursor: Annotated[str | None, Query(max_length=2048)] = None,
+) -> ScheduleDependencyPage:
     schedule = await session.get(Schedule, schedule_id)
     if not schedule:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
-    dependencies = await schedule_dependencies(session, schedule_id)
-    return ScheduleDependenciesResponse(**dependencies)
+    try:
+        return await schedule_dependency_page(session, schedule_id, cursor)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid schedule assignment cursor") from exc
 
 
 @router.delete("/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -176,20 +174,4 @@ def _operation_http_error(exc: ScheduleOperationError) -> HTTPException:
         "schedule_in_use": 409,
         "forbidden": 403,
     }
-    detail = str(exc)
-    if exc.dependencies:
-        detail = f"Schedule is currently in use by {_dependency_summary(exc.dependencies)}."
-    return HTTPException(status_code=codes.get(exc.code, 422), detail=detail)
-
-
-def _dependency_summary(dependencies: dict[str, list[dict[str, str | None]]]) -> str:
-    parts: list[str] = []
-    labels = {"people": "people", "vehicles": "vehicles", "doors": "doors"}
-    for key, rows in dependencies.items():
-        if rows:
-            names = ", ".join(
-                str(row.get("name") or row.get("entity_id") or row.get("id")) for row in rows[:4]
-            )
-            suffix = f" and {len(rows) - 4} more" if len(rows) > 4 else ""
-            parts.append(f"{labels.get(key, key)}: {names}{suffix}")
-    return "; ".join(parts) or "assigned entities"
+    return HTTPException(status_code=codes.get(exc.code, 422), detail=str(exc))

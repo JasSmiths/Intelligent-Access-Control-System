@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -103,7 +105,8 @@ def device_command_receipt(row: AccessDeviceCommandRecord) -> dict[str, Any]:
 
 class AccessDeviceCommandJournal:
     @staticmethod
-    async def record_outcome_in_session(session: AsyncSession, row: AccessDeviceCommandRecord) -> AuditLog | None:
+    async def record_outcome_in_session(session: AsyncSession, row: AccessDeviceCommandRecord, *,
+                                        include_existing: bool = True) -> AuditLog | None:
         """Outcome and mandatory audit share the existing journal transaction.
 
         The locked command identity and durable state also identify its audit.
@@ -122,7 +125,7 @@ class AccessDeviceCommandJournal:
         audit_id = uuid.uuid5(row.id, f"device-command-outcome:{row.state}")
         existing = await session.get(AuditLog, audit_id)
         if existing is not None:
-            return existing
+            return existing if include_existing else None
         dispatch_state, outcome, level = states[row.state]
         device = await session.get(AccessDevice, row.target_device_id)
         payload = device_command_receipt(row)
@@ -141,7 +144,7 @@ class AccessDeviceCommandJournal:
 
     @staticmethod
     async def publish_outcome_hint(audit: AuditLog | None) -> None:
-        """Preserve the full audit event after commit/close; replay may repeat it.
+        """Publish an outcome hint after commit/close.
 
         SQL audit identity is idempotent; realtime delivery is best effort.
         Externally composed access participants use access-event publication.
@@ -185,20 +188,38 @@ class AccessDeviceCommandJournal:
 
     async def gate_command_projection(self, session: AsyncSession, parent: GateCommandRecord, *,
                                       reconcile: bool = False) -> dict[str, Any] | None:
+        if not reconcile:
+            projections = await self.gate_command_projections(session, [parent])
+            return projections.get(parent.id)
         metadata = parent.command_metadata or {}
         plan = metadata.get("target_plan")
         if metadata.get("recovery_version") != 2 or not plan:
             return None
-        if reconcile:
-            receipts = await self.parent_receipts(session, parent)
-        else:
-            rows = list((await session.scalars(select(AccessDeviceCommandRecord).where(
-                AccessDeviceCommandRecord.gate_command_id == parent.id))).all())
-            by_id = {str(row.target_device_id): row for row in rows}
-            receipts = [device_command_receipt(by_id[target["target_device_id"]]) for target in plan["targets"]
-                        if target["target_device_id"] in by_id]
+        receipts = await self.parent_receipts(session, parent)
         return gate_receipt_projection(receipts, admission_target_device_id=plan.get("admission_target_device_id"),
                                        expected_target_count=len(plan["targets"]))
+
+    async def gate_command_projections(self, session: AsyncSession, parents: Sequence[GateCommandRecord]) -> dict[uuid.UUID, dict[str, Any]]:
+        plans = {
+            parent.id: parent.command_metadata["target_plan"] for parent in parents
+            if (parent.command_metadata or {}).get("recovery_version") == 2 and parent.command_metadata.get("target_plan")
+        }
+        if not plans:
+            return {}
+        rows = await session.scalars(select(AccessDeviceCommandRecord).where(
+            AccessDeviceCommandRecord.gate_command_id.in_(plans.keys())))
+        children: dict[uuid.UUID, dict[str, AccessDeviceCommandRecord]] = defaultdict(dict)
+        for row in rows:
+            if row.gate_command_id is not None:
+                children[row.gate_command_id][str(row.target_device_id)] = row
+        projections = {}
+        for parent_id, plan in plans.items():
+            by_target = children[parent_id]
+            receipts = [device_command_receipt(by_target[target["target_device_id"]]) for target in plan["targets"]
+                        if target["target_device_id"] in by_target]
+            projections[parent_id] = gate_receipt_projection(receipts,
+                admission_target_device_id=plan.get("admission_target_device_id"), expected_target_count=len(plan["targets"]))
+        return projections
 
     async def list_command_receipts(self, *, limit: int = 25,
                                     before_id: uuid.UUID | None = None) -> dict[str, Any]:
@@ -533,8 +554,7 @@ class AccessDeviceCommandJournal:
             # resolved by fresh evidence from their exact frozen binding only.
             if row.state in {"accepted", "unknown"} and row.binding_fingerprint == binding_fingerprint:
                 await self._verify(session, row, observation, now)
-            audit = await self.record_outcome_in_session(session, row)
-            await notify_work(session, WorkTopic.MOVEMENT)
+            audit = await self.record_outcome_in_session(session, row, include_existing=False)
             await session.commit()
             committed = True
             return row
@@ -573,8 +593,7 @@ class AccessDeviceCommandJournal:
                     row.gate_state = observation.state
                     row.state, row.completed_at = "verified", now
                     row.lease_token = row.lease_expires_at = None
-            audit = await self.record_outcome_in_session(session, row)
-            await notify_work(session, WorkTopic.MOVEMENT)
+            audit = await self.record_outcome_in_session(session, row, include_existing=False)
             await session.commit()
             committed = True
             return row

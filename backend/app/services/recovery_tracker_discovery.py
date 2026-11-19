@@ -1,11 +1,14 @@
 """Read-only, conservative mobile-app identity discovery for recovery drafts."""
 import asyncio
-from collections import Counter, defaultdict
+from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models import Person
 from app.modules.home_assistant.client import HomeAssistantClient, HomeAssistantState
@@ -29,7 +32,7 @@ class RecoveryTrackerMapping(BaseModel):
 
 class RecoveryTrackerDiscovery(BaseModel):
     trackers: list[RecoveryTracker]
-    mappings: list[RecoveryTrackerMapping]
+    mapping: RecoveryTrackerMapping | None
     status: Literal["complete", "unavailable"]
     reason: str | None
 
@@ -64,8 +67,16 @@ def _tracker_reason(
     return None
 
 
+@dataclass(frozen=True)
+class DiscoveryOwner:
+    id: UUID
+    is_active: bool
+    notify_service: str | None
+    shared_destination: bool
+
+
 def build_discovery(
-    people: list[Any], states: list[HomeAssistantState], advertised_services: set[str],
+    owner: DiscoveryOwner, states: list[HomeAssistantState], advertised_services: set[str],
     entities: list[dict[str, Any]] | None, devices: list[dict[str, Any]] | None,
     *, device_services: dict[str, str] | None = None, unavailable_reason: str | None = None,
 ) -> RecoveryTrackerDiscovery:
@@ -112,24 +123,15 @@ def build_discovery(
             eligible=tracker_reason is None, reason=tracker_reason,
         ))
     tracker_by_id = {tracker.entity_id: tracker for tracker in trackers}
-    notify_owners = Counter(person.home_assistant_mobile_app_notify_service for person in people
-                            if person.home_assistant_mobile_app_notify_service)
-    tracker_owners: dict[str, set[str]] = defaultdict(set)
-    for person in people:
-        assigned = person.missed_exit_recovery_tracker_entity_id
-        if assigned:
-            tracker_owners[assigned].add(str(person.id))
-    mappings = []
-    for person in people:
-        if not person.is_active:
-            continue
-        notify = person.home_assistant_mobile_app_notify_service
+    mapping = None
+    if owner.is_active:
+        notify = owner.notify_service
         status: Literal["matched", "ambiguous", "not_found", "unavailable"] = "not_found"
         reason: str | None = "saved_notify_service_missing"
         suggestion = None
         if notify:
             matches = service_devices.get(notify, [])
-            if notify_owners[notify] > 1:
+            if owner.shared_destination:
                 status, reason = "ambiguous", "notify_service_shared"
             elif not registry_available:
                 status, reason = "unavailable", unavailable_reason or "registry_unavailable"
@@ -156,29 +158,35 @@ def build_discovery(
                         tracker_by_id[row["entity_id"]].reason == "tracker_unavailable" for row in linked
                     ) else "not_found"
                     reason = "eligible_tracker_unavailable" if status == "unavailable" else "eligible_tracker_not_found"
-                elif tracker_owners[eligible[0].entity_id] - {str(person.id)}:
-                    status, reason = "ambiguous", "tracker_assigned_elsewhere"
                 else:
                     status, reason, suggestion = "matched", None, eligible[0].entity_id
-        mappings.append(RecoveryTrackerMapping(
-            person_id=str(person.id), notify_service_id=notify,
+        mapping = RecoveryTrackerMapping(
+            person_id=str(owner.id), notify_service_id=notify,
             suggested_tracker_entity_id=suggestion, status=status, reason=reason,
-        ))
+        )
     return RecoveryTrackerDiscovery(
-        trackers=trackers, mappings=mappings,
+        trackers=trackers, mapping=mapping,
         status="complete" if registry_available else "unavailable",
         reason=None if registry_available else unavailable_reason or "registry_unavailable",
     )
 
 
 async def discover_recovery_trackers(
-    session: AsyncSession, client: HomeAssistantClient,
-) -> RecoveryTrackerDiscovery:
-    # Include inactive owners to prevent reassignment/shared destinations. Only
-    # active people are presented. No transaction mutation, commits or audit writes.
-    people = list((await session.scalars(select(Person).order_by(
-        Person.first_name, Person.last_name, Person.id,
-    ))).all())
+    session: AsyncSession, client: HomeAssistantClient, owner_id: UUID,
+) -> RecoveryTrackerDiscovery | None:
+    other = aliased(Person)
+    shared = exists().where(
+        other.id != Person.id,
+        other.home_assistant_mobile_app_notify_service == Person.home_assistant_mobile_app_notify_service,
+    )
+    row = (await session.execute(select(
+        Person.id, Person.is_active, Person.home_assistant_mobile_app_notify_service, shared,
+    ).where(Person.id == owner_id))).one_or_none()
+    # End this read-only request transaction before waiting for Home Assistant.
+    await session.rollback()
+    if row is None:
+        return None
+    owner = DiscoveryOwner(*row)
     states: list[HomeAssistantState] = []
     services: set[str] = set()
     try:
@@ -196,8 +204,16 @@ async def discover_recovery_trackers(
                 [device.get("name") for device in mobile_devices], runtime_config=config,
             )
             device_services = {device.get("id"): service for device, service in zip(mobile_devices, normalized, strict=True)}
-        return build_discovery(people, states, services, entities, devices, device_services=device_services)
+        result = build_discovery(owner, states, services, entities, devices, device_services=device_services)
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001 - vendor failures must return only safe discovery status
-        return build_discovery(people, states, services, None, None, unavailable_reason="discovery_unavailable")
+        return build_discovery(owner, states, services, None, None, unavailable_reason="discovery_unavailable")
+    mapping = result.mapping
+    if mapping and mapping.suggested_tracker_entity_id and await session.scalar(select(exists().where(
+        Person.id != owner_id, Person.missed_exit_recovery_tracker_entity_id == mapping.suggested_tracker_entity_id,
+    ))):
+        mapping.status = "ambiguous"
+        mapping.reason = "tracker_assigned_elsewhere"
+        mapping.suggested_tracker_entity_id = None
+    return result

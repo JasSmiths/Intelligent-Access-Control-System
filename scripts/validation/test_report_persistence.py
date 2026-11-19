@@ -16,8 +16,8 @@ import pytest_asyncio
 from sqlalchemy import event, func, insert, select, text, update
 
 from app.db.session import AsyncSessionLocal, engine
-from app.models import AccessEvent, Anomaly, AuditLog, Person, ReportExport, SystemSetting, User, Vehicle
-from app.models.enums import AccessDecision, AccessDirection, AnomalySeverity, AnomalyType, TimingClassification, UserRole
+from app.models import AccessEvent, Anomaly, AuditLog, Person, ReportExport, SystemSetting, User, Vehicle, VisitorPass, VisitorPassReservationRecord
+from app.models.enums import AccessDecision, AccessDirection, AnomalySeverity, AnomalyType, TimingClassification, UserRole, VisitorPassType
 from app.services import auth, report_exports, report_reads, reports
 from app.services.report_contracts import ReportAuthority, ReportAuthorityError, ReportLimitError, ReportRequest, ReportStoppedError, ReportTimeoutError, ReportWork
 
@@ -61,6 +61,54 @@ async def preview(person_id):
         return await reports.preview_person_movement_report(
             session, person_id=person_id, period_start=NOW - timedelta(minutes=1), period_end=NOW + timedelta(minutes=1), **OPTIONS,
         )
+
+
+async def test_visitor_reports_respect_direct_receipts_and_unambiguous_legacy_intervals():
+    plate = "SHARED02"
+    midnight = NOW.replace(hour=0) + timedelta(days=1)
+    first = VisitorPass(id=uuid.uuid4(), visitor_name="First visit", pass_type=VisitorPassType.DURATION,
+        expected_time=midnight, number_plate=plate, valid_from=midnight - timedelta(hours=1), valid_until=midnight)
+    second = VisitorPass(id=uuid.uuid4(), visitor_name="Next visit", pass_type=VisitorPassType.ONE_TIME,
+        expected_time=midnight, number_plate=plate, window_minutes=15)
+    async with AsyncSessionLocal() as session:
+        session.add_all([first, second])
+        await session.commit()
+
+    def seen(index, minutes, *, person_id=None, raw_payload=None):
+        return observation(person_id, index, at=midnight + timedelta(minutes=minutes),
+                           registration_number=plate, raw_payload=raw_payload or {})
+
+    first_start = seen(10, -60)
+    first_only = seen(11, -16)
+    overlap = seen(12, -15)
+    second_only = seen(13, 0)
+    second_end = seen(14, 15)
+    outside = seen(15, 15)
+    outside["occurred_at"] += timedelta(microseconds=1)
+    named_second = seen(16, -30, raw_payload={"visitor_pass": {"id": str(second.id)}})
+    linked_first = seen(17, 60)
+    conflicting = seen(18, -30, raw_payload={"visitor_pass": {"id": str(first.id)}})
+    reserved_second = seen(19, -30)
+    resident = seen(20, -30, person_id=await subject())
+    await save_events([first_start, first_only, overlap, second_only, second_end, outside, named_second,
+                       linked_first, conflicting, reserved_second, resident])
+    async with AsyncSessionLocal() as session:
+        first = await session.get(VisitorPass, first.id)
+        second = await session.get(VisitorPass, second.id)
+        first.departure_event_id = linked_first["id"]
+        second.arrival_event_id = conflicting["id"]
+        session.add(VisitorPassReservationRecord(visitor_pass_id=second.id, access_event_id=reserved_second["id"],
+            intent_id=uuid.uuid4(), normalized_plate=plate, pass_type="one-time", state="released", dispatch_deadline=midnight))
+        await session.commit()
+    for selected, expected in ((first, (first_start, first_only, linked_first)),
+                               (second, (second_only, second_end, named_second, reserved_second))):
+        async with AsyncSessionLocal() as session:
+            report = await reports.build_visitor_pass_movement_report_snapshot(session, visitor_pass=selected,
+                report_number=None, period_start=midnight - timedelta(days=1), period_end=midnight + timedelta(days=1),
+                options=OPTIONS, timezone=reports._timezone("UTC"), verify_snapshot_availability=False)
+        expected_ids = {str(item["id"]) for item in expected}
+        assert {item["id"] for item in report["events"]} == expected_ids
+        assert {item["id"] for item in report["timeline"]["selected"]} == expected_ids
 
 
 async def test_compact_projection_exact_membership_duplicate_or_denied_and_anomaly_count():

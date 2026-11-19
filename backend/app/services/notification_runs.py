@@ -9,13 +9,14 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 
 from app.db.session import AsyncSessionLocal
 from app.models import NotificationRun
 from app.services.durable_readiness import readiness
 from app.services.durable_work import WorkReadiness, WorkTopic, notify_work
+from app.services.resident_location_contracts import LOCATION_REFRESH_TRIGGER
 from app.services.telemetry import TELEMETRY_CATEGORY_INTEGRATIONS, write_audit_log
 from app.services.workflows.channel_definitions import pending_notification_error
 
@@ -23,11 +24,19 @@ LEASE_SECONDS = 300
 MAX_DISPATCH_AGE_SECONDS = 900
 MAX_PREPARATION_ATTEMPTS = 3
 ACTIVE_STATUSES = ("queued", "processing")
+_ACTIVE_RUNS = "recovery_version=1 AND status IN ('queued','processing')"
+# Keep the fixed predicate visible to PostgreSQL's generic prepared plan so
+# the deadline worker can seek its partial index even after statement reuse.
+_ACTIVE_LOCATION_RUNS = f"{_ACTIVE_RUNS} AND trigger_event='{LOCATION_REFRESH_TRIGGER}'"
 DELIVERY_CERTAINTIES = {"accepted", "not_sent", "rejected", "unknown"}
 _MOBILE_RECEIPT_TARGET = re.compile(r"notify\.mobile_app_[A-Za-z0-9_]{1,192}\Z")
 _VOICE_RECEIPT_TARGET = re.compile(r"media_player\.[A-Za-z0-9_]{1,192}\Z")
 _APPRISE_RECEIPT_TARGET = re.compile(r"apprise:[0-9]{1,32}\Z")
 _NUMERIC_RECEIPT_TARGET = re.compile(r"[0-9]{1,32}\Z")
+
+
+def _dispatch_topic(trigger_event: str) -> WorkTopic:
+    return WorkTopic.LOCATION_NOTIFICATION if trigger_event == LOCATION_REFRESH_TRIGGER else WorkTopic.NOTIFICATION
 
 
 class ClaimLost(RuntimeError):
@@ -112,18 +121,14 @@ def destination_outcome_truth(value: Any) -> tuple[bool, int, bool]:
 
 
 class NotificationRunStore:
-    async def readiness(self) -> WorkReadiness:
+    async def readiness(self, *, location_only: bool = False) -> WorkReadiness:
+        eligible = "FROM notification_runs WHERE " + (_ACTIVE_LOCATION_RUNS if location_only else _ACTIVE_RUNS)
         return await readiness(
             self.sessions,
             (
-                (
-                    "SELECT t.now FROM t WHERE EXISTS (SELECT 1 FROM notification_runs WHERE recovery_version=1 AND status IN "
-                    "('queued','processing') AND claim_token IS NULL)"
-                ),
-                (
-                    "SELECT lease_expires_at FROM notification_runs WHERE recovery_version=1 AND status IN "
-                    "('queued','processing') AND claim_token IS NOT NULL ORDER BY lease_expires_at,id LIMIT 1"
-                ),
+                f"SELECT t.now FROM t WHERE EXISTS (SELECT 1 {eligible} AND claim_token IS NULL AND not_before IS NULL)",
+                f"SELECT not_before {eligible} AND claim_token IS NULL AND not_before IS NOT NULL ORDER BY not_before,id LIMIT 1",
+                f"SELECT lease_expires_at {eligible} AND claim_token IS NOT NULL ORDER BY lease_expires_at,id LIMIT 1",
             ),
         )
 
@@ -157,16 +162,16 @@ class NotificationRunStore:
         await self._insert(session, context, rules_override, identity, immediate=False)
         return identity
 
-    async def enqueue_prepared_in_session(self, session, context, *, run_id, plan) -> uuid.UUID:
+    async def enqueue_prepared_in_session(self, session, context, *, run_id, plan, not_before=None) -> uuid.UUID:
         """Reserve a concrete domain-owned output with its originating mutation."""
-        identity, _ = await self._prepared(session, context, run_id, plan, immediate=False)
+        identity, _ = await self._prepared(session, context, run_id, plan, immediate=False, not_before=not_before)
         return identity
 
     async def reserve_prepared_in_session(self, session, context, *, run_id, plan):
         """Join confirmed intake while preventing a poller stealing the first attempt."""
         return await self._prepared(session, context, run_id, plan, immediate=True)
 
-    async def _prepared(self, session, context, run_id, plan, *, immediate):
+    async def _prepared(self, session, context, run_id, plan, *, immediate, not_before=None):
         identity = uuid.UUID(str(run_id))
         if not isinstance(plan, list) or not plan or len(plan) > 100:
             raise ValueError("A bounded prepared notification plan is required")
@@ -181,7 +186,7 @@ class NotificationRunStore:
             ).encode()
         ).hexdigest()
         payload["prepared_plan_hash"] = fingerprint
-        row = await self._insert(session, payload, None, identity, immediate=immediate, plan=plan)
+        row = await self._insert(session, payload, None, identity, immediate=immediate, plan=plan, not_before=not_before)
         if row is None:
             existing = await session.scalar(
                 select(NotificationRun)
@@ -191,7 +196,7 @@ class NotificationRunStore:
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
-            if existing is None or existing.context.get("prepared_plan_hash") != fingerprint:
+            if existing is None or existing.not_before != not_before or existing.context.get("prepared_plan_hash") != fingerprint:
                 raise ValueError(
                     "Notification operation identity was reused with different content or authority"
                 )
@@ -206,7 +211,7 @@ class NotificationRunStore:
             await session.commit()
         return identity, row if immediate else None
 
-    async def _insert(self, session, context, rules_override, identity, *, immediate, plan=None):
+    async def _insert(self, session, context, rules_override, identity, *, immediate, plan=None, not_before=None):
         now = await session.scalar(select(func.clock_timestamp()))
         row = await session.scalar(
             insert(NotificationRun)
@@ -223,6 +228,7 @@ class NotificationRunStore:
                 severity=context["severity"],
                 context=context,
                 queued_at=now,
+                not_before=not_before,
                 rules_override=rules_override,
                 delivery_plan=copy.deepcopy(plan),
             )
@@ -230,8 +236,7 @@ class NotificationRunStore:
             .returning(NotificationRun)
         )
         if row is not None:
-
-            await notify_work(session, WorkTopic.NOTIFICATION)
+            await notify_work(session, _dispatch_topic(row.trigger_event))
         return row
 
     async def get(self, run_id: uuid.UUID) -> NotificationRun:
@@ -241,12 +246,12 @@ class NotificationRunStore:
                 raise LookupError("Notification run not found")
             return row
 
-    async def claim(self, run_id: uuid.UUID | None = None) -> NotificationRun | None:
+    async def claim(self, run_id: uuid.UUID | None = None, *, location_only: bool = False) -> NotificationRun | None:
         async with self.sessions() as session:
             now = await session.scalar(select(func.clock_timestamp()))
             query = select(NotificationRun).where(
-                NotificationRun.recovery_version == 1,
-                NotificationRun.status.in_(ACTIVE_STATUSES),
+                text(_ACTIVE_LOCATION_RUNS if location_only else _ACTIVE_RUNS),
+                or_(NotificationRun.not_before.is_(None), NotificationRun.not_before <= now),
                 or_(NotificationRun.claim_token.is_(None), NotificationRun.lease_expires_at <= now),
             )
             if run_id:
@@ -495,7 +500,7 @@ class NotificationRunStore:
             if row.status == "review_required":
                 await self._audit_checkpoint(session, row, "review", reason=row.review_reason)
 
-            await notify_work(session, WorkTopic.NOTIFICATION)
+            await notify_work(session, _dispatch_topic(row.trigger_event))
             await session.commit()
 
     @staticmethod

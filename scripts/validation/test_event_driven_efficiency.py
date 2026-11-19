@@ -28,7 +28,7 @@ from app.services.visitor_lifecycle import lifecycle_readiness
 
 pytestmark = pytest.mark.asyncio
 TABLES = ("access_events", "access_completion_work", "vehicle_information_jobs", "notification_runs", "automation_runs", "lpr_ingest_events", "visitor_passes", "automation_rules", "ha_presence_targets", "ha_presence_effects", "gate_command_records", "access_chart_dirty_state")
-TASKS = {"access-completion", "access-publication", "ha-presence-worker", "leaderboard-refresh", "vehicle-information", "notification-dispatch", "automation-dispatch", "automation-scheduler", "visitor-pass-lifecycle-worker", "movement-reconciliation", "access-event-worker"}
+TASKS = {"access-completion", "access-publication", "ha-presence-worker", "leaderboard-refresh", "vehicle-information", "notification-general", "notification-location", "automation-dispatch", "automation-scheduler", "visitor-pass-lifecycle-worker", "movement-reconciliation", "access-event-worker"}
 
 
 async def seed_history(size):

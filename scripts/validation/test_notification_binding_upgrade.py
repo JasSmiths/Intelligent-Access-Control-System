@@ -88,7 +88,9 @@ async def test_populated_upgrade_holds_only_ambiguous_work_and_preserves_receipt
             "run_status": {name: row["status"] for name, row in after.items()}, "plans_receipts_preserved": True}, indent=2))
     finally:
         await client.close()
-    # A fresh runtime's real store/dispatcher cannot reclaim held work.
+    assert not schema.migrate(scratch.name, "downgrade", BEFORE, scratch.output, "downgrade-refused")
+    # Check the historical revision above, then exercise the current worker on its schema.
+    assert schema.migrate(scratch.name, "upgrade", "head", scratch.output, "current-runtime")
     test_engine = create_async_engine(schema.scratch_url(scratch.name))
     factory = async_sessionmaker(test_engine, expire_on_commit=False)
     service = NotificationService(run_store=NotificationRunStore(session_factory=factory))
@@ -97,4 +99,10 @@ async def test_populated_upgrade_holds_only_ambiguous_work_and_preserves_receipt
             assert not await service.dispatcher.run_once(identity(name))
     finally:
         await test_engine.dispose()
-    assert not schema.migrate(scratch.name, "downgrade", BEFORE, scratch.output, "downgrade-refused")
+    # Dropping the schedule column could turn future notifications into immediate work.
+    assert not schema.migrate(scratch.name, "downgrade", "20261020_0020", scratch.output, "deadline-downgrade-refused")
+    client = await connection(scratch.name)
+    try:
+        assert await client.fetchval("SELECT count(*) FROM notification_runs WHERE not_before IS NULL") == len(rows)
+    finally:
+        await client.close()

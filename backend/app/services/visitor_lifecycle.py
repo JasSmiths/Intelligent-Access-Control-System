@@ -4,10 +4,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import Select, literal_column, select, text
+from sqlalchemy import Select, case, literal_column, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import VisitorPass
+from app.models.enums import VisitorPassStatus
 from app.models.visitor_timing import EXPIRY_SQL, INVALID_WINDOW_SQL, START_SQL
 from app.services.durable_readiness import readiness
 from app.services.durable_work import WorkReadiness
@@ -23,6 +25,18 @@ class VisitorLifecycleLane(StrEnum):
 
 
 LANES = tuple(VisitorLifecycleLane)
+
+
+def displayed_pass_status(now: datetime) -> ColumnElement[VisitorPassStatus]:
+    """Read the same UTC boundaries used by the lifecycle worker without locking a pass."""
+    checked = now.astimezone(UTC).replace(tzinfo=None)
+    status = VisitorPass.status
+    return case(
+        (status.notin_((VisitorPassStatus.SCHEDULED, VisitorPassStatus.ACTIVE)), status),
+        (literal_column(EXPIRY_SQL) <= checked, literal_column("'EXPIRED'")),
+        (literal_column(START_SQL) <= checked, literal_column("'ACTIVE'")),
+        else_=literal_column("'SCHEDULED'"),
+    ).cast(status.type)
 
 
 async def lifecycle_readiness(sessions: SessionFactory) -> WorkReadiness:

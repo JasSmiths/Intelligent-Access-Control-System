@@ -2,6 +2,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
+from typing import Literal
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +37,8 @@ logger = get_logger(__name__)
 
 RECONCILIATION_INTERVAL_SECONDS = 15.0
 RECONCILIATION_GRACE_SECONDS = 20.0
+SweepOwner = Literal["actionable", "garage", "reservations", "sagas", "standalone"]
+SWEEP_OWNERS: frozenset[SweepOwner] = frozenset({"actionable", "garage", "reservations", "sagas", "standalone"})
 
 
 class MovementReconciliationService:
@@ -49,6 +52,7 @@ class MovementReconciliationService:
         self._standalone_cursor: uuid.UUID | None = None
         self._reservation_cursor: uuid.UUID | None = None
         self._actionable_cursor: uuid.UUID | None = None
+        self._next_pages: set[SweepOwner] = set()
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -77,10 +81,8 @@ class MovementReconciliationService:
                     await self._wake.wait(generation, pending, fallback_seconds=RECONCILIATION_INTERVAL_SECONDS)
                     continue
                 while not self._stop_event.is_set():
-                    count = await self.reconcile_once()
-                    cursors = (self._saga_cursor, self._standalone_cursor,
-                               self._reservation_cursor, self._actionable_cursor)
-                    if not any(cursor is not None for cursor in cursors) and count == 0:
+                    await self.reconcile_once()
+                    if not self._next_pages:
                         break
                     await asyncio.sleep(0)
                 future = await movement_readiness(lambda: AsyncSessionLocal(), include_ready=False)
@@ -94,24 +96,32 @@ class MovementReconciliationService:
 
     async def reconcile_once(self) -> int:
         self._pending_events = []
+        # A failed scan retains its cursor for the next sweep. Only a successful
+        # page can ask this sweep to run its owner again.
+        owners = self._next_pages or SWEEP_OWNERS
+        next_pages: set[SweepOwner] = set()
         actionable_outputs = 0
-        try:
-            (
-                actionable_outputs,
-                self._actionable_cursor,
-            ) = await get_actionable_notification_service().reconcile_actionable_outputs(
-                after_id=self._actionable_cursor
+        if "actionable" in owners:
+            try:
+                actionable_outputs, self._actionable_cursor = (
+                    await get_actionable_notification_service().reconcile_actionable_outputs(after_id=self._actionable_cursor)
+                )
+                if self._actionable_cursor is not None:
+                    next_pages.add("actionable")
+            except Exception as exc:  # noqa: BLE001 - independent recovery owners must still run.
+                logger.error("actionable_output_reconciliation_failed", extra={"error_class": type(exc).__name__})
+        garage_outputs = 0
+        if "garage" in owners:
+            garage_outputs = await recover_garage_outcome_outputs()
+            if garage_outputs:
+                next_pages.add("garage")
+        recovered_reservations = 0
+        if "reservations" in owners:
+            recovered_reservations, self._reservation_cursor = await recover_unattempted_visitor_reservations(
+                after_id=self._reservation_cursor
             )
-        except Exception as exc:  # noqa: BLE001 - independent recovery owners must still run.
-            logger.error(
-                "actionable_output_reconciliation_failed",
-                extra={"error_class": type(exc).__name__},
-            )
-        garage_outputs = await recover_garage_outcome_outputs()
-        (
-            recovered_reservations,
-            self._reservation_cursor,
-        ) = await recover_unattempted_visitor_reservations(after_id=self._reservation_cursor)
+            if self._reservation_cursor is not None:
+                next_pages.add("reservations")
         now = datetime.now(tz=UTC)
         stale_cutoff = now - timedelta(seconds=RECONCILIATION_GRACE_SECONDS)
         command_saga_ids = (
@@ -154,7 +164,7 @@ class MovementReconciliationService:
                     .order_by(MovementSagaRecord.id.asc())
                     .limit(25)
                 )
-            ).all()
+            ).all() if "sagas" in owners else []
             next_saga_cursor = rows[-1].id if len(rows) == 25 else None
             count = actionable_outputs + garage_outputs + recovered_reservations
             ha_reservations: list[HaPresenceReservation] = []
@@ -193,7 +203,7 @@ class MovementReconciliationService:
                     .order_by(GateCommandRecord.id.asc())
                     .limit(25)
                 )
-            ).all()
+            ).all() if "standalone" in owners else []
             next_standalone_cursor = (
                 standalone_commands[-1].id if len(standalone_commands) == 25 else None
             )
@@ -204,6 +214,11 @@ class MovementReconciliationService:
             # Advance only after the batch commits; held rows keep their truthful state.
             self._saga_cursor = next_saga_cursor
             self._standalone_cursor = next_standalone_cursor
+            if next_saga_cursor is not None:
+                next_pages.add("sagas")
+            if next_standalone_cursor is not None:
+                next_pages.add("standalone")
+            self._next_pages = next_pages
             publications, self._pending_events = self._pending_events, []
         for event_type, payload in publications:
             if event_type == "audit.log.created":

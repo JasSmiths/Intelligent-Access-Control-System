@@ -138,6 +138,13 @@ class NotificationAuthorization:
         if policy is not None:
             return None, policy
         config = await self.config(session)
+        if action is not None and (
+            (payload.get("resident_location_origin") is not None and action.get("resident_location_output") is not None)
+            or (payload.get("resident_recovery_origin") is not None and action.get("resident_recovery_output") is not None)
+        ):
+            # The origin pass just checked this resident's exact action. The
+            # final pass repeats it after the potentially blocking run lock.
+            return config, None
         return config, await self._authorize_action_config_in_session(
             session,
             action,

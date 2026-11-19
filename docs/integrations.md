@@ -221,17 +221,53 @@ gate policy and uses the same command owner. Resident approval preserves the
 original denial and creates a linked recovery event. Recovery never invents an
 exit or bypasses unknown-plate, pending-command or admission checks.
 
+Direction and recovery consult the latest eligible movement before capture. An
+operator-reported exit for this resident and vehicle counts when its completed
+historical saga committed presence and its separate successful operator audit
+identifies that event. A newer live movement takes precedence. Historical repair
+itself sends no hardware commands.
+
 When that resident's recorded GPS location is stale, a live authorised plate
 observation can reserve one silent Home Assistant `request_location_update`
 notification through the existing notification journal. Requests coalesce across
-the resident's vehicles for one minute. The arrival waits at most 20 seconds,
+the resident's vehicles for one minute. Other residents' plates can proceed
+while IACS waits. Later reads for the same resident or vehicle retain their order.
+The arrival waits at most 20 seconds,
 within its original 60-second recognition deadline, without holding SQL locks.
-A changed, accurate near-gate fix after the request can complete an established
+A notification held or skipped before delivery ends the wait as soon as its journal
+state is observed (checked every half second while pending). Recovery records
+the rejection and continues with the camera and resident approval. An uncertain
+delivery retains the original deadline. A changed, accurate near-gate fix after
+the request can complete an established
 away episode: at least two away samples spanning five minutes, with the latest
 away sample within five minutes before recognition. Cached coordinates, poor
 accuracy, outward/implausible movement, consumed journeys, reconnection or changed
 configuration do not authorize entry. Current gate evidence and access authority
 are checked again; gate and garage commands still use their audited owners.
+
+For this recovery path the camera compares two recordings from the same gate
+camera, requested six seconds apart ending at the plate capture. Both frames
+must independently identify the exact plate. A clear travel direction must
+agree with the change in vehicle size in two complete bounding boxes (area
+ratio at least 1.25). Missing recordings, an unreadable plate, stationary or
+ambiguous motion, and the five-second camera deadline lead to the existing
+scoped approval path for eligible residents. Explicit departures keep their
+existing precedence. One empty archive read can retry within the original five-second deadline.
+Diagnostics identify the failed stage and frame, and record whether the read retried.
+Refreshed phone evidence records the age and five-minute limit of the last away fix.
+
+The admin recovery view shows the resident, approval device, provider acceptance,
+and action state for the original request and repeated reads. In owner configuration
+an administrator can optionally select a separate mobile service for an informational
+expiry notice. The durable worker checks the resident’s current settings and the
+original unanswered approval after expiry. Delayed notices expire after five more
+minutes. Only the resident’s original request contains the gate action.
+
+A busy database row during an unattempted resident approval causes two short
+retries. If it stays busy, IACS queues one informational response to the original
+resident and keeps the original expiry. A resolved, revoked or expired request
+cannot use that response to open the gate. Every retry rechecks the resident's
+current authority before creating a single linked event or command.
 
 Phone delivery or a fresh GPS fix is not guaranteed, particularly when the phone
 OS restricts background activity. Timeout retains camera/resident-approval

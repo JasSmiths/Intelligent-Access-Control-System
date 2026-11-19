@@ -147,7 +147,7 @@ async def test_clear_current_camera_evidence_can_resolve_recovery_as_entry(monke
         False, "phone_journey_missing", {"exact_plate": True})))
     observation = read()
     prepared = PreparedCameraEvidence.for_read(person.id, observation,
-        {"direction": "entry", "confidence": 0.99})
+        {"direction": "entry", "confidence": 0.99, "motion_confirmed": True})
     result = await value.resolve(FakeSession(), observation, observation, None, trace,
                                  camera_evidence=prepared)
     assert result.direction_resolution["missed_exit_recovery"]["method"] == "camera_automatic"
@@ -160,7 +160,7 @@ async def test_schedule_denial_cannot_gain_camera_or_resident_authority(monkeypa
     monkeypatch.setattr(recovery, "evaluate_phone", phone)
     observation = read()
     prepared = PreparedCameraEvidence.for_read(person.id, observation,
-        {"direction": "entry", "confidence": 0.99})
+        {"direction": "entry", "confidence": 0.99, "motion_confirmed": True})
     result = await value.resolve(FakeSession(), observation, observation, None, trace,
                                  camera_evidence=prepared)
     assert result.plan.decision == AccessDecision.DENIED
@@ -200,7 +200,7 @@ async def test_recovery_camera_timeout_is_bounded_and_discards_late_clear_entry(
         await asyncio.sleep(0)
         return set(), set(tasks)
 
-    monkeypatch.setattr(value, "_resolve_duplicate_arrival_with_camera", delayed_camera)
+    monkeypatch.setattr(owner, "recovery_camera", delayed_camera)
     monkeypatch.setattr(owner.asyncio, "wait", timed_out)
     # Setup consumed part of the original five-second decision window. Replace
     # only this owner's clock; the event loop and child cleanup keep real time.
@@ -236,14 +236,14 @@ async def test_disconnect_or_reconnect_revokes_a_previously_valid_journey(monkey
     session.get = AsyncMock(return_value=row)
     session.scalar = AsyncMock(side_effect=[NOW, NOW - timedelta(hours=1)])
     ready, reason, _checks = await recovery.evaluate_phone(session, person=person,
-        vehicle=vehicle, read=read(), config=value._runtime)
+        vehicle=vehicle, read=read(), config=value._runtime, safety_block=None)
     assert ready is True
     assert reason == "phone_return_corroborated"
     session.get.reset_mock()
     session.scalar = AsyncMock(return_value=NOW)
     recovery.invalidate_connection(connected=connected)
     ready, reason, _checks = await recovery.evaluate_phone(session, person=person,
-        vehicle=vehicle, read=read(), config=value._runtime)
+        vehicle=vehicle, read=read(), config=value._runtime, safety_block=None)
     assert ready is False
     assert reason == expected_reason
     if not connected:

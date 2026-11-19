@@ -57,6 +57,7 @@ TYPE_OWNERS = (
     TypeOwner('app/services/mutation_context.py', 'checked'),
     TypeOwner('app/services/schedule_assignments.py', 'checked'),
     TypeOwner('app/services/schedule_operations.py', 'checked'),
+    TypeOwner('app/services/schedule_dependency_reads.py', 'strict'),
     TypeOwner('app/services/domain_events.py', 'checked'),
     TypeOwner('app/services/telemetry.py', 'checked'),
     TypeOwner('app/services/event_bus.py', 'strict'),
@@ -132,6 +133,10 @@ TYPE_OWNERS = (
     TypeOwner('app/services/directory', 'strict'),
     TypeOwner('app/services/access', 'checked', (
         ('decision.py', 'strict'),
+        ('recovery_camera.py', 'strict'),
+        ('recovery_queue.py', 'strict'),
+        ('recovery_evidence_lane.py', 'strict'),
+        ('movement_history.py', 'strict'),
         ('timing.py', 'strict'),
         ('pipeline_contracts.py', 'strict'),
         ('pipeline_store.py', 'strict'),

@@ -11,10 +11,11 @@ ShieldAlert
 import React from "react";
 
 import { api, isAbortError } from "../api/client";
-import { formatDate, movementSagaDisplay, titleCase } from "../lib/format";
+import { formatDate, isRecord, movementSagaDisplay, titleCase } from "../lib/format";
 import { Badge, EmptyState, ErrorState, LoadingState, Toolbar } from "../ui/primitives";
 import { useModalFocus } from "../ui/useModalFocus";
 import type { BadgeTone } from "../ui/primitives";
+import { useCoordinatedRead } from "../lib/useCoordinatedRead";
 import { useHistoryPage } from "./useHistoryPage";
 
 type GateCommand = {
@@ -77,13 +78,12 @@ export function MovementsView({ targetId }: { targetId: string | null }) {
   const [query, setQuery] = React.useState("");
   const [from, setFrom] = React.useState("");
   const [to, setTo] = React.useState("");
-  const [selected, setSelected] = React.useState<MovementRecord | null>(null);
+  const [selectedId, setSelectedId] = React.useState<string | null>(targetId);
+  const [detail, setDetail] = React.useState<MovementRecord | null>(null);
   const [filter, setFilter] = React.useState<MovementFilter>("all");
   const [detailLoading, setDetailLoading] = React.useState(false);
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [actionLoading, setActionLoading] = React.useState(false);
-  const detailLoadSequenceRef = React.useRef(0);
-  const detailLoadAbortRef = React.useRef<AbortController | null>(null);
   const focusBeforeDetailRef = React.useRef<HTMLElement | null>(null);
   const [narrow, setNarrow] = React.useState(() => typeof window.matchMedia === "function" && window.matchMedia("(max-width: 980px)").matches);
   React.useEffect(() => {
@@ -100,85 +100,39 @@ export function MovementsView({ targetId }: { targetId: string | null }) {
   if (to) filters.set("to", to);
   if (filter !== "all") filters.set("category", filter);
   const history = useHistoryPage<MovementRecord>("/api/v1/access/movements/history", filters);
-  React.useEffect(() => {
-    if (!targetId) setSelected(null);
-  }, [targetId]);
-  React.useEffect(() => {
-    if (!targetId) return;
-    if (history.loading) return;
-    if (history.items.some((item) => item.id === targetId)) {
-      const match = history.items.find((item) => item.id === targetId);
-      if (match) setSelected(match);
-      return;
+  React.useEffect(() => { setSelectedId(targetId); }, [targetId]);
+  const selected = detail?.id === selectedId ? detail : history.items.find((item) => item.id === selectedId) ?? null;
+  const readDetail = React.useCallback(async (signal: AbortSignal) => {
+    if (!selectedId) return;
+    setDetailLoading(true); setActionError(null);
+    try {
+      const result = await api.get<MovementRecord>(`/api/v1/access/movements/${encodeURIComponent(selectedId)}`, { signal });
+      if (!signal.aborted) setDetail(result);
+    } catch (failure) {
+      if (!signal.aborted && !isAbortError(failure)) setActionError(errorMessage(failure));
+      throw failure;
+    } finally {
+      if (!signal.aborted) setDetailLoading(false);
     }
-    let active = true;
-    void api.get<MovementRecord>(`/api/v1/access/movements/${encodeURIComponent(targetId)}`)
-      .then((item) => { if (active) setSelected(item); })
-      .catch((error: unknown) => { if (active) setActionError(errorMessage(error)); });
-    return () => { active = false; };
-  }, [history.items, history.loading, targetId]);
-
-  const loadMovementDetail = React.useCallback(
-    async (movement: MovementRecord, options: { optimistic?: boolean; quiet?: boolean } = {}) => {
-      const sequence = detailLoadSequenceRef.current + 1;
-      detailLoadSequenceRef.current = sequence;
-      detailLoadAbortRef.current?.abort();
-      const controller = new AbortController();
-      detailLoadAbortRef.current = controller;
-      if (options.optimistic !== false) {
-        setSelected(movement);
-      }
-      if (!options.quiet) {
-        setActionError(null);
-      }
-      setDetailLoading(true);
-      try {
-        const detail = await api.get<MovementRecord>(`/api/v1/access/movements/${movement.id}`, {
-          signal: controller.signal
-        });
-        if (detailLoadSequenceRef.current !== sequence) return;
-        setSelected((current) => (current?.id === movement.id ? detail : current));
-      } catch (detailError) {
-        if (isAbortError(detailError)) return;
-        if (detailLoadSequenceRef.current !== sequence) return;
-        if (!options.quiet) {
-          setActionError(errorMessage(detailError));
-        }
-      } finally {
-        if (detailLoadSequenceRef.current === sequence) {
-          setDetailLoading(false);
-          if (detailLoadAbortRef.current === controller) {
-            detailLoadAbortRef.current = null;
-          }
-        }
-      }
-    },
-    []
-  );
-
-  React.useEffect(() => () => {
-    detailLoadSequenceRef.current += 1;
-    detailLoadAbortRef.current?.abort();
-  }, []);
-
-  const selectedNeedsDetail = Boolean(selected && !hasMovementDetail(selected));
-
-  React.useEffect(() => {
-    if (!selected || !selectedNeedsDetail) return;
-    void loadMovementDetail(selected, { optimistic: false, quiet: true });
-  }, [loadMovementDetail, selected, selectedNeedsDetail]);
+  }, [selectedId]);
+  const refreshDetail = useCoordinatedRead(readDetail, (event) => {
+    const movement = event.payload.movement_saga;
+    return (event.type === "access_event.updated" || event.type === "access_event.finalized")
+      && isRecord(movement) && movement.id === selectedId;
+  }, Boolean(selectedId));
 
   const visibleMovements = history.items;
   const firstItem = history.index * 50 + 1;
   const lastItem = history.index * 50 + visibleMovements.length;
 
-  const selectMovement = async (movement: MovementRecord) => {
+  const selectMovement = (movement: MovementRecord) => {
     focusBeforeDetailRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    await loadMovementDetail(movement);
+    if (movement.id === selectedId) void refreshDetail().catch(() => undefined);
+    else setSelectedId(movement.id);
   };
 
   const closeDetail = () => {
-    setSelected(null);
+    setSelectedId(null); setDetail(null); setActionError(null);
     focusBeforeDetailRef.current?.focus();
   };
 
@@ -190,8 +144,9 @@ export function MovementsView({ targetId }: { targetId: string | null }) {
       const updated = await api.post<MovementRecord>(`/api/v1/access/movements/${selected.id}/reconciliation-required`, {
         reason: "Operator flagged movement for review from Movement detail."
       });
-      setSelected(updated);
+      setDetail(updated);
       history.refresh();
+      void refreshDetail().catch(() => undefined);
     } catch (requestError) {
       setActionError(errorMessage(requestError));
     } finally {
@@ -207,6 +162,7 @@ export function MovementsView({ targetId }: { targetId: string | null }) {
         </button>
       </Toolbar>
 
+      {selectedId && !selected && actionError ? <div role="alert" className="callout danger">{actionError}</div> : null}
       <div className="history-filters" aria-label="Movement filters">
         <label>Search movements<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Plate, source, or failure" /></label>
         <label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
@@ -368,7 +324,7 @@ function MovementDetail({
           <ShieldAlert size={15} /> {actionLoading ? "Flagging…" : "Flag for Review"}
         </button>
       </div>
-      {actionError ? <div className="callout danger"><AlertTriangle size={16} /> {actionError}</div> : null}
+      {actionError ? <div className="callout danger" role="alert"><AlertTriangle size={16} /> {actionError}</div> : null}
 
       <div className="movement-detail-grid">
         <DetailTile label="Saga State" value={titleCase(movement.state)} tone={statusTone(movement)} />

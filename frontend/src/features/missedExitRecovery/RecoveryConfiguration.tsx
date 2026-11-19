@@ -9,10 +9,10 @@ import type { Person } from "../../api/types";
 import { stringifySetting, useSettings } from "../../lib/settings";
 import { recoveryTrackerMessage } from "./model";
 
-type OwnerConfig = { enabled: boolean; tracker: string };
+type OwnerConfig = { enabled: boolean; expiryTarget: string; tracker: string };
 type OwnerDraft = { config: OwnerConfig; dirty: boolean; trackerTouched: boolean; saved: OwnerConfig | null; autoTarget: string | null };
-const ownerValues = (person?: Person): OwnerConfig => ({ enabled: person?.missed_exit_recovery_enabled ?? false, tracker: person?.missed_exit_recovery_tracker_entity_id ?? "" });
-const sameOwnerValues = (a: OwnerConfig, b: OwnerConfig) => a.enabled === b.enabled && a.tracker === b.tracker;
+const ownerValues = (person?: Person): OwnerConfig => ({ expiryTarget: person?.missed_exit_recovery_expiry_notify_service ?? "", enabled: person?.missed_exit_recovery_enabled ?? false, tracker: person?.missed_exit_recovery_tracker_entity_id ?? "" });
+const sameOwnerValues = (a: OwnerConfig, b: OwnerConfig) => a.enabled === b.enabled && a.tracker === b.tracker && a.expiryTarget === b.expiryTarget;
 const newOwnerDraft = (person?: Person): OwnerDraft => ({ config: ownerValues(person), dirty: false, trackerTouched: false, saved: null, autoTarget: null });
 
 export function RecoveryConfiguration() {
@@ -51,17 +51,19 @@ export function RecoveryConfiguration() {
   React.useEffect(() => { if (ownerId) ownerDrafts.current.set(ownerId, ownerDraft); }, [ownerId, ownerDraft]);
   const loadDiscovery = React.useCallback(async () => {
     discoveryAbort.current?.abort();
+    setDiscovery(null); setDiscoveryError(""); setDiscoveryLoading(Boolean(ownerId));
+    if (!ownerId) return;
     const controller = new AbortController(); discoveryAbort.current = controller;
-    setDiscoveryLoading(true); setDiscoveryError(""); setDiscovery(null);
     try {
-      const result = await integrationsApi.getRecoveryTrackers({ signal: controller.signal });
+      const result = await integrationsApi.getRecoveryTrackers(ownerId, { signal: controller.signal });
       if (!controller.signal.aborted) setDiscovery(result);
     } catch (cause) {
       if (!controller.signal.aborted && !isAbortError(cause)) setDiscoveryError("Unable to discover phone trackers. You can enter the entity manually.");
     } finally { if (!controller.signal.aborted) setDiscoveryLoading(false); }
-  }, []);
+  }, [ownerId]);
   React.useEffect(() => { void loadDiscovery(); return () => discoveryAbort.current?.abort(); }, [loadDiscovery]);
-  const mapping = discovery?.mappings?.find((item) => item.person_id === ownerId && item.notify_service_id === owner?.home_assistant_mobile_app_notify_service);
+  const candidate = discovery?.mapping;
+  const mapping = candidate?.person_id === ownerId && candidate.notify_service_id === owner?.home_assistant_mobile_app_notify_service ? candidate : null;
   const phoneOptions = (discovery?.trackers ?? []).filter((item) => item.eligible);
   const selectedTracker = discovery?.trackers?.find((item) => item.entity_id === ownerConfig.tracker);
   const discoveryHint = discoveryError || (ownerDraft.autoTarget ? "A phone tracker was matched to this owner's saved notification destination. Save owner configuration to apply it." : "") || recoveryTrackerMessage(mapping?.reason) || recoveryTrackerMessage(selectedTracker?.reason) || recoveryTrackerMessage(discovery?.reason) || "Choose a discovered tracker or enter one manually. Automatic selection requires an exact association with the owner's saved notification destination.";
@@ -105,7 +107,7 @@ export function RecoveryConfiguration() {
     event.preventDefault(); if (!owner || saving) return;
     setSaving(true); setError(""); setSaved("");
     try {
-      const result = await missedExitRecoveryApi.saveOwner(owner, { missed_exit_recovery_enabled: ownerConfig.enabled, missed_exit_recovery_tracker_entity_id: ownerConfig.tracker.trim() || null });
+      const result = await missedExitRecoveryApi.saveOwner(owner, { missed_exit_recovery_enabled: ownerConfig.enabled, missed_exit_recovery_tracker_entity_id: ownerConfig.tracker.trim() || null, missed_exit_recovery_expiry_notify_service: ownerConfig.expiryTarget.trim() || null });
       const values = ownerValues(result);
       setOwnerDraft({ ...ownerDraft, config: values, dirty: false, saved: values, autoTarget: null });
       setSaved("Owner recovery settings saved.");
@@ -128,7 +130,8 @@ export function RecoveryConfiguration() {
         <label className="field"><span>Owner recovery opt-in</span><select disabled={!owner} value={String(ownerConfig.enabled)} onChange={(event) => editOwner({ enabled: event.target.value === "true" })}><option value="false">Disabled</option><option value="true">Enabled</option></select></label>
         <label className="field"><span>Discovered phone tracker</span><select disabled={!owner} value={ownerConfig.tracker} onChange={(event) => editOwner({ tracker: event.target.value }, true)}><option value="">Select tracker or enter manually</option>{ownerConfig.tracker && !phoneOptions.some((item) => item.entity_id === ownerConfig.tracker) ? <option value={ownerConfig.tracker}>{ownerConfig.tracker} (configured/manual)</option> : null}{phoneOptions.map((item) => <option key={item.entity_id} value={item.entity_id}>{item.name || item.entity_id} · {item.entity_id}{!item.available ? " (Unavailable)" : ""}</option>)}</select></label>
         <label className="field"><span>Home Assistant phone tracker entity</span><input disabled={!owner} value={ownerConfig.tracker} placeholder="device_tracker.phone" pattern="device_tracker\.[a-z0-9_]+" onChange={(event) => editOwner({ tracker: event.target.value }, true)} /></label>
-        <button className="secondary-button" type="button" disabled={discoveryLoading} onClick={() => void loadDiscovery()}>Refresh phone trackers</button>
+        <label className="field"><span>Notify when this resident’s approval expires (optional)</span><input disabled={!owner} value={ownerConfig.expiryTarget} placeholder="notify.mobile_app_phone" pattern="notify\.mobile_app_[a-zA-Z0-9_]+" onChange={(event) => editOwner({ expiryTarget: event.target.value })} /></label>
+        <button className="secondary-button" type="button" disabled={!owner || discoveryLoading} onClick={() => void loadDiscovery()}>Refresh phone trackers</button>
         <button className="primary-button" disabled={!owner} type="submit">Save owner configuration</button>
       </fieldset></form><p className="field-hint">{discoveryHint}</p><p className="field-hint">Notification service is configured on the person. Saving configuration does not send notifications or commands.</p>
     </section>

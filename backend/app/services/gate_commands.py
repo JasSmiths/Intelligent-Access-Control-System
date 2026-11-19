@@ -271,12 +271,12 @@ class GateCommandCoordinator:
                 )
             if row is None:
                 return None
-            return await self._receipt_for_row(session, row)
+            from app.services.access_device_commands import AccessDeviceCommandJournal
 
-    async def _receipt_for_row(self, session: AsyncSession, row: Any) -> dict[str, Any]:
-        from app.services.access_device_commands import AccessDeviceCommandJournal
+            projection = await AccessDeviceCommandJournal().gate_command_projection(session, row)
+            return self._receipt_for_row(row, projection)
 
-        projection = await AccessDeviceCommandJournal().gate_command_projection(session, row)
+    def _receipt_for_row(self, row: Any, projection: dict[str, Any] | None) -> dict[str, Any]:
         payload = self._ledger.outcome_payload_from_record(row)
         return {
             **payload,
@@ -292,6 +292,7 @@ class GateCommandCoordinator:
 
         from app.db.session import AsyncSessionLocal
         from app.models import GateCommandRecord
+        from app.services.access_device_commands import AccessDeviceCommandJournal
 
         if not 1 <= limit <= 100:
             raise ValueError("Receipt page size must be between 1 and 100.")
@@ -314,8 +315,10 @@ class GateCommandCoordinator:
                     )
                 ).all()
             )
+            page = rows[:limit]
+            projections = await AccessDeviceCommandJournal().gate_command_projections(session, page)
             return {
-                "items": [await self._receipt_for_row(session, row) for row in rows[:limit]],
+                "items": [self._receipt_for_row(row, projections.get(row.id)) for row in page],
                 "next_cursor": str(rows[limit - 1].id) if len(rows) > limit else None,
             }
 

@@ -6,6 +6,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+
+import ci_receipt as receipt
 
 from ci_evidence import collect, selected
 from recovery_checks import HOST_CHECKS
@@ -279,6 +282,13 @@ class CIEvidenceTests(unittest.TestCase):
         self.assertEqual(upload["with"]["retention-days"], "14")
         self.assertEqual(upload["with"]["path"], "${{ runner.temp }}/iacs-upload-evidence")
         self.assertLess(steps.index(selection), steps.index(upload))
+        producer = next(step for step in steps if "ci_receipt.py name" in step.get("run", ""))
+        receipt_upload = next(step for step in steps if step.get("name") == receipt.UPLOAD_STEP)
+        self.assertLess(steps.index(upload), steps.index(producer))
+        self.assertLess(steps.index(producer), steps.index(receipt_upload))
+        self.assertNotIn("if", producer)
+        self.assertNotIn("if", receipt_upload)
+        self.assertEqual(receipt_upload["with"]["if-no-files-found"], "error")
         self.assertTrue(any("validate.py --mode full --allow-downloads" in step.get("run", "") for step in steps))
 
     @unittest.skipUnless(importlib.util.find_spec("yaml"), "PyYAML is available in the locked harness dependencies")
@@ -304,6 +314,84 @@ class CIEvidenceTests(unittest.TestCase):
                 self.assertIn("full", arguments)
                 self.assertEqual("--database-restore" in arguments,
                     event == "workflow_dispatch" and requested == "true")
+
+
+class CIReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.commit, self.tree, self.fingerprint = 'a'*40, 'b'*40, 'c'*64
+        self.identity = self.commit, self.tree, self.fingerprint
+        self.repo = 'fixture/iacs'
+        self.run = dict(id=42, run_attempt=2, head_sha=self.commit, status='completed', conclusion='success',
+                        workflow_id=3, path='.github/workflows/project-checks.yml', event='push',
+                        repository={'full_name': self.repo}, head_repository={'full_name': self.repo})
+        self.artifact = dict(name=receipt.receipt_name(self.identity, 2), expired=False)
+        self.step = dict(name=receipt.UPLOAD_STEP, conclusion='success')
+
+    def verify(self):
+        payloads = {'workflows/project-checks.yml': {'id': 3}, 'runs/42': self.run,
+                    'runs/42/artifacts?per_page=100': {'artifacts': [self.artifact]},
+                    'runs/42/attempts/2/jobs?per_page=100': {'jobs': [
+                        dict(name='isolated-contracts', conclusion='success', steps=[self.step])]}}
+        def read(cmd, **kwargs):
+            self.assertEqual(cmd[:4], ['gh', 'api', '--hostname', 'github.com'])
+            return json.dumps(payloads[cmd[-1].split('/actions/')[1]]).encode()
+        with patch.object(receipt, 'checkout_identity', return_value=self.identity), patch.object(
+                receipt, 'origin_repository', return_value=self.repo), patch.object(receipt, 'git', return_value=''), patch.object(
+                subprocess, 'check_output', side_effect=read):
+            return receipt.verify(Path.cwd(), 42)
+
+    def test_passing_receipt_is_bound_to_repository_workflow_job_attempt_and_exact_source(self):
+        self.assertTrue(self.verify().endswith('/42/attempts/2'))
+        for obj, key, value in [(self.run, 'status', 'in_progress'), (self.run, 'conclusion', 'failure'),
+                (self.run, 'workflow_id', 99), (self.run, 'repository', {'full_name': 'other/repo'}),
+                (self.run, 'head_repository', {'full_name': 'fork/repo'}), (self.run, 'head_sha', '0'*40),
+                (self.step, 'conclusion', 'skipped'), (self.artifact, 'expired', True),
+                (self.artifact, 'name', receipt.receipt_name(self.identity, 1)),
+                (self.artifact, 'name', receipt.receipt_name((self.commit,self.tree,'0'*64), 2))]:
+            with self.subTest(key=key, value=value), patch.dict(obj, {key: value}), self.assertRaises(ValueError):
+                self.verify()
+
+    def test_pr_head_only_reuses_source_identical_merge(self):
+        merge = 'd'*40
+        self.run['event'] = 'pull_request'
+        name = receipt.receipt_name((merge, self.tree, self.fingerprint), 2)
+        self.assertTrue(receipt.matches_receipt(name, self.identity, self.run, []))
+        for changed in ((self.commit, 'e'*40, self.fingerprint), (self.commit, self.tree, 'e'*64)):
+            self.assertFalse(receipt.matches_receipt(name, changed, self.run, []))
+        self.assertTrue(receipt.matches_receipt(name, (merge, self.tree, self.fingerprint),
+                                                self.run, ['f'*40, self.commit]))
+
+    def test_dirty_checkout_refused_before_github(self):
+        with patch.object(receipt, 'git', return_value=' M backend/app/a.py'), self.assertRaisesRegex(ValueError, 'local changes'):
+            receipt.verify(Path.cwd())
+
+    def test_producer_requires_full_run_complete_inventory_and_unfiltered_suites(self):
+        from recovery_checks import PERSISTENCE_TESTS, DIAGNOSTIC_TESTS, SCHEMA_CHECKS
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            hashes = {'synthetic.py': 'f'*64}
+            identity = self.commit, self.tree, receipt.source_fingerprint(hashes)
+            suites = [dict(check=f'suite-{i:03}', path=p, targets=[p]) for i,p in enumerate(PERSISTENCE_TESTS + DIAGNOSTIC_TESTS, 1)]
+            keys = set(HOST_CHECKS) | set(('architecture-boundaries compile workflow-contracts backend-tests ruff test-names mypy '
+                'typed-contracts frontend-build frontend-tests compose-config isolation-db-free isolation-persistence isolation-inspect '
+                'migration-up migration-current migration-check python-lock-check frontend-lock-check frontend-tree-check').split())
+            keys.update(f'schema-check-{i}' for i in range(1, len(SCHEMA_CHECKS)+1))
+            for row in suites:
+                keys.update(row['check']+suffix for suffix in ('', '-create','-drop'))
+            manifest = dict(mode='full', database_restore=False, status='', commit=self.commit, sha256=hashes, source_fingerprint=identity[2])
+            checks = {k: {'status': 'passed'} for k in keys}
+            checks['database-restore'] = {'status': 'not_attempted'}
+            results = dict.fromkeys(keys, 0) | dict(cleanup=0, source_integrity=0, production_unchanged=True)
+            def stage():
+                for name, data in [('manifest',manifest),('results',results),('checks',checks),('persistence-suites',suites)]:
+                    (run/(name+'.json')).write_text(json.dumps(data))
+            stage()
+            receipt.validate_run(run, identity)
+            for obj, key, value in [(manifest,'mode','focused'),(suites[0],'targets',['selected::test_one']),
+                                    (results,'cleanup',1), (checks['migration-check'],'status','not_attempted')]:
+                with self.subTest(key=key), patch.dict(obj, {key:value}), self.assertRaises(ValueError):
+                    stage()
+                    receipt.validate_run(run, identity)
 
 
 if __name__ == "__main__":

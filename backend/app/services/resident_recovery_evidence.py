@@ -169,7 +169,10 @@ def evaluate_refreshed_journey(samples: list[dict[str, Any]], *,
             and s["distance_m"] - s["accuracy_m"] >= 500]
     if len(away) < 2 or (parse_time(away[-1]["at"]) - parse_time(away[0]["at"])).total_seconds() < 300:
         return False, "away_not_established", checks
-    if not 0 <= (captured_at - parse_time(away[-1]["at"])).total_seconds() <= 300:
+    away_age = (captured_at - parse_time(away[-1]["at"])).total_seconds()
+    away_limit = 300
+    checks.update(last_away_age_s=round(away_age, 2), last_away_limit_s=away_limit)
+    if not 0 <= away_age <= away_limit:
         return False, "away_evidence_stale", checks
     approach = [s for s in valid if parse_time(s["at"]) >= parse_time(away[-1]["at"])]
     for left, right in pairwise(approach):

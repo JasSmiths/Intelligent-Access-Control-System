@@ -14,6 +14,7 @@ from app.models import AccessEvent, Person, Vehicle
 from app.models.enums import AccessDecision, AccessDirection, TimingClassification
 from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
+from app.services.access.movement_history import latest_confirmed_movement
 from app.services.access.evidence import AccessEvidenceResolver
 from app.services.access.reads import GATE_MALFUNCTION_PAYLOAD_KEY, GATE_OBSERVATION_PAYLOAD_KEY
 
@@ -46,7 +47,7 @@ async def test_more_than_twenty_backfills_do_not_hide_live_predecessor_or_change
         for i in range(30)])
     resolver = AccessEvidenceResolver()
     async with AsyncSessionLocal() as session:
-        previous = await resolver._latest_live_person_or_vehicle_event(session, person=person, vehicle=vehicle, before=NOW)
+        previous = await latest_confirmed_movement(session, person=person, vehicle=vehicle, before=NOW)
         assert previous.id == rows[0].id
         read = PlateRead(registration_number="AB12CDE", confidence=1, source="live", captured_at=NOW,
             raw_payload={GATE_OBSERVATION_PAYLOAD_KEY: {"state": GateState.OPEN.value},
@@ -61,7 +62,7 @@ async def test_non_object_metadata_retains_live_semantics_and_timestamp_ties_are
     person, vehicle, rows = await history([("live", payload, NOW-timedelta(minutes=1), AccessDirection.ENTRY),
         ("live", payload, NOW-timedelta(minutes=1), AccessDirection.EXIT)])
     async with AsyncSessionLocal() as session:
-        row = await AccessEvidenceResolver()._latest_live_person_or_vehicle_event(session, person=person, vehicle=vehicle, before=NOW)
+        row = await latest_confirmed_movement(session, person=person, vehicle=vehicle, before=NOW)
     assert row.id == rows[1].id
 
 
@@ -69,7 +70,7 @@ async def test_no_preceding_live_event_returns_none(isolated_resources):
     person, vehicle, _ = await history([("live_backfill", {}, NOW-timedelta(minutes=1), AccessDirection.ENTRY),
         ("live", {"backfill": {}}, NOW-timedelta(minutes=2), AccessDirection.EXIT)])
     async with AsyncSessionLocal() as session:
-        assert await AccessEvidenceResolver()._latest_live_person_or_vehicle_event(session, person=person, vehicle=vehicle, before=NOW) is None
+        assert await latest_confirmed_movement(session, person=person, vehicle=vehicle, before=NOW) is None
 
 
 async def test_live_predicate_precedes_bounded_query_and_payload_is_not_materialized(isolated_resources):
@@ -80,7 +81,7 @@ async def test_live_predicate_precedes_bounded_query_and_payload_is_not_material
     sql_event.listen(engine.sync_engine, "before_cursor_execute", capture)
     try:
         async with AsyncSessionLocal() as session:
-            row = await AccessEvidenceResolver()._latest_live_person_or_vehicle_event(session, person=person, vehicle=vehicle, before=NOW)
+            row = await latest_confirmed_movement(session, person=person, vehicle=vehicle, before=NOW)
             assert "raw_payload" not in row.__dict__
     finally:
         sql_event.remove(engine.sync_engine, "before_cursor_execute", capture)
@@ -128,7 +129,7 @@ async def test_bounded_identity_seek_preserves_union_ordering(isolated_resources
             await session.execute(update(AccessEvent).where(AccessEvent.id==events[1].id).values(person_id=None))
         await session.commit()
     async with AsyncSessionLocal() as session:
-        result=await AccessEvidenceResolver()._latest_live_person_or_vehicle_event(session,
+        result=await latest_confirmed_movement(session,
             person=None if mode in {'vehicle_only','neither'} else person,
             vehicle=None if mode in {'person_only','neither'} else vehicle,before=NOW)
         assert (result.id if result else None)==(events[winner].id if winner is not None else None)

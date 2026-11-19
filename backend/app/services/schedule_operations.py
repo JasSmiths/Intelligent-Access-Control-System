@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Schedule, User
 from app.models.enums import UserRole
-from app.services.schedules import empty_time_blocks, normalize_time_blocks, schedule_dependencies
+from app.services.schedule_dependency_reads import has_schedule_assignments
+from app.services.schedules import empty_time_blocks, normalize_time_blocks
 from app.services.telemetry import (
     TELEMETRY_CATEGORY_CRUD,
     actor_from_user,
@@ -26,10 +27,9 @@ from app.services.telemetry import (
 
 
 class ScheduleOperationError(ValueError):
-    def __init__(self, code: str, message: str, *, dependencies: dict | None = None):
+    def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
-        self.dependencies = dependencies
 
 
 class ScheduleValues(BaseModel):
@@ -151,10 +151,8 @@ async def delete_schedule(
 ) -> Schedule:
     require_schedule_admin(user)
     schedule = await _locked_schedule(session, schedule_id)
-    dependencies = await schedule_dependencies(session, schedule_id)
-    if any(dependencies.values()):
-        raise ScheduleOperationError("schedule_in_use", "Schedule is currently assigned and cannot be deleted.",
-                                     dependencies=dependencies)
+    if await has_schedule_assignments(session, schedule_id):
+        raise ScheduleOperationError("schedule_in_use", "Schedule is currently assigned. Review its assignments before deleting it.")
     await _commit_change(session, schedule, action="schedule.delete", before=schedule_audit_snapshot(schedule),
                          user=user, source=source, deleting=True)
     return schedule

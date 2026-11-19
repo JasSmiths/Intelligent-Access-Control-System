@@ -1,4 +1,7 @@
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import React from "react";
+import { createReadSignals, ReadSignalsContext } from "../../lib/readSignals";
+import { InvestigationsWorkspace } from "./InvestigationsWorkspace";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as investigationApi from "../../api/investigations";
 import { defaultOverview, filterCatalog, scheduleBlockedEpisode, SITE_TIMEZONE } from "./fixtures";
@@ -90,4 +93,38 @@ it("aborts pagination on unmount", async () => {
   unmount();
   expect(signal?.aborted).toBe(true);
   await act(async () => { more.resolve(page("late")); await request; });
+});
+
+it("keeps older pages across automatic refresh and returns to the latest on request", async () => {
+  const signals = createReadSignals("investigations-test");
+  const read = vi.spyOn(investigationApi, "getActivityPage")
+    .mockResolvedValueOnce(page("first", "cursor")).mockResolvedValueOnce(page("older"))
+    .mockResolvedValueOnce(page("latest"));
+  const { result } = renderHook(() => useInvestigationData(DEFAULT_INVESTIGATION_QUERY), {
+    wrapper: ({ children }) => <ReadSignalsContext.Provider value={signals}>{children}</ReadSignalsContext.Provider>,
+  });
+  await waitFor(() => expect(result.current.items).toHaveLength(1));
+  await act(async () => { await result.current.loadMore(); });
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6000);
+  await act(async () => signals.publish({ type: "realtime", message: { type: "audit.log.created", payload: {} } }));
+  expect(result.current.newActivity).toBe(true);
+  expect(result.current.items.map((row) => row.episode_id)).toEqual(["first", "older"]);
+  expect(read).toHaveBeenCalledTimes(2);
+  await act(async () => { await result.current.refreshPage(); });
+  expect(result.current.items.map((row) => row.episode_id)).toEqual(["latest"]);
+  expect(result.current.newActivity).toBe(false);
+});
+
+it("retries failed overview evidence only when requested", async () => {
+  vi.spyOn(investigationApi, "getActivityPage").mockResolvedValue({
+    items: [], next_cursor: null, site_timezone: SITE_TIMEZONE, resolved_range: {},
+  });
+  const evidence = vi.spyOn(investigationApi, "getActivityEpisode").mockRejectedValue(new Error("Evidence unavailable"));
+  await act(async () => render(<InvestigationsWorkspace />));
+  const title = defaultOverview.recent_problems[0].title;
+  fireEvent.click(screen.getAllByRole("button", { name: new RegExp(title) })[0]);
+  const retry = await screen.findByRole("button", { name: "Retry evidence" });
+  expect(evidence).toHaveBeenCalledTimes(1);
+  await act(async () => fireEvent.click(retry));
+  expect(evidence).toHaveBeenCalledTimes(2);
 });

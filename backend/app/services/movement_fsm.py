@@ -82,6 +82,7 @@ class RecoveryDirectionIntent:
     camera_direction: AccessDirection | None
     camera_clear: bool
     probe_camera: bool = False
+    camera_motion_confirmed: bool = False
 
 
 @dataclass(frozen=True)
@@ -153,9 +154,10 @@ class MovementDirectionFSM:
         eligible = intent.allowed and intent.exact_plate and not intent.safety_block
         if intent.probe_camera and eligible:
             return RecoveryDirectionDecision(AccessDirection.ENTRY, intent.allowed, ready, reason, requires_camera=True)
-        if intent.camera_clear and intent.camera_direction == AccessDirection.EXIT:
+        clear_motion = intent.camera_motion_confirmed and intent.camera_clear
+        if clear_motion and intent.camera_direction == AccessDirection.EXIT:
             return RecoveryDirectionDecision(AccessDirection.EXIT, intent.allowed, ready, "camera_confirmed_departure")
-        if intent.camera_clear and intent.camera_direction == AccessDirection.ENTRY and eligible:
+        if clear_motion and intent.camera_direction == AccessDirection.ENTRY and eligible:
             return RecoveryDirectionDecision(AccessDirection.ENTRY, True, ready, "camera_confirmed_entry", method="camera_automatic")
         approval = bool(intent.allowed and intent.exact_plate and reason not in {
             "maintenance_mode", "gate_malfunction", "unresolved_gate_command", "unresolved_entry", "departure_evidence"})

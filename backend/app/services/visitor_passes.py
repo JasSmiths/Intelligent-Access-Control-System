@@ -31,6 +31,7 @@ from app.services.visitor_lifecycle import (
     BATCH_SIZE,
     LANES,
     VisitorLifecycleLane,
+    displayed_pass_status,
     due_passes_in_session,
     lifecycle_readiness,
 )
@@ -433,15 +434,16 @@ class VisitorPassService:
         statuses: list[VisitorPassStatus] | None = None,
         search: str | None = None,
         limit: int = 100,
-    ) -> list[VisitorPass]:
+    ) -> list[dict[str, Any]]:
+        status = displayed_pass_status(datetime.now(UTC))
         query = (
-            select(VisitorPass)
-            .options(selectinload(VisitorPass.created_by))
-            .order_by(VisitorPass.expected_time.desc(), VisitorPass.created_at.desc())
+            select(VisitorPass, status)
+            .options(selectinload(VisitorPass.created_by).load_only(User.full_name, User.username))
+            .order_by(VisitorPass.expected_time.desc(), VisitorPass.created_at.desc(), VisitorPass.id.desc())
             .limit(max(1, min(limit, 500)))
         )
         if statuses:
-            query = query.where(VisitorPass.status.in_(statuses))
+            query = query.where(status.in_(statuses))
         normalized_search = str(search or "").strip()
         if normalized_search:
             like = f"%{normalized_search}%"
@@ -460,7 +462,14 @@ class VisitorPassService:
                     VisitorPass.vehicle_colour.ilike(like),
                 )
             )
-        return list((await session.scalars(query)).all())
+        return [serialize_visitor_pass(row, displayed_status=value)
+                for row, value in await session.execute(query)]
+
+    async def pass_detail(self, session: AsyncSession, pass_id: uuid.UUID) -> dict[str, Any] | None:
+        result = (await session.execute(select(VisitorPass, displayed_pass_status(datetime.now(UTC)))
+            .options(selectinload(VisitorPass.created_by).load_only(User.full_name, User.username))
+            .where(VisitorPass.id == pass_id))).one_or_none()
+        return serialize_visitor_pass(result[0], displayed_status=result[1]) if result else None
 
     async def get_pass(self, session: AsyncSession, pass_id: uuid.UUID) -> VisitorPass | None:
         return await session.scalar(
@@ -1291,6 +1300,7 @@ def serialize_visitor_pass(
     visitor_pass: VisitorPass,
     *,
     timezone_name: str | None = None,
+    displayed_status: VisitorPassStatus | None = None,
 ) -> dict[str, Any]:
     timezone = _timezone(timezone_name)
     duration = visitor_pass.duration_on_site_seconds
@@ -1312,7 +1322,7 @@ def serialize_visitor_pass(
         "valid_until": _datetime_iso(visitor_pass.valid_until, timezone)
         if visitor_pass.valid_until
         else None,
-        "status": visitor_pass.status.value,
+        "status": (displayed_status or visitor_pass.status).value,
         "creation_source": visitor_pass.creation_source,
         "created_by_user_id": str(visitor_pass.created_by_user_id)
         if visitor_pass.created_by_user_id

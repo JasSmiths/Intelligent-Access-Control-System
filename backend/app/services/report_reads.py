@@ -8,12 +8,22 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 
-from sqlalchemy import case, func, or_, select, text
+from sqlalchemy import String, and_, case, func, literal_column, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.models import AccessEvent, Anomaly, Group, Person, Presence, Vehicle
+from app.models import (
+    AccessEvent,
+    Anomaly,
+    Group,
+    Person,
+    Presence,
+    Vehicle,
+    VisitorPass,
+    VisitorPassReservationRecord,
+)
 from app.models.enums import AccessDecision, AccessDirection, TimingClassification
+from app.models.visitor_timing import EXPIRY_SQL, START_SQL
 from app.services.profile_photos import stored_image_url
 from app.services.report_contracts import (
     MAX_REPORT_ACTIVITY_ROWS,
@@ -23,7 +33,7 @@ from app.services.report_contracts import (
     ReportTimeoutError,
     ReportWork,
 )
-from app.services.report_durations import MovementPoint, is_movement_event
+from app.services.report_durations import MovementPoint, is_movement_event, normalize_plate
 from app.services.settings import RuntimeConfig, get_runtime_config_for_session
 
 
@@ -91,6 +101,40 @@ def person_event_filter(person_id: uuid.UUID) -> ColumnElement[bool]:
     ))).where(Vehicle.person_id == person_id)
     return or_(AccessEvent.person_id == person_id, AccessEvent.vehicle_id.in_(vehicles),
                AccessEvent.registration_number.in_(plates))
+
+
+def visitor_pass_event_filter(visitor: VisitorPass) -> ColumnElement[bool]:
+    """Explicit receipts identify a visit; an unlabelled plate needs one matching window."""
+    payload_id = literal_column("(access_events.raw_payload -> 'visitor_pass' ->> 'id')", String())
+    reservation = VisitorPassReservationRecord
+    reserved_ids = select(reservation.access_event_id).where(reservation.visitor_pass_id == visitor.id)
+    direct: list[ColumnElement[bool]] = [payload_id == str(visitor.id), AccessEvent.id.in_(reserved_ids)]
+    linked_ids = [identity for identity in (visitor.arrival_event_id, visitor.departure_event_id) if identity]
+    if linked_ids:
+        direct.append(AccessEvent.id.in_(linked_ids))
+
+    plate = normalize_plate(visitor.number_plate or "")
+    if plate:
+        # Keep the exact inclusive/exclusive end rules used by the pass lifecycle.
+        occurred_utc = func.timezone("UTC", AccessEvent.occurred_at)
+        window = select(VisitorPass.id).where(
+            VisitorPass.number_plate == plate, literal_column(START_SQL) <= occurred_utc,
+            occurred_utc < literal_column(EXPIRY_SQL),
+        ).correlate(AccessEvent)
+        direct.append(and_(
+            AccessEvent.registration_number == plate,
+            AccessEvent.person_id.is_(None), AccessEvent.vehicle_id.is_(None), payload_id.is_(None),
+            window.where(VisitorPass.id == visitor.id).exists(),
+            ~window.where(VisitorPass.id != visitor.id).exists(),
+        ))
+
+    linked_elsewhere = select(VisitorPass.id).where(VisitorPass.id != visitor.id,
+        or_(VisitorPass.arrival_event_id == AccessEvent.id, VisitorPass.departure_event_id == AccessEvent.id),
+    ).correlate(AccessEvent).exists()
+    reserved_elsewhere = select(reservation.id).where(reservation.access_event_id == AccessEvent.id,
+        reservation.visitor_pass_id != visitor.id).correlate(AccessEvent).exists()
+    return and_(or_(*direct), or_(payload_id.is_(None), payload_id == str(visitor.id)),
+                ~linked_elsewhere, ~reserved_elsewhere)
 
 
 def remaining_activity_rows(events: Sequence[ReportEvent]) -> int:

@@ -102,16 +102,18 @@ function EpisodeEvidence({
   error,
   focusedEvidenceId,
   loading,
+  onRetry,
   timezone
 }: {
   detail?: ActivityEpisodeDetail;
   error?: string;
   focusedEvidenceId?: string;
   loading: boolean;
+  onRetry: () => void;
   timezone: string;
 }) {
   if (loading) return <div className="investigation-detail-loading"><LoaderCircle aria-hidden="true" className="spin" size={16} /> Loading supporting evidence…</div>;
-  if (error) return <div className="investigation-inline-error" role="alert">{error}</div>;
+  if (error) return <div className="investigation-inline-error" role="alert">{error} <button className="secondary-button" type="button" onClick={onRetry}>Retry evidence</button></div>;
   if (!detail) return null;
   return (
     <div className="investigation-episode-detail">
@@ -138,6 +140,7 @@ function EpisodeRow({
   expanded,
   focusedEvidenceId,
   loading,
+  onRetry,
   onToggle,
   timezone
 }: {
@@ -147,6 +150,7 @@ function EpisodeRow({
   expanded: boolean;
   focusedEvidenceId?: string;
   loading: boolean;
+  onRetry: () => void;
   onToggle: () => void;
   timezone: string;
 }) {
@@ -184,7 +188,7 @@ function EpisodeRow({
             {episode.actor ? <><dt>Initiated by</dt><dd>{episode.actor}</dd></> : null}
             {episode.source ? <><dt>Source subsystem</dt><dd>{episode.source}</dd></> : null}
           </dl>
-          <EpisodeEvidence detail={detail} error={error} focusedEvidenceId={focusedEvidenceId} loading={loading} timezone={timezone} />
+          <EpisodeEvidence detail={detail} error={error} focusedEvidenceId={focusedEvidenceId} loading={loading} onRetry={onRetry} timezone={timezone} />
         </div>
       ) : null}
     </article>
@@ -227,9 +231,8 @@ export function ActivityTimeline({
   React.useEffect(() => {
     if (!requestedEpisodeId) return;
     setExpandedIds((current) => new Set(current).add(requestedEpisodeId));
-    onLoadDetail(requestedEpisodeId);
     window.setTimeout(() => document.getElementById(`episode-${domId(requestedEpisodeId)}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
-  }, [onLoadDetail, requestedEpisodeId]);
+  }, [requestedEpisodeId]);
 
   React.useEffect(() => {
     if (!requestedEpisodeId || !focusedEvidenceId || !details[requestedEpisodeId]) return;
@@ -237,13 +240,11 @@ export function ActivityTimeline({
   }, [details, focusedEvidenceId, requestedEpisodeId]);
 
   function toggle(episodeId: string) {
+    if (!expandedIds.has(episodeId)) onLoadDetail(episodeId);
     setExpandedIds((current) => {
       const next = new Set(current);
       if (next.has(episodeId)) next.delete(episodeId);
-      else {
-        next.add(episodeId);
-        onLoadDetail(episodeId);
-      }
+      else next.add(episodeId);
       return next;
     });
   }
@@ -260,13 +261,13 @@ export function ActivityTimeline({
       {pinnedDetail ? (
         <div className="investigation-pinned-episode">
           <span>Selected investigation · outside the current results</span>
-          <EpisodeRow detail={pinnedDetail} episode={pinnedDetail.episode} error={detailErrors[pinnedDetail.episode.episode_id]} expanded focusedEvidenceId={focusedEvidenceId} loading={false} onToggle={() => toggle(pinnedDetail.episode.episode_id)} timezone={timezone} />
+          <EpisodeRow detail={pinnedDetail} episode={pinnedDetail.episode} error={detailErrors[pinnedDetail.episode.episode_id]} expanded focusedEvidenceId={focusedEvidenceId} loading={false} onRetry={() => onLoadDetail(pinnedDetail.episode.episode_id)} onToggle={() => toggle(pinnedDetail.episode.episode_id)} timezone={timezone} />
         </div>
       ) : null}
       {requestedEpisodeId && !items.some((item) => item.episode_id === requestedEpisodeId) && !pinnedDetail && loadingDetailIds.has(requestedEpisodeId) ?
         <div className="investigation-partial" role="status">Opening the selected investigation from outside the current results…</div> : null}
       {requestedEpisodeId && !items.some((item) => item.episode_id === requestedEpisodeId) && detailErrors[requestedEpisodeId] ?
-        <div className="investigation-page-error" role="alert">Selected investigation unavailable: {detailErrors[requestedEpisodeId]}</div> : null}
+        <div className="investigation-page-error" role="alert">Selected investigation unavailable: {detailErrors[requestedEpisodeId]} <button className="secondary-button" type="button" onClick={() => onLoadDetail(requestedEpisodeId)}>Retry evidence</button></div> : null}
       {!items.length ? (
         <div className="investigation-timeline-empty">
           {hasFilters ? <SearchX aria-hidden="true" size={24} /> : <FileQuestion aria-hidden="true" size={24} />}
@@ -275,7 +276,7 @@ export function ActivityTimeline({
         </div>
       ) : (
         <div className="investigation-timeline-list">
-          {items.map((episode) => <EpisodeRow detail={details[episode.episode_id]} episode={episode} error={detailErrors[episode.episode_id]} expanded={expandedIds.has(episode.episode_id)} focusedEvidenceId={requestedEpisodeId === episode.episode_id ? focusedEvidenceId : undefined} key={episode.episode_id} loading={loadingDetailIds.has(episode.episode_id)} onToggle={() => toggle(episode.episode_id)} timezone={timezone} />)}
+          {items.map((episode) => <EpisodeRow detail={details[episode.episode_id]} episode={episode} error={detailErrors[episode.episode_id]} expanded={expandedIds.has(episode.episode_id)} focusedEvidenceId={requestedEpisodeId === episode.episode_id ? focusedEvidenceId : undefined} key={episode.episode_id} loading={loadingDetailIds.has(episode.episode_id)} onRetry={() => onLoadDetail(episode.episode_id)} onToggle={() => toggle(episode.episode_id)} timezone={timezone} />)}
         </div>
       )}
       {nextCursor ? <button className="investigation-load-more" disabled={loadingMore} onClick={onLoadMore} type="button">{loadingMore ? <LoaderCircle aria-hidden="true" className="spin" size={15} /> : <ArrowDown aria-hidden="true" size={15} />}{loadingMore ? "Loading…" : "Load older activity"}</button> : null}

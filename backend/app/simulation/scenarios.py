@@ -357,7 +357,9 @@ class HardwareFreeAccessEventService(AccessEventService):
             await self._pipeline.release_coordinator(coordinator)
 
     async def _finalize_window(self, claim: WindowClaim) -> None:
-        await super()._finalize_window(claim)
+        # This finite runner owns no background evidence lane. Its instrumented
+        # execution completes in this call before the fixture records the event.
+        await self._execute_frozen_window(claim, park_recovery=False)
         async with AsyncSessionLocal() as session:
             window = await session.get(LprDebounceWindow, claim.window_id)
             if window is None or window.access_event_id is None:

@@ -1,7 +1,6 @@
 import { useCoordinatedRead } from "../../lib/useCoordinatedRead";
-import { auditResource } from "../../lib/realtime";
+import { isRecord } from "../../lib/format";
 import type { RealtimeMessage } from "../../api/types";
-const recoveryEventMatches = (event: RealtimeMessage) => event.type.startsWith("missed_exit_recovery.") || event.type === "access_event.finalized" || event.type === "access_event.updated" || event.type === "access_event.finalize_failed" || ["person", "settings"].includes(auditResource(event));
 import { useDirectoryOptions } from "../directory/reads";
 import { DirectoryPagination } from "../directory/DirectoryPagination";
 import { History, RefreshCw, X } from "lucide-react";
@@ -14,6 +13,15 @@ import { Badge, Toolbar } from "../../ui/primitives";
 import { RecoveryConfiguration } from "./RecoveryConfiguration";
 import { filterDate, recoveryLabel, recoveryMethods, safeDiagnosticRows } from "./model";
 
+function isRecoveryAccessEvent(event: RealtimeMessage) {
+  return (event.type === "access_event.finalized" || event.type === "access_event.updated")
+    && event.payload.has_recovery_attempt === true;
+}
+type TimedReceipt<T> = T & { refreshAt: number | null };
+function receipt<T extends { next_expiry_in_ms?: number }>(result: T): TimedReceipt<T> {
+  return { ...result, refreshAt: result.next_expiry_in_ms === undefined ? null : performance.now() + result.next_expiry_in_ms };
+}
+
 type Props = { targetId?: string | null; currentUser: UserAccount };
 export function MissedExitRecoveryView(props: Props) {
   if (props.currentUser.role !== "admin") return <section className="view-stack"><div className="permission-state" role="alert">Administrator access required for Missed Exit Recovery.</div></section>;
@@ -23,34 +31,64 @@ function RecoveryAdminView({ targetId }: Props) {
   const [draft, setDraft] = React.useState({ owner_id: "", registration_number: "", outcome: "", method: "", from_at: "", to_at: "" });
   const owners = useDirectoryOptions("people", draft.owner_id ? [draft.owner_id] : []);
   const [filters, setFilters] = React.useState<RecoveryAttemptFilters>({ offset: 0, limit: 25 });
-  const [page, setPage] = React.useState<RecoveryAttemptPage | null>(null);
+  const [page, setPage] = React.useState<TimedReceipt<RecoveryAttemptPage> | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState("");
   const [reload, setReload] = React.useState(0);
   const [selectedId, setSelectedId] = React.useState<string | null>(targetId ?? null);
-  const [detail, setDetail] = React.useState<RecoveryAttempt | null>(null);
+  const [detail, setDetail] = React.useState<TimedReceipt<RecoveryAttempt> | null>(null);
   const [detailError, setDetailError] = React.useState("");
   React.useEffect(() => { setSelectedId(targetId ?? null); }, [targetId]);
   const readAttempts = React.useCallback(async (signal: AbortSignal) => {
-    setLoading(true); setError(""); setPage(null);
-    try { const result = await missedExitRecoveryApi.attempts(filters, { signal }); if (!signal.aborted) setPage(result); }
+    setLoading(true); setError("");
+    try { const result = await missedExitRecoveryApi.attempts(filters, { signal }); if (!signal.aborted) setPage(receipt(result)); }
     catch (cause) { if (!signal.aborted && !isAbortError(cause)) setError(cause instanceof Error ? cause.message : "Unable to load recovery attempts"); throw cause; }
     finally { if (!signal.aborted) setLoading(false); }
   }, [filters, reload]);
-  useCoordinatedRead(readAttempts, recoveryEventMatches);
+  const refreshPage = useCoordinatedRead(readAttempts, (event) => isRecoveryAccessEvent(event)
+    && (!filters.owner_id || filters.owner_id === event.payload.person_id)
+    && (!filters.registration_number || filters.registration_number.replace(/ /g, "").toUpperCase() === event.payload.registration_number));
   const readDetail = React.useCallback(async (signal: AbortSignal) => {
-    setDetail(null); setDetailError(""); if (!selectedId) return;
-    try { const result = await missedExitRecoveryApi.attempt(selectedId, { signal }); if (!signal.aborted) setDetail(result); }
+    setDetailError(""); if (!selectedId) return;
+    try { const result = await missedExitRecoveryApi.attempt(selectedId, { signal }); if (!signal.aborted) setDetail(receipt(result)); }
     catch (cause) { if (!signal.aborted && !isAbortError(cause)) setDetailError(cause instanceof Error ? cause.message : "Unable to load attempt details"); throw cause; }
   }, [selectedId, reload]);
-  useCoordinatedRead(readDetail, recoveryEventMatches, Boolean(selectedId));
+  const currentDetail = selectedId === detail?.id ? detail : null;
+  const refreshDetail = useCoordinatedRead(readDetail, (event) => {
+    if (!currentDetail) return isRecoveryAccessEvent(event);
+    if (isRecoveryAccessEvent(event)) return event.payload.person_id === currentDetail.owner_id;
+    if (event.type !== "audit.log.created") return false;
+    const log = isRecord(event.payload.log) ? event.payload.log : event.payload;
+    return log.target_entity === "NotificationRun" && typeof log.target_id === "string"
+      && [currentDetail.notification.delivery_id, currentDetail.notification.apology_delivery_id,
+        currentDetail.notification.expiry_delivery_id].includes(log.target_id);
+  }, Boolean(selectedId));
+  const pageDeadline = page?.refreshAt ?? Infinity;
+  const detailDeadline = currentDetail?.refreshAt ?? Infinity;
+  React.useEffect(() => {
+    const deadline = Math.min(pageDeadline, detailDeadline);
+    if (!Number.isFinite(deadline)) return;
+    const timer = window.setTimeout(() => {
+      // Consume the deadline even on read failure. A failed refresh remains
+      // visible and an operator can retry without an automatic request loop.
+      if (pageDeadline === deadline || pageDeadline <= performance.now()) {
+        setPage((current) => current && { ...current, refreshAt: null });
+        void refreshPage().catch(() => undefined);
+      }
+      if (detailDeadline === deadline || detailDeadline <= performance.now()) {
+        setDetail((current) => current && { ...current, refreshAt: null });
+        void refreshDetail().catch(() => undefined);
+      }
+    }, Math.max(0, Math.ceil(deadline - performance.now())));
+    return () => window.clearTimeout(timer);
+  }, [pageDeadline, detailDeadline, refreshPage, refreshDetail]);
   function applyFilters(event: React.FormEvent) {
     event.preventDefault();
     const from = filterDate(draft.from_at), to = filterDate(draft.to_at);
     if (from && to && from > to) { setError("From must be earlier than To."); return; }
-    setSelectedId(null); setFilters({ ...draft, from_at: from, to_at: to, offset: 0, limit: filters.limit });
+    setPage(null); setSelectedId(null); setFilters({ ...draft, from_at: from, to_at: to, offset: 0, limit: filters.limit });
   }
-  function movePage(offset: number) { setSelectedId(null); setFilters({ ...filters, offset }); }
+  function movePage(offset: number) { setPage(null); setSelectedId(null); setFilters({ ...filters, offset }); }
   const offset = page?.offset ?? filters.offset ?? 0, limit = page?.limit ?? filters.limit ?? 25;
   return <section className="view-stack settings-page recovery-page">
     <Toolbar title="Missed Exit Recovery" icon={History} />
@@ -65,17 +103,17 @@ function RecoveryAdminView({ targetId }: Props) {
         <label className="field"><span>Method filter</span><select value={draft.method} onChange={(event) => setDraft({ ...draft, method: event.target.value })}><option value="">All methods</option>{recoveryMethods.map((method) => <option key={method} value={method}>{recoveryLabel(method)}</option>)}</select></label>
         <label className="field"><span>From</span><input type="datetime-local" value={draft.from_at} onChange={(event) => setDraft({ ...draft, from_at: event.target.value })} /></label>
         <label className="field"><span>To</span><input type="datetime-local" value={draft.to_at} onChange={(event) => setDraft({ ...draft, to_at: event.target.value })} /></label>
-        <label className="field"><span>Attempts per page</span><select value={filters.limit ?? 25} onChange={(event) => { setSelectedId(null); setFilters({ ...filters, limit: Number(event.target.value), offset: 0 }); }}>{[25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}</select></label>
+        <label className="field"><span>Attempts per page</span><select value={filters.limit ?? 25} onChange={(event) => { setPage(null); setSelectedId(null); setFilters({ ...filters, limit: Number(event.target.value), offset: 0 }); }}>{[25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}</select></label>
         <button className="primary-button" type="submit">Apply filters</button>
       </div></form>
       {error ? <div className="auth-error" role="alert">{error}</div> : null}
-      {loading ? <p role="status">Loading recovery attempts…</p> : page ? <>
+      {loading && !page ? <p role="status">Loading recovery attempts…</p> : page ? <>
         <div className="table-scroll"><table className="data-table"><thead><tr><th>Occurred</th><th>Owner / plate</th><th>Method</th><th>Outcome</th><th>Reason</th><th>Details</th></tr></thead><tbody>{page.items.map((attempt) => <tr key={attempt.id}><td>{formatDate(attempt.occurred_at)}</td><td>{attempt.owner_name || "Unresolved owner"}<br /><strong>{attempt.registration_number}</strong></td><td>{recoveryLabel(attempt.method)}</td><td><Badge tone="gray">{recoveryLabel(attempt.outcome)}</Badge></td><td>{attempt.reason}</td><td><button className="secondary-button" type="button" onClick={() => setSelectedId(attempt.id)} aria-label={`View recovery attempt ${attempt.registration_number} ${attempt.id}`}>View</button></td></tr>)}</tbody></table></div>
         {!page.items.length ? <p className="empty-state">No recovery attempts match these filters.</p> : null}
         <div className="toolbar"><span role="status">{page.total ? `${offset + 1}–${Math.min(offset + page.items.length, page.total)} of ${page.total}` : "0 attempts"}</span><div className="recovery-pagination"><button className="secondary-button" type="button" disabled={offset === 0} onClick={() => movePage(Math.max(0, offset - limit))}>Previous</button><button className="secondary-button" type="button" disabled={offset + limit >= page.total} onClick={() => movePage(offset + limit)}>Next</button></div></div>
       </> : null}
     </section>
-    {selectedId ? <section className="card" aria-label="Recovery attempt details"><div className="toolbar"><h2>Attempt details</h2><button className="icon-button" type="button" onClick={() => setSelectedId(null)} aria-label="Close attempt details"><X size={18} /></button></div>{detailError ? <div className="auth-error" role="alert">{detailError}</div> : detail ? <RecoveryAttemptDetails attempt={detail} /> : <p role="status">Loading attempt details…</p>}</section> : null}
+    {selectedId ? <section className="card" aria-label="Recovery attempt details"><div className="toolbar"><h2>Attempt details</h2><button className="icon-button" type="button" onClick={() => setSelectedId(null)} aria-label="Close attempt details"><X size={18} /></button></div>{detailError ? <div className="auth-error" role="alert">{detailError}</div> : null}{currentDetail ? <RecoveryAttemptDetails attempt={currentDetail} /> : !detailError ? <p role="status">Loading attempt details…</p> : null}</section> : null}
   </section>;
 }
 export function RecoveryAttemptDetails({ attempt }: { attempt: RecoveryAttempt }) {
@@ -84,8 +122,8 @@ export function RecoveryAttemptDetails({ attempt }: { attempt: RecoveryAttempt }
     <h3>Checks</h3><DiagnosticRows value={attempt.checks} />
     <h3>Notification lifecycle</h3><dl className="recovery-summary"><dt>Status</dt><dd>{recoveryLabel(attempt.notification.status || "not_requested")}</dd><dt>Expires</dt><dd>{attempt.notification.expires_at ? formatDate(attempt.notification.expires_at) : "None"}</dd><dt>Action received</dt><dd>{attempt.notification.action_at ? formatDate(attempt.notification.action_at) : "None"}</dd><dt>Delivery</dt><dd>{attempt.notification.delivery_id || "None"}</dd></dl>
     {attempt.notification.canonical_attempt_id ? <p>Coalesced with <a href={`/settings/missed-exit-recovery?attempt=${encodeURIComponent(attempt.notification.canonical_attempt_id)}`}>canonical attempt {attempt.notification.canonical_attempt_id}</a>{attempt.notification.canonical_outcome ? ` · ${recoveryLabel(attempt.notification.canonical_outcome)}` : ""}{attempt.notification.canonical_reason ? ` · ${attempt.notification.canonical_reason}` : ""}</p> : null}
-    <h4>Approval and apology delivery</h4><p className="field-hint">Delivered counts describe provider acceptance. They do not prove the resident saw the notification. Action received records the separate iOS action.</p>
-    <DiagnosticRows value={Object.fromEntries(Object.entries(attempt.notification).filter(([key]) => /^(approval|apology)_/.test(key) && !key.endsWith("_id")))} />
+    <h4>Notification delivery</h4><p className="field-hint">Delivered counts describe provider acceptance. They do not prove the resident saw the notification. Action received records the separate iOS action.</p>
+    <DiagnosticRows value={Object.fromEntries(Object.entries(attempt.notification).filter(([key]) => /^(approval|apology|expiry)_/.test(key) && !key.endsWith("_id")))} />
     {attempt.notification.apology_delivery_id ? <p>Apology delivery: {attempt.notification.apology_delivery_id}</p> : null}
     <h3>Decision and command timeline</h3><p className="field-hint">A recovery decision or provider acceptance alone does not verify physical gate movement. Review the command verification stage.</p>
     {attempt.timeline.length ? <ol className="recovery-timeline">{attempt.timeline.map((entry, index) => <li key={`${entry.at}:${entry.stage}:${index}`}><div><time>{formatDate(entry.at)}</time> · <strong>{recoveryLabel(entry.stage)}</strong> · {recoveryLabel(entry.status)}</div><p>{entry.reason}</p>{entry.details ? <DiagnosticRows value={entry.details} /> : null}</li>)}</ol> : <p>No timeline entries recorded.</p>}

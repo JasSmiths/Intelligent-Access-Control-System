@@ -309,3 +309,19 @@ async def test_malformed_notification_override_envelope_holds_before_display_nor
     from app.services.notifications import sample_notification_context
     with pytest.raises(WorkflowConfigurationError):
         await NotificationService().planner.build(sample_notification_context("authorized_entry"), raw)
+
+
+def test_location_refresh_literal_contract_is_closed_and_scoped():
+    from uuid import uuid4
+    from app.services.workflows.channel_definitions import ResidentLocationAction, pending_notification_error
+
+    action = ResidentLocationAction(target="notify.mobile_app_synthetic", resident_location_output=str(uuid4())).model_dump()
+    def error(candidate):
+        return pending_notification_error([{"state": "pending", "rule": {}, "action": candidate}])
+
+    assert error(action) is None
+    for changes in ({"resident_location_output": {}}, {"resident_location_output": "bogus"},
+                    {"type": "voice"}, {"delivery_mode": "rendered"}, {"message": "other"},
+                    {"target": "notify.other"}, {"actionable_output": {}}):
+        assert error({**action, **changes}) == "unsupported_action_configuration"
+    assert error({k: v for k, v in action.items() if k != "delivery_mode"}) == "unsupported_action_configuration"

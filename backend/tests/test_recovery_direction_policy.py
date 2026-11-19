@@ -13,19 +13,20 @@ BASE = RecoveryDirectionIntent(allowed=True, exact_plate=True, explicit_directio
 
 
 @pytest.mark.parametrize("updates,direction,allowed,method,approval,camera,reason", [
+    ({"camera_clear": True, "camera_direction": Direction.EXIT}, Direction.ENTRY, False, "none", True, False, "phone_journey_missing"),
     ({}, Direction.ENTRY, False, "none", True, False, "phone_journey_missing"),
     ({"phone_ready": True}, Direction.ENTRY, True, "phone_automatic", False, False, "phone_journey_missing"),
     ({"phone_ready": True, "explicit_direction": Direction.EXIT}, Direction.EXIT, True, "none", False, False, "departure_evidence"),
     ({"allowed": False, "phone_ready": True}, Direction.ENTRY, False, "none", False, False, "phone_journey_missing"),
     ({"probe_camera": True}, Direction.ENTRY, True, "none", False, True, "phone_journey_missing"),
     ({"probe_camera": True, "exact_plate": False}, Direction.ENTRY, False, "none", False, False, "phone_journey_missing"),
-    ({"camera_clear": True, "camera_direction": Direction.EXIT}, Direction.EXIT, True, "none", False, False, "camera_confirmed_departure"),
-    ({"camera_clear": True, "camera_direction": Direction.ENTRY}, Direction.ENTRY, True, "camera_automatic", False, False, "camera_confirmed_entry"),
+    ({"camera_clear": True, "camera_direction": Direction.EXIT, "camera_motion_confirmed": True}, Direction.EXIT, True, "none", False, False, "camera_confirmed_departure"),
+    ({"camera_clear": True, "camera_direction": Direction.ENTRY, "camera_motion_confirmed": True}, Direction.ENTRY, True, "camera_automatic", False, False, "camera_confirmed_entry"),
     ({"camera_clear": False, "camera_direction": Direction.ENTRY}, Direction.ENTRY, False, "none", True, False, "phone_journey_missing"),
     ({"camera_clear": True, "camera_direction": Direction.ENTRY, "exact_plate": False}, Direction.ENTRY, False, "none", False, False, "phone_journey_missing"),
     ({"camera_clear": True, "camera_direction": Direction.ENTRY, "safety_block": "maintenance_mode"}, Direction.ENTRY, False, "none", False, False, "maintenance_mode"),
     ({"phone_ready": True, "safety_block": "unresolved_gate_command"}, Direction.ENTRY, False, "none", False, False, "unresolved_gate_command"),
-    ({"camera_clear": True, "camera_direction": Direction.EXIT, "safety_block": "gate_malfunction"}, Direction.EXIT, True, "none", False, False, "camera_confirmed_departure"),
+    ({"camera_clear": True, "camera_direction": Direction.EXIT, "camera_motion_confirmed": True, "safety_block": "gate_malfunction"}, Direction.EXIT, True, "none", False, False, "camera_confirmed_departure"),
 ])
 def test_recovery_precedence(updates, direction, allowed, method, approval, camera, reason):
     result = MovementDirectionFSM.resolve_recovery(replace(BASE, **updates))

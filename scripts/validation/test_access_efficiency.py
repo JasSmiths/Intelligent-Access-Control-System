@@ -17,9 +17,9 @@ from app.db.session import AsyncSessionLocal, engine
 from app.models import AccessEvent, Person, Presence, User, Vehicle
 from app.models.enums import AccessDecision, AccessDirection, PresenceState, UserRole
 from app.modules.lpr.base import PlateRead
+from app.services.access.movement_history import latest_confirmed_movement
 from app.services.access.evidence import AccessEvidenceResolver
 from app.services.access.reads import GATE_OBSERVATION_PAYLOAD_KEY
-from app.services.access.plate_matching import match_candidates
 from app.services.access_events import AccessEventService
 from app.services.auth import _encode_jwt, authenticate_token, serialize_user
 from app.services.directory.reads import list_people
@@ -113,6 +113,17 @@ async def plans(statements):
     return retained
 
 
+def nodes(value):
+    if isinstance(value, dict):
+        if "Node Type" in value:
+            yield value
+        for child in value.values():
+            yield from nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from nodes(child)
+
+
 @pytest.mark.parametrize("size", [16, 2000])
 async def test_access_auth_and_matching_workload(isolated_resources, tmp_path, size):
     runtime = runtime_config_from_values({key: default for key, (_, default, _) in DEFAULT_DYNAMIC_SETTINGS.items()})
@@ -160,12 +171,10 @@ async def test_access_auth_and_matching_workload(isolated_resources, tmp_path, s
         return await auth_guard(request, next_request)
     async def predecessor():
         async with AsyncSessionLocal() as session:
-            row = await resolver._latest_live_person_or_vehicle_event(session, person=people[0], vehicle=vehicles[0], before=NOW)
+            row = await latest_confirmed_movement(session, person=people[0], vehicle=vehicles[0], before=NOW)
             return {"id": str(row.id), "direction": row.direction.value, **materialization(session)}
     async def matching(plate):
-        registrations = await worker._matching_vehicle_registrations((plate,))
-        return {"match": match_candidates((plate,), registrations, runtime.lpr_similarity_threshold),
-            "registration_rows": len(registrations), "registration_scalar_utf8_bytes": sum(len(item.encode()) for item in registrations)}
+        return {"match": await worker._known_vehicle_match((plate,), runtime.lpr_similarity_threshold)}
     async def ui_read():
         async with AsyncSessionLocal() as session:
             page = await list_people(session, limit=25)
@@ -180,22 +189,27 @@ async def test_access_auth_and_matching_workload(isolated_resources, tmp_path, s
     measurements, query_plans = {}, {}
     for name, operation in operations.items():
         measurements[name], queries = await measure(operation)
-        if name in {"known_photo_identity", "live_predecessor_person_or_vehicle", "exact_matching", "unknown_fuzzy_matching"}:
+        if name in {"exact_matching", "unknown_fuzzy_matching", "ocr_fuzzy_matching"}:
+            # Replay the two read-only SQL shapes outside timed samples to count
+            # the registrations transferred by the exact and fallback stages.
+            async with engine.connect() as connection:
+                returned = []
+                for sql, params in queries:
+                    returned.extend((await connection.exec_driver_sql(sql, params)).scalars())
+            output = measurements[name]["output"]
+            output.update(registration_rows=len(returned), registration_scalar_utf8_bytes=sum(len(row.encode()) for row in returned))
+            measurements[name]["json_utf8_bytes"] = len(json.dumps(output, sort_keys=True).encode())
+            if name == "unknown_fuzzy_matching":
+                assert output["match"] is None and not returned
+            elif name == "ocr_fuzzy_matching":
+                assert output["match"]["registration_number"] == known and len(returned) < size
+        if name in {"known_photo_identity", "live_predecessor_person_or_vehicle", "exact_matching", "unknown_fuzzy_matching", "ocr_fuzzy_matching"}:
             query_plans[name] = await plans(queries)
     artifact = Path(tmp_path)/f"access-efficiency-{size}.json"
     write_evidence(artifact, {"dataset": {"people": size//2, "vehicles": size, "events": size, "photo_scalar_bytes_each": len(BLOB.encode())},
         "warmups": WARMUPS, "samples": SAMPLES, "concurrent_ui_reads": 4, "measurements": measurements, "query_plans": query_plans,
         "limits": "Synthetic read/substep timings with tracemalloc enabled; seven samples give coarse p95. Scalar UTF-8 and JSON sizes are proxies, not database wire bytes/RSS. Concurrent UI reads do not parallelize access processing."})
     if size == 2000:
-        def nodes(value):
-            if isinstance(value, dict):
-                if "Node Type" in value:
-                    yield value
-                for child in value.values():
-                    yield from nodes(child)
-            elif isinstance(value, list):
-                for child in value:
-                    yield from nodes(child)
         for query in query_plans["live_predecessor_person_or_vehicle"]:
             for kind in ("actual_plan", "generic_plan"):
                 seeks = [node for node in nodes(query[kind])
@@ -205,4 +219,55 @@ async def test_access_auth_and_matching_workload(isolated_resources, tmp_path, s
                 conditions = [node.get("Index Cond", "") for node in seeks]
                 assert any("person_id" in condition and "occurred_at" in condition for condition in conditions)
                 assert any("vehicle_id" in condition and "occurred_at" in condition for condition in conditions)
+    print("ACCESS_EFFICIENCY_ARTIFACT", artifact)
+
+
+async def test_pending_admission_seeks_partial_index_through_completed_history(isolated_resources, tmp_path):
+    from app.services.resident_recovery import blockers
+
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql("""
+            INSERT INTO movement_sagas (id, idempotency_key, source, state, occurred_at, gate_command_required,
+                presence_committed, reconciliation_required, intent_payload, decision_payload, state_history, admission_status)
+            SELECT gen_random_uuid(), 'index-fixture-' || i, 'synthetic', 'COMPLETED', clock_timestamp(),
+                false, true, false, '{}', '{}', '[]', 'verified' FROM generate_series(1, 10000) AS i
+        """)
+        pending = (await connection.exec_driver_sql("""
+            INSERT INTO movement_sagas (id, idempotency_key, source, state, occurred_at, gate_command_required,
+                presence_committed, reconciliation_required, intent_payload, decision_payload, state_history, admission_status)
+            VALUES (gen_random_uuid(), 'index-fixture-pending', 'synthetic', 'PHYSICAL_COMMAND_PENDING', clock_timestamp(),
+                true, false, false, '{}', '{}', '[]', 'pending') RETURNING id
+        """)).scalar_one()
+        await connection.exec_driver_sql("ANALYZE movement_sagas")
+    captured = []
+    def capture(_connection, _cursor, sql, parameters, _context, _many):
+        if "FROM movement_sagas" in sql:
+            captured.append((sql, parameters))
+
+    sql_event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        async with AsyncSessionLocal() as session:
+            assert await blockers(session) == "unresolved_entry"
+            assert await blockers(session, exclude_saga_id=pending) is None
+    finally:
+        sql_event.remove(engine.sync_engine, "before_cursor_execute", capture)
+    assert len(captured) == 2
+    measured = await plans(captured)
+    for case, (sql, parameters), selected in zip(measured, captured, (1, 0), strict=True):
+        for kind in ("actual_plan", "generic_plan"):
+            seeks = [node for node in nodes(case[kind]) if node.get("Index Name") == "ix_movement_sagas_pending_admission"]
+            assert len(seeks) == 1 and seeks[0]["Actual Rows"] == selected
+            assert seeks[0].get("Rows Removed by Filter", 0) <= 1
+        # Compare the same captured query and rows to a forced sequential scan.
+        async with engine.begin() as connection:
+            for strategy in ("enable_indexscan", "enable_indexonlyscan", "enable_bitmapscan"):
+                await connection.exec_driver_sql(f"SET LOCAL {strategy} = off")
+            baseline = await connection.exec_driver_sql("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, parameters)
+            case["sequential_reference_plan"] = baseline.scalar_one()
+            scans = [node for node in nodes(case["sequential_reference_plan"]) if node.get("Relation Name") == "movement_sagas"]
+            assert len(scans) == 1 and scans[0]["Actual Rows"] == selected
+            if selected == 0:
+                assert scans[0].get("Rows Removed by Filter", 0) == 10001
+    artifact = Path(tmp_path) / "pending-admission-index.json"
+    write_evidence(artifact, {"completed": 10000, "pending": 1, "query_plans": measured})
     print("ACCESS_EFFICIENCY_ARTIFACT", artifact)

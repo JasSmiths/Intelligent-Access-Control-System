@@ -5,7 +5,7 @@ import { createRefreshCoordinator } from "./refreshCoordinator";
 
 // Own request lifetime and serialization; data, errors and event policy stay with the feature.
 export function useCoordinatedRead(
-  read: (signal: AbortSignal) => Promise<void>,
+  read: (signal: AbortSignal, background: boolean) => Promise<void>,
   eventMatches: (message: RealtimeMessage) => boolean,
   enabled = true,
   debounceMs = 0,
@@ -17,16 +17,16 @@ export function useCoordinatedRead(
   React.useLayoutEffect(() => { matchesRef.current = eventMatches; }, [eventMatches]);
   const owner = React.useMemo(() => {
     let active: AbortController | null = null;
-    let coordinator: ReturnType<typeof createRefreshCoordinator<"read">> | null = null;
+    let coordinator: ReturnType<typeof createRefreshCoordinator<"foreground" | "background">> | null = null;
     let firstDue = 0;
     return {
       activate() {
         firstDue = Date.now() + debounceMs;
-        coordinator = createRefreshCoordinator<"read">(async () => {
+        coordinator = createRefreshCoordinator<"foreground" | "background">(async (requests) => {
           firstDue = 0;
           const controller = new AbortController();
           active = controller;
-          try { await read(controller.signal); }
+          try { await read(controller.signal, !requests.has("foreground")); }
           catch (error) { if (!controller.signal.aborted) throw error; }
           finally { if (active === controller) active = null; }
         });
@@ -34,7 +34,7 @@ export function useCoordinatedRead(
       request(realtime = false, urgent = false) {
         if (!enabled) return Promise.resolve();
         if (urgent) active?.abort();
-        return coordinator?.request(new Set(["read"]), realtime ? REALTIME_REFRESH_MIN_INTERVAL_MS : 0, urgent ? 0 : firstDue) ?? Promise.resolve();
+        return coordinator?.request(new Set([realtime ? "background" : "foreground"]), realtime ? REALTIME_REFRESH_MIN_INTERVAL_MS : 0, urgent ? 0 : firstDue) ?? Promise.resolve();
       },
       dispose() { active?.abort(); coordinator?.dispose(); coordinator = null; }
     };

@@ -412,6 +412,56 @@ async def test_worker_start_stop_cleans_task_and_recovers_queued_work(monkeypatc
     assert (await service.run_store.get(identity)).status == "provider_accepted"
 
 
+async def test_location_refresh_dispatches_once_while_an_ordinary_delivery_is_blocked(monkeypatch):
+    from app.services import notification_dispatch, resident_location_refresh
+    from app.services.resident_location_contracts import LOCATION_REFRESH_TRIGGER
+    from app.services.workflows.channel_definitions import ResidentLocationAction
+
+    service = NotificationService()
+    ordinary = await queued(service.run_store, 1)
+    location = uuid.uuid4()
+    entered, release, sent = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def deliver(item, row, config, *, progress):
+        calls.append(row.id)
+        if row.id == ordinary:
+            entered.set()
+            await release.wait()
+        elif row.id == location:
+            sent.set()
+        return NotificationActionOutcome(delivered=True)
+
+    monkeypatch.setattr(notification_dispatch, "POLL_SECONDS", 0.01)
+    monkeypatch.setattr(service, "deliver_planned_action", deliver)
+    authorize = AsyncMock(return_value=None)
+    monkeypatch.setattr(resident_location_refresh, "authorize_output", authorize)
+    service.dispatcher.start()
+    try:
+        async with asyncio.timeout(5):
+            await entered.wait()
+            action = ResidentLocationAction(target="notify.mobile_app_synthetic", resident_location_output=str(location))
+            payload = owner.notification_context_payload(NotificationContext(
+                event_type=LOCATION_REFRESH_TRIGGER, subject="Synthetic", severity="info", facts={}))
+            payload["resident_location_origin"] = {"window_id": str(uuid.uuid4())}
+            async with AsyncSessionLocal() as s:
+                await service.run_store.enqueue_prepared_in_session(s, payload, run_id=location,
+                    plan=[{"state": "pending", "rule": {"id": "synthetic", "name": "Synthetic"}, "action": action.model_dump()}])
+                await s.commit()
+            await sent.wait()
+            assert not await service.dispatcher.run_once(location)
+            release.set()
+            for identity in (ordinary, location):
+                while (await service.run_store.get(identity)).status in ("processing", "queued"):
+                    await asyncio.sleep(0.01)
+                assert (await service.run_store.get(identity)).status == "provider_accepted"
+    finally:
+        release.set()
+        await service.dispatcher.stop()
+    assert calls == [ordinary, location]
+    assert authorize.await_count == 2
+
+
 async def test_real_old_schema_upgrade_preserves_history_and_guards_downgrade():
     spec = importlib.util.spec_from_file_location(
         "recovery_migration",

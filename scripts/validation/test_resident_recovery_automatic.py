@@ -3,6 +3,7 @@
 The guarded namespace permits only disposable PostgreSQL/Redis. No worker,
 lifespan, camera, notification sender or actuator is started by these tests.
 """
+from test_recovery_boundaries import Trace as BoundaryTrace
 from test_recovery_boundaries import isolated_resources as isolated_resources
 
 import asyncio
@@ -27,8 +28,10 @@ from app.modules.gate.base import CommandDelivery, GateState
 from app.modules.lpr.base import PlateRead
 from app.services import resident_recovery as recovery
 from app.services import resident_location_refresh as location
+from app.services import notifications
+from app.services.access import recovery_camera as motion_camera
+from app.modules.unifi_protect.client import ProtectMedia
 from app.services.access import authorization, evidence, execution, hardware
-from app.services.access.evidence import AccessEvidenceResolver
 from app.services.access.execution import AccessExecution
 from app.services.access.reads import (GATE_OBSERVATION_PAYLOAD_KEY,
     KNOWN_VEHICLE_PLATE_MATCH_PAYLOAD_KEY, LPR_INGEST_EVENT_PAYLOAD_KEY)
@@ -49,11 +52,11 @@ SETTINGS = {"missed_exit_recovery_enabled": True,
     "gate_admission_device_key": "synthetic_entry"}
 
 
-class Trace:
+class Trace(BoundaryTrace):
     trace_id = "synthetic-automatic-recovery"
 
     def start_span(self, *args, **kwargs):
-        return SimpleNamespace(finish=lambda **kwargs: None)
+        return SimpleNamespace(span_id="synthetic-span", finish=lambda **kwargs: None)
 
 
 class Harness:
@@ -92,9 +95,11 @@ class Harness:
             trip = await session.get(ResidentRecoveryJourney, event.person_id)
             assert event.decision == AccessDecision.GRANTED
             assert intake.status == "succeeded"
-            assert trip.claimed_event_id == event.id and trip.consumed_at is not None
             durable_recovery = event.raw_payload["direction_resolution"].get("missed_exit_recovery")
+            if trip is not None:
+                assert trip.claimed_event_id == event.id and trip.consumed_at is not None
             if durable_recovery:
+                assert trip is not None
                 assert durable_recovery["target_plan"] == target_plan() == intent.target_plan
             try:
                 await intent.authorize_dispatch(session)
@@ -143,7 +148,7 @@ async def h(isolated_resources, monkeypatch):
         monkeypatch.setattr(module, "get_runtime_config_for_session", value.runtime)
     monkeypatch.setattr(evidence, "get_runtime_config", value.current_runtime)
     monkeypatch.setattr(AccessDeviceConfiguration, "preview_gate_open", AsyncMock(return_value=target_plan()))
-    monkeypatch.setattr(AccessEvidenceResolver, "_resolve_duplicate_arrival_with_camera",
+    monkeypatch.setattr(evidence, "recovery_camera",
         AsyncMock(return_value={"direction": "unknown", "confidence": 0.0,
                                "reason": "Synthetic inert camera"}))
     monkeypatch.setattr(hardware, "get_gate_command_coordinator",
@@ -189,7 +194,8 @@ async def seed(h, *, trip=True):
         return SimpleNamespace(person=person, vehicles=vehicles, now=now)
 
 
-async def plate_read(h, item, index=0, *, gate="closed", explicit=None, capture_age=0):
+async def plate_read(h, item, index=0, *, gate="closed", explicit=None, capture_age=0,
+                     source="synthetic_automatic_lpr", detected_plate=None):
     async with AsyncSessionLocal() as session:
         observed = await session.scalar(select(func.clock_timestamp()))
     captured = observed-timedelta(seconds=capture_age)
@@ -201,7 +207,7 @@ async def plate_read(h, item, index=0, *, gate="closed", explicit=None, capture_
             "observed_registration_number": vehicle.registration_number}}
     if explicit:
         raw["direction"] = explicit
-    read = PlateRead(vehicle.registration_number, 1.0, "synthetic_automatic_lpr", captured, raw)
+    read = PlateRead(detected_plate or vehicle.registration_number, 1.0, source, captured, raw)
     intake, created = await h.ingest.persist_read(read, received_at=captured,
         idempotency_key=f"synthetic-auto:{raw['eventId']}", normalized_payload={
             "registration_number": read.registration_number, "captured_at": captured.isoformat(),
@@ -261,6 +267,17 @@ async def test_requested_fix_completes_admission_and_request_is_single_use(h, mo
                 _config, policy = await authority.authorize_attempt_with_config(session, run.context,
                     run.id, action=run.delivery_plan[0]["action"], final=final)
                 assert policy is None
+        service = notifications.NotificationService()
+        service.authorization = authority
+        monkeypatch.setattr(service, "delivery_config", h.current_runtime)
+        send = AsyncMock()
+        monkeypatch.setattr(notifications.HomeAssistantMobileAppNotifier, "send", send)
+        assert await service.dispatcher.run_once(refresh.run_id)
+        send.assert_awaited_once()
+        assert send.await_args.args[2] == "request_location_update"
+        async with AsyncSessionLocal() as session:
+            sent = await session.get(NotificationRun, refresh.run_id)
+            assert sent.delivered_count == 1 and sent.status == "provider_accepted"
         await fresh_fix(item)
         return await original_wait(refresh)
 
@@ -272,12 +289,63 @@ async def test_requested_fix_completes_admission_and_request_is_single_use(h, mo
     assert len(request_ids) == len(h.intents) == len(h.authorized) == 1
     async with AsyncSessionLocal() as session:
         event = await session.get(AccessEvent, event_id)
-        assert event.decision == AccessDecision.GRANTED
+        assert event.direction == AccessDirection.ENTRY and event.decision == AccessDecision.GRANTED
+        assert (await session.get(Presence, item.person.id)).state == PresenceState.PRESENT
+        attempt = (await session.scalars(select(MissedExitRecoveryAttempt).where(
+            MissedExitRecoveryAttempt.event_id == event_id))).one()
+        assert attempt.method == "phone_automatic" and attempt.action_context_id is None
         assert event.raw_payload["direction_resolution"]["missed_exit_recovery"]["checks"]["requested_fix"]
         run = await session.get(NotificationRun, request_ids[0])
         assert await location.authorize_output(session, run.context, run.id, run.delivery_plan[0]["action"]) == "location_request_encounter_ended"
     await h.execute(read)
     assert len(h.intents) == 1
+
+
+@pytest.mark.parametrize("movement", ["stationary", "exit"])
+async def test_held_refresh_falls_back_to_same_plate_motion_or_approval(h, monkeypatch, movement):
+    item = await stale_trip(h)
+    plate = item.vehicles[0].registration_number
+
+    async def rejected(refresh):
+        # Reproduce a prepared-plan rejection only in this synthetic database.
+        async with AsyncSessionLocal.begin() as session:
+            run = await session.get(NotificationRun, refresh.run_id)
+            step = run.delivery_plan[0]
+            run.delivery_plan = [{**step, "action": {**step["action"], "unexpected": True}}]
+        async with asyncio.TaskGroup() as tasks:
+            waiter = tasks.create_task(location.wait_for_location(refresh))
+            # Exercise a hold committed while the phone waiter is already active.
+            await asyncio.sleep(.05)
+            assert await location.NotificationRunStore().claim(refresh.run_id) is None
+            return await asyncio.wait_for(waiter, timeout=2)
+
+    monkeypatch.setattr(execution, "wait_for_location", rejected)
+    monkeypatch.setattr(evidence, "recovery_camera", motion_camera.recovery_camera)
+    frames = AsyncMock(return_value=(ProtectMedia(b"synthetic-first", "image/jpeg"),
+                                     ProtectMedia(b"synthetic-last", "image/jpeg")))
+    monkeypatch.setattr(motion_camera, "get_unifi_protect_service", lambda: SimpleNamespace(direction_frames=frames))
+    monkeypatch.setattr(motion_camera.telemetry, "store_artifact", AsyncMock(return_value={}))
+    first = {"plate": plate, "box": [.1, .1, .8, .8]}
+    last = first if movement == "stationary" else {"plate": plate, "box": [.3, .3, .65, .65]}
+    monkeypatch.setattr(motion_camera.OpenAIResponsesProvider, "analyze_images", AsyncMock(
+        return_value=SimpleNamespace(text=json.dumps({"motion": "exit", "confidence": .99,
+                                                      "first": first, "last": last}))))
+    event_id = await h.execute(await plate_read(h, item))
+    async with AsyncSessionLocal() as session:
+        event = await session.get(AccessEvent, event_id)
+        presence = await session.get(Presence, item.person.id)
+        attempt = (await session.scalars(select(MissedExitRecoveryAttempt).where(
+            MissedExitRecoveryAttempt.event_id == event_id))).one()
+        assert attempt.checks["location_request_failure"] == "unsupported_action_configuration"
+        if movement == "stationary":
+            assert event.direction == AccessDirection.ENTRY and event.decision == AccessDecision.DENIED
+            assert attempt.outcome == "awaiting_resident" and attempt.action_context_id
+            assert presence.state == PresenceState.PRESENT and presence.last_event_id != event_id
+        else:
+            assert event.direction == AccessDirection.EXIT and event.decision == AccessDecision.GRANTED
+            assert attempt.outcome == "departure" and attempt.action_context_id is None
+            assert presence.state == PresenceState.EXITED and presence.last_event_id == event_id
+    assert h.intents == []
 
 
 async def test_location_timeout_uses_approval_without_outside_schedule_anomaly(h, monkeypatch):
@@ -380,7 +448,7 @@ async def test_warm_ready_phone_local_evaluation_records_timings(h, capsys):
         config = await h.runtime(session)
         for index in range(23):
             ready, reason, checks = await recovery.evaluate_phone(session,
-                person=item.person, vehicle=item.vehicles[0], read=read, config=config)
+                person=item.person, vehicle=item.vehicles[0], read=read, config=config, safety_block=await recovery.blockers(session))
             assert ready and reason == "phone_return_corroborated"
             if index >= 3:
                 measurements.append(checks["phone_evaluation_ms"])
@@ -499,3 +567,334 @@ async def test_old_authenticated_socket_cannot_rebind_evidence_after_transport_c
     current = await trip_for(item)
     assert current.epoch == original.epoch and current.binding == original.binding
     assert current.samples == original.samples and current.latest_at == original.latest_at
+
+
+async def test_audited_historical_exit_allows_one_ordinary_arrival(h):
+    from app.models import AuditLog
+    from app.services.access.historical import HistoricalSessionInput, persist_historical_event_in_session
+
+    item = await seed(h)
+    vehicle = item.vehicles[0]
+    async with AsyncSessionLocal() as session:
+        exit_event = AccessEvent(vehicle_id=vehicle.id, person_id=item.person.id,
+            registration_number=vehicle.registration_number, direction=AccessDirection.EXIT,
+            decision=AccessDecision.GRANTED, confidence=1, occurred_at=item.now-timedelta(minutes=30),
+            source="operator_reported_backfill", timing_classification=TimingClassification.UNKNOWN,
+            raw_payload={"backfill": True})
+        session.add(exit_event)
+        await session.flush()
+        await persist_historical_event_in_session(session, exit_event, idempotency_key=str(exit_event.id),
+            evidence={"backfill": True}, session_input=HistoricalSessionInput(4, 30))
+        assert await recovery.has_conflict(session, item.person, vehicle, item.now)
+        session.add(AuditLog(category="access_presence", action="access_event.operator_reported_exit",
+            actor="synthetic operator", target_entity="AccessEvent", target_id=str(exit_event.id), outcome="success"))
+        await session.flush()
+        assert not await recovery.has_conflict(session, item.person, vehicle, item.now)
+        assert await recovery.has_conflict(session, item.person, item.vehicles[1], item.now)
+        await session.commit()
+    observation = await plate_read(h, item)
+    identity = await h.execute(observation)
+    async with AsyncSessionLocal() as session:
+        event = await session.get(AccessEvent, identity)
+        assert event.decision == AccessDecision.GRANTED and event.direction == AccessDirection.ENTRY
+        assert "missed_exit_recovery" not in event.raw_payload["direction_resolution"]
+        assert await recovery.has_conflict(session, item.person, vehicle, datetime.now(UTC))
+    assert not await rows(MissedExitRecoveryAttempt)
+    assert len(h.intents) == 1
+
+
+async def test_refused_gate_is_not_a_previous_entry_but_uncertainty_still_blocks(h):
+    from app.models.enums import MovementSagaState
+    item = await seed(h, trip=False)
+    vehicle = item.vehicles[0]
+    async with AsyncSessionLocal() as session:
+        presence = await session.get(Presence, item.person.id)
+        presence.state = PresenceState.EXITED
+        events = list(await session.scalars(select(AccessEvent).where(AccessEvent.person_id == item.person.id)))
+        rejected = next(event for event in events if event.vehicle_id == vehicle.id)
+        for event in events:
+            if event.id != rejected.id:
+                event.direction = AccessDirection.EXIT
+        saga = MovementSagaRecord(source=rejected.source, idempotency_key=str(rejected.id),
+            access_event_id=rejected.id, occurred_at=rejected.occurred_at, vehicle_id=vehicle.id,
+            person_id=item.person.id, gate_command_required=True, decision=AccessDecision.GRANTED,
+            direction=AccessDirection.ENTRY, admission_status="pending", state=MovementSagaState.RECONCILIATION_REQUIRED)
+        session.add(saga)
+        await session.flush()
+        assert await recovery.has_conflict(session, item.person, vehicle, item.now)
+        saga.admission_status, saga.state = "denied", MovementSagaState.FAILED
+        await session.flush()
+        assert not await recovery.has_conflict(session, item.person, vehicle, item.now)
+        await session.commit()
+    identity = await h.execute(await plate_read(h, item))
+    async with AsyncSessionLocal() as session:
+        retry = await session.get(AccessEvent, identity)
+        assert retry.direction == AccessDirection.ENTRY and retry.decision == AccessDecision.GRANTED
+        assert "missed_exit_recovery" not in retry.raw_payload["direction_resolution"]
+    assert not await rows(MissedExitRecoveryAttempt)
+    assert len(h.intents) == 1 and h.authorized == [identity]
+
+
+async def test_ineligible_tracker_skips_full_settings_read(h, monkeypatch):
+    item = await seed(h)
+    full_config = AsyncMock(side_effect=AssertionError("Ignored tracker loaded full configuration"))
+    monkeypatch.setattr(recovery, "get_runtime_config_for_session", full_config)
+    await recovery.observe_tracker("device_tracker.other", {}, {})
+    async with AsyncSessionLocal() as session:
+        setting = await session.get(SystemSetting, "missed_exit_recovery_enabled")
+        setting.value = {"plain": False}
+        await session.commit()
+    await recovery.observe_tracker(item.person.missed_exit_recovery_tracker_entity_id, {}, {})
+    full_config.assert_not_awaited()
+
+
+async def publish_original_observation(h, read):
+    identity = uuid.UUID(read.raw_payload[LPR_INGEST_EVENT_PAYLOAD_KEY]["id"])
+    async with AsyncSessionLocal() as session:
+        ingest = await session.get(LprIngestEvent, identity)
+        token = ingest.capture_token
+    assert await h.ingest.complete_observation(identity, token, read.raw_payload[GATE_OBSERVATION_PAYLOAD_KEY])
+    return identity
+
+
+async def recovery_coordinator(h, monkeypatch):
+    from app.services import access_events
+    from app.services.access import recovery_evidence_lane
+
+    monkeypatch.setattr(access_events.telemetry, "start_trace", lambda *args, **kwargs: Trace())
+    monkeypatch.setattr(access_events, "get_runtime_config", h.current_runtime)
+    monkeypatch.setattr(access_events, "is_maintenance_mode_active", AsyncMock(return_value=False))
+    monkeypatch.setattr(recovery_evidence_lane, "get_runtime_config_for_session", h.runtime)
+    service = access_events.AccessEventService()
+    coordinator = await service._pipeline.acquire_coordinator()
+    assert coordinator is not None
+    service._recovery_evidence.changed()
+    return service, coordinator
+
+
+async def test_parked_phone_preserves_resident_order_while_another_vehicle_passes(h, monkeypatch, capsys):
+    from app.models.access_pipeline import LprRecoveryBlockedRead, LprRecoveryWindow
+
+    item = await stale_trip(h)
+    async with AsyncSessionLocal() as session:
+        independent = Person(display_name="Independent driver", is_active=True)
+        vehicle = Vehicle(registration_number="OTHER90", owner=independent, is_active=True)
+        session.add_all([independent, vehicle])
+        await session.flush()
+        session.add(Presence(person_id=independent.id, state=PresenceState.EXITED,
+                             last_changed_at=item.now-timedelta(hours=1)))
+        await session.commit()
+    another = SimpleNamespace(vehicles=[vehicle])
+    first = await publish_original_observation(h, await plate_read(h, item))
+    sibling = await publish_original_observation(h, await plate_read(h, item, index=1))
+    other = await publish_original_observation(h, await plate_read(h, another))
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = location.wait_for_location
+
+    async def slow_phone(refresh):
+        entered.set()
+        await release.wait()
+        await fresh_fix(item)
+        return await original(refresh)
+
+    monkeypatch.setattr(location, "wait_for_location", slow_phone)
+    monkeypatch.setattr(location, "get_gate_controller", lambda _: SimpleNamespace(
+        current_state=AsyncMock(return_value=GateState.CLOSED)))
+    async def inert_gate(intent):
+        if intent.registration_number != vehicle.registration_number:
+            return await h.execute_open(intent)
+        # Retain a verified synthetic receipt so this ordinary entry can finish
+        # without leaving an unresolved command to block the recovering resident.
+        from app.simulation.scenarios import _persist_synthetic_verified_gate_receipt
+        async with AsyncSessionLocal() as session:
+            await intent.authorize_dispatch(session)
+            event = await session.get(AccessEvent, uuid.UUID(intent.event_id))
+        command_id, projection, _ = await _persist_synthetic_verified_gate_receipt(event,
+            movement_saga_id=intent.movement_saga_id, reason=intent.reason)
+        h.intents.append(intent)
+        return GateCommandOutcome(intent=intent, accepted=True, state=GateState.OPENING,
+            detail="Synthetic verified receipt", started_at=datetime.now(UTC), completed_at=datetime.now(UTC),
+            admission_verified=True, command_id=command_id, target_receipts=projection["target_receipts"],
+            reconciliation_required=False, delivery=CommandDelivery.ACCEPTED)
+
+    monkeypatch.setattr(hardware, "get_gate_command_coordinator", lambda: SimpleNamespace(execute_open=inert_gate))
+    service, coordinator = await recovery_coordinator(h, monkeypatch)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        async with asyncio.timeout(12):
+            await service._process_boundary(coordinator)
+            await service._process_boundary(coordinator)
+            await entered.wait()
+            await service._process_boundary(coordinator)
+            async with AsyncSessionLocal() as session:
+                assert (await session.get(LprIngestEvent, first)).access_event_id is None
+                assert (await session.get(LprIngestEvent, sibling)).access_event_id is None
+                assert await session.get(LprRecoveryBlockedRead, sibling) is not None
+                outside = await session.get(LprIngestEvent, other)
+                assert outside.status == "succeeded"
+                other_event = await session.get(AccessEvent, outside.access_event_id)
+                other_plate = other_event.registration_number
+                other_decision_ms = (outside.processed_at - outside.captured_at).total_seconds() * 1000
+                assert other_event.decision == AccessDecision.GRANTED and other_event.direction == AccessDirection.ENTRY
+                assert (await session.get(Presence, independent.id)).state == PresenceState.PRESENT
+            independent_ms = 1000 * (loop.time() - started)
+            release.set()
+            while True:
+                await service._process_boundary(coordinator)
+                async with AsyncSessionLocal() as session:
+                    recovered = await session.get(LprIngestEvent, first)
+                    later = await session.get(LprIngestEvent, sibling)
+                    if recovered.status == later.status == "succeeded":
+                        recovered_event = await session.get(AccessEvent, recovered.access_event_id)
+                        assert recovered_event.raw_payload["direction_resolution"]["missed_exit_recovery"]["method"] == "phone_automatic"
+                        assert h.authorized == [recovered_event.id]
+                        first_plate = recovered_event.registration_number
+                        first_decision_ms = (recovered.processed_at - recovered.captured_at).total_seconds() * 1000
+                        break
+                await asyncio.sleep(.01)
+            assert not await rows(LprRecoveryBlockedRead) and not await rows(LprRecoveryWindow)
+            assert [intent.registration_number for intent in h.intents] == [other_plate, first_plate]
+            with capsys.disabled():
+                print("MIXED_RESIDENT_QUEUE " + json.dumps({
+                    "reads": 3, "residents": 2, "independent_decision_ms": round(independent_ms, 1),
+                    "all_processed_ms": round(1000 * (loop.time() - started), 1),
+                    "independent_finished_before_phone_reply": True,
+                    "same_owner_read_waited": True, "gate_provider": "inert",
+                    "first": {"capture_to_decision_ms": round(first_decision_ms, 1),
+                              "inert_gate_commands": sum(intent.registration_number == first_plate for intent in h.intents)},
+                    "independent": {"capture_to_decision_ms": round(other_decision_ms, 1),
+                                    "inert_gate_commands": sum(intent.registration_number == other_plate for intent in h.intents)},
+                }))
+    finally:
+        release.set()
+        await service._recovery_evidence.stop()
+        await service._pipeline.release_coordinator(coordinator)
+
+
+async def test_restart_recovers_parked_window_without_reissuing_phone_request(h, monkeypatch):
+    item = await stale_trip(h)
+    identity = await publish_original_observation(h, await plate_read(h, item))
+    first, original = await recovery_coordinator(h, monkeypatch)
+    try:
+        await first._process_boundary(original)
+    finally:
+        await first._recovery_evidence.stop()
+        await first._pipeline.release_coordinator(original)
+    service, coordinator = await recovery_coordinator(h, monkeypatch)
+    try:
+        async with asyncio.timeout(8):
+            while True:
+                await service._process_boundary(coordinator)
+                async with AsyncSessionLocal() as session:
+                    if (await session.get(LprIngestEvent, identity)).status == "succeeded":
+                        break
+                await asyncio.sleep(.01)
+        requests = [run for run in await rows(NotificationRun) if run.trigger_event == location.TRIGGER]
+        assert len(requests) == 1 and requests[0].context[location.ORIGIN]["closed"]
+        attempts = await rows(MissedExitRecoveryAttempt)
+        assert len(attempts) == 1 and attempts[0].outcome == "awaiting_resident"
+        assert not h.intents
+    finally:
+        await service._recovery_evidence.stop()
+        await service._pipeline.release_coordinator(coordinator)
+
+
+async def test_parked_decision_timeouts_consume_the_original_attempt_budget(h, monkeypatch):
+    from app.models.access_pipeline import LprRecoveryWindow
+    from app.services import access_events
+    from app.services.access import recovery_evidence_lane
+    from app.services.access.pipeline_contracts import MAX_PLATE_READ_PROCESSING_ATTEMPTS
+
+    item = await stale_trip(h)
+    identity = await publish_original_observation(h, await plate_read(h, item))
+    service, coordinator = await recovery_coordinator(h, monkeypatch)
+    try:
+        await service._process_boundary(coordinator)
+        assert await rows(LprRecoveryWindow)
+        monkeypatch.setattr(access_events, "RECOVERY_FINALIZATION_TIMEOUT_SECONDS", .01)
+        monkeypatch.setattr(recovery_evidence_lane, "collect_recovery_evidence", AsyncMock(return_value=None))
+        never = asyncio.Event()
+
+        async def stalled_commit(*args, **kwargs):
+            await never.wait()
+
+        monkeypatch.setattr(service, "_execute_frozen_window", stalled_commit)
+        failures = 0
+        async with asyncio.timeout(5):
+            while await rows(LprRecoveryWindow):
+                try:
+                    await service._process_boundary(coordinator)
+                except TimeoutError:
+                    failures += 1
+                await asyncio.sleep(.001)
+        async with AsyncSessionLocal() as session:
+            ingest = await session.get(LprIngestEvent, identity)
+            assert ingest.status == "held" and ingest.terminal_reason == "processing_attempts_exhausted"
+            assert ingest.attempt_count == failures == MAX_PLATE_READ_PROCESSING_ATTEMPTS
+        assert not h.intents
+    finally:
+        await service._recovery_evidence.stop()
+        await service._pipeline.release_coordinator(coordinator)
+
+
+async def test_preexisting_sibling_window_can_still_accept_its_buffered_exact_read(h, monkeypatch):
+    from app.models.access_pipeline import LprDebounceWindow, LprRecoveryBlockedRead, LprWindowMember
+
+    item = await stale_trip(h)
+    original = location.wait_for_location
+    release, entered = asyncio.Event(), asyncio.Event()
+
+    async def slow_phone(refresh):
+        entered.set()
+        await release.wait()
+        await fresh_fix(item)
+        return await original(refresh)
+
+    monkeypatch.setattr(location, "wait_for_location", slow_phone)
+    monkeypatch.setattr(location, "get_gate_controller", lambda _: SimpleNamespace(
+        current_state=AsyncMock(return_value=GateState.CLOSED)))
+    service, coordinator = await recovery_coordinator(h, monkeypatch)
+    try:
+        # A fuzzy sighting from another camera is a real open debounce window.
+        fuzzy = await publish_original_observation(h, await plate_read(h, item, index=1,
+            source="synthetic_sibling_camera", detected_plate="SYNP2"))
+        await service._process_boundary(coordinator)
+        async with AsyncSessionLocal() as session:
+            early = await session.get(LprWindowMember, fuzzy)
+            assert (await session.get(LprDebounceWindow, early.window_id)).state == "open"
+            early_window = early.window_id
+        await publish_original_observation(h, await plate_read(h, item))
+        await service._process_boundary(coordinator)
+        # Force the earlier window's quiet deadline due while recovery is waiting.
+        async with AsyncSessionLocal() as session:
+            open_window = await session.get(LprDebounceWindow, early_window)
+            open_window.updated_at -= timedelta(minutes=2)
+            await session.commit()
+        exact = await publish_original_observation(h, await plate_read(h, item, index=1,
+            source="synthetic_sibling_camera"))
+        async with asyncio.timeout(10):
+            while True:
+                await service._process_boundary(coordinator)
+                async with AsyncSessionLocal() as session:
+                    window = await session.get(LprDebounceWindow, early_window)
+                    if window.wait_for_recovery and (await session.get(LprRecoveryBlockedRead, exact)):
+                        assert window.state == "open"
+                        break
+                await asyncio.sleep(.005)
+            await entered.wait()
+            release.set()
+            while True:
+                await service._process_boundary(coordinator)
+                async with AsyncSessionLocal() as session:
+                    if (await session.get(LprIngestEvent, exact)).status == "succeeded":
+                        assert (await session.get(LprWindowMember, exact)).window_id == early_window
+                        window = await session.get(LprDebounceWindow, early_window)
+                        assert window.state == "completed" and window.member_count == 2
+                        assert window.access_event_id == (await session.get(LprIngestEvent, fuzzy)).access_event_id
+                        break
+                await asyncio.sleep(.005)
+    finally:
+        release.set()
+        await service._recovery_evidence.stop()
+        await service._pipeline.release_coordinator(coordinator)

@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import func, or_, select, true
+from sqlalchemy import func, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -34,6 +34,7 @@ from app.services.report_reads import (
     person_event_filter,
     remaining_activity_rows,
     report_read_transaction,
+    visitor_pass_event_filter,
 )
 from app.services.settings import get_runtime_config
 from app.services.snapshots import access_event_snapshot_payload
@@ -290,7 +291,7 @@ async def build_visitor_pass_movement_report_snapshot(
     timezone: ZoneInfo,
     verify_snapshot_availability: bool = True,
 ) -> dict[str, Any]:
-    selected_filter = _visitor_pass_event_filter(visitor_pass)
+    selected_filter = visitor_pass_event_filter(visitor_pass)
     report_events, serialized_events, all_timeline_events, summary = await _collect_movement_report_events(
         session,
         selected_filter=selected_filter,
@@ -585,23 +586,6 @@ def event_tone(direction: AccessDirection | str, decision: AccessDecision | str)
 
 async def _get_report_visitor_pass(session: AsyncSession, visitor_pass_id: uuid.UUID) -> VisitorPass | None:
     return await session.get(VisitorPass, visitor_pass_id)
-
-
-def _visitor_pass_event_filter(visitor_pass: VisitorPass) -> Any:
-    clauses: list[Any] = [
-        AccessEvent.raw_payload.contains({"visitor_pass": {"id": str(visitor_pass.id)}})
-    ]
-    event_ids = [
-        event_id
-        for event_id in [visitor_pass.arrival_event_id, visitor_pass.departure_event_id]
-        if event_id
-    ]
-    if event_ids:
-        clauses.append(AccessEvent.id.in_(event_ids))
-    plate = _optional_text(visitor_pass.number_plate)
-    if plate:
-        clauses.append(AccessEvent.registration_number == normalize_plate(plate))
-    return or_(*clauses)
 
 
 def _visitor_pass_presence_payload(visitor_pass: VisitorPass) -> dict[str, str | None]:

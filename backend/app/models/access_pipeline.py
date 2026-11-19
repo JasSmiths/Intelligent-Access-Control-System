@@ -13,6 +13,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -62,6 +63,9 @@ class LprDebounceWindow(Base):
     lease_token: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     coordinator_epoch: Mapped[int | None] = mapped_column(BigInteger(), nullable=True)
+    wait_for_recovery: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(), ForeignKey("lpr_recovery_windows.window_id", ondelete="SET NULL", use_alter=True,
+                           name="fk_lpr_window_wait_for_recovery"))
     merged_into: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(), ForeignKey("lpr_debounce_windows.id", ondelete="RESTRICT"), nullable=True
     )
@@ -92,6 +96,7 @@ class LprDebounceWindow(Base):
             "NOT visitor_resolution_active OR (state = 'completed' AND visitor_resolution_expires_at IS NOT NULL)",
             name="ck_lpr_window_visitor_resolution",
         ),
+        Index("ix_lpr_window_recovery_dependency", "wait_for_recovery", postgresql_where=wait_for_recovery.is_not(None)),
         Index("ix_lpr_window_open_order", "state", "source", "open_ordinal"),
         Index("ix_lpr_window_lease", "state", "lease_until", "open_ordinal"),
         Index(
@@ -106,6 +111,37 @@ class LprDebounceWindow(Base):
             postgresql_where=visitor_resolution_active.is_(True),
         ),
     )
+
+
+class LprRecoveryWindow(Base):
+    """A frozen window awaiting optional evidence; survives coordinator replacement."""
+    __tablename__ = "lpr_recovery_windows"
+    window_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("lpr_debounce_windows.id", ondelete="CASCADE"), primary_key=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    vehicle_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    open_ordinal: Mapped[int] = mapped_column(BigInteger(), nullable=False)
+    park_ordinal: Mapped[int] = mapped_column(BigInteger(), Identity(), nullable=False)
+    phone_epoch: Mapped[str | None] = mapped_column(String(36))
+    after_window_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("lpr_debounce_windows.id", ondelete="RESTRICT"))
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    __table_args__ = (
+        CheckConstraint("state IN ('waiting','following','released')", name="ck_lpr_recovery_window_state"),
+        Index("ix_lpr_recovery_state_ordinal", "state", "open_ordinal"),
+        Index("ix_lpr_recovery_owner", "owner_id", "park_ordinal"),
+        Index("ix_lpr_recovery_vehicle", "vehicle_id", "park_ordinal"),
+    )
+
+
+class LprRecoveryBlockedRead(Base):
+    """Receipt-order dependency for another read of the same vehicle or owner."""
+    __tablename__ = "lpr_recovery_blocked_reads"
+    ingest_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("lpr_ingest_events.id", ondelete="CASCADE"), primary_key=True)
+    window_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("lpr_recovery_windows.window_id", ondelete="RESTRICT"), nullable=False)
+    ready_ordinal: Mapped[int] = mapped_column(BigInteger(), nullable=False)
+    __table_args__ = (Index("ix_lpr_recovery_blocked_order", "window_id", "ready_ordinal"),)
 
 
 class LprWindowMember(Base):

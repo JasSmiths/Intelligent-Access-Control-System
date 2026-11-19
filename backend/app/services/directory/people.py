@@ -68,6 +68,7 @@ async def add_person(
             request.home_assistant_presence_input_boolean_exit_action
         ),
         missed_exit_recovery_enabled=request.missed_exit_recovery_enabled,
+        missed_exit_recovery_expiry_notify_service=request.missed_exit_recovery_expiry_notify_service,
         missed_exit_recovery_tracker_entity_id=request.missed_exit_recovery_tracker_entity_id,
         notes=normalize_optional_text(request.notes),
         is_active=request.is_active,
@@ -193,6 +194,8 @@ async def update_person(
 
     if request.missed_exit_recovery_enabled is not None:
         person.missed_exit_recovery_enabled = request.missed_exit_recovery_enabled
+    if "missed_exit_recovery_expiry_notify_service" in request.model_fields_set:
+        person.missed_exit_recovery_expiry_notify_service = request.missed_exit_recovery_expiry_notify_service
     if "missed_exit_recovery_tracker_entity_id" in request.model_fields_set:
         person.missed_exit_recovery_tracker_entity_id = (
             request.missed_exit_recovery_tracker_entity_id

@@ -196,6 +196,10 @@ async def _current_projection(session: AsyncSession, event_id: uuid.UUID) -> dic
     query = public_event_query().add_columns(
         AccessEvent.person_id,
         AccessEvent.vehicle_id,
+        or_(
+            raw["direction_resolution"]["missed_exit_recovery"]["attempt_id"].astext.is_not(None),
+            raw["resident_recovery"]["attempt_id"].astext.is_not(None),
+        ).label("has_recovery_attempt"),
         _text_json(movement["id"], 36).label("movement_id"),
         _text_json(movement["admission_status"], 24).label("admission_status"),
         _text_json(movement["detail"], 500).label("movement_detail"),
@@ -219,6 +223,8 @@ async def _current_projection(session: AsyncSession, event_id: uuid.UUID) -> dic
         person_id=str(result["person_id"]) if result["person_id"] else None,
         vehicle_id=str(result["vehicle_id"]) if result["vehicle_id"] else None,
     )
+    if result["has_recovery_attempt"]:
+        payload["has_recovery_attempt"] = True
     movement_payload = payload["movement_saga"]
     # Extras are transport presentation only. Never graft a raw summary from a
     # different journal, or attach gate authority to an ambiguous legacy link.

@@ -25,7 +25,7 @@ from app.models.enums import MovementSagaState, VisitorPassStatus, VisitorPassTy
 from app.modules.gate.base import GateState
 from app.modules.lpr.base import PlateRead
 from app.services.access.completion_database import access_session
-from app.services.access.execution import AccessExecution
+from app.services.access.execution import AccessExecution, CollectedRecoveryEvidence
 from app.services.access.pipeline_contracts import (
     MAX_PLATE_READ_PROCESSING_ATTEMPTS,
     CoordinatorClaim,
@@ -43,7 +43,11 @@ from app.services.access.pipeline_store import (
     hold_window_in_session,
     preparation_failed_in_session,
 )
-from app.services.access.plate_matching import match_candidates
+from app.services.access.plate_matching import (
+    PlateMatch,
+    fuzzy_registration_pattern,
+    match_candidates,
+)
 from app.services.access.read_codec import read_from_ingest
 from app.services.access.reads import (
     EXTERNAL_ADMISSION_PAYLOAD_KEY,
@@ -67,6 +71,13 @@ from app.services.access.reads import (
     _plate_read_with_payload,
     _visitor_pass_candidate_kind,
     _webhook_trace_for_window,
+)
+from app.services.access.recovery_evidence_lane import RecoveryEvidenceLane
+from app.services.access.recovery_queue import (
+    RecoveryWindowParked,
+    defer_related_read,
+    defer_related_window,
+    finish_job,
 )
 from app.services.access.window_store import AccessWindowStore
 from app.services.durable_work import WorkReadiness, WorkTopic, WorkWake, work_wake
@@ -124,6 +135,9 @@ __all__ = [
 ]
 
 
+RECOVERY_FINALIZATION_TIMEOUT_SECONDS = 90
+
+
 class AccessEventService:
     """Coordinates plate reads into access events.
 
@@ -134,6 +148,8 @@ class AccessEventService:
 
     def __init__(self, *, wake: WorkWake | None = None) -> None:
         self._wake = wake if wake is not None else work_wake(WorkTopic.LPR)
+        self._recovery_evidence = RecoveryEvidenceLane(self._wake.set)
+        self._discover_parked = False
         self._cleanup: asyncio.Task[None] | None = None
         self._pipeline = AccessPipelineStore(session_factory=lambda: AsyncSessionLocal())
         self._windows = AccessWindowStore(session_factory=lambda: AsyncSessionLocal())
@@ -424,6 +440,7 @@ class AccessEventService:
                     await self._wait_for_wake()
                     continue
                 self._coordinator_owned = True
+                self._discover_parked = True
                 renewal = asyncio.create_task(
                     self._renew_coordinator(claim), name="lpr-coordinator-renewal"
                 )
@@ -476,6 +493,7 @@ class AccessEventService:
                     *(task for task in (operation, renewal) if task is not None),
                     return_exceptions=True,
                 )
+                await self._recovery_evidence.stop()
                 self._coordinator_owned = False
                 if claim is not None:
                     try:
@@ -498,11 +516,13 @@ class AccessEventService:
         while not self._stop_event.is_set():
             self._wait_generation = self._wake.generation
             runtime = self._runtime
+            if owned and self._recovery_evidence.runnable:
+                return
             if owned and self._last_probe_generation != self._wait_generation:
                 self._last_probe_generation = self._wait_generation
                 return
             pending = await self._pipeline.readiness(
-                owned=owned,
+                owned=owned, recover_parked=self._discover_parked,
                 quiet_seconds=runtime.lpr_debounce_quiet_seconds if runtime else 0.5,
                 max_seconds=runtime.lpr_debounce_max_seconds if runtime else 1,
             )
@@ -515,12 +535,34 @@ class AccessEventService:
         await self._wake.wait(self._wait_generation, WorkReadiness(False, 0.5), fallback_seconds=0.5)
 
     async def _process_boundary(self, coordinator: CoordinatorClaim) -> bool:
+        self._last_heartbeat_at = datetime.now(tz=UTC)
+        if self._discover_parked:
+            self._discover_parked = False
+            self._recovery_evidence.discover()
+        if self._recovery_evidence.pending:
+            async with asyncio.timeout(90):
+                completed = await self._recovery_evidence.next_completed(coordinator)
+            if completed is not None:
+                job, task = completed
+                try:
+                    if task.cancelled():
+                        raise RuntimeError("recovery_evidence_cancelled")
+                    # Catch the decision timeout here so it consumes the same durable
+                    # attempt budget as any other failure. External cancellation is
+                    # still owned by renewal loss/worker stop and takeover.
+                    async with asyncio.timeout(RECOVERY_FINALIZATION_TIMEOUT_SECONDS):
+                        finished = await self._execute_frozen_window(job.claim, collected=task.result(), resumed=True)
+                except Exception as exc:
+                    await finish_job(job.claim, failure=self._safe_exception_detail(exc))
+                    raise
+                if finished is not False:
+                    await finish_job(job.claim)
+                return True
         async with asyncio.timeout(90):
-            self._last_heartbeat_at = datetime.now(tz=UTC)
-            await self._lpr_ingest_repo().hold_expired_observations()
             if not await self._pipeline.has_pending_work(coordinator):
                 self._last_processed_at = datetime.now(tz=UTC)
                 return False
+            await self._lpr_ingest_repo().hold_expired_observations()
             self._runtime = await get_runtime_config()
             boundary = await self._pipeline.boundary(coordinator)
             ingest = None
@@ -551,6 +593,8 @@ class AccessEventService:
                 self._active_window = window
                 await self._finalize_window(window)
                 self._active_window = None
+                if self._recovery_evidence.runnable:
+                    break
             self._last_processed_at = datetime.now(tz=UTC)
             return worked
 
@@ -641,6 +685,8 @@ class AccessEventService:
                 await session.commit()
             return None
         read = await self._read_with_known_vehicle_match(read)
+        if self._recovery_evidence.pending and await defer_related_read(claim, read.registration_number):
+            return None
         read = await self._read_with_gate_malfunction_context(read)
         malfunction = _gate_malfunction_from_read(read)
         known = _known_vehicle_plate_match_from_read(read)
@@ -830,13 +876,12 @@ class AccessEventService:
 
     async def _read_with_known_vehicle_match(self, read: PlateRead) -> PlateRead:
         candidates = _candidate_registration_numbers(read)
-        registrations = await self._matching_vehicle_registrations(candidates)
         threshold = (
             self._runtime.lpr_similarity_threshold
             if self._runtime
             else settings.lpr_similarity_threshold
         )
-        best_match = match_candidates(candidates, registrations, threshold)
+        best_match = await self._known_vehicle_match(candidates, threshold)
 
         if not best_match:
             return read
@@ -847,9 +892,9 @@ class AccessEventService:
             read, raw_payload, registration_number=str(best_match["registration_number"])
         )
 
-    async def _matching_vehicle_registrations(self, candidates: tuple[str, ...]) -> list[str]:
+    async def _known_vehicle_match(self, candidates: tuple[str, ...], threshold: float) -> PlateMatch | None:
         if not candidates:
-            return []
+            return None
         async with access_session(AsyncSessionLocal) as session:
             # These fixed SQL literals match the functional index even when PostgreSQL
             # chooses a generic prepared plan. Plate candidates remain bound values.
@@ -872,16 +917,19 @@ class AccessEventService:
                 ).all()
             )
             if exact:
-                return exact
-            return list(
-                (
-                    await session.scalars(
-                        select(Vehicle.registration_number).where(
-                            Vehicle.is_active.is_(True),
-                        )
-                    )
-                ).all()
-            )
+                return match_candidates(candidates, exact, threshold)
+            query = select(Vehicle.registration_number).where(Vehicle.is_active.is_(True))
+            pattern = fuzzy_registration_pattern(candidates, threshold)
+            if pattern:
+                query = query.where(Vehicle.registration_number.op("~")(pattern))
+            rows = await session.stream_scalars(query.execution_options(yield_per=128))
+            best: PlateMatch | None = None
+            try:
+                async for batch in rows.partitions(128):
+                    best = match_candidates(candidates, batch, threshold, best)
+            finally:
+                await rows.close()
+            return best
 
     async def _read_with_gate_malfunction_context(self, read: PlateRead) -> PlateRead:
         gate_observation = gate_observation_from_read(read)
@@ -1073,6 +1121,10 @@ class AccessEventService:
         return saga
 
     async def _finalize_window(self, claim: WindowClaim) -> None:
+        await self._execute_frozen_window(claim)
+
+    async def _execute_frozen_window(self, claim: WindowClaim, *, collected: CollectedRecoveryEvidence | None = None,
+                                     resumed: bool = False, park_recovery: bool = True) -> bool:
         async with access_session(AsyncSessionLocal) as session:
             await assert_window_in_session(session, claim)
             if await is_maintenance_mode_active():
@@ -1088,8 +1140,13 @@ class AccessEventService:
                     metadata={"reason": "maintenance_mode_active"},
                 )
                 await session.commit()
-                return
+                return True
             window = await self._windows.load_in_session(session, claim.window_id)
+            if (not resumed and self._recovery_evidence.pending
+                    and await defer_related_window(session, claim, window.best_read.registration_number)):
+                await session.commit()
+                self._recovery_evidence.changed()
+                return False
         read = window.best_read
         direction_read = window.anchor_read or window.first_read
         finalize_started_at = datetime.now(tz=UTC)
@@ -1124,18 +1181,24 @@ class AccessEventService:
                 "preview_complete": window.summary.count == len(window.preview),
             },
         )
-        result = await AccessExecution(
-            self._movement_ledger, self._movement_sessions
-        ).execute(
-            window,
-            claim=claim,
-            read=read,
-            direction_read=direction_read,
-            runtime=self._runtime or await get_runtime_config(),
-            trace=trace,
-            finalize_started_at=finalize_started_at,
-            webhook_trace=webhook_trace,
-        )
+        try:
+            result = await AccessExecution(
+                self._movement_ledger, self._movement_sessions
+            ).execute(
+                window,
+                claim=claim,
+                read=read,
+                direction_read=direction_read,
+                runtime=self._runtime or await get_runtime_config(),
+                trace=trace,
+                finalize_started_at=finalize_started_at,
+                webhook_trace=webhook_trace,
+                park_recovery=park_recovery and collected is None, collected=collected,
+            )
+        except RecoveryWindowParked:
+            self._recovery_evidence.changed()
+            trace.finish(status="ok", summary="Frozen window awaits resident recovery evidence.")
+            return False
         trace.finish(
             status="ok",
             summary=(
@@ -1144,6 +1207,7 @@ class AccessEventService:
                 else "Original movement outcome reused or held; no hardware replay."
             ),
         )
+        return True
 
 
 def _datetime_delta_ms(end: datetime, start: datetime) -> float:

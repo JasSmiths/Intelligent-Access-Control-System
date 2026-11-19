@@ -4,6 +4,7 @@ import type { Person } from "./types";
 export type RecoveryMethod = "phone_automatic" | "camera_automatic" | "resident_confirmation" | "none";
 export type RecoveryTimelineEntry = { at: string; stage: string; status: string; reason: string; details?: Record<string, unknown> };
 export type RecoveryAttempt = {
+  next_expiry_in_ms?: number;
   id: string;
   occurred_at: string;
   owner_id: string | null;
@@ -28,9 +29,11 @@ export type RecoveryAttempt = {
   duration_ms: number | null;
   policy_version: string | number;
 };
-export type RecoveryAttemptPage = { items: RecoveryAttempt[]; total: number; offset: number; limit: number };
+export type RecoveryAttemptSummary = Pick<RecoveryAttempt,
+  "id" | "occurred_at" | "owner_name" | "registration_number" | "method" | "outcome" | "reason">;
+export type RecoveryAttemptPage = { next_expiry_in_ms?: number; items: RecoveryAttemptSummary[]; total: number; offset: number; limit: number };
 export type RecoveryAttemptFilters = { owner_id?: string; registration_number?: string; outcome?: string; method?: string; from_at?: string; to_at?: string; offset?: number; limit?: number };
-export type RecoveryOwnerSettings = Pick<Person, "missed_exit_recovery_enabled" | "missed_exit_recovery_tracker_entity_id">;
+export type RecoveryOwnerSettings = Pick<Person, "missed_exit_recovery_enabled" | "missed_exit_recovery_tracker_entity_id" | "missed_exit_recovery_expiry_notify_service">;
 
 export function recoveryAttemptQuery(filters: RecoveryAttemptFilters) {
   const query = new URLSearchParams();

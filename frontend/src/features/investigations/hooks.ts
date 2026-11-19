@@ -66,6 +66,8 @@ export function useInvestigationData(query: InvestigationQuery) {
   const [error, setError] = React.useState("");
   const [forbidden, setForbidden] = React.useState(false);
   const sequenceRef = React.useRef(0);
+  const browsingOlder = React.useRef(false);
+  const [newActivity, setNewActivity] = React.useState(false);
   const loadMoreAbortRef = React.useRef<AbortController | null>(null);
 
   const recordFailure = React.useCallback((failure: unknown, fallback: string) => {
@@ -83,8 +85,14 @@ export function useInvestigationData(query: InvestigationQuery) {
   useCoordinatedRead(readFilters, investigationEventMatches);
   useCoordinatedRead(readOverview, investigationEventMatches);
   const timezone = filters?.site_timezone;
-  const readPage = React.useCallback(async (signal: AbortSignal) => {
+  const readPage = React.useCallback(async (signal: AbortSignal, background: boolean) => {
     if (!timezone) return;
+    if (background && browsingOlder.current) {
+      setNewActivity(true);
+      return;
+    }
+    browsingOlder.current = false;
+    setNewActivity(false);
     loadMoreAbortRef.current?.abort(); loadMoreAbortRef.current = null;
     const sequence = ++sequenceRef.current;
     setLoadingMore(false); setPage(null); setLoading(true); setError(""); setForbidden(false);
@@ -96,10 +104,11 @@ export function useInvestigationData(query: InvestigationQuery) {
       throw failure;
     } finally { if (!signal.aborted && sequence === sequenceRef.current) setLoading(false); }
   }, [query, timezone, recordFailure]);
-  useCoordinatedRead(readPage, investigationEventMatches, Boolean(timezone));
+  const refreshPage = useCoordinatedRead(readPage, investigationEventMatches, Boolean(timezone));
 
   const loadMore = React.useCallback(async () => {
     if (!page?.next_cursor || loading || loadingMore) return;
+    browsingOlder.current = true;
     loadMoreAbortRef.current?.abort();
     const controller = new AbortController();
     const sequence = sequenceRef.current;
@@ -139,7 +148,7 @@ export function useInvestigationData(query: InvestigationQuery) {
     loadingMore,
     error,
     forbidden,
-    loadMore
+    loadMore, newActivity, refreshPage
   };
 }
 
@@ -150,7 +159,7 @@ export function useEpisodeDetails() {
   const controllers = React.useRef(new Map<string, AbortController>());
 
   const load = React.useCallback(async (episodeId: string) => {
-    if (details[episodeId] || loadingIds.has(episodeId)) return;
+    if (details[episodeId] || controllers.current.has(episodeId)) return;
     const controller = new AbortController();
     controllers.current.set(episodeId, controller);
     setLoadingIds((current) => new Set(current).add(episodeId));
@@ -168,7 +177,7 @@ export function useEpisodeDetails() {
       });
       controllers.current.delete(episodeId);
     }
-  }, [details, loadingIds]);
+  }, [details]);
 
   React.useEffect(() => () => controllers.current.forEach((controller) => controller.abort()), []);
   return { details, loadingIds, errors, load };

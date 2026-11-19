@@ -19,9 +19,10 @@ import uuid
 from storage import StorageGuard, StorageViolation, all_container_mounts, docker_free, remove_disposable, validation_interrupts
 
 from source_snapshot import changed_snapshot_sources, copy_sources, discover_sources, source_file, source_fingerprint
+from suite_selection import changed_files, focused_targets, prioritize, recent_suites
 from type_targets import classified_modules, type_commands
 from recovery_checks import (
-    HOST_CHECKS, PERSISTENCE_TESTS, inventory_errors, persistence_checks, pytest_arguments,
+    DIAGNOSTIC_TESTS, HOST_CHECKS, PERSISTENCE_TESTS, inventory_errors, persistence_checks, pytest_arguments,
     required_sources, schema_checks, suite_identity,
 )
 
@@ -41,8 +42,8 @@ def arguments(argv=None):
                         help='Require a safe new/ignored source or fixture file in the snapshot.')
     parser.add_argument('--evidence-root', type=Path,
                         default=Path.home() / 'Documents' / 'IACS Regression Baselines')
-    parser.add_argument('--mode', choices=('snapshot', 'db-free', 'full'), default='full',
-                        help='snapshot: host-only; db-free: no services/migrations; full: disposable DB.')
+    parser.add_argument('--mode', choices=('snapshot', 'db-free', 'focused', 'full'), default='full',
+                        help='snapshot: host-only; db-free: no services/migrations; focused: selected pytest targets; full: complete inventory.')
     parser.add_argument('--check-only', action='store_true', help='Alias for --mode snapshot; no Docker/imports/install.')
     parser.add_argument('--no-migrations', action='store_true', help='Alias for --mode db-free; no DB services or persistence checks.')
     parser.add_argument('--reuse-dependencies', type=Path, metavar='PRIOR_RUN',
@@ -53,6 +54,8 @@ def arguments(argv=None):
                         help='Allow image pulls and exact-lock dependency installation in manifest-only containers.')
     parser.add_argument('--diagnostic', action='append', default=[], metavar='REPO_RELATIVE_TEST',
                         help='Run an additional inert pytest diagnostic separately; failures remain failures.')
+    parser.add_argument('--test', action='append', default=[], metavar='FILE[::NODE]',
+                        help='In focused mode, select a backend unit file or registered isolated suite, optionally one pytest node. Repeatable.')
     parser.add_argument('--persistence-test', action='append', default=[], metavar='REPO_RELATIVE_TEST',
                         help='Add a pytest file; each file uses its own disposable database and Redis namespace.')
     parser.add_argument('--schema-check', action='append', default=[], metavar='REPO_RELATIVE_SCRIPT',
@@ -72,6 +75,12 @@ def arguments(argv=None):
         parser.error('--retain-dependencies requires a new --allow-downloads preparation')
     if args.mode != 'full' and (args.diagnostic or args.persistence_test or args.schema_check or args.database_restore):
         parser.error('Diagnostics, persistence tests, schema checks and restore rehearsals require --mode full')
+    if bool(args.test) != (args.mode == 'focused'):
+        parser.error('--mode focused requires at least one --test; --test is for focused mode only')
+    try:
+        args.targets = focused_targets(args.test, PERSISTENCE_TESTS + DIAGNOSTIC_TESTS)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.mode != 'snapshot' and not (args.reuse_dependencies or args.allow_downloads):
         parser.error('Execution requires --reuse-dependencies or explicit --allow-downloads for exact locks')
     return args
@@ -386,38 +395,7 @@ class Harness:
                        'manifests': manifest_hashes(self.snapshot), 'policy': 'Keep one preparation per required lock/runtime identity.'})
         return python_deps, js_deps
 
-    def execute(self):
-        references = image_references(self.snapshot)
-        required = ('backend', 'node', 'postgres', 'redis') if self.args.mode == 'full' else ('backend', 'node')
-        images = {name: self.image(references[name]) for name in required}
-        self.write('images.json', images)
-        self.write('image-references.json', references)
-        deps, jsdeps = self.dependencies(images)
-        for folder in ('runtime', 'logs', 'artifacts'):
-            (self.run / folder).mkdir()
-            if folder == 'runtime':
-                self.own_disposable(self.run / folder)
-        database = self.prefix.replace('-', '_')
-        env = {'IACS_ENVIRONMENT': 'testing', 'IACS_VALIDATION_MODE': 'db-free',
-               'IACS_DATABASE_URL': 'postgresql+asyncpg://validation:synthetic-validation-only@127.0.0.1:1/' + database,
-               'IACS_REDIS_URL': 'redis://127.0.0.1:1/0', 'IACS_AUTO_CREATE_SCHEMA': 'false',
-               'IACS_SEED_DEMO_DATA': 'false', 'IACS_AUTH_SECRET_KEY': 'validation-synthetic-auth-root-never-production',
-               'IACS_DATA_DIR': '/isolated/runtime', 'IACS_LOG_DIR': '/isolated/logs', 'IACS_WORKSPACE_DIR': '/workspace',
-               'IACS_IMAGE_IDENTITY': images['backend'],
-               'IACS_SOURCE_IDENTITY': json.loads((self.run / 'manifest.json').read_text())['source_fingerprint'],
-               'PYTHONPATH': '/workspace/backend:/workspace', 'PYTHONDONTWRITEBYTECODE': '1', 'HOME': '/tmp'}
-        mounts = [(self.snapshot, '/workspace', 'ro'), (deps, '/deps', 'ro'),
-                  (self.run / 'runtime', '/isolated/runtime', 'rw'), (self.run / 'logs', '/isolated/logs', 'rw'),
-                  (self.run / 'artifacts', '/results', 'rw')]
-        def backend_check(name, command, required=False, *, persistent=False, classification='db-free', extra_env=None):
-            # Pytest creates basetemp itself, but requires its parent to exist.
-            if command[:2] == ['-m', 'pytest']:
-                (self.run / 'artifacts' / name).mkdir()
-            return self.check(name, self.container(name, images['backend'], ['/deps/.venv/bin/python', *command],
-                mounts=mounts, env=(persistence_env if persistent else env) | (extra_env or {}),
-                network=namespace if persistent else 'none', work='/workspace/backend'),
-                required, classification=classification)
-        backend_check('isolation-db-free', ['/workspace/scripts/validation/preflight.py'], True)
+    def db_free_checks(self, backend_check, images, jsdeps):
         for name, relative in HOST_CHECKS.items():
             backend_check(name, ['/workspace/' + relative], True)
         backend_check('architecture-boundaries', ['/workspace/scripts/architecture/check_boundaries.py'],
@@ -448,11 +426,58 @@ class Harness:
                    [str(plugin)] if plugin.is_file() else ['docker', 'compose'])
         self.check('compose-config', ['env', '-i', 'PATH=' + os.environ['PATH'], 'HOME=' + str(self.run),
             *compose, '-f', str(self.snapshot / 'docker-compose.yml'), 'config', '--quiet'])
-        if self.args.mode != 'full':
+
+    def execute(self):
+        references = image_references(self.snapshot)
+        needs_database = self.args.mode == 'full' or (self.args.mode == 'focused' and persistence_checks(self.args))
+        required = ('backend', 'node', 'postgres', 'redis') if needs_database else ('backend', 'node')
+        images = {name: self.image(references[name]) for name in required}
+        self.write('images.json', images)
+        self.write('image-references.json', references)
+        deps, jsdeps = self.dependencies(images)
+        for folder in ('runtime', 'logs', 'artifacts'):
+            (self.run / folder).mkdir()
+            if folder == 'runtime':
+                self.own_disposable(self.run / folder)
+        database = self.prefix.replace('-', '_')
+        env = {'IACS_ENVIRONMENT': 'testing', 'IACS_VALIDATION_MODE': 'db-free',
+               'IACS_DATABASE_URL': 'postgresql+asyncpg://validation:synthetic-validation-only@127.0.0.1:1/' + database,
+               'IACS_REDIS_URL': 'redis://127.0.0.1:1/0', 'IACS_AUTO_CREATE_SCHEMA': 'false',
+               'IACS_SEED_DEMO_DATA': 'false', 'IACS_AUTH_SECRET_KEY': 'validation-synthetic-auth-root-never-production',
+               'IACS_DATA_DIR': '/isolated/runtime', 'IACS_LOG_DIR': '/isolated/logs', 'IACS_WORKSPACE_DIR': '/workspace',
+               'IACS_IMAGE_IDENTITY': images['backend'],
+               'IACS_SOURCE_IDENTITY': json.loads((self.run / 'manifest.json').read_text())['source_fingerprint'],
+               'PYTHONPATH': '/workspace/backend:/workspace', 'PYTHONDONTWRITEBYTECODE': '1', 'HOME': '/tmp'}
+        mounts = [(self.snapshot, '/workspace', 'ro'), (deps, '/deps', 'ro'),
+                  (self.run / 'runtime', '/isolated/runtime', 'rw'), (self.run / 'logs', '/isolated/logs', 'rw'),
+                  (self.run / 'artifacts', '/results', 'rw')]
+        def backend_check(name, command, required=False, *, persistent=False, classification='db-free', extra_env=None):
+            # Pytest creates basetemp itself, but requires its parent to exist.
+            if command[:2] == ['-m', 'pytest']:
+                (self.run / 'artifacts' / name).mkdir()
+            return self.check(name, self.container(name, images['backend'], ['/deps/.venv/bin/python', *command],
+                mounts=mounts, env=(persistence_env if persistent else env) | (extra_env or {}),
+                network=namespace if persistent else 'none', work='/workspace/backend'),
+                required, classification=classification)
+        backend_check('isolation-db-free', ['/workspace/scripts/validation/preflight.py'], True)
+        if self.args.mode == 'focused':
+            units = [target for path, targets in self.args.targets.items()
+                     if path not in PERSISTENCE_TESTS and path not in DIAGNOSTIC_TESTS for target in targets]
+            if units:
+                backend_check('focused-unit-tests', pytest_arguments('focused-unit-tests',
+                    ['/workspace/' + target for target in units]))
+            if not persistence_checks(self.args):
+                return
+        else:
+            self.db_free_checks(backend_check, images, jsdeps)
+        if self.args.mode == 'db-free':
             for name in ('migration-up', 'migration-current', 'migration-check', 'persistence-tests', 'schema-checks', 'diagnostics', 'database-restore'):
                 self.skip(name, 'db-free mode prohibits services, migrations and schema-dependent execution')
             return
         suites = persistence_checks(self.args)
+        if self.args.mode == 'full':
+            manifest = json.loads((self.run / 'manifest.json').read_text())
+            suites = prioritize(suites, manifest.get('changed_paths', []), *recent_suites(ROOT, self.run.parent, self.run))
         if len(suites) > 999:
             raise ValueError('The bounded full harness supports at most 999 isolated pytest suites')
         for folder in ('postgres', 'redis'):
@@ -491,7 +516,8 @@ class Harness:
         suite_records = []
         for index, (relative, classification) in enumerate(suites, 1):
             name, suite_database = suite_identity(self.prefix, index)
-            suite_records.append({'check': name, 'path': relative, 'classification': classification,
+            targets = self.args.targets.get(relative, [relative])
+            suite_records.append({'targets': targets, 'check': name, 'path': relative, 'classification': classification,
                 'template_database': database, 'database': suite_database, 'redis_database': index,
                 'evidence': f'artifacts/{name}'})
             self.write('persistence-suites.json', suite_records)
@@ -510,7 +536,7 @@ class Harness:
                 self.skip(name, 'disposable suite database could not be created')
                 continue
             try:
-                backend_check(name, pytest_arguments(name, ['/workspace/' + relative]),
+                backend_check(name, pytest_arguments(name, ['/workspace/' + target for target in targets]),
                     persistent=True, classification=classification, extra_env={
                         'IACS_DATABASE_URL': persistence_env['IACS_DATABASE_URL'].rsplit('/', 1)[0] + '/' + suite_database,
                         'IACS_REDIS_URL': f'redis://127.0.0.1:6379/{index}',
@@ -582,6 +608,7 @@ def run(args):
         'status': harness.capture('git', '-C', str(ROOT), 'status', '--short'),
         'diff_stat': harness.capture('git', '-C', str(ROOT), 'diff', '--stat'),
         'mode': args.mode, 'database_restore': args.database_restore,
+        'changed_paths': changed_files(ROOT, inventory['automatic_untracked']),
         'inventory': inventory, 'sha256': hashes,
         'source_fingerprint': source_fingerprint(hashes), 'dependency_manifests': manifest_hashes(snapshot),
         'host_python': sys.version, 'host_platform': platform.platform(), 'argv': sys.argv,

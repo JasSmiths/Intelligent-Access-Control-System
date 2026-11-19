@@ -16,12 +16,6 @@ NOTIFY = "notify.mobile_app_jane_s_iphone"
 TRACKER = "device_tracker.renamed_without_notify_suffix"
 
 
-def person(**kwargs):
-    return SimpleNamespace(**({"id": PERSON_ID, "is_active": True,
-        "home_assistant_mobile_app_notify_service": NOTIFY,
-        "missed_exit_recovery_tracker_entity_id": None} | kwargs))
-
-
 def state(entity_id=TRACKER, state_value="not_home", **attributes):
     return vendor.HomeAssistantState(entity_id, state_value, {
         "source_type": "gps", "friendly_name": "Unrelated renamed tracker",
@@ -41,7 +35,7 @@ def device(**kwargs):
             "config_entries": ["private-entry-id"]} | kwargs
 
 
-def result(*, people=None, states=None, entities=None, devices=None, services=None):
+def result(*, owner=None, states=None, entities=None, devices=None, services=None):
     device_rows = devices if devices is not None else [device()]
     canonical = {"Jane's iPhone": NOTIFY, "Jane s iPhone": NOTIFY,
                  "Jane’s iPhone": "notify.mobile_app_janes_iphone",
@@ -50,7 +44,7 @@ def result(*, people=None, states=None, entities=None, devices=None, services=No
                  "Jáné's iPhone": NOTIFY}
     normalized = {row["id"]: canonical[row["name"]] for row in device_rows}
     return discovery.build_discovery(
-        people if people is not None else [person()], states if states is not None else [state()],
+        owner or discovery.DiscoveryOwner(PERSON_ID, True, NOTIFY, False), states if states is not None else [state()],
         services if services is not None else {NOTIFY},
         entities if entities is not None else [entity()], device_rows, device_services=normalized,
     )
@@ -58,8 +52,8 @@ def result(*, people=None, states=None, entities=None, devices=None, services=No
 
 def test_renamed_entity_and_device_override_do_not_affect_original_name_identity():
     found = result()
-    assert found.mappings[0].status == "matched"
-    assert found.mappings[0].suggested_tracker_entity_id == TRACKER
+    assert found.mapping.status == "matched"
+    assert found.mapping.suggested_tracker_entity_id == TRACKER
     assert found.trackers[0].name == "Unrelated renamed tracker"
     assert found.trackers[0].eligible is True
 
@@ -76,7 +70,7 @@ def test_renamed_entity_and_device_override_do_not_affect_original_name_identity
 def test_registry_and_gps_eligibility(changed_entity, changed_device, changed_state, reason):
     found = result(entities=[entity(**changed_entity)], devices=[device(**changed_device)],
                    states=[state(**changed_state)])
-    assert found.mappings[0].suggested_tracker_entity_id is None
+    assert found.mapping.suggested_tracker_entity_id is None
     assert found.trackers[0].eligible is False
     assert found.trackers[0].reason == reason
 
@@ -84,46 +78,46 @@ def test_registry_and_gps_eligibility(changed_entity, changed_device, changed_st
 @pytest.mark.parametrize("states", [[], [state(state_value="unavailable")], [state(state_value="unknown")]])
 def test_missing_unavailable_unknown_tracker_never_suggested(states):
     found = result(states=states)
-    assert found.mappings[0].status == "unavailable"
-    assert found.mappings[0].suggested_tracker_entity_id is None
+    assert found.mapping.status == "unavailable"
+    assert found.mapping.suggested_tracker_entity_id is None
 
 
 def test_device_name_collision_before_disabled_or_non_iphone_filter():
     found = result(devices=[device(), device(id="private-stale-id", name="Jane s iPhone",
                                             manufacturer="Samsung", disabled_by="user")])
-    assert found.mappings[0].status == "ambiguous"
-    assert found.mappings[0].reason == "device_name_collision"
+    assert found.mapping.status == "ambiguous"
+    assert found.mapping.reason == "device_name_collision"
 
 
 def test_unicode_quote_original_name_collision_is_checked_before_eligibility():
     notify = "notify.mobile_app_janes_iphone"
-    found = result(people=[person(home_assistant_mobile_app_notify_service=notify)], services={notify},
+    found = result(owner=discovery.DiscoveryOwner(PERSON_ID, True, notify, False), services={notify},
                    devices=[device(name="Jane’s iPhone"), device(id="stale-device", name="Janes iPhone", model="MacBook Air")])
-    assert found.mappings[0].reason == "device_name_collision"
+    assert found.mapping.reason == "device_name_collision"
 
 
 def test_unrelated_curly_quote_macbook_does_not_block_iphone_match():
     found = result(devices=[device(), device(id="macbook", name="Ash’s MacBook Air", model="MacBook Air")])
-    assert found.mappings[0].status == "matched"
+    assert found.mapping.status == "matched"
 
 
 def test_multiple_eligible_trackers_ambiguous():
     found = result(states=[state(), state("device_tracker.second")],
                    entities=[entity(), entity(entity_id="device_tracker.second")])
-    assert found.mappings[0].reason == "multiple_eligible_trackers"
-    assert found.mappings[0].suggested_tracker_entity_id is None
+    assert found.mapping.reason == "multiple_eligible_trackers"
+    assert found.mapping.suggested_tracker_entity_id is None
 
 
 def test_disabled_extra_tracker_does_not_compete_with_one_eligible_tracker():
     found = result(states=[state(), state("device_tracker.second")],
                    entities=[entity(), entity(entity_id="device_tracker.second", disabled_by="user")])
-    assert found.mappings[0].status == "matched"
+    assert found.mapping.status == "matched"
 
 
 def test_multiple_mobile_registrations_on_device_are_ambiguous_before_eligibility():
     found = result(entities=[entity(), entity(entity_id="device_tracker.disabled", config_entry_id="second-entry", disabled_by="user")],
                    devices=[device(config_entries=["private-entry-id", "second-entry"])])
-    assert found.mappings[0].reason == "multiple_mobile_app_registrations"
+    assert found.mapping.reason == "multiple_mobile_app_registrations"
 
 
 @pytest.mark.parametrize("entities, devices", [
@@ -136,29 +130,26 @@ def test_malformed_duplicate_registry_identity_fails_closed(entities, devices):
         result(entities=entities, devices=devices)
 
 
-@pytest.mark.parametrize("active", [True, False])
-def test_shared_notify_destination_including_inactive_owner_is_ambiguous(active):
-    found = result(people=[person(), person(id=UUID(int=2), is_active=active)])
-    assert found.mappings[0].reason == "notify_service_shared"
-    assert len(found.mappings) == (2 if active else 1)
+def test_shared_notify_destination_is_ambiguous():
+    found = result(owner=discovery.DiscoveryOwner(PERSON_ID, True, NOTIFY, True))
+    assert found.mapping.reason == "notify_service_shared"
 
 
-def test_existing_tracker_owned_by_another_person_is_blocked():
-    found = result(people=[person(), person(id=UUID(int=2), is_active=False,
-        home_assistant_mobile_app_notify_service=None, missed_exit_recovery_tracker_entity_id=TRACKER)])
-    assert found.mappings[0].reason == "tracker_assigned_elsewhere"
-    assert result(people=[person(missed_exit_recovery_tracker_entity_id=TRACKER)]).mappings[0].status == "matched"
+async def test_existing_tracker_owned_by_another_person_is_blocked():
+    found = await discovery.discover_recovery_trackers(FakeSession(assigned=True), FakeClient(), PERSON_ID)
+    assert found.mapping.reason == "tracker_assigned_elsewhere"
+    assert found.mapping.suggested_tracker_entity_id is None
 
 
 def test_missing_saved_notify_service_and_nonadvertised_target():
-    assert result(people=[person(home_assistant_mobile_app_notify_service=None)]).mappings[0].reason == "saved_notify_service_missing"
-    assert result(services=set()).mappings[0].reason == "saved_notify_service_unavailable"
-    assert result(devices=[]).mappings[0].reason == "device_not_found"
+    assert result(owner=discovery.DiscoveryOwner(PERSON_ID, True, None, False)).mapping.reason == "saved_notify_service_missing"
+    assert result(services=set()).mapping.reason == "saved_notify_service_unavailable"
+    assert result(devices=[]).mapping.reason == "device_not_found"
 
 
 def test_unicode_name_normalized_by_home_assistant_participates_in_collision_check():
     found = result(devices=[device(), device(id="another-id", name="Jáné's iPhone")])
-    assert found.mappings[0].reason == "device_name_collision"
+    assert found.mapping.reason == "device_name_collision"
 
 
 def test_response_excludes_location_registry_identifiers_and_provider_diagnostics():
@@ -169,9 +160,20 @@ def test_response_excludes_location_registry_identifiers_and_provider_diagnostic
 
 
 class FakeSession:
-    async def scalars(self, statement):
-        self.statement = str(statement)
-        return SimpleNamespace(all=lambda: [person()])
+    def __init__(self, assigned=False):
+        self.assigned = assigned
+        self.released = False
+
+    async def execute(self, statement):
+        self.projection = str(statement)
+        return SimpleNamespace(one_or_none=lambda: (PERSON_ID, True, NOTIFY, False))
+
+    async def rollback(self):
+        self.released = True
+
+    async def scalar(self, statement):
+        self.collision = str(statement)
+        return self.assigned
 
 
 class FakeClient:
@@ -193,10 +195,20 @@ class FakeClient:
 
 
 async def test_discovery_reads_people_without_mutations_and_protects_admin_route():
-    session = FakeSession()  # Has no execute/add/commit/flush/write methods.
-    found = await discovery.discover_recovery_trackers(session, FakeClient())
-    assert found.mappings[0].status == "matched"
-    assert "ORDER BY" in session.statement
+    session = FakeSession()
+
+    class Client(FakeClient):
+        async def config(self):
+            assert session.released
+            return await super().config()
+
+    found = await discovery.discover_recovery_trackers(session, Client(), PERSON_ID)
+    assert found.mapping.status == "matched"
+    assert "WHERE people.id =" in session.projection
+    assert "profile_photo" not in session.projection
+    assert "people_1.is_active" not in session.projection
+    assert "missed_exit_recovery_tracker_entity_id =" in session.collision
+    assert "is_active" not in session.collision
     route = next(route for route in integrations.router.routes if route.path.endswith("/home-assistant/recovery-trackers"))
     assert admin_user in [dependency.call for dependency in route.dependant.dependencies]
     assert route.methods == {"GET"}
@@ -207,10 +219,10 @@ async def test_registry_failure_retains_manual_list_without_suggestions(error):
     class Failed(FakeClient):
         async def list_recovery_registries(self, **kwargs):
             raise error
-    found = await discovery.discover_recovery_trackers(FakeSession(), Failed())
+    found = await discovery.discover_recovery_trackers(FakeSession(), Failed(), PERSON_ID)
     assert found.status == "unavailable"
     assert found.trackers[0].entity_id == TRACKER
-    assert found.mappings[0].suggested_tracker_entity_id is None
+    assert found.mapping.suggested_tracker_entity_id is None
     assert "PRIVATE" not in found.model_dump_json()
 
 
@@ -219,7 +231,7 @@ async def test_discovery_cancellation_propagates():
         async def list_recovery_registries(self, **kwargs):
             raise asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError):
-        await discovery.discover_recovery_trackers(FakeSession(), Cancelled())
+        await discovery.discover_recovery_trackers(FakeSession(), Cancelled(), PERSON_ID)
 
 
 class Socket:
@@ -332,8 +344,8 @@ async def test_template_failure_does_not_produce_mapping_and_keeps_manual_list()
     class Failed(FakeClient):
         async def normalize_mobile_app_service_names(self, names, **kwargs):
             raise vendor.HomeAssistantError("PRIVATE PROVIDER ERROR")
-    found = await discovery.discover_recovery_trackers(FakeSession(), Failed())
+    found = await discovery.discover_recovery_trackers(FakeSession(), Failed(), PERSON_ID)
     assert found.status == "unavailable"
     assert found.trackers[0].entity_id == TRACKER
-    assert found.mappings[0].suggested_tracker_entity_id is None
+    assert found.mapping.suggested_tracker_entity_id is None
     assert "PRIVATE" not in found.model_dump_json()

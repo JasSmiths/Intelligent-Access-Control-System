@@ -1,5 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createReadSignals, ReadSignalsContext } from "../../lib/readSignals";
+import { integrationsApi } from "../../api/integrations";
 import { missedExitRecoveryApi, type RecoveryAttempt } from "../../api/missedExitRecovery";
 import * as directory from "../../api/directory";
 import * as client from "../../api/client";
@@ -14,6 +16,7 @@ const props = { currentUser: { id: "admin-1", role: "admin" } as UserAccount };
 beforeEach(() => {
   vi.spyOn(directory, "readDirectory").mockResolvedValue({ items: [person], total: 1, next_cursor: null });
   vi.spyOn(directory, "lookupDirectory").mockResolvedValue([person]);
+  vi.spyOn(integrationsApi, "getRecoveryTrackers").mockResolvedValue({ status: "complete", reason: null, trackers: [], mapping: null });
   settings.save.mockReset();
   vi.spyOn(missedExitRecoveryApi, "attempts").mockResolvedValue({ items: [attempt], total: 26, offset: 0, limit: 25 });
   vi.spyOn(missedExitRecoveryApi, "attempt").mockResolvedValue(attempt);
@@ -58,8 +61,9 @@ it("saves the explicit owner and tracker association", async () => {
   fireEvent.change(screen.getByRole("combobox", { name: "Configure owner" }), { target: { value: person.id } });
   fireEvent.change(screen.getByRole("combobox", { name: "Owner recovery opt-in" }), { target: { value: "true" } });
   fireEvent.change(screen.getByRole("textbox", { name: "Home Assistant phone tracker entity" }), { target: { value: "device_tracker.synthetic" } });
+  fireEvent.change(screen.getByLabelText(/Notify when this resident/), { target: { value: "notify.mobile_app_observer" } });
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save owner configuration" })));
-  expect(missedExitRecoveryApi.saveOwner).toHaveBeenCalledWith(person, { missed_exit_recovery_enabled: true, missed_exit_recovery_tracker_entity_id: "device_tracker.synthetic" });
+  expect(missedExitRecoveryApi.saveOwner).toHaveBeenCalledWith(person, { missed_exit_recovery_expiry_notify_service: "notify.mobile_app_observer", missed_exit_recovery_enabled: true, missed_exit_recovery_tracker_entity_id: "device_tracker.synthetic" });
 });
 it("pages on the server and resets the offset when filters are applied", async () => {
   await act(async () => render(<MissedExitRecoveryView {...props} />));
@@ -107,6 +111,7 @@ it("aborts and ignores a late attempt list when the administrator changes filter
 it("shows coalesced canonical authority and keeps notification acceptance separate from the resident action", () => {
   render(<RecoveryAttemptDetails attempt={{ ...attempt, method: "none", outcome: "coalesced", reason: "existing_resident_request", notification: {
     canonical_attempt_id: "canonical-1", canonical_outcome: "expired", canonical_reason: "resident_approval_expired",
+    approval_device: "notify.mobile_app_synthetic", approval_recipient: "Synthetic Resident",
     approval_delivery_status: "completed", approval_queued_at: "2026-10-02T10:00:00Z",
     approval_delivered_count: 1, approval_failed_count: 0, approval_skipped_count: 0,
     apology_delivery_status: "pending", apology_delivered_count: 0,
@@ -116,6 +121,7 @@ it("shows coalesced canonical authority and keeps notification acceptance separa
   expect(screen.getByText(/resident_approval_expired/)).toBeInTheDocument();
   expect(screen.getByText("Approval Delivered Count")).toBeInTheDocument();
   expect(screen.getByText("Apology Delivery Status")).toBeInTheDocument();
+  expect(screen.getByText("notify.mobile_app_synthetic")).toBeInTheDocument();
   expect(screen.getByText(/They do not prove the resident saw the notification/)).toBeInTheDocument();
 });
 it("renders denied attempts with empty notification metadata", () => {
@@ -125,4 +131,44 @@ it("renders denied attempts with empty notification metadata", () => {
 it("loads a linked canonical attempt without requiring a list-row click", async () => {
   await act(async () => render(<MissedExitRecoveryView {...props} targetId="canonical-1" />));
   expect(missedExitRecoveryApi.attempt).toHaveBeenCalledWith("canonical-1", expect.anything());
+});
+
+it("keeps the displayed evidence while refreshing and ignores normal traffic", async () => {
+  const signals = createReadSignals("recovery-test");
+  await act(async () => render(<ReadSignalsContext.Provider value={signals}><MissedExitRecoveryView {...props} targetId={attempt.id} /></ReadSignalsContext.Provider>));
+  expect(screen.getByText("Command Verification")).toBeVisible();
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6000);
+  await act(async () => signals.publish({ type: "realtime", message: { type: "access_event.updated", payload: { person_id: person.id } } }));
+  expect(missedExitRecoveryApi.attempts).toHaveBeenCalledTimes(1);
+  expect(missedExitRecoveryApi.attempt).toHaveBeenCalledTimes(1);
+  let finish!: (value: RecoveryAttempt) => void;
+  vi.mocked(missedExitRecoveryApi.attempt).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+  await act(async () => signals.publish({ type: "realtime", message: { type: "access_event.updated", payload: { has_recovery_attempt: true, person_id: person.id } } }));
+  expect(missedExitRecoveryApi.attempts).toHaveBeenCalledTimes(2);
+  expect(missedExitRecoveryApi.attempt).toHaveBeenCalledTimes(2);
+  expect(screen.getByText("Command Verification")).toBeVisible();
+  await act(async () => finish({ ...attempt, reason: "Updated synthetic evidence" }));
+  expect(screen.getByText("Updated synthetic evidence")).toBeVisible();
+});
+
+it("refreshes the pending page and open attempt at expiry without traffic or repeated polling", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.mocked(missedExitRecoveryApi.attempts)
+      .mockResolvedValueOnce({ items: [attempt], total: 1, limit: 25, offset: 0, next_expiry_in_ms: 1000 })
+      .mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 });
+    vi.mocked(missedExitRecoveryApi.attempt)
+      .mockResolvedValueOnce({ ...attempt, next_expiry_in_ms: 1000 })
+      .mockResolvedValue({ ...attempt, outcome: "expired", reason: "Approval timed out" });
+    await act(async () => render(<MissedExitRecoveryView {...props} targetId={attempt.id} />));
+    await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+    expect(missedExitRecoveryApi.attempts).toHaveBeenCalledTimes(1);
+    expect(missedExitRecoveryApi.attempt).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getByText("Approval timed out")).toBeVisible();
+    expect(screen.getByText("No recovery attempts match these filters.")).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(missedExitRecoveryApi.attempts).toHaveBeenCalledTimes(2);
+    expect(missedExitRecoveryApi.attempt).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
 });

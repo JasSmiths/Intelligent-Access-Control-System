@@ -49,6 +49,7 @@ export function InvestigationsWorkspace() {
 
       <InvestigationFilters catalog={data.filters ?? EMPTY_FILTER_CATALOG} onChange={updateQuery} onReset={resetQuery} query={query} timezone={timezone} />
 
+      {data.newActivity ? <p role="status">The activity timeline has updates. <button className="secondary-button" type="button" onClick={() => void data.refreshPage().catch(() => undefined)}>Show latest activity</button></p> : null}
       {(data.page || data.loading || !data.error) ? <ActivityTimeline
         detailErrors={episodeDetails.errors}
         details={episodeDetails.details}
