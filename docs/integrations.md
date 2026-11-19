@@ -420,8 +420,8 @@ migration, enabling credentials and live provider tests require separate authori
 
 ## UniFi Protect SDK contract
 
-The locked SDK is `uiprotect==23.1.2`, whose supported console requirement is
-[UniFi Protect 7.2+](https://github.com/uilibs/uiprotect#requirements). IACS retains
+The locked SDK is `uiprotect==25.5.0`, whose supported console requirement is
+[UniFi Protect 7.2+](https://github.com/uilibs/uiprotect/tree/v25.5.0#requirements). IACS retains
 local username/password and Integration API key credentials for its private
 bootstrap/media and public event/device channels. An upgrade does not enable
 new hardware actions or replay historical detections.
@@ -447,15 +447,33 @@ Recorded clips use the event's exact cached camera and its start/end times throu
 ongoing/invalid ranges, rejected exports and empty responses fail without substituting
 a different camera or time range. Normal snapshots retain width/height parameters.
 Package snapshots use `get_public_api_camera_snapshot(package=True)` after the
-existing local-user live/media permission check and package-camera capability check;
-that supported public endpoint returns native quality rather than arbitrary width
-and height. Requests above 1920×1080 select high quality.
+local-user live/media permission check. The capability comes from the public
+camera with the same ID, or from that camera's private feature flags when the
+public bootstrap is partial. An unknown capability prevents the request.
+The endpoint returns native quality. Requests above 1920×1080 select high quality.
 
 Private camera detections come from enabled recording/detection settings and the
 SDK's supported last-event lookups. Public WebSocket cameras retain the SDK's
 current per-type predicates over its cached public events. An ended event is not current evidence;
 audio uses its own enabled types independently of the visual detection flag. These
 lookups use the SDK's active-event index/cache and perform no provider I/O.
+
+The private bootstrap provides configured smart-zone IDs, names and object types,
+motion status and channel metadata. A [per-bootstrap camera catalog](../backend/app/modules/unifi_protect/camera_catalog.py)
+captures those fields before SDK normalization. Private camera updates revise
+the same camera's entry, including zone-only renames and explicit empty lists.
+Discovery, camera status and numeric webhook zone resolution use this shared
+view. Replacing the bootstrap replaces its catalog. Public camera motion comes
+from the public event stream. An unavailable motion or channel-status value is
+shown as unknown.
+
+The [event evidence adapter](../backend/app/modules/unifi_protect/event_evidence.py)
+captures thumbnail and group fields from the same private HTTP response or
+WebSocket frame that the SDK accepted. Group matches retain their own name and
+confidence, including a reported zero. A missing group score stays unknown.
+Replacement thumbnail lists clear prior matches. Event browsing, timing
+observations and vehicle evidence can read the resulting event without another
+provider request. Historical discovery keeps its separate minimal record.
 
 ## UniFi optional stream evidence and capacity
 

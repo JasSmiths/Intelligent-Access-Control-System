@@ -2,12 +2,13 @@ from datetime import UTC, datetime
 from enum import Enum
 from types import SimpleNamespace
 
+from app.modules.unifi_protect.camera_catalog import CameraWireCatalog
 from app.modules.unifi_protect.client import serialize_unifi_camera, serialize_unifi_event
 from app.services.unifi_protect import (
     UnifiProtectIntegrationService,
     _websocket_state_name,
     gate_lpr_camera_from_bootstrap,
-    resolve_camera_smart_zone_names,
+    resolve_camera_smart_zones,
 )
 
 
@@ -16,7 +17,9 @@ class EnumValue:
         self.value = value
 
 
-def test_camera_serialization_exposes_metadata_not_stream_urls() -> None:
+def test_camera_serialization_exposes_metadata_not_stream_urls(monkeypatch) -> None:
+    from app.modules.unifi_protect.camera_catalog import CameraWireMetadata
+
     camera = SimpleNamespace(
         id="cam-1",
         display_name="Driveway",
@@ -26,7 +29,6 @@ def test_camera_serialization_exposes_metadata_not_stream_urls() -> None:
         is_recording=True,
         is_recording_enabled=True,
         is_video_ready=True,
-        is_motion_detected=False,
         is_smart_detected=True,
         last_motion=datetime(2026, 4, 25, tzinfo=UTC),
         last_motion_event_id="event-1",
@@ -36,34 +38,32 @@ def test_camera_serialization_exposes_metadata_not_stream_urls() -> None:
         last_smart_audio_detect_event_id=None,
         channels=[
             SimpleNamespace(
-                id="0",
-                name="High",
+                id=0,
                 width=1920,
                 height=1080,
                 fps=30,
                 bitrate=6000,
-                is_rtsp_enabled=True,
-                is_package=False,
                 rtsp_url="rtsp://secret",
             )
         ],
         feature_flags=SimpleNamespace(
             has_smart_detect=True,
-            has_package_camera=False,
             smart_detect_types=[EnumValue("person")],
             smart_detect_audio_types=[],
         ),
-        smart_detect_zones=[
-            SimpleNamespace(
-                id=2, name="Default", object_types=[EnumValue("person"), EnumValue("vehicle")]
-            ),
-        ],
         has_mic=True,
     )
 
     from uiprotect.data import SmartDetectObjectType
 
-    camera.active_smart_detect_types = {SmartDetectObjectType.PERSON}
+    wire = CameraWireMetadata.from_raw({
+        "smartDetectZones": [{"id": 2, "name": "Default", "objectTypes": ["person", "vehicle"]}],
+        "channels": [{"id": 0, "name": "High", "isRtspEnabled": True}],
+        "isMotionDetected": False,
+    })
+    monkeypatch.setattr("app.modules.unifi_protect.client.camera_wire_metadata", lambda _: wire)
+    camera.use_global = False
+    camera.smart_detect_settings = SimpleNamespace(object_types=[SmartDetectObjectType.PERSON], audio_types=[])
     camera.get_last_smart_detect_event = lambda _: SimpleNamespace(
         end=None, smart_detect_types=[SmartDetectObjectType.PERSON])
     payload = serialize_unifi_camera(camera)
@@ -82,16 +82,24 @@ def test_gate_lpr_zone_id_resolves_to_zone_name() -> None:
         id="camera-protect-id",
         mac="942A6FD09D64",
         display_name="Gate LPR",
-        smart_detect_zones=[
-            SimpleNamespace(id=2, name="Default", object_types=[EnumValue("vehicle")]),
-        ],
     )
-    other = SimpleNamespace(id="other", mac="other", display_name="Drive", smart_detect_zones=[])
+    other = SimpleNamespace(id="other", mac="other", display_name="Drive")
+    catalog = CameraWireCatalog.from_bootstrap([
+        {"id": other.id, "smartDetectZones": [{"id": 2, "name": "Other"}]},
+        {"id": gate_lpr.id, "smartDetectZones": [{"id": 2, "name": "Default"}]},
+    ])
 
     camera = gate_lpr_camera_from_bootstrap([other, gate_lpr], camera_identifier="942A6FD09D64")
 
     assert camera is gate_lpr
-    assert resolve_camera_smart_zone_names(camera, ["2"]) == ["2", "Default"]
+    metadata = catalog.get(camera.id)
+    assert metadata is not None and metadata.zones is not None
+    resolved, matches = resolve_camera_smart_zones(metadata.zones, ["2", "unmapped"])
+    assert resolved == ["2", "Default", "unmapped"]
+    assert matches == [
+        {"input": "2", "id": "2", "name": "Default"},
+        {"input": "unmapped", "id": "unmapped", "name": "unmapped"},
+    ]
 
 
 def test_event_serialization_includes_proxy_urls() -> None:
@@ -201,7 +209,8 @@ def test_detection_update_still_refreshes_vehicle_presence() -> None:
     from uiprotect.data import SmartDetectObjectType
 
     camera.is_recording_enabled = camera.is_smart_detected = True
-    camera.active_smart_detect_types = {SmartDetectObjectType.VEHICLE}
+    camera.use_global = False
+    camera.smart_detect_settings = SimpleNamespace(object_types=[SmartDetectObjectType.VEHICLE], audio_types=[])
     camera.get_last_smart_detect_event = lambda _: SimpleNamespace(
         end=None, smart_detect_types=[SmartDetectObjectType.VEHICLE])
     service._handle_websocket_message(

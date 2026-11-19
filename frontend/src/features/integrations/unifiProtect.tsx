@@ -97,7 +97,7 @@ export function UnifiProtectCameraSection({
           {cameras.map((camera) => {
             const events = eventsByCamera[camera.id] ?? [];
             const analysis = analysisByCamera[camera.id];
-            const detectionLabels = camera.detections.active.length ? camera.detections.active : camera.is_motion_detected ? ["motion"] : [];
+            const detection = currentDetectionState(camera);
             const snapshotUrl = `${camera.snapshot_url}?width=320&height=180&_=${snapshotNonce[camera.id] ?? refreshToken}`;
             return (
               <article className="protect-camera-card" key={camera.id}>
@@ -119,9 +119,9 @@ export function UnifiProtectCameraSection({
                     </button>
                   </div>
                   <div className="protect-detection-row">
-                    {detectionLabels.length ? detectionLabels.map((label) => (
+                    {detection.labels.length ? detection.labels.map((label) => (
                       <Badge tone={label === "motion" ? "amber" : "blue"} key={label}>{titleCase(label)}</Badge>
-                    )) : <Badge tone="gray">Clear</Badge>}
+                    )) : <Badge tone="gray">{detection.description}</Badge>}
                     {camera.feature_flags.has_mic ? <Badge tone="gray">Mic</Badge> : null}
                     {camera.feature_flags.has_package_camera ? <Badge tone="gray">Package Cam</Badge> : null}
                   </div>
@@ -265,6 +265,13 @@ function ProtectExposeTable({
     </section>
   );
 }
+function currentDetectionState(camera: UnifiProtectCamera) {
+  const labels = camera.detections.active;
+  if (labels.length) return { labels, description: labels.map(titleCase).join(", ") };
+  if (camera.is_motion_detected) return { labels: ["motion"], description: "Motion" };
+  return { labels: [], description: camera.is_motion_detected == null ? "Unknown" : "Clear" };
+}
+
 function buildProtectExposeRows(status: UnifiProtectStatus | null, cameras: UnifiProtectCamera[]) {
   const consoleRows: ProtectExposeRow[] = [
     { name: "Connection", value: status?.connected ? "Connected" : status?.configured ? "Configured" : "Not configured" },
@@ -293,7 +300,7 @@ function buildProtectExposeRows(status: UnifiProtectStatus | null, cameras: Unif
     { name: `${camera.name} package camera`, value: formatExposeValue(camera.feature_flags.has_package_camera) }
   ]);
   const detectionRows = cameras.flatMap((camera) => [
-    { name: `${camera.name} active detections`, value: camera.detections.active.length ? camera.detections.active.map(titleCase).join(", ") : "Clear" },
+    { name: `${camera.name} active detections`, value: currentDetectionState(camera).description },
     { name: `${camera.name} supported smart detections`, value: camera.feature_flags.smart_detect_types.length ? camera.feature_flags.smart_detect_types.map(titleCase).join(", ") : "None" },
     { name: `${camera.name} supported audio detections`, value: camera.feature_flags.smart_detect_audio_types.length ? camera.feature_flags.smart_detect_audio_types.map(titleCase).join(", ") : "None" },
     { name: `${camera.name} last motion`, value: camera.last_motion_at ? formatDate(camera.last_motion_at) : "None" },
@@ -305,7 +312,7 @@ function buildProtectExposeRows(status: UnifiProtectStatus | null, cameras: Unif
       channel.width && channel.height ? `${channel.width}x${channel.height}` : "resolution unknown",
       channel.fps ? `${channel.fps}fps` : null,
       channel.bitrate ? `${channel.bitrate}kbps` : null,
-      channel.is_rtsp_enabled ? "RTSP enabled" : "RTSP disabled",
+      channel.is_rtsp_enabled == null ? "RTSP unknown" : channel.is_rtsp_enabled ? "RTSP enabled" : "RTSP disabled",
       channel.is_package ? "package channel" : null
     ].filter(Boolean).join(" · ")
   })));

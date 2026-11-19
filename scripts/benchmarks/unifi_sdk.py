@@ -59,23 +59,13 @@ async def measure():
     from datetime import UTC, datetime, timedelta
 
     from app.modules.unifi_protect.client import (
+        build_unifi_protect_client,
         list_unifi_protect_events,
         serialize_unifi_camera,
         serialize_unifi_event,
     )
     from uiprotect import ProtectApiClient
-    from uiprotect.data import (
-        Camera,
-        Event,
-        ModelType,
-        RecordingMode,
-        SmartDetectObjectType,
-    )
-    from uiprotect.data.devices import (
-        CameraFeatureFlags,
-        RecordingSettings,
-        SmartDetectSettings,
-    )
+    from uiprotect.data import Event, ModelType, SmartDetectObjectType
 
     now = datetime(2026, 10, 13, 12, tzinfo=UTC)
 
@@ -128,7 +118,20 @@ async def measure():
                     "camera": "cam-1" if i % 2 == 0 else "cam-other",
                     "start": int((now - timedelta(seconds=i + 20)).timestamp() * 1000),
                     "end": int((now - timedelta(seconds=i + 10)).timestamp() * 1000),
-                    "smartDetectTypes": ["vehicle"],
+                    "smartDetectTypes": ["vehicle", "licensePlate"],
+                    "metadata": {"detectedThumbnails": [{
+                        "type": "licensePlate",
+                        "croppedId": f"crop-{i}",
+                        "objectId": f"object-{i}",
+                        "coord": [1, 2, 10, 12],
+                        "confidence": 99,
+                        "group": {
+                            "id": f"group-{i}",
+                            "name": "AB12 CDE",
+                            "confidence": 0 if i % 4 == 0 else 85,
+                        },
+                        "attributes": {"color": {"val": "silver", "confidence": 88}},
+                    }]},
                 }
                 for i in range(start, stop)
             ]
@@ -147,6 +150,19 @@ async def measure():
         elapsed = perf_counter() - started
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
+        for event in public:
+            source_index = int(event["id"].removeprefix("event-"))
+            thumbnail, = event["metadata"]["detectedThumbnails"]
+            assert thumbnail.get("name") is None
+            assert thumbnail["confidence"] == 99
+            assert thumbnail["group"] == {
+                "id": f"group-{source_index}", "name": "AB12 CDE",
+                "confidence": 0 if source_index % 4 == 0 else 85,
+            }
+            assert thumbnail["croppedId"] == f"crop-{source_index}"
+            assert thumbnail["coord"] == [1, 2, 10, 12]
+            assert thumbnail["objectId"] == f"object-{source_index}"
+            assert thumbnail["attributes"]["color"] == {"val": "silver", "confidence": 88}
         reads.append(
             {
                 "source_rows": size,
@@ -162,34 +178,55 @@ async def measure():
         )
         await api.close_session()
     projections = []
-    api = client()
-    kinds = [SmartDetectObjectType.VEHICLE, SmartDetectObjectType.LICENSE_PLATE]
-    camera = Camera.model_construct(
-        model=ModelType.CAMERA,
-        id="cam-1",
-        name="Gate LPR",
-        type="UVC G6",
-        is_adopted=True,
-        is_recording=True,
-        is_motion_detected=False,
-        is_smart_detected=True,
-        use_global=False,
-        channels=[],
-        smart_detect_zones=[],
-        feature_flags=CameraFeatureFlags.model_construct(
-            has_mic=True,
-            has_package_camera=False,
-            has_smart_detect=True,
-            smart_detect_types=kinds,
-            smart_detect_audio_types=[],
-        ),
-        recording_settings=RecordingSettings.model_construct(mode=RecordingMode.ALWAYS),
-        smart_detect_settings=SmartDetectSettings.model_construct(
-            object_types=kinds, audio_types=[]
-        ),
+    config = SimpleNamespace(
+        unifi_protect_host="example.invalid",
+        unifi_protect_port=443,
+        unifi_protect_username="synthetic",
+        unifi_protect_password="synthetic",
+        unifi_protect_api_key="synthetic",
+        unifi_protect_verify_ssl=True,
     )
-    camera._api = api
-    api._bootstrap.cameras[camera.id] = camera
+    api = await build_unifi_protect_client(config)
+    kinds = [SmartDetectObjectType.VEHICLE, SmartDetectObjectType.LICENSE_PLATE]
+    wire_types = [kind.value for kind in kinds]
+    # Feed identical console fields through each release's normal bootstrap
+    # parser, before timing repeated reads from the resulting camera.
+    raw = {model.devices_key: [] for model in ModelType.bootstrap_models_types_set}
+    raw["nvr"] = {"id": "synthetic-nvr", "timezone": "UTC"}
+    raw["cameras"] = [{
+        "modelKey": "camera",
+        "id": "cam-1",
+        "name": "Gate LPR",
+        "type": "UVC G6",
+        "isAdopted": True,
+        "isRecording": True,
+        "isMotionDetected": True,
+        "isSmartDetected": True,
+        "useGlobal": False,
+        "channels": [{
+            "id": 0,
+            "name": "High",
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "bitrate": 6000,
+            "isRtspEnabled": True,
+        }],
+        "smartDetectZones": [{"id": 1, "name": "Driveway", "objectTypes": ["vehicle"]}],
+        "featureFlags": {
+            "hasMic": True,
+            "hasPackageCamera": True,
+            "hasSmartDetect": True,
+            "smartDetectTypes": wire_types,
+            "smartDetectAudioTypes": [],
+        },
+        "recordingSettings": {"mode": "always"},
+        "smartDetectSettings": {"objectTypes": wire_types, "audioTypes": []},
+    }]
+    api.api_request_obj = AsyncMock(return_value=raw)
+    api._bootstrap = await api.get_bootstrap()
+    api.api_request_obj.assert_awaited_once_with("bootstrap")
+    camera = api.bootstrap.cameras["cam-1"]
     event = Event.from_unifi_dict(
         modelKey="event",
         id="ongoing",
@@ -203,6 +240,15 @@ async def measure():
     )
     api._bootstrap.events[event.id] = event
     camera.last_smart_detect_event_ids = {kind: event.id for kind in kinds}
+    projected = serialize_unifi_camera(camera)
+    assert projected["is_motion_detected"] is True
+    assert projected["feature_flags"]["has_package_camera"] is True
+    assert projected["detections"]["active"] == ["vehicle", "license_plate"]
+    assert projected["smart_detect_zones"] == [
+        {"id": 1, "name": "Driveway", "object_types": ["vehicle"]}
+    ]
+    channel, = projected["channels"]
+    assert channel["name"] == "High" and channel["is_rtsp_enabled"] is True
     for count in [20, 2000]:
         tracemalloc.start()
         started = perf_counter()
@@ -249,6 +295,7 @@ async def measure():
         },
     )
     public_projections = []
+    public_sample = serialize_unifi_camera(public_camera)
     for count in [20, 2000]:
         tracemalloc.start()
         started = perf_counter()
@@ -268,7 +315,9 @@ async def measure():
     return {
         "event_reads": reads,
         "camera_projections": projections,
+        "camera_sample": projected,
         "public_camera_projections": public_projections,
+        "public_camera_sample": public_sample,
     }
 
 

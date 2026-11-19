@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from app.modules.unifi_protect.client import (
     close_unifi_protect_client,
-    is_unifi_protect_stream_metadata_only,
+    is_unifi_protect_camera_metadata_only,
     subscribe_unifi_protect,
 )
 
@@ -117,10 +117,16 @@ def test_subscribe_unifi_protect_registers_channel_states_before_starting_socket
 
 
 def test_stream_metadata_only_message_is_identified_without_hiding_detection_changes() -> None:
-    assert is_unifi_protect_stream_metadata_only(
+    assert is_unifi_protect_camera_metadata_only(
+        SimpleNamespace(changed_data={"modelKey": "camera", "id": "cam-1", "smart_detect_zones": []})
+    )
+    assert not is_unifi_protect_camera_metadata_only(
+        SimpleNamespace(changed_data={"smart_detect_zones": [], "is_motion_detected": True})
+    )
+    assert is_unifi_protect_camera_metadata_only(
         SimpleNamespace(changed_data={"modelKey": "camera", "id": "cam-1", "rtsps_streams": {}})
     )
-    assert not is_unifi_protect_stream_metadata_only(
+    assert not is_unifi_protect_camera_metadata_only(
         SimpleNamespace(
             changed_data={
                 "modelKey": "camera",
@@ -130,4 +136,4 @@ def test_stream_metadata_only_message_is_identified_without_hiding_detection_cha
             }
         )
     )
-    assert not is_unifi_protect_stream_metadata_only(SimpleNamespace(changed_data={"modelKey": "event", "id": "event-1"}))
+    assert not is_unifi_protect_camera_metadata_only(SimpleNamespace(changed_data={"modelKey": "event", "id": "event-1"}))

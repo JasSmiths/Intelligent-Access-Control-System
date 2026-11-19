@@ -11,19 +11,21 @@ from typing import Any, TypeVar
 
 from app.core.logging import get_logger
 from app.core.task_lifecycle import drain_owned
+from app.modules.unifi_protect.camera_catalog import CameraSmartZone
 from app.modules.unifi_protect.client import (
     ProtectMedia,
     ProtectRecoveryPage,
     UnifiProtectError,
     build_unifi_protect_client,
+    camera_wire_metadata,
     close_unifi_protect_client,
     get_direction_frames,
     get_unifi_protect_event_thumbnail,
     get_unifi_protect_event_video,
     get_unifi_protect_snapshot,
     get_unifi_protect_track,
+    is_unifi_protect_camera_metadata_only,
     is_unifi_protect_configured,
-    is_unifi_protect_stream_metadata_only,
     list_bootstrap_cameras,
     list_unifi_protect_events,
     load_unifi_protect_bootstrap,
@@ -282,11 +284,12 @@ class UnifiProtectIntegrationService:
         camera = gate_lpr_camera_from_bootstrap(
             list_bootstrap_cameras(api), camera_identifier=camera_identifier
         )
-        resolved = (
-            resolve_camera_smart_zone_names(camera, zone_values)
-            if camera is not None
-            else zone_values
-        )
+        if camera is not None:
+            metadata = camera_wire_metadata(camera)
+            zones = metadata.zones if metadata and metadata.zones is not None else ()
+            resolved, matches = resolve_camera_smart_zones(zones, zone_values)
+        else:
+            resolved, matches = zone_values, []
         day_night, day_night_source = camera_day_night(camera)
         return {
             "camera_id": str(getattr(camera, "id", "") or "") if camera is not None else None,
@@ -297,9 +300,7 @@ class UnifiProtectIntegrationService:
             else None,
             "camera_identifier": camera_identifier,
             "smart_zones": resolved,
-            "smart_zone_matches": resolve_camera_smart_zone_matches(camera, zone_values)
-            if camera is not None
-            else [],
+            "smart_zone_matches": matches,
             "time_of_day": day_night,
             "time_of_day_source": day_night_source,
         }
@@ -562,7 +563,7 @@ class UnifiProtectIntegrationService:
             return
         received_at, admitted_at = datetime.now(tz=UTC), monotonic()
         try:
-            metadata_only = is_unifi_protect_stream_metadata_only(message)
+            metadata_only = is_unifi_protect_camera_metadata_only(message)
             payload = websocket_message_payload(message)
             probe_id = None if metadata_only else self._lpr_track_probe_event_id(message)
             event = getattr(message, "new_obj", None)
@@ -770,51 +771,26 @@ def gate_lpr_camera_from_bootstrap(
     return None
 
 
-def resolve_camera_smart_zone_names(camera: Any, zone_values: list[str]) -> list[str]:
-    lookup: dict[str, list[str]] = {}
-    for zone in getattr(camera, "smart_detect_zones", []) or []:
-        zone_id = _string_or_none(getattr(zone, "id", None))
-        zone_name = _string_or_none(getattr(zone, "name", None))
-        labels = [value for value in (zone_id, zone_name) if value]
-        for label in labels:
-            lookup[_normalize_smart_zone(label)] = labels
-
-    resolved: list[str] = []
-    for value in zone_values:
-        text = _string_or_none(value)
-        if not text:
-            continue
-        resolved.append(text)
-        resolved.extend(lookup.get(_normalize_smart_zone(text), []))
-    return _dedupe_preserving_order(resolved)
-
-
-def resolve_camera_smart_zone_matches(
-    camera: Any, zone_values: list[str]
-) -> list[dict[str, str | None]]:
-    lookup: dict[str, dict[str, str | None]] = {}
-    for zone in getattr(camera, "smart_detect_zones", []) or []:
-        zone_id = _string_or_none(getattr(zone, "id", None))
-        zone_name = _string_or_none(getattr(zone, "name", None))
-        match = {"id": zone_id, "name": zone_name}
+def resolve_camera_smart_zones(
+    zones: tuple[CameraSmartZone, ...], zone_values: list[str]
+) -> tuple[list[str], list[dict[str, str]]]:
+    lookup: dict[str, tuple[str, str]] = {}
+    for zone in zones:
+        zone_id, zone_name = str(zone.id).strip(), zone.name.strip()
         for label in (zone_id, zone_name):
             if label:
-                lookup[_normalize_smart_zone(label)] = match
+                lookup[_normalize_smart_zone(label)] = (zone_id, zone_name)
 
-    matches: list[dict[str, str | None]] = []
+    resolved: list[str] = []
+    matches: list[dict[str, str]] = []
     for value in zone_values:
-        text = _string_or_none(value)
+        text = value.strip()
         if not text:
             continue
-        match = lookup.get(_normalize_smart_zone(text), {})
-        matches.append(
-            {
-                "input": text,
-                "id": match.get("id") or text,
-                "name": match.get("name") or text,
-            }
-        )
-    return matches
+        zone_id, zone_name = lookup.get(_normalize_smart_zone(text), (text, text))
+        resolved.extend((text, zone_id, zone_name))
+        matches.append({"input": text, "id": zone_id or text, "name": zone_name or text})
+    return _dedupe_preserving_order(resolved), matches
 
 
 def camera_day_night(camera: Any | None) -> tuple[str, str]:
@@ -849,12 +825,6 @@ def _normalize_camera_identifier(value: Any) -> str:
 
 def _normalize_smart_zone(value: Any) -> str:
     return " ".join(str(value or "").strip().casefold().replace("_", " ").replace("-", " ").split())
-
-
-def _string_or_none(value: Any) -> str | None:
-    if value is None or value == "":
-        return None
-    return str(value).strip()
 
 
 def _dedupe_preserving_order(values: list[str]) -> list[str]:

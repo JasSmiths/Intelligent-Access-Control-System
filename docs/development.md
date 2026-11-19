@@ -224,7 +224,7 @@ Profile photos, report images and snapshots retain their existing conversion and
 size limits; the dependency upgrade does not change those policies.
 
 The October 2026 refresh updates application and development dependencies,
-including `uiprotect==23.1.2` and Mako 1.4.3 (the Windows
+including Mako 1.4.3 (the Windows
 `TemplateLookup` traversal fix is in 1.4.2,
 [GHSA-5639-2j2p-m4mx](https://github.com/sqlalchemy/mako/security/advisories/GHSA-5639-2j2p-m4mx)).
 Apprise 2 returns a result object; the notification adapter accepts only a
@@ -233,8 +233,10 @@ services and timeouts. ESPHome resolves to 46.10.0 on the container platform;
 the lock retains 45.6.2 on Intel macOS because newer ESPHome releases cap
 `cryptography` below the reviewed application version on that platform.
 Python and JavaScript Playwright have independent locked versions; install each
-package's matching browsers. The UniFi wrapper uses raw-event conversion, camera
-video exports and the current SDK camera projection contract; see the
+package's matching browsers. The November UniFi refresh pins `uiprotect==25.5.0`,
+Pydantic 2.14.4 and platformdirs 4.14.7. The adapter reads the public camera
+capabilities and retains the private fields used by zone matching and LPR evidence.
+See the
 [SDK integration contract](integrations.md#unifi-protect-sdk-contract).
 
 SQLAlchemy stays on the patched 2.0 line (`>=2.0.54,<2.1`). Review transaction

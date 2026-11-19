@@ -361,7 +361,7 @@ export type UnifiProtectCamera = {
   is_recording: boolean;
   is_recording_enabled: boolean;
   is_video_ready: boolean;
-  is_motion_detected: boolean;
+  is_motion_detected: boolean | null;
   is_smart_detected: boolean;
   last_motion_at: string | null;
   last_smart_detect_at: string | null;
@@ -373,12 +373,12 @@ export type UnifiProtectCamera = {
     height: number | null;
     fps: number | null;
     bitrate: number | null;
-    is_rtsp_enabled: boolean;
+    is_rtsp_enabled: boolean | null;
     is_package: boolean;
   }>;
   feature_flags: {
     has_smart_detect: boolean;
-    has_package_camera: boolean;
+    has_package_camera: boolean | null;
     has_mic: boolean;
     smart_detect_types: string[];
     smart_detect_audio_types: string[];

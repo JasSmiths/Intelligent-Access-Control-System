@@ -891,6 +891,12 @@ vehicle evidence at event start/end and SDK disconnect invalidation. Existing
 runtime/lifecycle fixtures
 retain cancellation, disconnect/gap invalidation and provider-replacement checks.
 
+The [private camera catalog tests](../backend/tests/test_unifi_camera_catalog.py)
+check sparse deltas, explicit clears and ID matching. The
+[event evidence tests](../backend/tests/test_protect_event_evidence.py) exercise
+group-only plate matches across HTTP and private WebSocket updates, distinct
+group and thumbnail scores, and removal of superseded evidence.
+
 The [SDK workload](../scripts/benchmarks/unifi_sdk.py) runs the same small and
 20,000-event source fixtures against baseline/candidate source snapshots and their
 own exact locked SDKs. Retain equivalent public-output hashes, request/response row

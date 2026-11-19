@@ -20,6 +20,8 @@ from uiprotect.data.devices import (
     RecordingSettings,
     SmartDetectSettings,
 )
+from uiprotect.data.public_bootstrap import PublicBootstrap
+from uiprotect.data.public_devices import PublicCamera
 
 from app.modules.unifi_protect.client import (
     UnifiProtectError,
@@ -79,7 +81,6 @@ async def sdk(tmp_path):
     api = await build_unifi_protect_client(config)
     flags = CameraFeatureFlags.model_construct(
         has_mic=True,
-        has_package_camera=True,
         has_smart_detect=True,
         smart_detect_types=[SmartDetectObjectType.VEHICLE, SmartDetectObjectType.LICENSE_PLATE],
         smart_detect_audio_types=[],
@@ -90,12 +91,10 @@ async def sdk(tmp_path):
         name="Gate LPR",
         type="UVC G6",
         is_adopted=True,
-        is_motion_detected=False,
         is_smart_detected=True,
         is_recording=True,
         use_global=False,
         feature_flags=flags,
-        smart_detect_zones=[],
         recording_settings=RecordingSettings.model_construct(mode=RecordingMode.ALWAYS),
         smart_detect_settings=SmartDetectSettings.model_construct(
             object_types=flags.smart_detect_types, audio_types=[]
@@ -103,13 +102,10 @@ async def sdk(tmp_path):
         channels=[
             CameraChannel.model_construct(
                 id=0,
-                name="High",
                 width=1920,
                 height=1080,
                 fps=30,
                 bitrate=6000,
-                is_rtsp_enabled=False,
-                is_package=False,
             )
         ],
     )
@@ -118,6 +114,9 @@ async def sdk(tmp_path):
         cameras={camera.id: camera},
         events={},
         auth_user=SimpleNamespace(can=Mock(return_value=True)),
+    )
+    api._public_bootstrap = PublicBootstrap(
+        cameras={camera.id: PublicCamera.model_construct(id=camera.id, has_package_camera=True)}
     )
     api.api_request_list = AsyncMock(return_value=[])
     api.api_request_raw = AsyncMock(return_value=b"synthetic-media")
@@ -289,6 +288,16 @@ async def test_invalid_clip_context_never_requests_video(sdk, changes, message):
     api.api_request_raw.assert_not_awaited()
 
 
+async def test_package_snapshot_requires_matching_camera_capability(sdk):
+    api, camera = sdk
+    api.public_bootstrap.cameras = {
+        "another-camera": PublicCamera.model_construct(id="another-camera", has_package_camera=True)
+    }
+    with pytest.raises(UnifiProtectError, match="capability is unavailable"):
+        await get_unifi_protect_snapshot(api, camera.id, channel="package")
+    api.api_request_raw.assert_not_awaited()
+
+
 async def test_uncached_event_keeps_sdk_lookup_and_permission_rejection(sdk):
     api, _ = sdk
     api.api_request_obj = AsyncMock(return_value=event_payload())
@@ -356,6 +365,29 @@ async def test_current_detection_projection_uses_active_typed_events(sdk):
     camera.recording_settings.mode = RecordingMode.NEVER
     assert serialize_unifi_camera(camera)["detections"]["active"] == []
     api.api_request_list.assert_not_awaited()
+    api.api_request_raw.assert_not_awaited()
+
+
+async def test_global_settings_intersect_capabilities_and_keep_audio_independent(sdk):
+    api, camera = sdk
+    plate, vehicle, smoke = (
+        SmartDetectObjectType.LICENSE_PLATE, SmartDetectObjectType.VEHICLE, SmartDetectObjectType.SMOKE
+    )
+    camera.use_global = True
+    api._bootstrap.nvr = SimpleNamespace(is_global_recording_enabled=True)
+    camera.feature_flags.smart_detect_types = [vehicle]
+    camera.feature_flags.smart_detect_audio_types = [smoke.audio_type]
+    camera.smart_detect_settings.object_types = [vehicle, plate]
+    camera.smart_detect_settings.audio_types = [smoke.audio_type]
+    event = Event.from_unifi_dict(**event_payload(end=None, smartDetectTypes=[k.value for k in (plate, vehicle, smoke)]), api=api)
+    api._bootstrap.events[event.id] = event
+    camera.last_smart_detect_event_ids = {k: event.id for k in (plate, vehicle)}
+    camera.last_smart_audio_detect_event_ids = {smoke.audio_type: event.id}
+    assert serialize_unifi_camera(camera)["detections"]["active"] == ["vehicle", "smoke"]
+    camera.is_smart_detected = False
+    assert serialize_unifi_camera(camera)["detections"]["active"] == ["smoke"]
+    api._bootstrap.nvr.is_global_recording_enabled = False
+    assert serialize_unifi_camera(camera)["detections"]["active"] == []
     api.api_request_raw.assert_not_awaited()
 
 

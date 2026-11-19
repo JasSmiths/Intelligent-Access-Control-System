@@ -9,6 +9,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.modules.unifi_protect.camera_catalog import CameraChannelStatus, CameraWireMetadata
 from app.services.settings import RuntimeConfig
 
 logger = get_logger(__name__)
@@ -120,13 +121,14 @@ async def build_unifi_protect_client(config: RuntimeConfig):
         )
 
     try:
-        from uiprotect import ProtectApiClient
         from uiprotect.data import ModelType
+
+        from app.modules.unifi_protect.wire_client import IacsProtectClient
     except ImportError as exc:
         detail = _uiprotect_import_error_message(exc)
         raise UnifiProtectError(detail) from exc
 
-    return ProtectApiClient(
+    return IacsProtectClient(
         host=config.unifi_protect_host,
         port=config.unifi_protect_port,
         username=config.unifi_protect_username,
@@ -343,7 +345,9 @@ async def list_unifi_protect_events(
     until: datetime | None = None,
 ) -> list[Any]:
     try:
-        from uiprotect.data import Event, EventType
+        from uiprotect.data import EventType
+
+        from app.modules.unifi_protect.wire_client import event_from_wire
     except ImportError as exc:
         detail = _uiprotect_import_error_message(exc)
         raise UnifiProtectError(detail) from exc
@@ -388,7 +392,7 @@ async def list_unifi_protect_events(
         if payload.get("modelKey", "event") != "event":
             continue
         try:
-            event = Event.from_unifi_dict(**{**payload, "modelKey": "event"}, api=api)
+            event = event_from_wire(api, payload)
         except Exception as exc:  # Do not expose a vendor validation error's raw input.
             raise UnifiProtectError("UniFi Protect returned an invalid event response.") from exc
         if event.score >= 0 and (not camera_id or event.camera_id == camera_id):
@@ -411,12 +415,15 @@ async def get_unifi_protect_snapshot(
         if channel == "package":
             from uiprotect.data import ModelType, PermissionNode
 
-            if not camera.feature_flags.has_package_camera:
-                raise UnifiProtectError("Device does not have a package camera.")
             user = api.bootstrap.auth_user
             if not (user.can(ModelType.CAMERA, PermissionNode.READ_LIVE, camera)
                     or user.can(ModelType.CAMERA, PermissionNode.READ_MEDIA, camera)):
                 raise UnifiProtectError("No permission to read the package camera.")
+            capability = _package_camera_capability(_public_camera(camera), camera_wire_metadata(camera))
+            if capability is None:
+                raise UnifiProtectError("Package camera capability is unavailable.")
+            if not capability:
+                raise UnifiProtectError("Device does not have a package camera.")
             # The supported public endpoint selects native quality, not w/h.
             content = await api.get_public_api_camera_snapshot(
                 camera.id, package=True,
@@ -499,8 +506,49 @@ async def get_unifi_protect_event_video(api: Any, event_id: str) -> ProtectMedia
     return ProtectMedia(content=content, content_type="video/mp4")
 
 
+def camera_wire_metadata(camera: Any) -> CameraWireMetadata | None:
+    from app.modules.unifi_protect.wire_client import IacsProtectBootstrap
+
+    api = getattr(camera, "_api", None)
+    if api is None:
+        return None
+    bootstrap = api.bootstrap
+    return bootstrap.camera_catalog.get(camera.id) if isinstance(bootstrap, IacsProtectBootstrap) else None
+
+
+def _public_camera(camera: Any) -> Any:
+    from uiprotect.data.public_devices import PublicCamera
+
+    if isinstance(camera, PublicCamera):
+        return camera
+    api = getattr(camera, "_api", None)
+    if api is None or not api.has_public_bootstrap:
+        return None
+    return api.public_bootstrap.cameras.get(camera.id)
+
+
+def _package_camera_capability(public_camera: Any, wire: CameraWireMetadata | None) -> bool | None:
+    if public_camera is not None:
+        return bool(public_camera.has_package_camera)
+    return wire.has_package_camera if wire is not None else None
+
+
 def serialize_unifi_camera(camera: Any) -> dict[str, Any]:
+    from uiprotect.data.public_devices import PublicCamera
+
     camera_id = str(getattr(camera, "id", ""))
+    is_public = isinstance(camera, PublicCamera)
+    wire = None if is_public else camera_wire_metadata(camera)
+    public = _public_camera(camera)
+    # Private camera frames report motion directly. Public frames carry the
+    # SDK's event-derived state, including the end of the final motion event.
+    if is_public:
+        motion = camera.is_motion_detected
+    elif wire is not None and wire.is_motion_detected is not None:
+        motion = wire.is_motion_detected
+    else:
+        motion = True if public is not None and public.is_motion_detected else None
+    channel_status = wire.channels if wire is not None and wire.channels else {}
     return {
         "id": camera_id,
         "name": str(
@@ -514,7 +562,7 @@ def serialize_unifi_camera(camera: Any) -> dict[str, Any]:
         "is_recording": bool(getattr(camera, "is_recording", False)),
         "is_recording_enabled": bool(getattr(camera, "is_recording_enabled", False)),
         "is_video_ready": bool(getattr(camera, "is_video_ready", False)),
-        "is_motion_detected": bool(getattr(camera, "is_motion_detected", False)),
+        "is_motion_detected": motion,
         "is_smart_detected": bool(getattr(camera, "is_smart_detected", False)),
         "last_motion_at": _isoformat(getattr(camera, "last_motion", None)),
         "last_motion_event_id": getattr(camera, "last_motion_event_id", None),
@@ -524,12 +572,11 @@ def serialize_unifi_camera(camera: Any) -> dict[str, Any]:
         "last_smart_audio_detect_event_id": getattr(
             camera, "last_smart_audio_detect_event_id", None
         ),
-        "channels": [_serialize_channel(channel) for channel in getattr(camera, "channels", [])],
-        "feature_flags": _serialize_camera_features(camera),
+        "channels": [_serialize_channel(channel, channel_status.get(str(channel.id)))
+                     for channel in getattr(camera, "channels", [])],
+        "feature_flags": _serialize_camera_features(camera, _package_camera_capability(public, wire)),
         "detections": _serialize_camera_detections(camera),
-        "smart_detect_zones": [
-            _serialize_smart_detect_zone(zone) for zone in getattr(camera, "smart_detect_zones", [])
-        ],
+        "smart_detect_zones": wire.zone_rows() if wire is not None else [],
         "snapshot_url": f"/api/v1/integrations/unifi-protect/cameras/{camera_id}/snapshot",
     }
 
@@ -581,35 +628,38 @@ def websocket_message_payload(message: Any) -> dict[str, Any]:
     return payload
 
 
-def is_unifi_protect_stream_metadata_only(message: Any) -> bool:
-    """Return true for uiprotect's synthetic RTSPS stream-cache update."""
+def is_unifi_protect_camera_metadata_only(message: Any) -> bool:
+    """Stream configuration and zone renames carry no fresh vehicle observation."""
     changed_data = getattr(message, "changed_data", None)
     if not isinstance(changed_data, dict):
         return False
     keys = {re.sub(r"[^a-z0-9]", "", str(key).lower()) for key in changed_data}
-    stream_keys = {"rtspstreams", "rtspsstreams"}
-    metadata_keys = {"modelkey", "id", *stream_keys}
-    return bool(keys & stream_keys) and keys <= metadata_keys
+    catalog_keys = {"rtspstreams", "rtspsstreams", "smartdetectzones"}
+    metadata_keys = {"modelkey", "id", *catalog_keys}
+    return bool(keys & catalog_keys) and keys <= metadata_keys
 
 
-def _serialize_channel(channel: Any) -> dict[str, Any]:
+def _serialize_channel(channel: Any, status: CameraChannelStatus | None) -> dict[str, Any]:
+    from uiprotect.data import ChannelQuality, quality_for_channel_id
+
+    quality = quality_for_channel_id(channel.id)
     return {
         "id": str(getattr(channel, "id", "")),
-        "name": str(getattr(channel, "name", "") or getattr(channel, "id", "")),
+        "name": (status.name if status else None) or (quality.value if quality else str(channel.id)),
         "width": getattr(channel, "width", None),
         "height": getattr(channel, "height", None),
         "fps": getattr(channel, "fps", None),
         "bitrate": getattr(channel, "bitrate", None),
-        "is_rtsp_enabled": bool(getattr(channel, "is_rtsp_enabled", False)),
-        "is_package": bool(getattr(channel, "is_package", False)),
+        "is_rtsp_enabled": status.is_rtsp_enabled if status else None,
+        "is_package": status.is_package if status and status.is_package is not None else quality == ChannelQuality.PACKAGE,
     }
 
 
-def _serialize_camera_features(camera: Any) -> dict[str, Any]:
+def _serialize_camera_features(camera: Any, has_package_camera: bool | None) -> dict[str, Any]:
     flags = getattr(camera, "feature_flags", None)
     return {
         "has_smart_detect": bool(getattr(flags, "has_smart_detect", False)),
-        "has_package_camera": bool(getattr(flags, "has_package_camera", False)),
+        "has_package_camera": has_package_camera,
         "has_mic": bool(getattr(camera, "has_mic", False)),
         "smart_detect_types": [
             _enum_value(item) for item in getattr(flags, "smart_detect_types", [])
@@ -659,29 +709,27 @@ def _serialize_camera_detections(camera: Any) -> dict[str, Any]:
     active: list[str] = []
     if not getattr(camera, "is_recording_enabled", False):
         return {"active": active}
+    configured = camera.smart_detect_settings
+    visual_types = set(configured.object_types)
+    audio_types = set(configured.audio_types or ())
+    if camera.use_global:
+        visual_types.intersection_update(camera.feature_flags.smart_detect_types)
+        audio_types.intersection_update(camera.feature_flags.smart_detect_audio_types or ())
     for label, smart_type in types.items():
         # Supported per-type SDK lookups use its bounded active-event index;
         # these are in-memory reads, never a scan or a provider request.
         if (audio_type := smart_type.audio_type) is not None:
-            if audio_type not in getattr(camera, "active_audio_detect_types", set()):
+            if audio_type not in audio_types:
                 continue
             event = camera.get_last_smart_audio_detect_event(audio_type)
         else:
             if (not getattr(camera, "is_smart_detected", False)
-                    or smart_type not in getattr(camera, "active_smart_detect_types", set())):
+                    or smart_type not in visual_types):
                 continue
             event = camera.get_last_smart_detect_event(smart_type)
         if event is not None and event.end is None and smart_type in event.smart_detect_types:
             active.append(label)
     return {"active": active}
-
-
-def _serialize_smart_detect_zone(zone: Any) -> dict[str, Any]:
-    return {
-        "id": getattr(zone, "id", None),
-        "name": str(getattr(zone, "name", "") or getattr(zone, "id", "") or ""),
-        "object_types": [_enum_value(item) for item in (getattr(zone, "object_types", None) or [])],
-    }
 
 
 def _looks_like_camera(obj: Any, model_key: str) -> bool:
