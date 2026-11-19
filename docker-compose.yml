@@ -61,7 +61,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    image: pgvector/pgvector:pg16@sha256:484e838076e04939d27d3e176e91c86eea96236126023be8d3059761122e579f
     container_name: iacs-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-iacs}
@@ -80,7 +80,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    image: redis:7.4.12-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
     container_name: iacs-redis
     command: ["redis-server", "--appendonly", "yes", "--dir", "/data"]
     ports:

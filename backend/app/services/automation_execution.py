@@ -510,16 +510,14 @@ class AutomationRunStore:
                 if failed:
                     return False
                 unfinished = True
-            elif unfinished:
-                # Recovery may preemptively withhold later hardware while an
-                # earlier independent notification is still pending. No later
-                # successful/failed/unknown send may overtake pending work.
-                if not (
-                    uncertain
-                    and state == "skipped"
-                    and item["result"].get("reason") == "earlier_action_unknown"
-                ):
-                    return False
+            # Recovery may withhold later hardware while an earlier notification
+            # is pending. Other terminal results cannot overtake unfinished work.
+            elif unfinished and not (
+                uncertain
+                and state == "skipped"
+                and item["result"].get("reason") == "earlier_action_unknown"
+            ):
+                return False
             uncertain = uncertain or state == "unknown"
             failed = failed or state == "failed"
         return True

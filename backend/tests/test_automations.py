@@ -3,7 +3,7 @@ import hashlib
 import hmac
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
 from fastapi import HTTPException
@@ -362,6 +362,60 @@ def test_scheduler_next_run_and_due_trigger_helpers() -> None:
     assert due_trigger is not None
     assert due_trigger["id"] == "trigger-1"
     assert cron_from_recurrence(weekly_start, "weekly") == "0 21 * * 4"
+
+
+@pytest.mark.parametrize(("expression", "expected"), [
+    ("59/15 * * * *", "2026-01-01T00:15:00+00:00"),
+    ("1,59/8 * * * *", "2026-01-01T00:01:00+00:00"),
+    ("0 23/6 * * *", "2026-01-01T06:00:00+00:00"),
+    ("0 0 31/5 * *", "2026-01-06T00:00:00+00:00"),
+    ("0 0 1 DEC/3 *", "2026-04-01T00:00:00+00:00"),
+    ("0 0 * * SAT/2", "2026-01-03T00:00:00+00:00"),
+    ("* * * * * 59/4", "2026-01-01T00:00:04+00:00"),
+    ("0 0 1 1 * 0 2099/3", "2027-01-01T00:00:00+00:00"),
+    ("０\u00a0５ * * *", "2026-01-01T05:00:00+00:00"),
+    ("0 0 0/5 * * 0", "2026-01-06T00:00:00+00:00"),
+    ("0 0 31 2 SUN", None),
+    ("0 0 31 2 *", None),
+    ("0 0 1 1 * 0 2000", None),
+    ("0 0 * * L7 0", None),
+    ("0 0 * * R(1-7) 0", None),
+    ("R(10-12)/6 * * * *", None),
+])
+def test_raw_cron_retains_saved_schedule(expression: str, expected: str | None) -> None:
+    trigger = {"type": "time.cron", "config": {"cron_expression": expression, "timezone": "UTC"}}
+    result = next_run_for_trigger(trigger, now=datetime(2026, 1, 1, tzinfo=UTC))
+    assert (result.isoformat() if result else None) == expected
+
+
+def test_oversized_cron_field_stays_dormant() -> None:
+    expression = "9" * 5000 + " * * * *"
+    trigger = {"type": "time.cron", "config": {"cron_expression": expression, "timezone": "UTC"}}
+    assert next_run_for_trigger(trigger, now=datetime(2026, 1, 1, tzinfo=UTC)) is None
+
+
+@pytest.mark.parametrize(("expression", "draw", "expected"), [
+    ("0 0 R(28-31) FEB MON", 0, "2026-02-02T00:00:00+00:00"),  # day 28
+    ("0 0 R(28-31) FEB MON", 12, None),  # day 31 must keep both branches dormant
+    ("R(10-12)/3 * * * *", 12, "2026-01-01T00:03:00+00:00"),
+])
+def test_random_schedule_uses_one_draw(expression: str, draw: int, expected: str | None) -> None:
+    trigger = {"type": "time.cron", "config": {"cron_expression": expression, "timezone": "UTC"}}
+    with patch("random.randint", return_value=draw) as choose:
+        result = next_run_for_trigger(trigger, now=datetime(2026, 1, 1, tzinfo=UTC))
+    choose.assert_called_once()
+    assert (result.isoformat() if result else None) == expected
+
+
+@pytest.mark.parametrize(("zone", "expression", "start", "expected"), [
+    ("Europe/London", "15 1 * * *", "2026-03-28T01:15:00+00:00", "2026-03-29T01:00:00+00:00"),
+    ("Europe/London", "15 1 * * *", "2026-10-25T00:15:00+00:00", "2026-10-25T01:15:00+00:00"),
+    ("Australia/Lord_Howe", "0 * * * *", "2019-10-05T14:33:00+00:00", "2019-10-05T16:00:00+00:00"),
+])
+def test_raw_cron_daylight_saving_transition(zone: str, expression: str, start: str, expected: str) -> None:
+    trigger = {"type": "time.cron", "config": {"cron_expression": expression, "timezone": zone}}
+    result = next_run_for_trigger(trigger, now=datetime.fromisoformat(start))
+    assert result == datetime.fromisoformat(expected)
 
 
 def test_malformed_every_x_interval_defaults_safely() -> None:

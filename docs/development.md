@@ -48,6 +48,8 @@ Install Docker with Compose v2. The images supply Python 3.12, PostgreSQL 16 wit
 pgvector, Redis, and the frontend build tools. For host-side frontend work use
 Node.js 22.22.2+ (22.x), 24.15+ (24.x), or 26+ and npm; use host Python 3.12
 for the validation entrypoint.
+The production build pins Python 3.12.16 and uv 0.13.9. Node 22.23.5
+builds the frontend assets, which Nginx 1.30.7 serves.
 The backend shared image ancestry installs locked Playwright Chromium and native
 libraries, so the non-root runtime can render reports. Check final-image packaging
 with the [runtime PDF smoke](validation.md#final-runtime-pdf-capability).
@@ -229,17 +231,28 @@ including Mako 1.4.3 (the Windows
 [GHSA-5639-2j2p-m4mx](https://github.com/sqlalchemy/mako/security/advisories/GHSA-5639-2j2p-m4mx)).
 Apprise 2 returns a result object; the notification adapter accepts only a
 successful result and retains failure handling for partial delivery, no matching
-services and timeouts. ESPHome resolves to 46.10.0 on the container platform;
+services and timeouts. ESPHome resolves to 46.30.1 on the container platform;
 the lock retains 45.6.2 on Intel macOS because newer ESPHome releases cap
 `cryptography` below the reviewed application version on that platform.
-Python and JavaScript Playwright have independent locked versions; install each
-package's matching browsers. The November UniFi refresh pins `uiprotect==25.5.0`,
+Python Playwright 1.65.2 renders report PDFs with its bundled Chromium.
+JavaScript Playwright 1.65.1 uses its own matching Chromium and WebKit for browser tests. The November UniFi refresh pins `uiprotect==25.5.0`,
 Pydantic 2.14.4 and platformdirs 4.14.7. The adapter reads the public camera
 capabilities and retains the private fields used by zone matching and LPR evidence.
 See the
 [SDK integration contract](integrations.md#unifi-protect-sdk-contract).
 
-SQLAlchemy stays on the patched 2.0 line (`>=2.0.54,<2.1`). Review transaction
+The [automation scheduler](../backend/app/services/automation_scheduling.py)
+uses croniter 7. Stored stepped expressions retain their cadence, including
+`59/15` for every quarter hour. Impossible dates and expired year fields
+produce no next run. Review stored randomized fields before rollout. A random
+range outside its field, or a random step wider than its range, now stays
+dormant. An administrator can replace it with explicit intended times.
+Croniter corrected an hourly scheduling edge in
+half-hour daylight-saving gaps. For example, a Lord Howe Island spring
+transition skips the nonexistent 02:00 slot and resumes at 03:00. See the
+[upstream changes](https://github.com/pallets-eco/croniter/blob/7.0.0/CHANGELOG.rst).
+
+SQLAlchemy stays on the patched 2.0 line (`>=2.0.58,<2.1`). Review transaction
 and fixture ownership separately before changing this dependency bound; retain
 the supported recovery expiry and rollback assertions.
 
@@ -329,6 +342,21 @@ the supplied frontend configuration assumes hosting at `/`, so a subpath also
 needs an explicitly matched proxy/frontend configuration.
 
 ## Schema upgrades, backup, and recovery
+
+The Compose image pairs PostgreSQL 16.16 with pgvector 0.8.7. Historical
+migrations use the extension. The assistant retirement migration drops the old
+HNSW tables and the extension, so a database at the current schema head needs
+no vector extension update. [Retirement migration](../backend/alembic/versions/20261005_0010_retire_assistant_messaging.py)
+
+For an existing PostgreSQL 16 installation, review its indexes before rollout.
+The release recommends rebuilding B-tree indexes on `bpchar`, GiST indexes
+using `gist_trgm_ops`, and GIN indexes when corruption is suspected. IACS
+defines a GIN index on `automation_rules.trigger_keys`. Check site-specific
+indexes and extensions against the release notes when planning maintenance.
+[PostgreSQL 16.16 migration notes](https://www.postgresql.org/docs/release/16.16/)
+
+The Redis service uses 7.4.12 in standalone mode with append-only persistence.
+[Redis release notes](https://github.com/redis/redis/releases/tag/7.4.12)
 
 Use [Alembic migrations](../backend/alembic/versions/) for schema changes.
 `IACS_AUTO_CREATE_SCHEMA` controls `alembic upgrade head` at startup; it is not an

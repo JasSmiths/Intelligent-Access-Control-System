@@ -40,10 +40,10 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
       IACS_VALIDATION_BACKEND_IMAGE: iacs-backend:ci-runtime
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Validate source selection and required check classification
@@ -76,9 +76,10 @@ jobs:
           --output "${{ runner.temp }}/iacs-upload-evidence"
       - name: Retain commands, fingerprints and test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: isolated-contract-evidence
+          archive: true
           if-no-files-found: warn
           retention-days: 14
           path: ${{ runner.temp }}/iacs-upload-evidence
@@ -89,9 +90,10 @@ jobs:
           name=$(python3 scripts/validation/ci_receipt.py name --root "$RUNNER_TEMP/iacs-evidence" --attempt "$GITHUB_RUN_ATTEMPT")
           echo "name=$name" >> "$GITHUB_OUTPUT"
       - name: Publish verified full-run receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.full-receipt.outputs.name }}
+          archive: true
           path: ${{ runner.temp }}/iacs-evidence/iacs-validation-*/manifest.json
           if-no-files-found: error
           retention-days: 14
@@ -99,17 +101,17 @@ jobs:
   dependency-audits:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - name: Audit the locked Python dependency set
         working-directory: backend
         run: |
-          python -m pip install uv pip-audit
+          python -m pip install uv==0.13.9 pip-audit
           uv export --locked --extra dev --format requirements-txt --no-emit-project --no-hashes > "${{ runner.temp }}/iacs-requirements.txt"
           pip-audit --strict -r "${{ runner.temp }}/iacs-requirements.txt"
       - name: Audit the frontend lock
@@ -119,7 +121,7 @@ jobs:
   image-builds:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build backend development image
         run: docker build --target development -t iacs-backend:ci-development backend
       - name: Build frontend runtime image

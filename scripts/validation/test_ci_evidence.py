@@ -289,6 +289,9 @@ class CIEvidenceTests(unittest.TestCase):
         self.assertNotIn("if", producer)
         self.assertNotIn("if", receipt_upload)
         self.assertEqual(receipt_upload["with"]["if-no-files-found"], "error")
+        self.assertEqual(upload["with"]["archive"], "true")
+        self.assertEqual(receipt_upload["with"]["archive"], "true")
+        self.assertEqual(receipt_upload["with"]["name"], "${{ steps.full-receipt.outputs.name }}")
         self.assertTrue(any("validate.py --mode full --allow-downloads" in step.get("run", "") for step in steps))
 
     @unittest.skipUnless(importlib.util.find_spec("yaml"), "PyYAML is available in the locked harness dependencies")

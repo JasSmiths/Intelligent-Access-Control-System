@@ -1,4 +1,4 @@
-FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS base
+FROM python:3.12.16-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -14,7 +14,7 @@ WORKDIR /app
 
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/80-retries \
     && apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock README.md ./
@@ -28,7 +28,7 @@ RUN chmod -R a+rX /app/app /app/alembic /app/tools \
     && chmod a+r /app/pyproject.toml /app/uv.lock /app/README.md /app/alembic.ini
 
 RUN pip install pip==26.2.1 \
-    && pip install uv==0.12.13 \
+    && pip install uv==0.13.9 \
     && uv sync --locked --no-dev --no-editable --compile-bytecode
 
 # Reports use the locked Python Playwright browser in every final image.
