@@ -359,6 +359,9 @@ container cleanup. Required evidence must remain compact and separate from
 disposable working data. Moving the same data to another folder on the same disk
 does not recover capacity.
 
+The initial Docker capacity probe allows 30 seconds for a cold container start.
+After its first successful reading, each probe has a five-second limit.
+
 1. **Inventory before every allocation.** Before each snapshot, installation,
    focused/full/DB-free/browser run, image build or backup, record host free space,
    task/evidence/cache sizes and Docker storage. Include existing runs outside the

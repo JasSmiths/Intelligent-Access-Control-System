@@ -12,7 +12,7 @@ import uuid
 
 from source_snapshot import copy_sources, discover_sources, source_fingerprint
 from validate import Harness, arguments, validate_resource_paths, validation_run_lock, ValidationRunBusyError, image_references
-from storage import StorageGuard, docker_free, validation_interrupts, draining_cleanup
+from storage import StorageGuard, docker_free_probe, validation_interrupts, draining_cleanup
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -53,7 +53,7 @@ def run_smoke(argv=None):
     inspection = Harness(arguments(['--check-only']), evidence, ROOT)
     before = inspection.production_state()
     validate_resource_paths(evidence, None, before)
-    inspection.storage = StorageGuard(evidence, vm_probe=lambda: docker_free(image_references(ROOT)['backend']))
+    inspection.storage = StorageGuard(evidence, vm_probe=docker_free_probe(image_references(ROOT)['backend']))
     inspection.storage.check(force=True)
     evidence.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix='iacs-runtime-pdf-', dir=evidence))

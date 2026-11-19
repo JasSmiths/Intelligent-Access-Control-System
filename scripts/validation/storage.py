@@ -67,7 +67,20 @@ def disposable_bytes(roots):
     return total
 
 
-def docker_free(image):
+def docker_free_probe(image):
+    """Allow a cold container start before the first successful capacity reading."""
+    timeout = 30
+
+    def probe():
+        nonlocal timeout
+        available = docker_free(image, timeout=timeout)
+        timeout = 5
+        return available
+
+    return probe
+
+
+def docker_free(image, *, timeout=5):
     """Probe the VM using a cached image, no mounts/network/application startup."""
     identity = subprocess.check_output(['docker','image','inspect',image,'--format','{{.Id}}'],
                                        text=True,timeout=3).strip()
@@ -79,7 +92,7 @@ def docker_free(image):
                '--security-opt', 'no-new-privileges', '--memory', '64m', '--pids-limit', '32',
                '--entrypoint', '/bin/df', identity, '-Pk', '/']
     try:
-        output = subprocess.check_output(command, text=True, timeout=5)
+        output = subprocess.check_output(command, text=True, timeout=timeout)
         return int(output.splitlines()[-1].split()[3]) * 1024
     finally:
         with draining_cleanup():

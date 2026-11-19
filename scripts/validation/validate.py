@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
-from storage import StorageGuard, StorageViolation, all_container_mounts, docker_free, remove_disposable, validation_interrupts
+from storage import StorageGuard, StorageViolation, all_container_mounts, docker_free_probe, remove_disposable, validation_interrupts
 
 from source_snapshot import changed_snapshot_sources, copy_sources, discover_sources, source_file, source_fingerprint
 from suite_selection import changed_files, focused_targets, prioritize, recent_suites
@@ -202,7 +202,7 @@ class Harness:
         if self.storage is None:
             before = self.production_state()
             validate_resource_paths(self.run.parent, self.args.reuse_dependencies, before)
-            probe = None if self.args.mode == 'snapshot' else lambda: docker_free(image_references(ROOT)['backend'])
+            probe = None if self.args.mode == 'snapshot' else docker_free_probe(image_references(ROOT)['backend'])
             self.storage = StorageGuard(self.run.parent, self.args.reuse_dependencies, vm_probe=probe)
         try:
             self.storage.check(force=True)
@@ -589,7 +589,7 @@ def run(args):
             # under a proposed evidence path until its mounts are checked.
             before = Harness(args, evidence, ROOT).production_state()
             validate_resource_paths(evidence, args.reuse_dependencies, before)
-        probe = None if args.mode == 'snapshot' else lambda: docker_free(image_references(ROOT)['backend'])
+        probe = None if args.mode == 'snapshot' else docker_free_probe(image_references(ROOT)['backend'])
         storage = StorageGuard(evidence, args.reuse_dependencies, vm_probe=probe)
         storage.check(force=True)
         evidence.mkdir(parents=True, exist_ok=True)

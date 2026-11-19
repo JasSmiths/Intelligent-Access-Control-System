@@ -6,7 +6,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 import subprocess
 
-from storage import StorageGuard, StorageViolation, disposable_bytes, remove_disposable, GIB, docker_free, validation_interrupts, draining_cleanup
+from storage import StorageGuard, StorageViolation, disposable_bytes, remove_disposable, GIB, docker_free, docker_free_probe, validation_interrupts, draining_cleanup
 
 
 class StorageTests(unittest.TestCase):
@@ -61,6 +61,14 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(docker_free('mutable-tag'),99*1024)
         workload=command.call_args.args[0]
         self.assertIn('--pull=never',workload);self.assertIn('sha256:synthetic',workload);self.assertNotIn('mutable-tag',workload)
+
+    def test_only_initial_docker_capacity_read_allows_cold_start(self):
+        with patch('storage.docker_free', return_value=42 * GIB) as read:
+            probe = docker_free_probe('cached-image')
+            self.assertEqual(probe(), 42 * GIB)
+            read.assert_called_once_with('cached-image', timeout=30)
+            self.assertEqual(probe(), 42 * GIB)
+            read.assert_called_with('cached-image', timeout=5)
 
     def test_unreadable_and_slow_accounting_fail_closed(self):
         def denied(root,**kwargs):
